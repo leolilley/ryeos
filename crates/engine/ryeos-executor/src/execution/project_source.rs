@@ -630,7 +630,12 @@ fn bind_logical_project_root(
     }
 }
 
-fn current_head_logical_project(
+/// The logical project a pinned qualification may state for `principal_id`:
+/// the canonical form of `project_path`, only when that principal's own pushed
+/// head for it is exactly `snapshot_hash`. A missing or different head is a
+/// typed `SnapshotNotCurrentHead`; an unresolvable path is `Other`. There is
+/// no fallback to a projectless or synthetic identity.
+pub fn current_head_logical_project(
     state: &AppState,
     principal_id: &str,
     project_path: &Path,

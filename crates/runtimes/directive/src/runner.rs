@@ -361,6 +361,11 @@ const OUTPUT_LIMIT_ERROR: &str = "provider_output_limit_reached: provider ended 
      response at its declared/native output limit; this is \
      distinct from a RyeOS-local output byte limit";
 
+/// Code that starts the failure text of a run whose malformed replies the
+/// provider's signed policy could not correct. The text goes on to name the
+/// marker the last reply matched.
+const MALFORMED_REPLY_ERROR_CODE: &str = "malformed_reply_retries_exhausted";
+
 /// The model-visible error for a call whose arguments did not parse.
 fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
     format!(
@@ -805,6 +810,9 @@ pub struct Runner {
     /// Derived from the record on resume; non-zero means the latest recorded
     /// turn ended at the limit.
     consecutive_length_turns: u32,
+    /// Malformed replies in a row that were corrected. Derived from the
+    /// record on resume.
+    consecutive_malformed_replies: u32,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
     /// The provider turn a restart cut. Set on resume of an unfinished
@@ -1654,6 +1662,7 @@ impl Runner {
             resume_owed_siblings: Vec::new(),
             turn_malformed_calls: Vec::new(),
             consecutive_length_turns: 0,
+            consecutive_malformed_replies: 0,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
             restart_cut_turn: None,
@@ -1701,6 +1710,7 @@ impl Runner {
         let wrap_up_delivered = resume.wrap_up_delivered;
         let loop_warned = resume.loop_warned.clone();
         let trailing_length_turns = resume.trailing_length_turns;
+        let trailing_malformed_replies = resume.trailing_malformed_replies;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
@@ -1783,6 +1793,7 @@ impl Runner {
         runner.wrap_up_delivered = wrap_up_delivered;
         runner.loop_warned = loop_warned;
         runner.consecutive_length_turns = trailing_length_turns;
+        runner.consecutive_malformed_replies = trailing_malformed_replies;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -3629,6 +3640,7 @@ impl Runner {
                     match last {
                         Some(msg) => {
                             if msg.has_tool_calls() {
+                                self.consecutive_malformed_replies = 0;
                                 let occurrences = msg
                                     .calls()
                                     .iter()
@@ -3669,6 +3681,7 @@ impl Runner {
                                     }
                                 }
                             } else if self.consecutive_length_turns > 0 {
+                                self.consecutive_malformed_replies = 0;
                                 // The turn ended at the output limit and made no
                                 // tool call: its text is incomplete, so it must
                                 // not finalize. Record the policy's message as a
@@ -3702,7 +3715,68 @@ impl Runner {
                                         error: OUTPUT_LIMIT_ERROR.to_string(),
                                     },
                                 }
+                            } else if let Some((marker, policy)) = self
+                                .provider_config
+                                .malformed_replies
+                                .as_ref()
+                                .and_then(|policy| {
+                                    policy
+                                        .first_marker_in(&msg.joined_text())
+                                        .map(|marker| (marker.to_string(), policy.clone()))
+                                })
+                            {
+                                // A reply with no structured tool call whose
+                                // text holds a marker is malformed: the model
+                                // wrote a call as text. Invariant: text that
+                                // looks like a tool call is never parsed or
+                                // executed, so a malformed reply runs no tool.
+                                // The reply is dropped from the conversation,
+                                // the policy's message takes its place, and
+                                // another turn is taken within the policy's
+                                // bound and the turn limit. Otherwise the run
+                                // fails, and the reply is never the result.
+                                let streak = self.consecutive_malformed_replies.saturating_add(1);
+                                tracing::warn!(
+                                    turn,
+                                    streak,
+                                    matched_marker = %marker,
+                                    max_consecutive = policy.max_consecutive,
+                                    "provider reply is malformed"
+                                );
+                                if streak <= policy.max_consecutive && self.can_start_another_turn()
+                                {
+                                    let input = ryeos_runtime::CognitionInput::text(
+                                        "harness",
+                                        &policy.message,
+                                    )
+                                    .with_kind(
+                                        ryeos_runtime::cognition::malformed_reply_kind(
+                                            turn, streak,
+                                        ),
+                                    );
+                                    if let Err(e) = self.callback.emit_cognition_input(&input).await
+                                    {
+                                        State::RecoveryRequired {
+                                            error: format!(
+                                                "resume-critical malformed_reply input append failed: {e}"
+                                            ),
+                                        }
+                                    } else {
+                                        self.messages.pop();
+                                        self.messages.push(ProviderMessage::user(policy.message));
+                                        self.consecutive_malformed_replies = streak;
+                                        State::CheckingLimits
+                                    }
+                                } else {
+                                    State::Errored {
+                                        error: format!(
+                                            "{MALFORMED_REPLY_ERROR_CODE}: the provider's reply held the marker {marker:?} and no correction was left (allowed in a row: {})",
+                                            policy.max_consecutive
+                                        ),
+                                    }
+                                }
                             } else if let Some(content) = msg.content_value() {
+                                self.consecutive_malformed_replies = 0;
                                 // Steer pre-finalize drain (finding C): a no-tool
                                 // content response is about to finalize. If an
                                 // operator input is pending, fold it and take
@@ -6856,6 +6930,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -6938,6 +7013,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -6996,6 +7072,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7053,6 +7130,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -7125,6 +7203,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -7302,6 +7381,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7379,6 +7459,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7453,6 +7534,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7511,6 +7593,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -8510,6 +8593,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {
