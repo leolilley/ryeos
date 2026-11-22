@@ -75,7 +75,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &state,
         &authority,
         &binding.local_project_path,
-        &binding.remote_project_path,
+        &binding.project_name,
         &remote_ignore,
     )
     .await?;
@@ -83,6 +83,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let apply = client
         .apply_project_snapshot(
             &binding.remote_project_path,
+            &binding.project_name,
             &push.snapshot_hash,
             expected_deployed_hash.as_deref(),
         )

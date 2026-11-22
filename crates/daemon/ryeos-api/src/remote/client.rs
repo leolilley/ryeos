@@ -1621,11 +1621,13 @@ impl RemoteClient {
     pub async fn apply_project_snapshot(
         &self,
         project_path: &str,
+        project_name: &ryeos_state::project_identity::ProjectName,
         snapshot_hash: &str,
         expected_deployed_hash: Option<&str>,
     ) -> Result<Value> {
         let body = serde_json::json!({
             "project_path": project_path,
+            "project_name": project_name,
             "snapshot_hash": snapshot_hash,
             "expected_deployed_hash": expected_deployed_hash,
         });

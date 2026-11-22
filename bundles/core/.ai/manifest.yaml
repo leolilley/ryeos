@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-20T23:17:05Z:82d42cb49cdc9edceef815a2390de875ebeabe6ef794d966a63b14bd8712240c:6K6bvhkFYHsWr/MOE9kEzfqmByB3Ewkk2I9ma48EmQLOR23oxOwQiY5x54+XWjnqR1ZCB4xNAsYZPqD1HKb0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T17:13:16Z:62897bd32410595e45bbad400dbe938296f9f4b42b373600603a26f00b0b3679:AS5V0Y27AWLDXM6yYYAXoKC86qHLS3KUmiDcoMWL0KIYyaoE6ELj9IBbm65nrAuByCoyR8HI1JU+thTnWvQ8AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -33,6 +33,8 @@ sync_include:
 - root: .ai/manifest.source.yaml
   shape: file
 - root: .ai/manifest.yaml
+  shape: file
+- root: .ai/project.yaml
   shape: file
 - root: .ai/directives
   shape: directory

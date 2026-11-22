@@ -33,7 +33,11 @@ pub struct ExplicitExpectedDeployedHash(Option<String>);
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// The checkout the snapshot is applied to: a locator, never identity.
     pub project_path: String,
+    /// The caller's head whose snapshot is applied, keyed by (the caller,
+    /// this name). The snapshot must declare the same name.
+    pub project_name: ryeos_state::project_identity::ProjectName,
     pub snapshot_hash: String,
     /// Exact deployed HEAD observed before the request. Mandatory and nullable.
     pub expected_deployed_hash: ExplicitExpectedDeployedHash,
@@ -308,10 +312,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let cas_read_guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
 
-    let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)?;
+    let head_key =
+        ryeos_state::project_identity::ProjectHeadKey::owned_by(&ctx.fingerprint, &req.project_name)?;
     let pushed_head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+        .with_state_db(|db| db.read_project_head(&head_key))?;
     if pushed_head.as_deref() != Some(req.snapshot_hash.as_str()) {
         anyhow::bail!(
             "project.apply-snapshot refused: caller's staged HEAD for project '{}' is {:?}, not requested snapshot {}",
@@ -348,6 +353,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         ryeos_state::object_closure::ObjectClosureLimits::default().max_object_bytes,
     )?;
     let tree = ProjectTree::from_value(&tree_obj)?;
+    let declared =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)?;
+    if declared.as_ref() != Some(&req.project_name) {
+        anyhow::bail!(
+            "project_name_mismatch: apply-snapshot names project {} but the snapshot declares {}",
+            req.project_name,
+            declared.map_or_else(|| "no name".to_owned(), |name| name.to_string())
+        );
+    }
     ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy, &state.sync_include)?;
     ryeos_state::project_sync::validate_project_tree_against_target_ignore(
         &tree,

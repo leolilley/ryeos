@@ -35,17 +35,29 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     config::validate_remote_project_path(&req.remote_project)?;
     let local = config::canonical_local_project_path(&req.project)?;
     let local_key = config::local_project_identity(&local)?.to_owned();
+    // The binding records the name the tree declares now; heads on both
+    // nodes are keyed by it.
+    let project_name = ryeos_state::project_identity::ProjectDeclaration::declared_name(&local)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "project_undeclared: {} declares no project name in {}; add one before binding it",
+                local.display(),
+                ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+            )
+        })?;
     let app_root = state.config.runtime_root();
 
     let request_digest = lillux::cas::canonical_json(&serde_json::json!({
         "remote": req.remote,
         "project": local_key,
+        "project_name": project_name,
         "remote_project": req.remote_project,
         "sync_scope": req.sync_scope,
     }))
     .ok()
     .map(|canonical| lillux::cas::sha256_hex(canonical.as_bytes()));
     let binding = RemoteProjectBinding {
+        project_name: project_name.clone(),
         remote_project_path: req.remote_project.clone(),
         sync_scope: req.sync_scope,
     };
@@ -63,6 +75,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "remote": req.remote,
         "scope": "operator",
         "local_project_path": local_key,
+        "project_name": project_name,
         "remote_project_path": req.remote_project,
         "sync_scope": req.sync_scope,
     }))

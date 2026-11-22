@@ -76,6 +76,10 @@ pub fn load_descriptor(path: &Path) -> Result<RemoteDescriptor> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteProjectBinding {
+    /// The project name the local tree declared when it was bound. Heads on
+    /// both nodes are keyed by it; every use re-reads the local declaration
+    /// and refuses a mismatch.
+    pub project_name: ryeos_state::project_identity::ProjectName,
     /// Absolute project path on the remote node. This is not
     /// canonicalized locally; the remote canonicalizes it before use.
     pub remote_project_path: String,
@@ -419,6 +423,8 @@ pub struct RemotesLoadReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProjectBinding {
     pub local_project_path: PathBuf,
+    /// The bound name, equal to what the local tree declares now.
+    pub project_name: ryeos_state::project_identity::ProjectName,
     pub remote_project_path: String,
     pub sync_scope: ProjectSyncScope,
 }
@@ -797,12 +803,28 @@ pub fn resolve_project_binding(
         )
     })?;
     validate_remote_project_path(&binding.remote_project_path)?;
+    require_bound_name(&canonical, &binding.project_name)?;
 
     Ok(ResolvedProjectBinding {
         local_project_path: canonical,
+        project_name: binding.project_name.clone(),
         remote_project_path: binding.remote_project_path.clone(),
         sync_scope: binding.sync_scope,
     })
+}
+
+/// Refuse unless the local tree at `canonical` still declares `bound`. A
+/// stored binding name is never used without re-reading the declaration.
+pub fn require_bound_name(canonical: &Path, bound: &ryeos_state::project_identity::ProjectName) -> Result<()> {
+    let declared = ryeos_state::project_identity::ProjectDeclaration::declared_name(canonical)?;
+    if declared.as_ref() != Some(bound) {
+        anyhow::bail!(
+            "project_name_mismatch: the binding for '{}' names project {bound} but the tree declares {}; re-run `ryeos remote bind-project`",
+            canonical.display(),
+            declared.map_or_else(|| "no name".to_owned(), |name| name.to_string())
+        );
+    }
+    Ok(())
 }
 
 /// Resolve a local->remote binding from operator-local project_bindings.

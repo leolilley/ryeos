@@ -155,18 +155,34 @@ pub async fn handle(
         }
     };
     let mut scope = ProjectSyncScope::default();
+    let mut bound_name = None;
     if let Some(loaded) = loaded_remote.as_ref() {
-        match config::resolve_loaded_project_binding(loaded, &abs_project_path) {
-            Ok(binding) => {
-                scope = binding.sync_scope;
-                project_path_for_ref = binding.remote_project_path;
-            }
-            Err(_) => {
-                // No binding is required for the default ai_only push; use
-                // the canonical local project path as the remote path ref.
-            }
+        // No binding is required for the default ai_only push. A binding
+        // that exists must resolve, including its name check; its failure is
+        // never treated as "unbound".
+        let canonical = config::canonical_local_project_path(&abs_project_path)?;
+        if loaded
+            .config
+            .project_bindings
+            .contains_key(config::local_project_identity(&canonical)?)
+        {
+            let binding = config::resolve_loaded_project_binding(loaded, &abs_project_path)?;
+            scope = binding.sync_scope;
+            project_path_for_ref = binding.remote_project_path;
+            bound_name = Some(binding.project_name);
         }
     }
+    let project_name = match bound_name {
+        Some(name) => name,
+        None => ryeos_state::project_identity::ProjectDeclaration::declared_name(&abs_project_path)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "project_undeclared: {} declares no project name in {}; a pushed head is keyed by it",
+                    abs_project_path.display(),
+                    ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+                )
+            })?,
+    };
 
     match scope {
         ProjectSyncScope::AiOnly => {
@@ -195,13 +211,14 @@ pub async fn handle(
                 &state,
                 &authority,
                 &abs_project_path,
-                &project_path_for_ref,
+                &project_name,
                 &remote_ignore,
             )
             .await?;
             Ok(serde_json::json!({
                 "scope": "ai_only",
                 "remote_project_path": project_path_for_ref,
+                "project_name": project_name,
                 "snapshot_hash": result.snapshot_hash,
                 "tree_hash": result.tree_hash,
                 "tree_entries": result.tree_entries,
@@ -244,13 +261,14 @@ pub async fn handle(
                 &state,
                 &authority,
                 &abs_project_path,
-                &project_path_for_ref,
+                &project_name,
                 &remote_ignore,
             )
             .await?;
             Ok(serde_json::json!({
                 "scope": "full_project",
                 "remote_project_path": project_path_for_ref,
+                "project_name": project_name,
                 "snapshot_hash": result.snapshot_hash,
                 "tree_hash": result.tree_hash,
                 "tree_entries": result.tree_entries,
