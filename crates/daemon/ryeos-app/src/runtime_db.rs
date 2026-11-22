@@ -10109,6 +10109,23 @@ impl RuntimeDb {
               WHERE placement_thread_id=?1 AND state IN ('pending', 'decision_reserved')",
                 params![placement_thread_id, now],
             )?;
+            // The session named no worker, so the profile's lock can only be
+            // released by what no worker, session or reservation still claims:
+            // the same orphan test the boot reconcile applies, in this
+            // transition's transaction.
+            tx.execute(
+                "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?2
+              WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
+                                  WHERE placement_thread_id=?1)
+                AND lock_owner IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_process
+                      WHERE worker_instance_id=credential_profile.lock_owner)
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session
+                      WHERE worker_instance_id=credential_profile.lock_owner)
+                AND NOT EXISTS(SELECT 1 FROM credential_profile_reservation
+                      WHERE reservation_id=credential_profile.lock_owner AND state='reserved')",
+                params![placement_thread_id, now],
+            )?;
             tx.commit()?;
             Ok(())
         })

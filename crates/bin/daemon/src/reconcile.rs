@@ -2253,6 +2253,7 @@ async fn reconcile_active_threads_inner(
                         )),
                         &mut reconciled,
                     )?;
+                    settle_session_of_finalized_root(state, &thread.thread_id);
                     continue;
                 }
             }
@@ -2413,6 +2414,7 @@ async fn reconcile_active_threads_inner(
                     )),
                     &mut reconciled,
                 )?;
+                settle_session_of_finalized_root(state, &thread.thread_id);
             }
             ResumeDecision::DeadlineReached { end_at_ms } => {
                 tracing::warn!(
@@ -2443,6 +2445,7 @@ async fn reconcile_active_threads_inner(
                     )),
                     &mut reconciled,
                 )?;
+                settle_session_of_finalized_root(state, &thread.thread_id);
             }
             ResumeDecision::Resume { .. }
                 if dedicated_session_root_resume(state, &thread.thread_id)?
@@ -2480,6 +2483,7 @@ async fn reconcile_active_threads_inner(
                     )),
                     &mut reconciled,
                 )?;
+                settle_session_of_finalized_root(state, &thread.thread_id);
             }
             ResumeDecision::Resume { next_attempt, max } => {
                 // Persist the bumped counter BEFORE scheduling the
@@ -3187,6 +3191,10 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                 session.worker_instance_id.as_deref(),
                 session.worker_boot_epoch,
             ) else {
+                // No worker was ever recorded for this session, so no scope
+                // or holding exists to prove absent. Once its external
+                // allocation has settled nothing else can keep it alive.
+                settle_session_after_allocation(state, &session.placement_thread_id)?;
                 continue;
             };
             if state.state_store.worker_process(worker_id)?.is_some() {
@@ -3285,6 +3293,52 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Settle a predecessor session whose external allocation has settled and
+/// which recorded no local holding: terminal with a typed reason, credential
+/// lock released in the same transaction, no provider I/O.
+fn settle_session_after_allocation(state: &AppState, placement_thread_id: &str) -> Result<()> {
+    use ryeos_app::dedicated_session_service::{
+        SESSION_SETTLED_ALLOCATION_REASON, SessionLocalSettle, SessionSettleGround,
+        settle_session_without_worker,
+    };
+    match settle_session_without_worker(
+        state,
+        placement_thread_id,
+        SessionSettleGround::AllocationSettled,
+    )? {
+        SessionLocalSettle::Settled => {
+            log_predecessor_session_settled(placement_thread_id, SESSION_SETTLED_ALLOCATION_REASON)
+        }
+        SessionLocalSettle::Skipped("allocation_unsettled") => {
+            warn_session_awaits_external_terminal(placement_thread_id)
+        }
+        SessionLocalSettle::Skipped(_) => {}
+    }
+    Ok(())
+}
+
+/// A root finalised by reconcile will never run its dedicated session again:
+/// settle the session from local rows too, so its credential lock does not
+/// outlive the root. A skipped settlement is retried by the passes that own
+/// the skipped condition; it never fails the root's finalisation.
+fn settle_session_of_finalized_root(state: &AppState, thread_id: &str) {
+    use ryeos_app::dedicated_session_service::{
+        SessionLocalSettle, SessionSettleGround, settle_session_without_worker,
+    };
+    match settle_session_without_worker(state, thread_id, SessionSettleGround::RootFinalized) {
+        Ok(SessionLocalSettle::Settled) => log_predecessor_session_settled(
+            thread_id,
+            "dedicated session settled with its finalised root",
+        ),
+        Ok(SessionLocalSettle::Skipped(_)) => {}
+        Err(error) => tracing::warn!(
+            thread_id,
+            error = %format!("{error:#}"),
+            "settling the dedicated session of a finalised root failed"
+        ),
+    }
+}
+
 fn log_predecessor_session_settled(placement_thread_id: &str, reason: &str) {
     tracing::info!(
         placement_thread_id,
@@ -3320,6 +3374,10 @@ fn settle_unattached_trusted_holding(
         epoch,
     )?
     else {
+        // No holding was recorded, so no local process was ever launched for
+        // this attempt: with its external allocation settled there is nothing
+        // left to prove absent.
+        settle_session_after_allocation(state, placement_thread_id)?;
         return Ok(());
     };
     if holding.daemon_generation_id == ryeos_app::runtime_db::daemon_generation_id() {

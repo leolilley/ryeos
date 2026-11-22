@@ -108,7 +108,23 @@ fn require_counted_start(harness: &DaemonHarness, label: &str) -> Result<String>
 struct Held {
     phase: ExternalAllocationPhase,
     session_state: String,
+    terminal_reason: Option<String>,
     lock_owner: Option<String>,
+}
+
+/// Whether a NEW session could take the seeded credential profile's lock now,
+/// through the same exclusive-lock compare-and-set a successor's admission
+/// begins with. It takes the lock on success, so call it once, last.
+fn successor_acquires_the_credential(harness: &DaemonHarness) -> Result<bool> {
+    let store =
+        common::open_stopped_node_store(&harness.state_path).context("open stopped store")?;
+    let profile_id = format!("P-{PLACEMENT}");
+    let profile = store
+        .credential_profile(&profile_id)?
+        .context("the credential profile was lost")?;
+    Ok(store
+        .acquire_credential_profile(&profile_id, &profile.owner_principal, "successor-session")
+        .is_ok())
 }
 
 fn held_after_stop(harness: &DaemonHarness) -> Result<Held> {
@@ -126,6 +142,7 @@ fn held_after_stop(harness: &DaemonHarness) -> Result<Held> {
     Ok(Held {
         phase: allocation.phase,
         session_state: session.state,
+        terminal_reason: session.terminal_reason,
         lock_owner: profile.lock_owner,
     })
 }
@@ -600,6 +617,20 @@ fn require_unsettled(held: &Held, log: &str) {
     );
 }
 
+/// The session settled with a typed outcome and released its credential lock.
+fn require_settled_session(held: &Held, log: &str) {
+    assert_eq!(held.session_state, "terminal", "{log}");
+    assert_eq!(
+        held.terminal_reason.as_deref(),
+        Some("external_allocation_settled"),
+        "{log}"
+    );
+    assert_eq!(
+        held.lock_owner, None,
+        "the credential lock stayed held:\n{log}"
+    );
+}
+
 fn require_basis(observations: &[serde_json::Value], basis: &str) {
     assert_eq!(
         observations.len(),
@@ -614,7 +645,7 @@ fn require_basis(observations: &[serde_json::Value], basis: &str) {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the built synthetic adapter binaries; see the module doc"]
 async fn a_terminated_provider_settles_the_allocation_at_startup() -> Result<()> {
-    let (_rig, log, held, observations) =
+    let (rig, log, held, observations) =
         restarted_over(true, scripted("terminated", false, 0)).await?;
     let counts = real_adapter::counts_line(&log)?;
     assert!(
@@ -623,9 +654,10 @@ async fn a_terminated_provider_settles_the_allocation_at_startup() -> Result<()>
     );
     assert_eq!(held.phase, ExternalAllocationPhase::Terminated, "{log}");
     require_basis(&observations, "observed_terminated");
-    eprintln!(
-        "S1 session after settlement: state={} lock={:?}",
-        held.session_state, held.lock_owner
+    require_settled_session(&held, &log);
+    assert!(
+        successor_acquires_the_credential(&rig.harness)?,
+        "a new session could not take the credential after the provider terminal:\n{log}"
     );
     Ok(())
 }
@@ -635,7 +667,7 @@ async fn a_terminated_provider_settles_the_allocation_at_startup() -> Result<()>
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the built synthetic adapter binaries; see the module doc"]
 async fn a_pending_provider_keeps_the_session_unsettled_and_the_node_ready() -> Result<()> {
-    let (_rig, log, held, observations) =
+    let (rig, log, held, observations) =
         restarted_over(true, scripted("pending", true, 20 * GRACE_MS)).await?;
     let counts = real_adapter::counts_line(&log)?;
     assert!(
@@ -644,6 +676,10 @@ async fn a_pending_provider_keeps_the_session_unsettled_and_the_node_ready() -> 
     );
     require_unsettled(&held, &log);
     assert!(observations.is_empty(), "{observations:?}");
+    assert!(
+        !successor_acquires_the_credential(&rig.harness)?,
+        "a new session took a credential whose session is still unsettled"
+    );
     Ok(())
 }
 
@@ -656,6 +692,7 @@ async fn not_found_after_an_accepted_terminate_settles_by_rule_a() -> Result<()>
         restarted_over(true, scripted("not_found", true, 0)).await?;
     assert_eq!(held.phase, ExternalAllocationPhase::Terminated, "{log}");
     require_basis(&observations, "accepted_terminate_then_not_found");
+    require_settled_session(&held, &log);
     Ok(())
 }
 
@@ -686,6 +723,7 @@ async fn not_found_past_the_lease_end_and_grace_settles_by_rule_b() -> Result<()
         restarted_over(true, scripted("not_found", false, 20 * 60 * 1000)).await?;
     assert_eq!(held.phase, ExternalAllocationPhase::Terminated, "{log}");
     require_basis(&observations, "past_latest_lease_end_not_found");
+    require_settled_session(&held, &log);
     Ok(())
 }
 
@@ -742,9 +780,10 @@ async fn pending_at_startup_is_settled_by_the_periodic_pass() -> Result<()> {
     let held = rig.held()?;
     assert_eq!(held.phase, ExternalAllocationPhase::Terminated);
     require_basis(&rig.stored_observations()?, "observed_terminated");
-    eprintln!(
-        "S8 session after the periodic settle: state={} lock={:?}",
-        held.session_state, held.lock_owner
+    require_settled_session(&held, &rig.log());
+    assert!(
+        successor_acquires_the_credential(&rig.harness)?,
+        "a new session could not take the credential after the periodic settle"
     );
     Ok(())
 }
