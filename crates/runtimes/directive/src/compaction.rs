@@ -246,7 +246,7 @@ pub fn pinned_inputs_fit_a_record(
 }
 
 /// Read the tool results of `messages` (the kept turns, oldest first) under
-/// `rule`: every result but the newest `keep_recent` whose text is longer than
+/// `rule`: every result, except one already spilled to an attachment, but the newest `keep_recent` whose text is longer than
 /// `over_bytes` becomes its head, a marker naming what was left out, and its
 /// tail. A pure function of the messages and the rule, so a live run and a
 /// rebuild from the record read the same bytes.
@@ -264,6 +264,16 @@ pub fn clip_tool_results(messages: &mut [ProviderMessage], rule: &ryeos_runtime:
             let Part::ToolResult(result) = part else {
                 continue;
             };
+            // A spilled result is already a bounded preview with its own
+            // marker; clipping it again would cut the marker's account of
+            // where the full text lives.
+            let spilled = result.parts.iter().any(|inner| {
+                matches!(inner, Part::Text(text)
+                    if text.text.starts_with(ryeos_runtime::TOOL_RESULT_PARTIAL_PREFIX))
+            });
+            if spilled {
+                continue;
+            }
             for inner in &mut result.parts {
                 if let Part::Text(text) = inner {
                     text.text = clip_text(&text.text, rule);
@@ -502,6 +512,31 @@ mod tests {
             .collect();
         clip_tool_results(&mut again, &rule);
         assert_eq!(again, messages);
+    }
+
+    #[test]
+    fn a_spilled_tool_result_is_never_clipped_again() {
+        let big = "x".repeat(1000);
+        let spilled = format!(
+            "{}9000 bytes, full result stored as attachment abc; the full result is not available to you]\n{big}",
+            ryeos_runtime::TOOL_RESULT_PARTIAL_PREFIX
+        );
+        let mut messages = vec![
+            ProviderMessage::tool_result("c0".to_string(), spilled.clone()),
+            ProviderMessage::tool_result("c1".to_string(), format!("1{big}")),
+            ProviderMessage::tool_result("c2".to_string(), format!("2{big}")),
+        ];
+        let rule = ryeos_runtime::ClipRule {
+            over_bytes: 100,
+            head_bytes: 10,
+            tail_bytes: 10,
+            keep_recent: 1,
+        };
+        clip_tool_results(&mut messages, &rule);
+        let texts: Vec<String> = messages.iter().map(|m| m.text().unwrap()).collect();
+        assert_eq!(texts[0], spilled);
+        assert!(texts[1].contains("bytes of this result were clipped"));
+        assert_eq!(texts[2].len(), 1001);
     }
 
     #[test]
