@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:908b4e07c67d6e9ef311e43d6a9fce379d337978ab522e41afb715721cd7fd2d:dKsgmY2roEB9Q7PwsxRXqqHrYx+8oHhzerMiRmWJqSDqixYy9h4TxHnuBWdk5kRwZUFB3D7Tpb6PV3GXMWnZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T04:38:35Z:eef2cca9ca82265c42ba21359cb5c3f36881864177266f1c7a021311b9805228:rnvPNAa6Lad1oCcSC9ks0Iga+N+Vb1Q3Sh4KICIdIkVvX4+Axdre6x/3IuEZW7xfnV07zWsMKVXcesJRts/XDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -228,3 +228,13 @@ and invokes the same explicit replacement boundary, passing through any
 `--keep-section`/`--reset-section` choices. It preserves node, operator, and
 vault identities, operator-applied policy sections, and all non-policy state. Do not use the reset
 flag on a fresh node or a node whose generation is already current.
+
+The `hosted-node`, `hosted-workflow` and `hosted-controller` profiles are
+single-operator nodes, and their `ui_browser_sessions.session_scopes` give a
+browser seat no `projects/add`, `projects/open` or `ryeos.read.project.live`:
+a seat on a hosted node cannot register or open a host path, so its file reads
+have no project root. Scopes naming bundles a profile does not install are
+left out too. A node initialized from an earlier profile keeps its old scopes
+until the same stopped-node cutover takes the profile's section; if an
+operator applied `ui_browser_sessions`, name it with `--reset-section
+ui_browser_sessions` to take the profile's body.
