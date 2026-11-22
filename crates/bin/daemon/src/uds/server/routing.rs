@@ -277,6 +277,15 @@ fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse
                     details,
                 );
             }
+            if let Some(refusal) = ryeos_app::accounting_db::ProviderOutcomeUnknown::find(&err) {
+                return RpcResponse::classified_err(
+                    request_id,
+                    refusal.code(),
+                    refusal.to_string(),
+                    false,
+                    json!({ "code": refusal.code() }),
+                );
+            }
             RpcResponse::err(request_id, "request_failed", format!("{err:#}"))
         }
     }
@@ -293,6 +302,28 @@ mod tests {
         let error = response.error.expect("unknown method error");
         assert_eq!(error.code, "unknown_method");
         assert_eq!(error.message, "unknown rpc method: nonexistent.method");
+    }
+
+    #[test]
+    fn an_unknown_provider_outcome_keeps_its_typed_code_through_the_rpc_layer() {
+        let error = anyhow::Error::new(ryeos_app::accounting_db::ProviderOutcomeUnknown {
+            thread_id: "T-1".to_string(),
+            turn: 3,
+            attempt_number: 1,
+            predecessor_generation: "G-1".to_string(),
+            detail: "settled".to_string(),
+        })
+        .context("handler context");
+        let response = rpc_result(7, Err(error));
+        let error = response.error.expect("typed refusal");
+        assert_eq!(error.code, "provider_attempt_outcome_unknown");
+        assert!(
+            error
+                .message
+                .contains("Resuming after a restart is not supported"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

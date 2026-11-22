@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T06:12:01Z:718481f3dbd1d8821c1d8ef6a942f251bcf1017c19b3f3aae7953296195f6fd1:2TggmeRZGU1BmFl4ndjwnrmnaOnjQzSBy5T3WeFtP8ekdkcxYkYLqwqRuvLLI9smzcCXsbGpIUSj+UE4tZBZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-21T21:46:02Z:e7cb05b486972e86ab0845bdcc6f3dffcbc25dd96be5a03704027f5bd3eddfaa:Px8rx3pNBn21hrwaZdevRKF2BJzhLI1yREwNs0i+PUr+GxtUZW6plGvBtSMzX7yOfg3XcJgQTtPdwQ4pdzRTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -70,6 +70,13 @@ resulting ceiling into the launch capsule and the daemon refuses any unknown-
 outcome retry beyond it, so editing this file mid-run cannot widen it. Every
 retry is charged the full reserved maximum for the abandoned attempt. The
 removed `retry_on_timeout` and `retry_mid_stream` keys are refused.
+
+These retries cover a failure the running process observed. If the node stops
+while a model call is in flight (a kill, a crash, a planned rollover that cuts
+the run), the call's outcome is never recorded. The attempt is charged its
+reserved maximum, the turn cannot be resumed, and the thread fails with
+`provider_attempt_outcome_unknown`. Resuming after a restart is not supported
+for any directive yet; no header declaration changes this.
 
 ### Output limit
 

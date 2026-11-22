@@ -5163,6 +5163,16 @@ impl Runner {
                     }
                     return Ok(response);
                 }
+                // A provider coordinate with an unknown outcome is a decision
+                // the ledger will repeat on every try. Fail the thread with
+                // its typed code instead of retrying it.
+                Err(ryeos_runtime::callback::CallbackError::ActionFailed {
+                    code,
+                    message,
+                    retryable: false,
+                }) if code == ryeos_accounting::PROVIDER_OUTCOME_UNKNOWN_CODE => {
+                    anyhow::bail!("{code}: {message}; zero provider requests");
+                }
                 Err(error) => {
                     tracing::warn!(
                         retry,
