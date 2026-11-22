@@ -13,7 +13,9 @@
 
 use serde_json::{Value, json};
 
-use crate::contracts::{ExecutionHints, PlanArgument, PlanContext, PlanNode, VerifiedItem};
+use crate::contracts::{
+    ExecutionHints, LogicalProject, PlanArgument, PlanContext, PlanNode, VerifiedItem,
+};
 use crate::engine::Engine;
 use crate::isolation::{IsolationLaunchContext, IsolationRuntime};
 
@@ -99,7 +101,7 @@ pub fn import_dry_run(
     // when this probe cannot supply the required captured launch authority.
     let plan = match engine.with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
         let effective = generation.effective_item(crate::engine::EffectiveItemRequest {
-            logical_project_root: None,
+            logical_project: LogicalProject::from_optional(None, &plan_ctx.subject_resolution_authority),
             item_ref: verified.resolved.canonical_ref.clone(),
             expected_kind: Some(verified.resolved.kind.clone()),
             project_root: match &plan_ctx.project_context {

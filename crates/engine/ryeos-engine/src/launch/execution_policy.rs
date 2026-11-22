@@ -612,6 +612,7 @@ fn source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::{LogicalProject, LogicalProjectAbsence};
     use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
     use crate::project_content::{AuthoritativeProjectContent, ProjectContentEntry};
     use serde_json::json;
@@ -717,7 +718,7 @@ mod tests {
             ],
         };
         let roots = ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
@@ -772,7 +773,7 @@ mod tests {
             }],
         };
         let roots = ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Node,

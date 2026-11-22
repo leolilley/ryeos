@@ -331,7 +331,10 @@ fn callback_execution_context(
         // The project this callback's pinned generation stands for. Its
         // checkout is temporary, so a project-scoped signer is matched on the
         // logical project, as for every direct launch.
-        logical_project_root: child_provenance.logical_project_root(current_site_id),
+        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+            child_provenance.logical_project_root(current_site_id),
+            &callback_subject_authority,
+        ),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: thread_auth.acting_principal.clone(),
             scopes: dispatch_caps.to_vec(),

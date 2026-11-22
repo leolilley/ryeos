@@ -84,7 +84,9 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             &site_id,
         );
         let plan_ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: principal_id.clone(),
                 scopes: principal_scopes.clone(),

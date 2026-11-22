@@ -46,7 +46,9 @@ pub async fn handle(
     let effective = state
         .engine
         .effective_item(EffectiveItemRequest {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             item_ref,
             expected_kind: None,
             project_root: None,

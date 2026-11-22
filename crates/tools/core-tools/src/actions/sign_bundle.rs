@@ -533,7 +533,15 @@ fn bundle_authoring_resolution_roots(
             canonical_root,
         });
     }
-    Ok(ryeos_engine::item_resolution::ResolutionRoots::from_registered(None, &registered))
+    Ok(
+        ryeos_engine::item_resolution::ResolutionRoots::from_registered(
+            None,
+            &registered,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
+        ),
+    )
 }
 
 fn mark_bundle_item_source_signed(report: &mut SignBundleReport, item_ref: &str) -> Result<()> {
