@@ -30,9 +30,7 @@ use ryeos_client_base::ui::admission_operation::{
 use ryeos_client_base::ui::composition_operation::{CompositionMutation, CompositionOwner};
 use ryeos_client_base::ui::composition_replay::UiCompositionReplay;
 use ryeos_client_base::ui::seat::retained_seat_event_with_evidence;
-use ryeos_client_base::ui::{
-    SeatEventKind, UiBindingAttachmentCoordinate, seat_payload_digest,
-};
+use ryeos_client_base::ui::{SeatEventKind, UiBindingAttachmentCoordinate, seat_payload_digest};
 use serde_json::{Value, json};
 
 const SURFACE_REF: &str = "surface:acme/ui/notes";
@@ -183,9 +181,7 @@ async fn mint_session(
     if let Some(project) = project {
         request["project_path"] = json!(project.to_str().expect("utf-8 project path"));
     }
-    let (status, minted) = harness
-        .post_json("/ui/api/launch/mint", request)
-        .await?;
+    let (status, minted) = harness.post_json("/ui/api/launch/mint", request).await?;
     anyhow::ensure!(status == StatusCode::OK, "mint: {minted}");
     let session_id = activate_launch(
         minted["launch_url"]
@@ -325,7 +321,10 @@ impl Seat {
     /// frame as (event name, payload), ending at the completion fence.
     async fn history(&self, harness: &DaemonHarness) -> anyhow::Result<Vec<(String, Value)>> {
         let response = reqwest::Client::new()
-            .post(format!("http://{}/ui/api/session/seat/history", harness.bind))
+            .post(format!(
+                "http://{}/ui/api/session/seat/history",
+                harness.bind
+            ))
             .header("cookie", format!("ryeos_session={}", self.session_id))
             .json(&json!({
                 "presentation_id": self.producer["presentation_id"],
@@ -372,7 +371,11 @@ impl Seat {
             .map_err(|error| anyhow::anyhow!("fold seat history: {error:?}"))
     }
 
-    fn prepared_operation(&self, body: Value, operation_id: &str) -> UiPreparedPresentationOperation {
+    fn prepared_operation(
+        &self,
+        body: Value,
+        operation_id: &str,
+    ) -> UiPreparedPresentationOperation {
         let mut prepared: UiPreparedPresentationOperation = serde_json::from_value(json!({
             "schema": 2,
             "prepared_engine_seq": self.next_engine_seq,
@@ -496,8 +499,18 @@ async fn a_live_seat_picks_up_a_revised_project_view_through_hint_revise_and_reb
     // signed with the operator's key are trusted project items.
     let guard = tempfile::tempdir()?;
     let project = guard.path().canonicalize()?;
-    write_signed(&project, ".ai/surfaces/acme/ui/notes.yaml", SURFACE_BODY, &operator);
-    write_signed(&project, ".ai/view_sets/acme/notes.yaml", VIEW_SET_BODY, &operator);
+    write_signed(
+        &project,
+        ".ai/surfaces/acme/ui/notes.yaml",
+        SURFACE_BODY,
+        &operator,
+    );
+    write_signed(
+        &project,
+        ".ai/view_sets/acme/notes.yaml",
+        VIEW_SET_BODY,
+        &operator,
+    );
     assert_eq!(operator_signs_view(&project, &operator, "marker-v1"), 1);
 
     // A browser seat bound to the project, and a second session that is not.
@@ -560,7 +573,11 @@ async fn a_live_seat_picks_up_a_revised_project_view_through_hint_revise_and_reb
         }),
     )
     .await?;
-    assert_eq!(status, StatusCode::OK, "open the project Surface: {dispatched}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "open the project Surface: {dispatched}"
+    );
     let opened = locate(&dispatched, "ui_transition");
     let transition = &opened["ui_transition"];
     assert_eq!(transition["kind"], "open_surface", "{dispatched}");
@@ -724,8 +741,11 @@ async fn a_live_seat_picks_up_a_revised_project_view_through_hint_revise_and_reb
         .map_err(|error| anyhow::anyhow!("expected rename completion: {error:?}"))?;
     seat.append(&harness, &[(PREPARED, serde_json::to_value(&rename)?)])
         .await?;
-    seat.append(&harness, &[(COMPLETED, serde_json::to_value(&rename_completion)?)])
-        .await?;
+    seat.append(
+        &harness,
+        &[(COMPLETED, serde_json::to_value(&rename_completion)?)],
+    )
+    .await?;
 
     // A dispatch on the rebound tile is admitted.
     let (status, admitted) = cookie_post(
@@ -744,12 +764,20 @@ async fn a_live_seat_picks_up_a_revised_project_view_through_hint_revise_and_reb
         }),
     )
     .await?;
-    assert_eq!(status, StatusCode::OK, "dispatch on the rebound tile: {admitted}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "dispatch on the rebound tile: {admitted}"
+    );
 
     // The session now holds the successor with the new view content.
     let current = session_current(&harness, &session_id).await?;
-    let rebound = serde_json::to_string(&descriptor_of(&current, &to.binding_attachment_id)["presentation"])?;
-    assert!(rebound.contains("marker-v2"), "the rebound binding resolves v2");
+    let rebound =
+        serde_json::to_string(&descriptor_of(&current, &to.binding_attachment_id)["presentation"])?;
+    assert!(
+        rebound.contains("marker-v2"),
+        "the rebound binding resolves v2"
+    );
 
     // Detaching the settled source is the idempotent no-op.
     let (status, detached) = cookie_post(
@@ -763,8 +791,16 @@ async fn a_live_seat_picks_up_a_revised_project_view_through_hint_revise_and_reb
         }),
     )
     .await?;
-    assert_eq!(status, StatusCode::OK, "detach the settled source: {detached}");
-    assert_eq!(locate(&detached, "detached")["detached"], false, "{detached}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "detach the settled source: {detached}"
+    );
+    assert_eq!(
+        locate(&detached, "detached")["detached"],
+        false,
+        "{detached}"
+    );
 
     // Nothing further was announced to either session.
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
