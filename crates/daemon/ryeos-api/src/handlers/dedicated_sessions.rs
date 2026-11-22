@@ -4042,6 +4042,16 @@ async fn handoff(
     let successor_project_snapshot_hash = target_authority
         .operational_snapshot_projection()
         .map(ToOwned::to_owned);
+    // The pre-cut crash boundary sits before the accounting allowance export:
+    // once exported, recovery must roll the writer cut forward, so a crash
+    // here is the last point where the handoff still aborts cleanly.
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforeWriterCut,
+        &operation,
+    )
+    .map_err(internal)?;
     let source_accounting_transfer = match (
         state.accounting.as_ref(),
         source_metadata.accounting_scope.as_ref(),
@@ -4088,13 +4098,6 @@ async fn handoff(
         usage_subject_asserted_by: None,
         captured_history_policy: None,
     };
-    #[cfg(any(test, feature = "handoff-test-support"))]
-    reach_source_handoff_phase_cut(
-        &state,
-        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceBeforeWriterCut,
-        &operation,
-    )
-    .map_err(internal)?;
     #[cfg(any(test, feature = "handoff-test-support"))]
     let source_publication_started = lillux::time::MonotonicTimer::start();
     let publication = state
