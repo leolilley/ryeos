@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T21:46:02Z:e7cb05b486972e86ab0845bdcc6f3dffcbc25dd96be5a03704027f5bd3eddfaa:Px8rx3pNBn21hrwaZdevRKF2BJzhLI1yREwNs0i+PUr+GxtUZW6plGvBtSMzX7yOfg3XcJgQTtPdwQ4pdzRTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:28:22Z:10e7e397ea199a2f0533f551f5ab5df9edf2c79897d7677ae18697ab5950c146:7HiUqQLbOfXexu7UW9TGzslV4Z5eVR4IVbWxege1zkXMTEUCcTr7gEVmomPnfONqmNPwZp/L/DWmJFlJRgmzBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -33,6 +33,7 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `accounting.failure_policy` | auto | Fail closed for unavailable usage with a finite token/spend budget; otherwise warn |
 | `accounting.budget_mode` | settled | Settle after each attempt; may overshoot a finite budget by one attempt |
 | `tool_images` | see below | Ceilings on the images a run's tools return |
+| `tool_output` | see below | How an oversize tool result is shown to the model and stored |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
 
 ## Retry Behavior
@@ -171,6 +172,55 @@ An image over the dimension limit is dropped as `image_dimensions`.
 The per-run counters are rebuilt from the record on resume and continuation.
 The node's `thread_attachments` policy still bounds every append, and a model's
 own `image_input.accepts.max_bytes_per_image` can lower the per-image limit.
+
+## Oversize tool results
+
+A tool result longer than `spill_threshold_bytes` is stored whole as a thread
+attachment beside its `tool_call_result` event, and the model sees a preview:
+a first line that says the result is partial and names the attachment, then the
+first `preview_head_bytes` and the last `preview_tail_bytes` of the text.
+
+```
+[tool result partial: 120000 bytes, full result stored as attachment <hash>; the full result is not available to you]
+[first 24576 bytes]
+...
+[... 87232 bytes omitted ...]
+[last 8192 bytes]
+...
+```
+
+The model cannot read the stored text back; it is kept for the operator and
+the record. The guard's record carries `spill` (attachment hash, bytes stored,
+total bytes, preview head and tail bytes) and the result's `attachment_refs`
+name the attachment after any images. A result longer than `max_stored_bytes`
+stores its first `max_stored_bytes` bytes and the preview says so.
+
+```yaml
+tool_output:
+  spill_threshold_bytes: 65536
+  preview_head_bytes: 24576
+  preview_tail_bytes: 8192
+  max_stored_bytes: 4194304   # keep within the node's thread_attachments limit
+  hard_cut_bytes: 102400      # the cut used when a result is not stored
+```
+
+`preview_head_bytes + preview_tail_bytes` must stay below
+`spill_threshold_bytes`, and `max_stored_bytes` must be at least the threshold;
+a config that breaks either is refused at load.
+
+When the node refuses the stored copy, the result is recorded again, cut at
+`hard_cut_bytes`, with `truncated_reason` naming the cause, and the run goes on:
+
+| `truncated_reason` | Cause |
+| --- | --- |
+| `spill_media_type_not_admitted` | the node's `thread_attachments` policy does not accept `text/plain`; storing stays off for the rest of the run |
+| `spill_over_attachment_limit` | the result is over the node's per-attachment byte limit |
+| `spill_attachment_budget_spent` | the append or the run is out of attachments |
+
+The first refusal of a run is logged. A node installed before `text/plain` was
+added to the shipped `thread_attachments` policy keeps its installed policy
+until it resets its policy generation (`reset policy-generation`); until then
+oversize results are cut with `spill_media_type_not_admitted`.
 
 ## Config Resolution Chain
 

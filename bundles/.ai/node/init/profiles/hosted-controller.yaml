@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T19:47:34Z:85c0f38ca8f5237d1e694b865d80f4956ad30660c4acab53dd70082b3de3d1a3:3N3r7a0OW1Z+t4xeUQCvyc42Cv5tjxpHbpWXdomgwxJIIDLp8DD1Ujhm73VKgjrBZodbKfs+MVNZD9zVgK2/Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T00:28:11Z:9c16f1af36b05b4fcdbd030d0f758163bf55db0f66ed5c7de3e4df5d0e003adb:OdFKQdzr+mGCNoJG5ZywmUbOSWsUYObkVoRq2StItIi90x2acofYM6lqBk8N+xwYRyjb8HeE2rJv2kXDkHXPAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -193,6 +193,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by

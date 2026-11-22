@@ -112,6 +112,7 @@ impl ThreadAttachmentsPolicy {
                 "image/jpeg",
                 "image/png",
                 "image/webp",
+                "text/plain",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -167,7 +168,8 @@ mod tests {
                 "image/gif",
                 "image/jpeg",
                 "image/png",
-                "image/webp"
+                "image/webp",
+                "text/plain"
             ]
         })
     }
