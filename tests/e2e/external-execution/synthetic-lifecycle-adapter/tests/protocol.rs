@@ -1171,11 +1171,11 @@ async fn prepare_external_worker_program_and_binding(
 ) -> AdmittedExternalCandidateProgram {
     let roots = engine.resolution_roots(
         Some(project_root.to_path_buf()),
-        ryeos_engine::contracts::LogicalProject::from_optional(None, &subject),
+        ryeos_engine::contracts::LogicalProject::from_optional(None, subject),
     );
     let mut resolution = engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(None, &subject),
+            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(None, subject),
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                 "worker:test/external-candidate",
             )
