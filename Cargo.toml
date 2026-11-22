@@ -69,6 +69,7 @@ members = [
     "crates/support/ryeos-tracing",
     "crates/support/ryeos-request-signing",
     "crates/support/ryeos-chat-stub",
+    "crates/support/ryeos-http-egress",
     "crates/state/ryeos-vault",
     "crates/host-adapters/modal-guest-launcher",
 ]
@@ -173,6 +174,7 @@ ryeos-remote-lease-core = { path = "crates/host-adapters/remote-lease-core" }
 ryeos-tracing = { path = "crates/support/ryeos-tracing" }
 ryeos-request-signing = { path = "crates/support/ryeos-request-signing" }
 ryeos-chat-stub = { path = "crates/support/ryeos-chat-stub" }
+ryeos-http-egress = { path = "crates/support/ryeos-http-egress" }
 ryeos-ui = { path = "crates/daemon/ryeos-ui" }
 ryeos-vault = { path = "crates/state/ryeos-vault" }
 

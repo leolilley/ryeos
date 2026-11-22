@@ -116,7 +116,7 @@ pub async fn handle(
         HandlerError::Internal(format!("verified validation URL is invalid: {error}"))
     })?;
     let pinned_resolution = resolve_validation_target(&parsed_url, credential.is_some()).await?;
-    let mut client_builder = reqwest::Client::builder()
+    let mut client_builder = ryeos_http_egress::client_builder()
         .connect_timeout(Duration::from_secs(validation.timeout_seconds.min(30)))
         .timeout(Duration::from_secs(validation.timeout_seconds.min(60)))
         .redirect(reqwest::redirect::Policy::none());

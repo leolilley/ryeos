@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:28:11Z:9c16f1af36b05b4fcdbd030d0f758163bf55db0f66ed5c7de3e4df5d0e003adb:OdFKQdzr+mGCNoJG5ZywmUbOSWsUYObkVoRq2StItIi90x2acofYM6lqBk8N+xwYRyjb8HeE2rJv2kXDkHXPAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T04:38:07Z:0aa395fccf79b28365e5db5a6f817baffc13e454dad618f74fd954ba98ca5bca:9JPMwbuTWWAkMMJOXoOZcUYA0fjEP12PTAkGGL1MdNRxsIMce/rBiQMj7eKYagHwZFIeGdFGEldY63h+HbfgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -520,8 +520,6 @@ policies:
       - ryeos.execute.service.node/status
       - ryeos.execute.service.projects/list
       - ryeos.execute.service.events/chain_replay
-      - ryeos.execute.service.projects/add
-      - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input
       - ryeos.execute.service.commands/dispatch
       - ryeos.execute.service.commands/submit
@@ -529,7 +527,6 @@ policies:
       - ryeos.execute.service.revisions/list
       - ryeos.execute.service.revisions/get
       - ryeos.execute.service.worker-executions/resolve-approval
-      - ryeos.execute.directive.*
       - ryeos.execute.graph.*
       - ryeos.execute.tool.ryeos/core/fetch
       - ryeos.execute.tool.ryeos/core/verify
@@ -539,7 +536,6 @@ policies:
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log
-      - ryeos.read.project.live
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16

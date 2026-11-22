@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:908b4e07c67d6e9ef311e43d6a9fce379d337978ab522e41afb715721cd7fd2d:dKsgmY2roEB9Q7PwsxRXqqHrYx+8oHhzerMiRmWJqSDqixYy9h4TxHnuBWdk5kRwZUFB3D7Tpb6PV3GXMWnZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T05:02:59Z:056329ce29923e89b41402963017cbec5eda3aa9ab01954bdbe8b8e2e1ba6601:UbgLMZS9ieOX4kGlh3bbgWgQ5IAzAh0lgBhivmFESP3I/Q2924zM7xh+athabF9GnS39+R2ye10Gf8CoCdoSCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -228,3 +228,19 @@ and invokes the same explicit replacement boundary, passing through any
 `--keep-section`/`--reset-section` choices. It preserves node, operator, and
 vault identities, operator-applied policy sections, and all non-policy state. Do not use the reset
 flag on a fresh node or a node whose generation is already current.
+
+The `hosted-node`, `hosted-workflow` and `hosted-controller` profiles are
+single-operator nodes, and their `ui_browser_sessions.session_scopes` give a
+browser seat no `projects/add`, `projects/open` or `ryeos.read.project.live`:
+a seat on a hosted node cannot register or open a host path, so its file reads
+have no project root. Scopes naming bundles a profile does not install are
+left out too. A node initialized from an earlier profile keeps its old scopes
+until the same stopped-node cutover takes the profile's section; if an
+operator applied `ui_browser_sessions`, name it with `--reset-section
+ui_browser_sessions` to take the profile's body.
+Browser sessions are held in daemon memory only, and the cutover runs on a
+stopped node, so every session minted under the old scopes ends with that
+stop; a session minted after the restart gets the trimmed scopes, and nothing
+needs revoking. The cutover's restart counts against the node's capacity
+incarnations like any start, so on a hosted node fold it into the next image
+change rather than restarting for it alone.
