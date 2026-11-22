@@ -8935,7 +8935,7 @@ fn verify_candidate_integration_terminal(
             ));
         }
     };
-    let expected_head = owner_checkout_head_key(&session.owner_principal, &source_display_path)?;
+    let expected_head = owner_checkout_head_key(&session.owner_principal, source_display_path)?;
     let expected_principal_key = expected_head.owner_key();
     let expected_project_hash = expected_head.name_hash().to_owned();
     let exact_realization = matches!(

@@ -38,7 +38,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn rust_sources(root: &Path, directory: &Path, out: &mut Vec<PathBuf>) {
+fn rust_sources(directory: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
@@ -51,7 +51,7 @@ fn rust_sources(root: &Path, directory: &Path, out: &mut Vec<PathBuf>) {
             if path.file_name().is_some_and(|name| name == "target") {
                 continue;
             }
-            rust_sources(root, &path, out);
+            rust_sources(&path, out);
         } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
             out.push(path);
         }
@@ -62,7 +62,7 @@ fn rust_sources(root: &Path, directory: &Path, out: &mut Vec<PathBuf>) {
 fn no_head_key_is_built_from_anything_but_a_project_head_key() {
     let root = workspace_root();
     let mut files = Vec::new();
-    rust_sources(&root, &root.join("crates"), &mut files);
+    rust_sources(&root.join("crates"), &mut files);
     assert!(!files.is_empty(), "no sources under {}", root.display());
     let this_file = Path::new(file!())
         .file_name()

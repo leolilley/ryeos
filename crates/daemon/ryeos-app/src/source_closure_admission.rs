@@ -1830,7 +1830,7 @@ composer: handler:ryeos/core/identity
 
     struct Fixture {
         // Keeps the temporary checkout alive for the candidate's reads.
-        checkout: tempfile::TempDir,
+        _checkout: tempfile::TempDir,
         registry: ryeos_engine::kind_registry::KindRegistry,
         candidate: ryeos_engine::source_closure::CapturedSourceCandidate,
         resolution: ResolutionOutput,
@@ -1908,7 +1908,7 @@ composer: handler:ryeos/core/identity
             composed: KindComposedView::identity(serde_yaml::from_str("name: unit\n").unwrap()),
         };
         Fixture {
-            checkout,
+            _checkout: checkout,
             registry,
             candidate,
             resolution,

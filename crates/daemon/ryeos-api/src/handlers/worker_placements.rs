@@ -3956,7 +3956,7 @@ async fn prepare_after_staging(
     state
         .state_store
         .verify_project_snapshot_closure(candidate)?;
-    let target_project_identity = target_project_identity(owner, &target_project_path)?;
+    let target_project_identity = target_project_identity(owner, target_project_path)?;
     let target_head_key =
         ryeos_state::project_identity::ProjectHeadKey::for_project(&target_project_identity);
     let principal_key = target_head_key.owner_key().to_owned();
