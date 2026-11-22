@@ -629,7 +629,10 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     plant_python_tool(
         root,
         "noop",
-        "print(json.dumps({'ok': True}))",
+        &format!(
+            "{}print(json.dumps({{'ok': True, 'n': n}}))",
+            counter_code(aux.path(), "noop")
+        ),
         &fixture.publisher,
     )?;
     plant_python_tool(
@@ -650,7 +653,8 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         root,
         "nap",
         &format!(
-            "time.sleep({})\nprint(json.dumps({{'ok': True}}))",
+            "{}time.sleep({})\nprint(json.dumps({{'ok': True, 'n': n}}))",
+            counter_code(aux.path(), "nap"),
             opts.nap_seconds
         ),
         &fixture.publisher,
@@ -660,9 +664,10 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         root,
         "marker",
         &format!(
-            "with open({marker:?}, 'a') as f:\n    f.write('executed\\n')\n    f.flush()\n    os.fsync(f.fileno())\ntime.sleep({})\nprint(json.dumps({{'executed': True}}))",
+            "{counter}with open({marker:?}, 'a') as f:\n    f.write('executed\\n')\n    f.flush()\n    os.fsync(f.fileno())\ntime.sleep({})\nprint(json.dumps({{'executed': True, 'n': n}}))",
             opts.marker_sleep_seconds,
             marker = marker.to_str().expect("utf-8 path"),
+            counter = counter_code(aux.path(), "marker"),
         ),
         &fixture.publisher,
     )?;
@@ -712,6 +717,20 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         started_at,
         phase_gate,
     })
+}
+
+/// Python that numbers each call of a stub tool from a locked per-run counter
+/// file in `aux` and leaves the number in `n`. A scripted run that repeats the
+/// tool every turn then gets different results, so it makes progress under the
+/// production loop guards; the sequence is the same on every run and across a
+/// restart.
+fn counter_code(aux: &std::path::Path, tool: &str) -> String {
+    format!(
+        "import fcntl\nfd = os.open({:?}, os.O_RDWR | os.O_CREAT)\nfcntl.flock(fd, fcntl.LOCK_EX)\nn = int(os.read(fd, 32).decode() or '0') + 1\nos.lseek(fd, 0, 0)\nos.ftruncate(fd, 0)\nos.write(fd, str(n).encode())\nos.close(fd)\n",
+        aux.join(format!("{tool}.count"))
+            .to_str()
+            .expect("utf-8 path")
+    )
 }
 
 // ── launching and observing ─────────────────────────────────────────────
