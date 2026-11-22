@@ -10,6 +10,8 @@ use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
 mod configuration_absence;
+#[cfg(test)]
+mod replay_tests;
 mod workload_client_broker;
 
 const WIRE_PROTOCOL: &str = "ryeos.structured-session";

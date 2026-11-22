@@ -5,6 +5,7 @@
 //! into history when the point walks back off the tail.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::{Style, TextSurface};
 use ryeos_client_base::ui::view_model::{
     RyeOsRowDetailVm, RyeOsTimelineDockVm, RyeOsTimelineEntryVm, RyeOsTimelineLaneVm, RyeOsTone,
@@ -64,7 +65,7 @@ pub struct TimelineEntryMeta<'a> {
 }
 
 /// Docked asks drawn at most; the rest stay in the flow.
-const MAX_DOCKED: usize = 3;
+const MAX_DOCKED: usize = LAYOUT.cells.max_docked;
 
 /// Rows the foot under the feed takes: one for the status lane, reserved
 /// whether or not it has text, then one per docked ask. At least one row stays
@@ -139,7 +140,9 @@ pub fn draw_timeline(
     if width == 0 || height == 0 {
         return;
     }
-    let entry_window = height.saturating_mul(4).max(64);
+    let entry_window = height
+        .saturating_mul(LAYOUT.cells.timeline_window_per_row)
+        .max(LAYOUT.cells.timeline_window_least);
     let selected_entry = selected.and_then(|sel| (sel < entries.len()).then_some(sel));
     let entry_start = match selected_entry {
         Some(sel) => sel.saturating_sub(entry_window / 2),
@@ -239,7 +242,7 @@ fn push_timeline_lines(
         // two spaces per level, so the braid reads as a call tree. Panic-safe: a
         // missing/short indent vector degrades to depth 0 (flat).
         let depth = entry_indents.get(entry_index).copied().unwrap_or(0) as usize;
-        let indent_cols = (depth * 2).min(width.saturating_sub(1));
+        let indent_cols = (depth * LAYOUT.cells.timeline_indent).min(width.saturating_sub(1));
         let entry_width = width.saturating_sub(indent_cols).max(1);
         let first_line = lines.len();
         match entry {

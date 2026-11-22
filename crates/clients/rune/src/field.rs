@@ -7,6 +7,7 @@
 //! elements rather than painted pixels, which gives press, focus and an
 //! accessible name to each without hit-testing.
 
+use ryeos_client_base::layout_table::LAYOUT;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rune::{Color, El, Key, KeyEvent, LineCap, Shape, canvas, col, el, row, text, text_input};
@@ -24,12 +25,12 @@ use ryeos_client_base::view_set::{FieldCursorState, FieldEventRefState};
 use crate::theme::{self, Palette};
 use crate::{App, Local};
 
-const GROUP_WIDTH: f32 = 520.0;
+const GROUP_WIDTH: f32 = LAYOUT.px.field.group_width;
 /// An empty group's header box.
-const EMPTY_GROUP_WIDTH: f32 = 200.0;
-const RANK_SPACING: f32 = 210.0;
-const GROUP_RIGHT_GUTTER: f32 = 300.0;
-const GROUP_HEADER_HEIGHT: f32 = 26.0;
+const EMPTY_GROUP_WIDTH: f32 = LAYOUT.px.field.empty_group_width;
+const RANK_SPACING: f32 = LAYOUT.px.field.rank_spacing;
+const GROUP_RIGHT_GUTTER: f32 = LAYOUT.px.field.group_right_gutter;
+const GROUP_HEADER_HEIGHT: f32 = LAYOUT.px.field.group_header_height;
 
 /// One placed entity, centred on `x`, `y`.
 struct Node<'a> {
@@ -1835,7 +1836,7 @@ fn transcript(preview: &RyeOsArtifactPreviewVm, grid: &RyeOsIndexedGridVm, local
 }
 
 /// Rows a transcript page reads at once.
-const TRANSCRIPT_ROWS: u32 = 16;
+const TRANSCRIPT_ROWS: u32 = LAYOUT.px.field.transcript_rows;
 
 struct TranscriptPage {
     /// Row number (from one) and its cells, each `column N: name`.
