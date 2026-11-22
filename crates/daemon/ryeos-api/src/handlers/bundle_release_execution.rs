@@ -500,7 +500,7 @@ pub(crate) async fn execute_pinned_graph(
         let child_consumer_ref = if graph_ref.starts_with("graph:") {
             let graph = project_ctx.request_engine.effective_item(
                 ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project_root: plan_ctx.logical_project_root.clone(),
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(graph_ref)?,
                     expected_kind: None,
                     project_root: Some(effective_path.clone()),
@@ -696,6 +696,7 @@ pub(crate) async fn execute_protected_qualification(
         "capture": signed_capture_recipe.as_deref(),
         "recipe_ref": recipe_ref,
     }))?;
+    let release_project_identity = source_generation.project_identity().to_path_buf();
     let workspace = tokio::task::spawn_blocking(move || {
         source_generation.materialize_with_recipe_overlay(
             &signed_build_recipe,
@@ -727,7 +728,10 @@ pub(crate) async fn execute_protected_qualification(
         .context("release qualification lost its overlay snapshot")?;
     let site_id = state.threads.site_id().to_owned();
     let plan_ctx = ryeos_engine::contracts::PlanContext {
-        logical_project_root: None,
+        // The overlay copies the release source generation into a private
+        // workspace; project-scoped signers are matched on the registered
+        // project the generation stands for, never on that workspace.
+        logical_project_root: Some(release_project_identity),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),

@@ -284,7 +284,14 @@ pub fn finalize_pinned_qualification_launch(
     // and consumer slot instead of assuming dispatch preflight projected a
     // resolved selection into the root ResolutionOutput.
     let subject_authority = &plan_context.subject_resolution_authority;
-    let roots = request_engine.resolution_roots(Some(project_root.to_path_buf()));
+    // The pinned authority's logical project, when it states one. A pinned
+    // verifier lane may legitimately state none (its tools are judged by
+    // bundle trust), so an absent root is not refused here.
+    let roots = request_engine
+        .resolution_roots(Some(project_root.to_path_buf()))
+        .with_logical_project_root(
+            project_authority.logical_project_root(&plan_context.current_site_id),
+        );
     let selectors = prepared
         .product_selections
         .iter()
@@ -4882,7 +4889,15 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     {
         bail!("qualification binding subject authority differs from its sealed verifier capsule");
     }
-    let roots = request_engine.resolution_roots(project_root.clone());
+    // The verifier generation states its logical project when the pinned
+    // admission carries one. A bundle verifier's own trust does not depend on
+    // it, and a pinned verifier may legitimately state none, so there is no
+    // refusal here.
+    let roots = request_engine
+        .resolution_roots(project_root.clone())
+        .with_logical_project_root(
+            plan_context.effective_logical_project_root(project_root.as_deref()),
+        );
     // Admit the exact current subject before choosing its execution route.
     // A signed delegated runtime need not declare a root executor chain.
     let preflight = crate::thread_lifecycle::preflight_root_execution(
