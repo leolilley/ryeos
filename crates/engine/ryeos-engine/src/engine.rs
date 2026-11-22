@@ -37,22 +37,9 @@ pub struct EffectiveItemRequest {
 }
 
 impl EffectiveItemRequest {
-    /// The logical project for signer scopes: the stated one, or the project
-    /// root itself when the authority is the live project.
-    pub fn effective_logical_project_root(&self) -> Option<PathBuf> {
-        self.logical_project.resolve(
-            &self.subject_resolution_authority,
-            self.project_root.as_deref(),
-        )
-    }
-
-    /// [`EffectiveItemRequest::effective_logical_project_root`] as a
-    /// `LogicalProject`, keeping the reason when no project results.
-    pub fn effective_logical_project(&self) -> LogicalProject {
-        self.logical_project.resolved(
-            &self.subject_resolution_authority,
-            self.project_root.as_deref(),
-        )
+    /// The project signer scopes judge this request's items against.
+    pub fn signer_project(&self) -> &LogicalProject {
+        &self.logical_project
     }
 }
 

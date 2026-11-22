@@ -20,6 +20,7 @@
 //! The trust store does NOT share trust policy with daemon request auth or
 //! node auth; those are distinct trust domains.
 
+use ryeos_state::project_identity::{LogicalProject, LogicalProjectAbsence};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -179,36 +180,37 @@ pub struct SignerContext<'a> {
     /// Item kind, or a fixed document name for signed non-item documents
     /// (for example `bundle_manifest`).
     pub kind: &'a str,
-    /// Project root the item belongs to, when it came from a project.
-    pub project_root: Option<&'a Path>,
+    /// The owner+name project the item belongs to, as this node has
+    /// established it. Never a path: an absent identity matches no scoped
+    /// signer.
+    pub project: &'a LogicalProject,
 }
 
+/// The project of bundle- and node-space contexts.
+pub static NO_PROJECT: LogicalProject = LogicalProject::Absent(LogicalProjectAbsence::Projectless);
+
 impl<'a> SignerContext<'a> {
-    pub fn new(
-        space: impl Into<SignerSpace>,
-        kind: &'a str,
-        project_root: Option<&'a Path>,
-    ) -> Self {
+    pub fn new(space: impl Into<SignerSpace>, kind: &'a str, project: &'a LogicalProject) -> Self {
         Self {
             space: space.into(),
             kind,
-            project_root,
+            project,
         }
     }
 
     /// A bundle-space item or document.
     pub fn bundle(kind: &'a str) -> Self {
-        Self::new(SignerSpace::Bundle, kind, None)
+        Self::new(SignerSpace::Bundle, kind, &NO_PROJECT)
     }
 
     /// A node-space item or document.
     pub fn node(kind: &'a str) -> Self {
-        Self::new(SignerSpace::Node, kind, None)
+        Self::new(SignerSpace::Node, kind, &NO_PROJECT)
     }
 
     /// A project-space item.
-    pub fn project(kind: &'a str, project_root: Option<&'a Path>) -> Self {
-        Self::new(SignerSpace::Project, kind, project_root)
+    pub fn project(kind: &'a str, project: &'a LogicalProject) -> Self {
+        Self::new(SignerSpace::Project, kind, project)
     }
 }
 
@@ -261,7 +263,7 @@ pub struct TrustStore {
 
 #[derive(Debug, Clone)]
 struct LaunchEndorsements {
-    project: String,
+    project: ryeos_state::project_identity::ProjectIdentity,
     authoring_signers: std::collections::BTreeSet<String>,
 }
 
@@ -539,16 +541,15 @@ impl TrustStore {
 
     /// The endorsements a launch of `logical_project` carries to its runtime,
     /// taken from this store's index (a request's frozen snapshot), or `None`
-    /// when the project is unknown or nothing applies. The project identity is
-    /// the canonical root, the same one [`Self::endorsed`] matches on.
+    /// when the project states no identity or nothing applies. The identity
+    /// is the same one [`Self::endorsed`] matches on.
     pub fn launch_endorsements(
         &self,
-        logical_project: Option<&Path>,
+        logical_project: &LogicalProject,
     ) -> Option<EndorsementSnapshot> {
-        let root = logical_project?;
-        let canonical = std::fs::canonicalize(root).ok();
-        let project = canonical.as_deref().unwrap_or(root).to_str()?.to_owned();
-        self.endorsements.current().snapshot_for(&project)
+        self.endorsements
+            .current()
+            .snapshot_for(logical_project.identity()?)
     }
 
     /// The scoped signer list a launch carries: this store's entries, with the
@@ -560,7 +561,7 @@ impl TrustStore {
     pub fn launch_signer_entries(
         &self,
         frozen: &TrustStore,
-        logical_project: Option<&Path>,
+        logical_project: &LogicalProject,
     ) -> Vec<TrustedSignerEntry> {
         let mut entries = self.signer_entries();
         let Some(snapshot) = frozen.launch_endorsements(logical_project) else {
@@ -754,7 +755,7 @@ impl TrustStore {
             }
             if record
                 .scope
-                .admits(context.space, context.kind, context.project_root)
+                .admits(context.space, context.kind, context.project, fingerprint)
             {
                 return ScopeDecision::Admitted;
             }
@@ -765,7 +766,7 @@ impl TrustStore {
         }
         if self.node_key.as_ref().map(compute_fingerprint).as_deref() == Some(fingerprint) {
             let scope = node_root_scope();
-            if scope.admits(context.space, context.kind, context.project_root) {
+            if scope.admits(context.space, context.kind, context.project, fingerprint) {
                 return ScopeDecision::Admitted;
             }
             return ScopeDecision::OutOfScope {
@@ -774,7 +775,7 @@ impl TrustStore {
             };
         }
         if let Some(scope) = self.entry_scopes.get(fingerprint) {
-            if scope.admits(context.space, context.kind, context.project_root) {
+            if scope.admits(context.space, context.kind, context.project, fingerprint) {
                 return ScopeDecision::Admitted;
             }
             return ScopeDecision::OutOfScope {
@@ -798,27 +799,19 @@ impl TrustStore {
         if context.space != SignerSpace::Project {
             return false;
         }
-        let Some(root) = context.project_root else {
+        // Endorsements name a project by its owner+name identity; an absent
+        // identity is never endorsed.
+        let Some(identity) = context.project.identity() else {
             return false;
         };
-        // A launch's runtime matches the launch's own project identity; its
-        // process path may be a checkout of that project.
+        // A launch's frozen snapshot fixes the project it decides for.
         if let Some(launch) = &self.launch_endorsements {
-            return self.endorsements.current().covers(
-                &launch.project,
-                context.kind,
-                content_digest,
-                lillux::time::unix_secs_now(),
-            );
+            if launch.project != *identity {
+                return false;
+            }
         }
-        // Endorsements name the project by its canonical root, however the
-        // request spelled the path.
-        let canonical = std::fs::canonicalize(root).ok();
-        let Some(project) = canonical.as_deref().unwrap_or(root).to_str() else {
-            return false;
-        };
         self.endorsements.current().covers(
-            project,
+            identity,
             context.kind,
             content_digest,
             lillux::time::unix_secs_now(),
@@ -1032,8 +1025,9 @@ pub fn verify_item_signature_with_hash(
                             kind: context.kind.to_string(),
                             space: context.space.as_str().to_string(),
                             project: context
-                                .project_root
-                                .map(|root| format!(" in project {}", root.display()))
+                                .project
+                                .identity()
+                                .map(|identity| format!(" in project {identity}"))
                                 .unwrap_or_default(),
                         }
                         .into())
@@ -1116,8 +1110,7 @@ pub(crate) fn verify_resolved_item_content_with_hash(
 
     match &item.signature_header {
         Some(header) => {
-            let context =
-                SignerContext::new(item.source_space, &item.kind, item.logical_project.stated());
+            let context = SignerContext::new(item.source_space, &item.kind, &item.logical_project);
             let (trust_class, signer) = verify_item_signature(
                 content,
                 header,

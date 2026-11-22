@@ -132,97 +132,9 @@ impl SubjectResolutionAuthority {
 // ── Logical project ──────────────────────────────────────────────────
 
 /// The project a plan, item or resolution belongs to, for signer project
-/// scopes. There is deliberately no default and no bare `None`: every site
-/// names which case it is, so a forgotten logical project cannot compile as
-/// "no project".
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum LogicalProject {
-    /// The absolute canonical project path, stated by provenance, a pushed
-    /// head or a live root. For a pinned generation or COW workspace this is
-    /// the original project path, never the per-generation checkout.
-    Stated(PathBuf),
-    /// The live materialized root is its own logical project. Only
-    /// meaningful with [`SubjectResolutionAuthority::LiveFs`]; with any other
-    /// authority it resolves to no project.
-    MaterializedLive,
-    /// No logical project. A signer scoped to specific projects admits
-    /// nothing; there is no fallback to a checkout path.
-    Absent(LogicalProjectAbsence),
-}
-
-/// Why a plan, item or resolution states no logical project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LogicalProjectAbsence {
-    /// The subject has no project at all.
-    Projectless,
-    /// A pinned identity minted on another site: this node cannot state its
-    /// project path.
-    NotAuthoritySite,
-    /// A project subject whose caller states no logical project (for example
-    /// a pinned generation known only by snapshot).
-    NotStated,
-}
-
-impl LogicalProject {
-    /// Map an optional stated root under `authority`, with the meaning the
-    /// former `Option<PathBuf>` field had: a stated root wins; otherwise a
-    /// live authority is its own logical project, a projectless one has none,
-    /// and any other authority states none.
-    pub fn from_optional(stated: Option<PathBuf>, authority: &SubjectResolutionAuthority) -> Self {
-        match (stated, authority) {
-            (Some(path), _) => Self::Stated(path),
-            (None, SubjectResolutionAuthority::LiveFs) => Self::MaterializedLive,
-            (None, SubjectResolutionAuthority::Projectless) => {
-                Self::Absent(LogicalProjectAbsence::Projectless)
-            }
-            (None, _) => Self::Absent(LogicalProjectAbsence::NotStated),
-        }
-    }
-
-    /// The stated project path, if any. `MaterializedLive` is not a stated
-    /// path; use [`LogicalProject::resolve`] to apply it.
-    pub fn stated(&self) -> Option<&std::path::Path> {
-        match self {
-            Self::Stated(path) => Some(path),
-            Self::MaterializedLive | Self::Absent(_) => None,
-        }
-    }
-
-    /// The project path signer scopes are judged against: the stated path,
-    /// or the materialized root when it is live and its own logical project.
-    pub fn resolve(
-        &self,
-        authority: &SubjectResolutionAuthority,
-        materialized_project_root: Option<&std::path::Path>,
-    ) -> Option<PathBuf> {
-        match (self, authority) {
-            (Self::Stated(path), _) => Some(path.clone()),
-            (Self::MaterializedLive, SubjectResolutionAuthority::LiveFs) => {
-                materialized_project_root.map(std::path::Path::to_path_buf)
-            }
-            (Self::MaterializedLive, _) | (Self::Absent(_), _) => None,
-        }
-    }
-
-    /// The same project after resolution against `authority` and its
-    /// materialized root: `Stated` when a path results, otherwise `Absent`
-    /// with this value's reason (`NotStated` for an unresolvable live claim).
-    pub fn resolved(
-        &self,
-        authority: &SubjectResolutionAuthority,
-        materialized_project_root: Option<&std::path::Path>,
-    ) -> Self {
-        match self.resolve(authority, materialized_project_root) {
-            Some(path) => Self::Stated(path),
-            None => match self {
-                Self::Absent(reason) => Self::Absent(*reason),
-                Self::Stated(_) | Self::MaterializedLive => {
-                    Self::Absent(LogicalProjectAbsence::NotStated)
-                }
-            },
-        }
-    }
-}
+/// scopes: an owner+name identity this node established, or a typed absence.
+/// There is no path form and no materialized fallback.
+pub use ryeos_state::project_identity::{LogicalProject, LogicalProjectAbsence};
 
 fn validate_snapshot_hash(value: &str) -> anyhow::Result<()> {
     if value.len() != 64
@@ -281,29 +193,10 @@ pub struct PlanContext {
 }
 
 impl PlanContext {
-    /// The logical project of this plan for signer project scopes: the stated
-    /// `logical_project_root`, or the materialized root itself when the plan
-    /// resolves against the live project (which is its own logical root).
-    pub fn effective_logical_project_root(
-        &self,
-        materialized_project_root: Option<&std::path::Path>,
-    ) -> Option<PathBuf> {
-        self.logical_project.resolve(
-            &self.subject_resolution_authority,
-            materialized_project_root,
-        )
-    }
-
-    /// [`PlanContext::effective_logical_project_root`] as a `LogicalProject`,
-    /// keeping the reason when no project results.
-    pub fn effective_logical_project(
-        &self,
-        materialized_project_root: Option<&std::path::Path>,
-    ) -> LogicalProject {
-        self.logical_project.resolved(
-            &self.subject_resolution_authority,
-            materialized_project_root,
-        )
+    /// The project signer scopes judge this plan's items against. Never a
+    /// checkout: a pinned or live root states its identity at admission.
+    pub fn signer_project(&self) -> &LogicalProject {
+        &self.logical_project
     }
 }
 
@@ -1018,13 +911,10 @@ mod tests {
 
     fn plan_context(
         authority: SubjectResolutionAuthority,
-        logical_project_root: Option<&str>,
+        logical_project: LogicalProject,
     ) -> PlanContext {
         PlanContext {
-            logical_project: LogicalProject::from_optional(
-                logical_project_root.map(PathBuf::from),
-                &authority,
-            ),
+            logical_project,
             requested_by: EffectivePrincipal::Local(crate::contracts::Principal {
                 fingerprint: "fp:test".to_owned(),
                 scopes: Vec::new(),
@@ -1040,34 +930,21 @@ mod tests {
     }
 
     #[test]
-    fn logical_project_root_is_the_stated_one_never_the_checkout() {
-        let checkout = std::path::Path::new("/cache/pinned/ab12/project");
+    fn the_signer_project_is_the_stated_identity_and_nothing_is_derived_from_a_root() {
         let pinned = SubjectResolutionAuthority::PinnedGeneration {
             snapshot_hash: "a".repeat(64),
         };
-        // A pinned checkout with no stated logical project has none: the
-        // checkout path is never offered as project identity.
+        let absent = LogicalProject::Absent(LogicalProjectAbsence::NotStated);
+        assert_eq!(plan_context(pinned.clone(), absent.clone()).signer_project(), &absent);
+        let identity: ryeos_state::project_identity::ProjectIdentity =
+            format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap();
+        let stated = LogicalProject::Stated(identity);
+        assert_eq!(plan_context(pinned, stated.clone()).signer_project(), &stated);
+        // A live plan states nothing unless admission established an identity.
+        let unregistered = LogicalProject::Absent(LogicalProjectAbsence::NotRegistered);
         assert_eq!(
-            plan_context(pinned.clone(), None).effective_logical_project_root(Some(checkout)),
-            None
-        );
-        // A stated logical project wins over the checkout.
-        assert_eq!(
-            plan_context(pinned, Some("/srv/projects/alpha"))
-                .effective_logical_project_root(Some(checkout)),
-            Some(PathBuf::from("/srv/projects/alpha"))
-        );
-        // A live project is its own logical root.
-        let live = std::path::Path::new("/srv/projects/alpha");
-        assert_eq!(
-            plan_context(SubjectResolutionAuthority::LiveFs, None)
-                .effective_logical_project_root(Some(live)),
-            Some(live.to_path_buf())
-        );
-        assert_eq!(
-            plan_context(SubjectResolutionAuthority::Projectless, None)
-                .effective_logical_project_root(None),
-            None
+            plan_context(SubjectResolutionAuthority::LiveFs, unregistered.clone()).signer_project(),
+            &unregistered
         );
     }
 

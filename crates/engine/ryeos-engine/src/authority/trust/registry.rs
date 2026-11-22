@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::contracts::ItemSpace;
 
 /// Schema identifier of one signer record.
-pub const SIGNER_RECORD_SCHEMA: &str = "ryeos/trust-signer/v1";
+pub const SIGNER_RECORD_SCHEMA: &str = "ryeos/trust-signer/v2";
 /// Schema identifier of one key event.
 pub const TRUST_EVENT_SCHEMA: &str = "ryeos/trust-event/v1";
 /// Schema identifier of a succession statement.
@@ -302,10 +302,82 @@ pub struct SignerScope {
     pub spaces: Vec<SignerSpace>,
     /// `["*"]` or an explicit list of item kinds. Empty admits no kind.
     pub kinds: Vec<String>,
-    /// Project roots the signer may sign for; empty means every project.
-    /// Only meaningful when `spaces` contains `project`.
+    /// Projects the signer may sign for, by owner+name identity. Empty means
+    /// unscoped: every project context, stated or absent. A scoped signer
+    /// matches only a stated identity equal to an entry. Only meaningful
+    /// when `spaces` contains `project`.
     #[serde(default)]
-    pub projects: Vec<String>,
+    pub projects: Vec<ProjectScopeEntry>,
+}
+
+/// One project a scoped signer may sign for.
+///
+/// Written `fp:<64 hex>/<name>` for a named owner, or `own:<name>` for the
+/// signer's own key as owner. Nothing else parses: a path is never a scope.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum ProjectScopeEntry {
+    Identity(ryeos_state::project_identity::ProjectIdentity),
+    Own(ryeos_state::project_identity::ProjectName),
+}
+
+impl ProjectScopeEntry {
+    /// Whether this entry names `identity` for a signer whose raw
+    /// fingerprint is `signer_fingerprint`.
+    pub fn names(
+        &self,
+        identity: &ryeos_state::project_identity::ProjectIdentity,
+        signer_fingerprint: &str,
+    ) -> bool {
+        match self {
+            Self::Identity(entry) => entry == identity,
+            Self::Own(name) => {
+                identity.name() == name
+                    && identity.owner().strip_prefix("fp:") == Some(signer_fingerprint)
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for ProjectScopeEntry {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        if let Some(name) = value.strip_prefix("own:") {
+            return ryeos_state::project_identity::ProjectName::new(name)
+                .map(Self::Own)
+                .map_err(|error| format!("project scope `{value}`: {error:#}"));
+        }
+        value
+            .parse::<ryeos_state::project_identity::ProjectIdentity>()
+            .map(Self::Identity)
+            .map_err(|error| {
+                format!("project scope `{value}` must be fp:<owner>/<name> or own:<name>: {error:#}")
+            })
+    }
+}
+
+impl TryFrom<String> for ProjectScopeEntry {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, String> {
+        value.parse()
+    }
+}
+
+impl From<ProjectScopeEntry> for String {
+    fn from(value: ProjectScopeEntry) -> Self {
+        value.to_string()
+    }
+}
+
+impl std::fmt::Display for ProjectScopeEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Identity(identity) => write!(formatter, "{identity}"),
+            Self::Own(name) => write!(formatter, "own:{name}"),
+        }
+    }
 }
 
 impl SignerScope {
@@ -348,8 +420,17 @@ impl SignerScope {
         }
     }
 
-    /// Whether the scope admits one signature context.
-    pub fn admits(&self, space: SignerSpace, kind: &str, project_root: Option<&Path>) -> bool {
+    /// Whether the scope admits one signature context, for the signer whose
+    /// raw fingerprint is `signer_fingerprint`. An unscoped scope (empty
+    /// `projects`) admits every project context; a scoped one admits only a
+    /// stated identity that one of its entries names, never an absent one.
+    pub fn admits(
+        &self,
+        space: SignerSpace,
+        kind: &str,
+        project: &ryeos_state::project_identity::LogicalProject,
+        signer_fingerprint: &str,
+    ) -> bool {
         if !self.spaces.contains(&space) {
             return false;
         }
@@ -357,10 +438,13 @@ impl SignerScope {
             return false;
         }
         if space == SignerSpace::Project && !self.projects.is_empty() {
-            let Some(root) = project_root else {
+            let Some(identity) = project.identity() else {
                 return false;
             };
-            return self.projects.iter().any(|p| Path::new(p) == root);
+            return self
+                .projects
+                .iter()
+                .any(|entry| entry.names(identity, signer_fingerprint));
         }
         true
     }
@@ -375,7 +459,13 @@ impl SignerScope {
             .join(",");
         let mut out = format!("{{spaces: [{spaces}], kinds: [{}]", self.kinds.join(","));
         if !self.projects.is_empty() {
-            out.push_str(&format!(", projects: [{}]", self.projects.join(",")));
+            let projects = self
+                .projects
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!(", projects: [{projects}]"));
         }
         out.push('}');
         out
@@ -401,9 +491,10 @@ impl SignerScope {
         if !self.projects.is_empty() && !self.spaces.contains(&SignerSpace::Project) {
             return Err("scope.projects is only meaningful with the `project` space".to_string());
         }
+        let mut seen_projects = std::collections::BTreeSet::new();
         for project in &self.projects {
-            if !Path::new(project).is_absolute() {
-                return Err(format!("scope.projects entry `{project}` is not absolute"));
+            if !seen_projects.insert(project) {
+                return Err(format!("scope.projects lists `{project}` twice"));
             }
         }
         Ok(())

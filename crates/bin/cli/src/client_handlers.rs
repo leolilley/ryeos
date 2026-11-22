@@ -294,10 +294,6 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .ok_or_else(|| local("endorse requires a project (--project <dir>)"))?;
     let project = std::fs::canonicalize(project_path)
         .map_err(|error| local(format!("project `{project_path}` is not readable: {error}")))?;
-    let project_text = project
-        .to_str()
-        .ok_or_else(|| local("the project path is not UTF-8"))?
-        .to_owned();
     let items = text_list(parameters.get("item"), "item")?;
     let kinds = text_list(parameters.get("kind"), "kind")?;
     let standing = parameters
@@ -365,13 +361,28 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .ok_or_else(|| local("the node did not return its endorsement ledger head"))?
         .to_owned();
     let endorser = format!("fp:{}", signer.fingerprint);
+    // The endorsement names the project as fp:<operator>/<declared name>:
+    // the owner is always the endorsing operator, never input.
+    let declared = ryeos_state::project_identity::ProjectDeclaration::declared_name(&project)
+        .map_err(|error| local(format!("{error:#}")))?
+        .ok_or_else(|| {
+            local(format!(
+                "project_undeclared: {} declares no project name in {}",
+                project.display(),
+                ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+            ))
+        })?;
+    let project_identity =
+        ryeos_state::project_identity::ProjectIdentity::new(endorser.clone(), declared)
+            .map_err(|error| local(format!("{error:#}")))?;
+    eprintln!("endorsing in project {project_identity}");
     let nonce: [u8; 16] = rand::random();
     let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
     let now = lillux::time::unix_secs_now();
     let endorsed_at = lillux::time::iso8601_from_unix_secs(now);
     let body = if standing {
         EndorsementBody::standing(
-            &project_text,
+            &project_identity,
             &endorser,
             kinds,
             lifetime_secs
@@ -382,7 +393,7 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         )
     } else {
         EndorsementBody::for_items(
-            &project_text,
+            &project_identity,
             &endorser,
             described
                 .iter()

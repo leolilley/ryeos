@@ -156,6 +156,71 @@ impl fmt::Display for ProjectIdentity {
     }
 }
 
+/// The project a plan, item or execution belongs to, for signer project
+/// scopes. There is deliberately no default and no bare `None`: every site
+/// names which case it is. Only `Stated` can match a scoped signer; nothing
+/// here is a path, so a checkout or label can never be matched.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicalProject {
+    /// An owner+name identity this node has established: a checkout the
+    /// launcher registered under its own owner, or a head this node holds
+    /// for that owner and name at the exact snapshot.
+    Stated(ProjectIdentity),
+    /// No identity. A signer scoped to specific projects admits nothing.
+    Absent(LogicalProjectAbsence),
+}
+
+/// Why a plan, item or execution states no project identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogicalProjectAbsence {
+    /// The subject has no project at all.
+    Projectless,
+    /// A live checkout the launcher has not registered under its own owner,
+    /// that declares another name, or a launcher without live write.
+    NotRegistered,
+    /// A pinned generation whose owner's head for its name is not held by
+    /// this node at that snapshot.
+    ForeignHeadNotHeld,
+    /// A project tree that declares no name.
+    NoDeclaredName,
+    /// A caller that states no project (for example a pinned generation
+    /// known only by snapshot).
+    NotStated,
+}
+
+impl LogicalProject {
+    /// The stated identity, if any.
+    pub fn identity(&self) -> Option<&ProjectIdentity> {
+        match self {
+            Self::Stated(identity) => Some(identity),
+            Self::Absent(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for LogicalProjectAbsence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Projectless => "projectless",
+            Self::NotRegistered => "no project identity for this session",
+            Self::ForeignHeadNotHeld => "this node does not hold the owner's head for this project",
+            Self::NoDeclaredName => "the project declares no name",
+            Self::NotStated => "no project stated",
+        })
+    }
+}
+
+impl fmt::Display for LogicalProject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stated(identity) => write!(formatter, "{identity}"),
+            Self::Absent(reason) => write!(formatter, "(none: {reason})"),
+        }
+    }
+}
+
 /// The reserved head name of `--no-project` pushes. Not a valid
 /// [`ProjectName`].
 pub const NO_PROJECT_HEAD_NAME: &str = "__no_project__";
