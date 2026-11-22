@@ -25,6 +25,7 @@ lillux-sqlite = { workspace = true }
 once_cell = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+ryeos-http-egress = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rusqlite = { workspace = true }
 ryeos-accounting = { workspace = true }

@@ -1482,7 +1482,7 @@ impl Runner {
             // honest aggregate connection-establishment boundary, which can
             // include DNS, TCP, proxy negotiation, and TLS. Response versions
             // are observed after negotiation rather than forced here.
-            http_client: reqwest::Client::builder()
+            http_client: ryeos_http_egress::client_builder()
                 .pool_max_idle_per_host(8)
                 .dns_resolver(std::sync::Arc::new(
                     crate::provider_transport_timing::InstrumentedDnsResolver,

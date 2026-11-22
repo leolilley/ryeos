@@ -18,6 +18,7 @@ hex = { workspace = true }
 lillux = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+ryeos-http-egress = { workspace = true }
 ryeos-client-base = { workspace = true }
 ryeos-client-transport = { workspace = true }
 ryeos-request-signing = { workspace = true }

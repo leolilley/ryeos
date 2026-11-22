@@ -26,7 +26,7 @@ const CONTROL_PLANE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// check), failing loud. The canonical https origin is reached in one hop
 /// because discovery and signed dispatch share one exact validated base URL.
 pub fn signed_client() -> Result<reqwest::Client, TransportError> {
-    reqwest::Client::builder()
+    ryeos_http_egress::client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
