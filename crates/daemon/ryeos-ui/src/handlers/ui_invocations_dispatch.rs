@@ -2113,7 +2113,7 @@ mod tests {
             json!({
                 "binding_attachment_id":id,"binding_generation":1,"binding_digest":"a".repeat(64),
                 "root_ref":root_ref,"root_generation":"generation","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
-                "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":1024,"max_seat_append_bytes":65536},
+                "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":1024,"max_seat_append_bytes":65536},
                 "presentation":{"definition":definition,"views":{"view:test/work":{"widget":"rows"}}}
             })
         };
@@ -2226,7 +2226,7 @@ mod tests {
         let attachment = json!({"binding_attachment_id":"attachment-tab", "binding_generation":2,"binding_digest":"11",
             "root_ref":"surface:test/base","root_generation":"22","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
-            "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
+            "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
         let composition = json!({"provenance":{"kind":"library","saved_id":"saved-surface","library_revision":1,"record_digest":"ab".repeat(32)},
             "active_view_set_id":"set-one","body":{"kind":"particular","tabs":[{"saved_set_id":"set-one","binding":binding,
                 "resolved":{"id":"set-one","name":"First","composition":{"schema":2,"id":"set-one","title":"First","root":null},
@@ -2320,7 +2320,7 @@ mod tests {
         let attachment = json!({"binding_attachment_id":"reusable-tab","binding_generation":2,"binding_digest":"11".repeat(32),
             "root_ref":"surface:test/base","root_generation":"22".repeat(32),"project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
-            "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
+            "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":65536,"max_seat_append_bytes":65536}});
         let composition = json!({"provenance":{"kind":"library","saved_id":"reusable","library_revision":2,"record_digest":"ab".repeat(32)},"active_view_set_id":"set-one",
             "body":{"kind":"reusable","tabs":[{"saved_set_id":"set-one","binding":binding,"origin":{"surface_ref":"surface:test/base"},
                 "template":{"id":"set-one","name":"First","composition":{"schema":2,"id":"set-one","title":"First","root":null},"relationships":[]},"fresh_subjects":{}}]}});
@@ -2399,7 +2399,7 @@ mod tests {
             "root_ref":"surface:test/base","root_generation":"cd".repeat(32),
             "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}},
             "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only",
-            "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":65536}
+            "named_items": [], "binding_request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":65536}
         })).unwrap();
         let coordinate = UiBindingAttachmentCoordinate {
             binding_attachment_id: attachment.binding_attachment_id.clone(),
@@ -2487,7 +2487,7 @@ mod tests {
                 "project_path": null,
                 "subject": {"kind":"projectless"},
                 "posture": "observation_only",
-                "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
+                "named_items": [], "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
             }
         });
         let attachment: ryeos_client_base::ui::UiBindingAttachment =
@@ -2601,7 +2601,7 @@ mod tests {
                 "presentation_id": "11111111-1111-4111-8111-111111111111",
                 "creation_request_id": "33333333-3333-4333-8333-333333333333",
                 "surface": {"surface_instance_id":"22222222-2222-4222-8222-222222222222", "ordinal":1, "title":"Fixture", "binding":{"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11"}},
-                "attachment": {"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11", "root_ref":"surface:test/base", "root_generation":"22", "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}}, "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","binding_request_bounds":{"max_request_bytes":1024,"max_input_bytes":512,"max_seat_append_bytes":65536}}
+                "attachment": {"binding_attachment_id":"attachment-2", "binding_generation":2,"binding_digest":"11", "root_ref":"surface:test/base", "root_generation":"22", "presentation":{"definition":{"kind":"surface","surface":{"name":"Fixture"}},"views":{}}, "project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","named_items": [], "binding_request_bounds":{"max_request_bytes":1024,"max_input_bytes":512,"max_seat_append_bytes":65536}}
             }
         });
         result["ui_transition"]["attachment"]["presentation"]["views"] =
@@ -2683,7 +2683,7 @@ mod tests {
             "project_path": null,
             "subject": {"kind":"projectless"},
             "posture": "observation_only",
-            "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
+            "named_items": [], "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512,"max_seat_append_bytes":65536}
         });
         assert!(
             retain_declared_result_effect(

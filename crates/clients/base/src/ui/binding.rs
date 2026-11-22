@@ -1073,7 +1073,7 @@ mod tests {
             "project_path": null,
             "subject": {"kind":"projectless"},
             "posture": "observation_only",
-            "binding_request_bounds": {"max_request_bytes": 4096, "max_input_bytes": 1024,"max_seat_append_bytes":65536}
+            "named_items": [], "binding_request_bounds": {"max_request_bytes": 4096, "max_input_bytes": 1024,"max_seat_append_bytes":65536}
         });
         assert!(
             serde_json::from_value::<UiBindingAttachment>(valid.clone())
@@ -1162,7 +1162,7 @@ mod tests {
             "root_generation": "generation-one",
             "presentation": {"definition": {"kind": "surface", "surface": {"name": "test"}}, "views": {}},
             "project_path": null, "subject":{"kind":"projectless"}, "posture": "observation_only",
-            "binding_request_bounds": {"max_request_bytes": 4096, "max_input_bytes": 1024,"max_seat_append_bytes":65536}
+            "named_items": [], "binding_request_bounds": {"max_request_bytes": 4096, "max_input_bytes": 1024,"max_seat_append_bytes":65536}
         });
         assert!(
             serde_json::from_value::<UiBindingAttachment>(value.clone())

@@ -58,7 +58,7 @@ mod tests {
         serde_json::from_value(json!({
             "binding_attachment_id":"shared", "binding_generation":1, "binding_digest":"digest",
             "root_ref":"config:test/shared", "root_generation":"generation", "project_path":null, "subject":{"kind":"projectless"},
-            "posture":"observation_only", "binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},
+            "posture":"observation_only", "named_items": [], "binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},
             "presentation":{"definition":{"kind":"shared_presentation","config":{
                 "category":"ui", "shared_presentation":{"schema":2,"title":"RyeOS","launcher":"launch",
                     "dialogs":[{"id":"launch","title":"Launch","view":"view:test/shared"},{"id":"help","title":"Help","view":"view:test/shared"}],
