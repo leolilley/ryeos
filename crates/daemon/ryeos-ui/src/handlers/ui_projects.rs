@@ -2104,13 +2104,6 @@ descriptor!(
     handle_projects_resolve
 );
 descriptor!(
-    UI_PROJECTS_OPEN_DESCRIPTOR,
-    "service:ui/projects/open",
-    "ui.projects.open",
-    handle_projects_open,
-    &["ryeos.execute.service.projects/open"]
-);
-descriptor!(
     RYEOS_UI_PROJECTS_LIST_DESCRIPTOR,
     "service:ui/ryeos-ui/projects/list",
     "ui.ryeos.projects.list",
@@ -2134,13 +2127,6 @@ descriptor!(
     "service:ui/ryeos-ui/projects/resolve",
     "ui.ryeos.projects.resolve",
     handle_projects_resolve
-);
-descriptor!(
-    RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR,
-    "service:ui/ryeos-ui/projects/open",
-    "ui.ryeos.projects.open",
-    handle_projects_open,
-    &["ryeos.execute.service.projects/open"]
 );
 descriptor!(
     RECENT_TOUCH_DESCRIPTOR,
@@ -2193,8 +2179,6 @@ mod tests {
             (&UI_PROJECTS_ADD_DESCRIPTOR, "projects/add"),
             (&RYEOS_UI_PROJECTS_ADD_DESCRIPTOR, "projects/add"),
             (&PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
-            (&UI_PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
-            (&RYEOS_UI_PROJECTS_OPEN_DESCRIPTOR, "projects/open"),
             (&CONFIG_UPDATE_DESCRIPTOR, "ui/ryeos-ui/config/update"),
             (
                 &PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,

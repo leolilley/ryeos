@@ -128,6 +128,13 @@ fn ui_result_effects_and_dispatch_read_through_the_runtime_extractors() {
             UiResultEffect::ResumeParticularViewSet,
         ),
     ];
+    // The two Surface openings take the lane by declaration.
+    for lane_ref in ["service:projects/open", "service:ui/session/surfaces/open"] {
+        assert!(
+            expected.iter().any(|(candidate, _)| *candidate == lane_ref),
+            "{lane_ref} must be a declared session transition"
+        );
+    }
     for (service_ref, effect) in expected {
         let document = &documents[service_ref];
         let read = extract_ui_result_effect(&document.metadata)
