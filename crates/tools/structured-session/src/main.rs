@@ -5180,11 +5180,14 @@ mod tests {
             .to_string();
         assert!(message.contains("0.156.1"), "{message}");
         assert!(message.contains("0.147.0"), "{message}");
+        assert!(message.contains("re-sign"), "{message}");
         let message = check_server_version("0.147.0", &initialize_result("odd"))
             .unwrap_err()
             .to_string();
         assert!(
-            message.contains("unreported") && message.contains("0.147.0"),
+            message.contains("did not report a version")
+                && message.contains("`odd`")
+                && message.contains("0.147.0"),
             "{message}"
         );
     }
