@@ -4558,11 +4558,14 @@ impl Engine {
 
     /// Add node-local configuration to launch-config lookup only. Keeping this
     /// separate prevents mutable node state from becoming a general item root.
+    /// Launch-config lookup keeps the logical project of `roots`: a pinned
+    /// launch's project config layers are judged on the project the
+    /// generation stands for, never on its checkout.
     pub fn launch_config_roots(&self, roots: &ResolutionRoots) -> ResolutionRoots {
         let mut ordered = roots.ordered.clone();
         let Some(node_config_root) = &self.node_config_root else {
             return ResolutionRoots {
-                logical_project_root: None,
+                logical_project_root: roots.logical_project_root.clone(),
                 owned_namespaces: roots.owned_namespaces.clone(),
                 ordered,
             };
@@ -4573,7 +4576,7 @@ impl Engine {
             .any(|root| root.ai_root == node_config_ai_root)
         {
             return ResolutionRoots {
-                logical_project_root: None,
+                logical_project_root: roots.logical_project_root.clone(),
                 owned_namespaces: roots.owned_namespaces.clone(),
                 ordered,
             };
@@ -4593,7 +4596,7 @@ impl Engine {
             },
         );
         ResolutionRoots {
-            logical_project_root: None,
+            logical_project_root: roots.logical_project_root.clone(),
             owned_namespaces: roots.owned_namespaces.clone(),
             ordered,
         }
