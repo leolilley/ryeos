@@ -370,6 +370,52 @@ fn authenticate_composition(
             "shared subject owner differs from presentation root",
         ));
     }
+    if let ryeos_client_base::ui::composition_operation::CompositionMutation::RebindAttachment {
+        from,
+        to,
+        descriptor,
+    } = &composition.mutation
+    {
+        let private = |coordinate: &UiBindingAttachmentCoordinate| BindingAttachmentCoordinate {
+            binding_attachment_id: coordinate.binding_attachment_id.clone(),
+            binding_generation: coordinate.binding_generation,
+            binding_digest: coordinate.binding_digest.clone(),
+        };
+        let surface_id = composition
+            .owner
+            .surface_instance_id()
+            .ok_or_else(|| conflict("rebind requires a Surface owner"))?;
+        let surface = membership
+            .surfaces
+            .get(surface_id.as_str())
+            .ok_or_else(|| conflict("rebind Surface is not a live member"))?;
+        if !surface
+            .pending_rebinds
+            .iter()
+            .any(|(source, target)| *source == private(from) && *target == private(to))
+        {
+            return Err(conflict(
+                "rebind successor was not published for this exact source",
+            ));
+        }
+        authenticate_binding(generation, state, session, membership, from)?;
+        let admitted = crate::state::get_ui_state(state)
+            .ok_or_else(|| conflict("UI state is absent"))?
+            .browser_sessions
+            .require_presentation_attachment(
+                &session.session_id,
+                &membership.presentation_id,
+                &private(to),
+                state.node_policy.generation_digest(),
+            )
+            .map_err(|error| conflict(error.to_string()))?;
+        let bounds = super::super::ui_launch_mint::binding_request_bounds(state)?;
+        if admitted.public_descriptor(bounds) != **descriptor {
+            return Err(conflict(
+                "rebind descriptor differs from the published successor",
+            ));
+        }
+    }
     if let ryeos_client_base::ui::composition_operation::CompositionMutation::MoveViewAcrossSurfaces {
         destination,
         destination_binding,
@@ -905,6 +951,7 @@ mod tests {
             particular_resume: None,
             saved_resume: None,
             tab_openings: std::collections::BTreeMap::new(),
+            pending_rebinds: Vec::new(),
         };
         // This is a membership-shape regression, not a compiled grant fixture.
         assert!(require_live_composition_surface(Some(&surface), id, &binding).is_ok());

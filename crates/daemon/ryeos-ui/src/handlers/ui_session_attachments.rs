@@ -651,6 +651,147 @@ pub async fn handle_detach(
     Ok(json!({"detached":true,"attachment":coordinate}))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviseRequest {
+    presentation_id: String,
+    binding_attachment_id: String,
+    binding_generation: u64,
+    binding_digest: String,
+}
+
+/// Recompile one presentation-owned non-root attachment from its own origin
+/// under the current engine generation and publish the successor beside it.
+/// The source stays owned until the seat's rebind completion settles in
+/// authenticated history; nothing here edits a layout or the seat.
+pub async fn handle_revise(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let request: ReviseRequest = serde_json::from_value(params)
+        .map_err(|error| HandlerError::BadRequest(format!("invalid request: {error}")))?;
+    let ui = get_ui_state(&state).expect("UiState not set");
+    let session_id = session_id(&ctx)?;
+    let from = BindingAttachmentCoordinate {
+        binding_attachment_id: request.binding_attachment_id.clone(),
+        binding_generation: request.binding_generation,
+        binding_digest: request.binding_digest.clone(),
+    };
+    let session = ui
+        .browser_sessions
+        .get_session(&session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    if from.binding_attachment_id == session.root_attachment_id {
+        return Err(HandlerError::Structured {
+            code: "surface_attachment_immutable".into(),
+            status: 409,
+            body: json!({"code":"surface_attachment_immutable"}),
+        }
+        .into());
+    }
+    let old = ui
+        .browser_sessions
+        .resolve_attachment(&session_id, &from)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let compile_context = HandlerContext::new(
+        session.principal_id.clone(),
+        session.granted_caps.clone(),
+        true,
+    );
+    let selection = super::ui_launch_mint::Request {
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
+        root_ref: old.root_ref.clone(),
+        project_path: old.compiled_binding.binding.project_root.clone(),
+        user_principal_id: None,
+        scopes: None,
+    };
+    let (binding, presentation) = super::ui_launch_mint::compile_session_binding(
+        &selection,
+        &compile_context,
+        &state,
+        old.project_authority.as_deref(),
+        SeatClass::of_session(session.user_principal_id.as_deref()),
+    )?;
+    let bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
+    if binding.binding_digest == from.binding_digest {
+        return Ok(json!({"revised":false,"attachment":from}));
+    }
+    let limits = crate::browser_session::PresentationLimits::from_policy(
+        state
+            .node_policy
+            .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+            )?,
+    )?;
+    let resolution_root = old
+        .project_authority
+        .as_ref()
+        .map(|authority| authority.descriptor_path())
+        .transpose()?;
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let mut published = None;
+    state
+        .engine
+        .with_checked_bundle_generation(|generation| -> Result<()> {
+            if generation.request_engine_generation_identity()
+                != binding.binding.request_engine_generation_identity
+            {
+                return Err(HandlerError::Conflict(
+                    "UI engine generation changed during attachment revision".into(),
+                )
+                .into());
+            }
+            super::ui_launch_mint::revalidate_binding_authority(
+                generation,
+                &binding,
+                resolution_root.as_deref(),
+                old.project_authority.as_deref(),
+            )?;
+            published = Some(
+                ui.browser_sessions
+                    .publish_rebind_attachment(
+                        &session_id,
+                        &request.presentation_id,
+                        &from,
+                        crate::browser_session::BindingAttachmentCandidate {
+                            registered_project_id: old.registered_project_id.clone(),
+                            compiled_binding: Arc::new(binding),
+                            presentation,
+                            project_authority: old.project_authority.clone(),
+                        },
+                        limits.max_attachments,
+                        state.node_policy.generation_digest(),
+                    )
+                    .map_err(|error| match error {
+                        AttachmentStoreError::RootAttachmentImmutable => HandlerError::Structured {
+                            code: "surface_attachment_immutable".into(),
+                            status: 409,
+                            body: json!({"code":"surface_attachment_immutable"}),
+                        },
+                        other => HandlerError::Forbidden(other.to_string()),
+                    })?,
+            );
+            Ok(())
+        })?;
+    let attachment =
+        published.ok_or_else(|| HandlerError::Internal("revision publication missing".into()))?;
+    Ok(json!({
+        "revised": true,
+        "from": from,
+        "attachment": attachment.public_descriptor(bounds),
+    }))
+}
+
+pub const REVISE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/session/attachments/revise",
+    endpoint: "ui.session.attachments.revise",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(handle_revise(params, ctx, state)),
+};
+
 pub const DETACH_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/session/attachments/detach",
     endpoint: "ui.session.attachments.detach",

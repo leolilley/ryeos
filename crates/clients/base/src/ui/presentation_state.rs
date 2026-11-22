@@ -1715,6 +1715,37 @@ impl PresentationComposition {
             .select_view_set(id)
     }
 
+    /// Every distinct attachment coordinate each Surface names: its own
+    /// binding, its tiles, its dialogs and its admitted saved tabs.
+    pub fn surface_attachment_coordinates(
+        &self,
+    ) -> Vec<(SurfaceInstanceId, UiBindingAttachmentCoordinate)> {
+        let mut found: Vec<(SurfaceInstanceId, UiBindingAttachmentCoordinate)> = Vec::new();
+        let mut add = |surface: &SurfaceInstanceId, coordinate: &UiBindingAttachmentCoordinate| {
+            if !found
+                .iter()
+                .any(|(owner, held)| owner == surface && held == coordinate)
+            {
+                found.push((surface.clone(), coordinate.clone()));
+            }
+        };
+        for (id, surface) in &self.surfaces {
+            add(id, &surface.binding);
+            for binding in surface.mount_bindings.values() {
+                add(id, binding);
+            }
+            for tab in surface.admitted_saved_tabs.values() {
+                add(id, tab.binding());
+            }
+        }
+        for dialog in self.dialogs.values() {
+            if let Some(owner) = dialog.surface_owner.as_ref() {
+                add(owner, &dialog.view.binding);
+            }
+        }
+        found
+    }
+
     /// Replace every coordinate `from` held by one Surface with `to`, in place.
     /// Tile ids, groups and instance keys are untouched, so state keyed by
     /// instance identity carries over. A tile or dialog whose View is absent

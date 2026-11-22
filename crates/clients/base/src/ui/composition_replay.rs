@@ -66,7 +66,11 @@ pub struct UiCompositionReplay {
     /// Settled attachment rebinds by operation: the exact coordinates swapped
     /// and the successor descriptor. The live ACK owner migrates transient
     /// local state once from this; historical replay never re-applies it.
-    completed_rebinds: Vec<(String, UiBindingAttachmentCoordinate, UiBindingAttachmentCoordinate)>,
+    completed_rebinds: Vec<(
+        String,
+        UiBindingAttachmentCoordinate,
+        UiBindingAttachmentCoordinate,
+    )>,
     pub lens_frames:
         BTreeMap<RyeOsViewInstanceKey, Vec<super::composition_lens::RetainedLensFrame>>,
     pub input_routes: BTreeMap<RyeOsViewInstanceKey, (u64, Option<serde_json::Value>)>,
@@ -354,7 +358,11 @@ impl UiCompositionReplay {
     /// Settled rebinds in history order: (operation id, from, to).
     pub fn completed_rebinds(
         &self,
-    ) -> &[(String, UiBindingAttachmentCoordinate, UiBindingAttachmentCoordinate)] {
+    ) -> &[(
+        String,
+        UiBindingAttachmentCoordinate,
+        UiBindingAttachmentCoordinate,
+    )] {
         &self.completed_rebinds
     }
 
@@ -1532,6 +1540,16 @@ impl UiCompositionReplay {
                             "composition completion differs from its exact staged delta".into()
                         );
                     }
+                    let rebind = if let super::composition_operation::CompositionMutation::RebindAttachment {
+                        from,
+                        to,
+                        descriptor,
+                    } = &request.mutation
+                    {
+                        Some((from.clone(), to.clone(), (**descriptor).clone()))
+                    } else {
+                        None
+                    };
                     if let Some(instance) = replaced_instance {
                         self.lens_frames.remove(&instance);
                         self.input_routes.remove(&instance);
@@ -1546,16 +1564,6 @@ impl UiCompositionReplay {
                         }
                     }
                     self.remap_completed_mount_metadata(&delta)?;
-                    let rebind = if let super::composition_operation::CompositionMutation::RebindAttachment {
-                        from,
-                        to,
-                        descriptor,
-                    } = &request.mutation
-                    {
-                        Some((from.clone(), to.clone(), (**descriptor).clone()))
-                    } else {
-                        None
-                    };
                     if let Some((from, to, descriptor)) = rebind {
                         self.apply_rebind_metadata(&from, &to, &descriptor, &delta.composition);
                         self.retain_descriptor(descriptor)?;
