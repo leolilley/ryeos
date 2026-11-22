@@ -117,3 +117,55 @@ fn owners_come_only_from_the_resolver_and_are_never_compared_with_keys() {
         violations.join("\n")
     );
 }
+
+/// Files whose production code may build a `HeadAdvancer` directly: the
+/// record type, the resolver (which checks the key acts for the head's owner
+/// first), and the node's own compaction rewrite.
+const HEAD_ADVANCER_BUILDERS: &[&str] = &[
+    "crates/state/ryeos-state/src/head_advance.rs",
+    "crates/daemon/ryeos-app/src/project_owner.rs",
+    "crates/state/ryeos-state/src/gc/compact.rs",
+];
+
+/// Production code of a source file: everything before its first test
+/// module. Test fixtures may build records directly.
+fn production_text(text: &str) -> &str {
+    text.find("#[cfg(test)]").map_or(text, |end| &text[..end])
+}
+
+#[test]
+fn every_head_advance_gets_its_advancer_from_the_resolver() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("crates"), &mut files);
+    let mut violations = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(&root)
+            .expect("source under the workspace")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative.contains("/tests/")
+            || relative.ends_with("tests.rs")
+            || relative.ends_with("/tests.rs")
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let needle = concat!("HeadAdvancer", " {");
+        if production_text(&text).contains(needle)
+            && !HEAD_ADVANCER_BUILDERS.contains(&relative.as_str())
+        {
+            violations.push(format!(
+                "{relative}: builds a head advancer by hand; use project_owner::head_advancer"
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "head advances must take their advancer from the ownership resolver:\n{}",
+        violations.join("\n")
+    );
+}
