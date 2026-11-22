@@ -4,6 +4,7 @@
 
 use rune::{El, ScrollSpec, col, el, row, text};
 use ryeos_client_base::ids::RyeOsViewInstanceKey;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::ui::RyeOsUiEvent;
 use ryeos_client_base::ui::view_model::{RyeOsDialogVm, RyeOsRowVm, RyeOsViewVm};
 
@@ -11,31 +12,31 @@ use crate::theme::{self, Tokens};
 use crate::{App, Local};
 
 /// The sheet's width, before a narrow window takes it in.
-const SHEET_WIDTH: f32 = 860.0;
+const SHEET_WIDTH: f32 = LAYOUT.px.launcher.sheet_width;
 /// The sheet's tallest, so the list scrolls inside it.
-const SHEET_MAX_HEIGHT: f32 = 640.0;
+const SHEET_MAX_HEIGHT: f32 = LAYOUT.px.launcher.sheet_max_height;
 /// The find line's height and its text.
-const FIND_HEIGHT: f32 = 64.0;
+const FIND_HEIGHT: f32 = LAYOUT.px.launcher.find_height;
 /// A view's row: its inset, the gap between its columns and its radius.
-const ROW_PAD_X: f32 = 14.0;
-const ROW_PAD_Y: f32 = 10.0;
-const ROW_GAP: f32 = 14.0;
-const ROW_RADIUS: f32 = 11.0;
+const ROW_PAD_X: f32 = LAYOUT.px.launcher.row_pad_x;
+const ROW_PAD_Y: f32 = LAYOUT.px.launcher.row_pad_y;
+const ROW_GAP: f32 = LAYOUT.px.launcher.row_gap;
+const ROW_RADIUS: f32 = LAYOUT.px.launcher.row_radius;
 /// A view's row is at least this tall, whatever lines it carries.
-const ROW_HEIGHT: f32 = 34.0;
+const ROW_HEIGHT: f32 = LAYOUT.px.launcher.row_height;
 /// The ink of the commands' label and of a command's name at rest: quieter
 /// than the views', which they follow.
-const COMMAND_LABEL_INK: f32 = 0.30;
-const COMMAND_NAME_INK: f32 = 0.60;
+const COMMAND_LABEL_INK: f32 = LAYOUT.px.launcher.command_label_ink;
+const COMMAND_NAME_INK: f32 = LAYOUT.px.launcher.command_name_ink;
 /// The title column's width.
-const NAME_WIDTH: f32 = 190.0;
+const NAME_WIDTH: f32 = LAYOUT.px.launcher.name_width;
 /// A place's height and radius.
-const PLACE_HEIGHT: f32 = 44.0;
-const PLACE_RADIUS: f32 = 10.0;
+const PLACE_HEIGHT: f32 = LAYOUT.px.launcher.place_height;
+const PLACE_RADIUS: f32 = LAYOUT.px.launcher.place_radius;
 /// The footer's height.
-const FOOT_HEIGHT: f32 = 44.0;
+const FOOT_HEIGHT: f32 = LAYOUT.px.launcher.foot_height;
 /// How far a row that cannot be chosen is dimmed.
-const DIMMED: f32 = 0.55;
+const DIMMED: f32 = LAYOUT.px.launcher.dimmed;
 
 /// The group every record that is not a view is listed under.
 const COMMANDS: &str = "Commands";
@@ -351,8 +352,8 @@ fn thumbnail(key: &str, chosen: bool) -> El {
 }
 
 /// A place's thumbnail frame.
-const THUMB_WIDTH: f32 = 46.0;
-const THUMB_HEIGHT: f32 = 30.0;
+const THUMB_WIDTH: f32 = LAYOUT.px.launcher.thumb_width;
+const THUMB_HEIGHT: f32 = LAYOUT.px.launcher.thumb_height;
 
 /// The footer: the keys, then the view's own note at the right. The Esc cap
 /// closes the sheet.

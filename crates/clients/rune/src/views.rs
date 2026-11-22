@@ -5,6 +5,7 @@
 
 use rune::{Align, Color, El, Key, KeyEvent, ScrollSpec, Side, col, el, row, text};
 use ryeos_client_base::ids::RyeOsViewInstanceKey;
+use ryeos_client_base::layout_table::{ColumnWidth, LAYOUT as L, ListInset as ListPad};
 use ryeos_client_base::ui::content::ColumnRole;
 use ryeos_client_base::ui::timeline::RyeOsTimelineEntryVm;
 
@@ -75,9 +76,6 @@ fn tile_title(label: &str) -> El {
         .truncate()
 }
 
-/// Height of a tile's title row.
-const TITLE_ROW_HEIGHT: f32 = 44.0;
-
 /// What a tile adds to a frame's header beyond its title.
 pub struct TileChrome<'a> {
     pub tile_id: &'a str,
@@ -118,9 +116,6 @@ pub fn menu_key(instance: &RyeOsViewInstanceKey) -> String {
     format!("menu:{instance:?}")
 }
 
-/// How much of the tile fill a tile with a transparent background keeps.
-const TRANSPARENT_TILE_FILL: f32 = 0.8;
-
 /// A bordered frame: header, heading, the view body, supplement footer and
 /// the input composer, in the order the browser shell draws them.
 pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
@@ -128,7 +123,7 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
     // A tile: `sheet.fill` and a 1 px edge, `sheet.focus` when it holds focus.
     let mut fill = t.sheet_fill();
     if spec.transparent {
-        fill = fill.alpha(fill.a * TRANSPARENT_TILE_FILL);
+        fill = fill.alpha(fill.a * L.px.tile.transparent_fill);
     }
     let mut frame = col()
         .key(spec.key.clone())
@@ -187,10 +182,10 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     let identity = row().center_y().min_w(0.0).child(tile_title(spec.label));
     let mut title_row = row()
         .w_full()
-        .min_h(TITLE_ROW_HEIGHT)
+        .min_h(L.px.tile.title_row_height)
         .px(theme::PAD_TILE)
         .center_y()
-        .gap(10.0)
+        .gap(L.px.tile.title_gap)
         .child(identity);
     // The mark for a project-authored view: always drawn when present, at
     // the right of the title row, in ink (never a warning tone). The title
@@ -226,7 +221,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
     // The note takes what room the title leaves and is cut first; the title
     // is never cut for it.
     title_row = title_row.child(note_slot(note));
-    let mut tools = row().center_y().gap(8.0);
+    let mut tools = row().center_y().gap(L.px.tile.tools_gap);
     if let Some(attachment) = spec.attachment {
         tools = tools.child(frame_detail(attachment).label("Selection attachment"));
     }
@@ -247,7 +242,7 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
                     .font(theme::TYPE_LINE)
                     .color(tool_ink),
             )
-            .padding(2.0)
+            .padding(L.px.tile.maximize_pad)
             .radius(theme::RADIUS_ROW)
             .hover(t.select_fill())
             .role("button")
@@ -273,10 +268,10 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
                 .key(format!("{key}:open"))
                 .child(crate::icons::glyph(
                     &crate::icons::MORE,
-                    14.0,
+                    L.px.icons.tile_more,
                     if open { t.accent } else { tool_ink },
                 ))
-                .padding(5.0)
+                .padding(L.px.tile.more_pad)
                 .radius(theme::RADIUS_ROW)
                 .hover(t.select_fill())
                 .role("button")
@@ -293,8 +288,8 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         header = header.child(
             row()
                 .w_full()
-                .min_h(40.0)
-                .px(6.0)
+                .min_h(L.px.tile.group_tabs_min_height)
+                .px(L.px.tile.group_tabs_px)
                 .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
                 .child(tabs),
         );
@@ -309,19 +304,22 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
 fn authorship_chip(authorship: &ryeos_client_base::ui::content::ItemAuthorship) -> El {
     let t = Tokens::get();
     row()
-        .h(22.0)
-        .px(9.0)
-        .gap(7.0)
+        .h(L.px.tile.chip_height)
+        .px(L.px.tile.chip_px)
+        .gap(L.px.tile.chip_gap)
         .center_y()
-        .radius(theme::radius_pill(22.0))
-        .border(1.0, t.ink_at(0.22))
+        .radius(theme::radius_pill(L.px.tile.chip_height))
+        .border(1.0, t.ink_at(L.px.tile.chip_border))
         .label(format!("Project view, {}", authorship.mark_tail()))
         .child(text("project").font(theme::TYPE_NOTE).color(t.ink_soft()))
-        .child(el().size(1.0, 10.0).fill(t.ink_at(0.18)))
+        .child(
+            el().size(1.0, L.px.tile.chip_divider_height)
+                .fill(t.ink_at(L.px.tile.chip_divider)),
+        )
         .child(
             text(authorship.mark_tail())
                 .font(theme::medium(theme::TYPE_NOTE))
-                .color(t.ink_at(0.85))
+                .color(t.ink_at(L.px.tile.chip_name))
                 .truncate(),
         )
 }
@@ -349,7 +347,7 @@ fn view_tabs(tabs: &[RyeOsViewTabVm], grouped: bool) -> El {
     let t = Tokens::get();
     let mut strip = row().h_full().role("tablist");
     if !grouped {
-        strip = strip.ml(18.0);
+        strip = strip.ml(L.px.tile.tab_indent);
     }
     if grouped {
         strip = strip.scroll_x();
@@ -359,8 +357,8 @@ fn view_tabs(tabs: &[RyeOsViewTabVm], grouped: bool) -> El {
         strip = strip.child(
             row()
                 .h_full()
-                .min_h(TITLE_ROW_HEIGHT)
-                .px(13.0)
+                .min_h(L.px.tile.title_row_height)
+                .px(L.px.tile.tab_px)
                 .center_y()
                 .border_sides(
                     [0.0, 0.0, 1.0, 0.0],
@@ -396,40 +394,40 @@ fn content_heading(heading: &RyeOsViewHeadingVm) -> El {
     let p = Palette::get();
     let mut block = col()
         .w_full()
-        .pt(28.0)
-        .px(34.0)
-        .pb(22.0)
+        .pt(L.px.tile.heading_pt)
+        .px(L.px.tile.heading_px)
+        .pb(L.px.tile.heading_pb)
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
         .child(
             text(heading.eyebrow.to_uppercase())
-                .font(theme::data(9.0).tracking(1.3))
+                .font(theme::data(L.px.type_scale.s9).tracking(L.px.type_scale.tracking_eyebrow))
                 .color(p.muted),
         )
         .child(
             text(heading.title.clone())
-                .font(theme::ui(38.0).tracking(-1.5))
+                .font(theme::ui(L.px.type_scale.s38).tracking(L.px.type_scale.tracking_display))
                 .color(p.text)
                 .wrap()
-                .max_w(720.0)
-                .mt(14.0)
-                .mb(10.0),
+                .max_w(L.px.tile.heading_title_max_width)
+                .mt(L.px.tile.heading_title_mt)
+                .mb(L.px.tile.heading_title_mb),
         );
     if !heading.summary.is_empty() {
         block = block.child(
             text(heading.summary.clone())
-                .font(theme::ui(13.0))
+                .font(theme::ui(L.px.type_scale.s13))
                 .color(p.text)
                 .wrap()
-                .max_w(620.0),
+                .max_w(L.px.tile.heading_summary_max_width),
         );
     }
     if !heading.metadata.is_empty() {
         block = block.child(
             text(heading.metadata.join("  /  ").to_uppercase())
-                .font(theme::data(9.0).tracking(1.3))
+                .font(theme::data(L.px.type_scale.s9).tracking(L.px.type_scale.tracking_eyebrow))
                 .color(p.muted)
                 .wrap()
-                .mt(17.0),
+                .mt(L.px.tile.heading_metadata_mt),
         );
     }
     block
@@ -440,10 +438,10 @@ fn supplement_footer(mut frame: El, supplement: &RyeOsViewSupplementVm) -> El {
     let p = Palette::get();
     let caption = |label: &str| {
         text(label.to_uppercase())
-            .font(theme::data(9.0).tracking(0.7))
+            .font(theme::data(L.px.type_scale.s9).tracking(L.px.type_scale.tracking_caption))
             .color(p.muted)
-            .px(12.0)
-            .py(8.0)
+            .px(L.px.supplement.caption_px)
+            .py(L.px.supplement.caption_py)
     };
     if !supplement.excerpt.is_empty() {
         let mut code = col().w_full();
@@ -451,31 +449,31 @@ fn supplement_footer(mut frame: El, supplement: &RyeOsViewSupplementVm) -> El {
             let ink = line.tone.map_or(p.muted, |tone| p.tone(tone, p.muted));
             let mut entry = row()
                 .w_full()
-                .min_h(20.0)
-                .px(12.0)
-                .py(2.0)
+                .min_h(L.px.supplement.excerpt_min_height)
+                .px(L.px.supplement.excerpt_px)
+                .py(L.px.supplement.excerpt_py)
                 .child(
                     text(line.field.clone())
-                        .font(theme::data(10.0))
+                        .font(theme::data(L.px.type_scale.s10))
                         .color(p.faint)
-                        .w(42.0),
+                        .w(L.px.supplement.excerpt_field_width),
                 )
                 .child(
                     text(line.value.clone())
-                        .font(theme::data(10.0))
+                        .font(theme::data(L.px.type_scale.s10))
                         .color(ink)
                         .wrap_anywhere()
                         .grow(1.0)
                         .min_w(0.0),
                 );
             if line.tone == Some(RyeOsTone::Good) {
-                entry = entry.fill(p.green.alpha(0.09));
+                entry = entry.fill(p.green.alpha(L.px.supplement.excerpt_good_fill));
             }
             code = code.child(entry);
         }
         let mut section = col()
             .w_full()
-            .max_h(240.0)
+            .max_h(L.px.supplement.excerpt_max_height)
             .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
             .label(if supplement.excerpt_title.is_empty() {
                 "Excerpt".to_owned()
@@ -493,7 +491,7 @@ fn supplement_footer(mut frame: El, supplement: &RyeOsViewSupplementVm) -> El {
     if !supplement.footer.is_empty() || !supplement.footer_rows.is_empty() {
         let mut footer = col()
             .w_full()
-            .py(4.0)
+            .py(L.px.supplement.footer_py)
             .border_sides([1.0, 0.0, 0.0, 0.0], p.line);
         if !supplement.footer.is_empty() {
             footer = footer.child(caption(&supplement.footer));
@@ -503,12 +501,12 @@ fn supplement_footer(mut frame: El, supplement: &RyeOsViewSupplementVm) -> El {
             footer = footer.child(
                 row()
                     .w_full()
-                    .px(14.0)
-                    .py(5.0)
-                    .gap(12.0)
+                    .px(L.px.supplement.footer_row_px)
+                    .py(L.px.supplement.footer_row_py)
+                    .gap(L.px.supplement.footer_row_gap)
                     .child(
                         text(line.field.clone())
-                            .font(theme::ui(10.0))
+                            .font(theme::ui(L.px.type_scale.s10))
                             .color(ink)
                             .grow(1.0)
                             .min_w(0.0)
@@ -516,7 +514,7 @@ fn supplement_footer(mut frame: El, supplement: &RyeOsViewSupplementVm) -> El {
                     )
                     .child(
                         text(line.value.clone())
-                            .font(theme::ui(10.0))
+                            .font(theme::ui(L.px.type_scale.s10))
                             .color(p.muted),
                     ),
             );
@@ -532,10 +530,15 @@ pub fn actions_menu(key: &str, intents: &[RyeOsTileIntentVm]) -> El {
     let p = Palette::get();
     let mut list = col()
         .key(key.to_owned())
-        .anchored_fit(format!("{key}:open"), Side::Bottom, Align::End, 2.0)
-        .min_w(180.0)
-        .max_w(360.0)
-        .padding(4.0)
+        .anchored_fit(
+            format!("{key}:open"),
+            Side::Bottom,
+            Align::End,
+            L.px.supplement.menu_offset,
+        )
+        .min_w(L.px.supplement.menu_min_width)
+        .max_w(L.px.supplement.menu_max_width)
+        .padding(L.px.supplement.menu_pad)
         .fill(p.plane_raised)
         .border(1.0, p.line_strong)
         .role("menu")
@@ -544,12 +547,12 @@ pub fn actions_menu(key: &str, intents: &[RyeOsTileIntentVm]) -> El {
         let intent = action.intent.clone();
         list = list.child(
             text(action.label.clone())
-                .font(theme::ui(12.0))
+                .font(theme::ui(L.px.type_scale.s12))
                 .color(p.text)
                 .truncate()
                 .w_full()
-                .px(10.0)
-                .py(9.0)
+                .px(L.px.supplement.menu_item_px)
+                .py(L.px.supplement.menu_item_py)
                 .hover(p.plane_selected)
                 .role("menuitem")
                 .label(action.title.clone())
@@ -644,26 +647,8 @@ fn body_in(
     }
 }
 
-/// The inset and spacing of a scrolling list body.
-#[derive(Clone, Copy)]
-struct ListPad {
-    x: f32,
-    top: f32,
-    bottom: f32,
-    /// Between rows.
-    gap: f32,
-    /// Rows sit in a centred column no wider than this.
-    column: Option<f32>,
-}
-
 /// The list views' inset.
-const LIST_PAD: ListPad = ListPad {
-    x: 16.0,
-    top: 12.0,
-    bottom: 12.0,
-    gap: 0.0,
-    column: None,
-};
+const LIST_PAD: ListPad = L.px.list.inset;
 
 /// A scrolling list body with the list views' inset.
 fn list(key: String, label: &str) -> El {
@@ -672,8 +657,8 @@ fn list(key: String, label: &str) -> El {
         .w_full()
         .shrink()
         .min_h(0.0)
-        .px(16.0)
-        .py(12.0)
+        .px(L.px.list.pad_x)
+        .py(L.px.list.pad_y)
         .label(label.to_owned())
         .scroll(ScrollSpec {
             stick_bottom: false,
@@ -686,7 +671,7 @@ fn rows_view(
     status: Option<&RyeOsSourceStatusVm>,
     rows: &[RyeOsRowVm],
 ) -> El {
-    if rows.len() > VIRTUAL_ROWS_FROM {
+    if rows.len() > L.px.list.virtual_rows_from {
         let head = status.map(source_status);
         let keys = rows
             .iter()
@@ -699,7 +684,7 @@ fn rows_view(
             head,
             instance,
             keys,
-            ROW_ESTIMATE,
+            L.px.list.row_estimate,
             false,
             LIST_PAD,
             |view, instance, index| match view {
@@ -719,13 +704,6 @@ fn rows_view(
     }
     body
 }
-
-/// Lists longer than this build only the rows in view (`El::virtual_rows`);
-/// shorter ones build every row.
-const VIRTUAL_ROWS_FROM: usize = 64;
-/// Estimated heights for rows not yet measured.
-const ROW_ESTIMATE: f32 = 46.0;
-const TABLE_ROW_ESTIMATE: f32 = 38.0;
 
 /// A long list: `head` stays above a scroll viewport whose rows are built by
 /// index from the current model at layout time, so a commit costs a key per
@@ -805,26 +783,10 @@ fn virtual_list(
         scroll = scroll
             .px(pad.x)
             .items_center()
-            .scroll_edge_fade(TIMELINE_FADE);
+            .scroll_edge_fade(L.px.timeline.fade);
     }
     body.child(scroll.child(rows))
 }
-
-/// Above a section's title, and below it.
-const SECTION_TITLE_ABOVE: f32 = 12.0;
-const SECTION_TITLE_BELOW: f32 = 9.0;
-/// A section's field row.
-const FIELD_ROW_HEIGHT: f32 = 24.0;
-const FIELD_ROW_GAP: f32 = 8.0;
-/// The fixed width of a field's name.
-const FIELD_NAME_WIDTH: f32 = 104.0;
-/// A field row sits this far in from the tile's padding, so its selection
-/// fill has a margin.
-const FIELD_INSET: f32 = 8.0;
-/// A tone's dot beside its words.
-const TONE_DOT: f32 = 6.0;
-/// Between a status dot and its word.
-const TONE_DOT_GAP: f32 = 7.0;
 
 /// A tone's dot: the tone's colour, or nothing at all.
 fn tone_dot(tone: Option<Color>, size: f32) -> Option<El> {
@@ -837,8 +799,8 @@ fn sections_view(instance: &RyeOsViewInstanceKey, title: &str, sections: &[RyeOs
         .w_full()
         .shrink()
         .min_h(0.0)
-        .px(theme::PAD_TILE - FIELD_INSET)
-        .py(8.0)
+        .px(theme::PAD_TILE - L.px.list.field_inset)
+        .py(L.px.list.section_py)
         .label(title.to_owned())
         .scroll(ScrollSpec {
             stick_bottom: false,
@@ -866,10 +828,10 @@ fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> E
     let mut header = row()
         .key(format!("section:{instance:?}:{}", section.id))
         .w_full()
-        .mt(SECTION_TITLE_ABOVE)
-        .mb(SECTION_TITLE_BELOW)
+        .mt(L.px.list.section_title_above)
+        .mb(L.px.list.section_title_below)
         .center_y()
-        .gap(8.0)
+        .gap(L.px.list.section_header_gap)
         .hover(t.select_fill())
         .role("button")
         .expanded(!section.collapsed)
@@ -892,7 +854,11 @@ fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> E
     // The fold mark shows only where the fold is not the usual state: a
     // folded section, or the one the point is on.
     if section.collapsed || section.header_selected {
-        header = header.child(crate::icons::glyph(fold, 10.0, t.ink_mute()));
+        header = header.child(crate::icons::glyph(
+            fold,
+            L.px.icons.section_fold,
+            t.ink_mute(),
+        ));
     }
     let mut block = col().w_full().child(header);
     if let Some(status) = &section.source_status {
@@ -949,26 +915,30 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
     }
     line = match style {
         RowStyle::Rows => {
-            let mut copy = col().grow(1.0).min_w(0.0).gap(3.0).child(
-                text(item.primary.clone())
-                    .font(rune::tok::TextStyle::new(13.0, 450.0).family(theme::UI))
-                    .color(ink)
-                    .truncate(),
-            );
+            let mut copy = col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(L.px.list.record_copy_gap)
+                .child(
+                    text(item.primary.clone())
+                        .font(theme::style(L.px.type_scale.record).family(theme::UI))
+                        .color(ink)
+                        .truncate(),
+                );
             if let Some(secondary) = &item.secondary {
                 copy = copy.child(
                     text(secondary.clone())
-                        .font(theme::ui(10.0))
+                        .font(theme::ui(L.px.type_scale.s10))
                         .color(p.muted)
                         .truncate(),
                 );
             }
             let mut line = line
-                .min_h(43.0)
-                .px(10.0)
-                .py(7.0)
+                .min_h(L.px.list.record_min_height)
+                .px(L.px.list.record_px)
+                .py(L.px.list.record_py)
                 .child(
-                    el().w(24.0).child(
+                    el().w(L.px.list.record_glyph_width).child(
                         text(
                             item.glyph
                                 .as_deref()
@@ -977,13 +947,17 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
                                 })
                                 .into_owned(),
                         )
-                        .font(theme::ui(13.0))
+                        .font(theme::ui(L.px.type_scale.s13))
                         .color(p.yellow),
                     ),
                 )
                 .child(copy);
             if let Some(meta) = &item.meta {
-                line = line.child(text(meta.clone()).font(theme::ui(10.0)).color(p.muted));
+                line = line.child(
+                    text(meta.clone())
+                        .font(theme::ui(L.px.type_scale.s10))
+                        .color(p.muted),
+                );
             }
             line
         }
@@ -991,8 +965,12 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
             // A field row: its name, fixed width, then its value; a toned
             // row puts the tone's dot before the value's words.
             let aside = item.meta.as_ref().or(item.secondary.as_ref());
-            let mut value = row().grow(1.0).min_w(0.0).gap(TONE_DOT_GAP).center_y();
-            if let Some(dot) = tone_dot(t.tone(item.tone), TONE_DOT) {
+            let mut value = row()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(L.px.list.tone_dot_gap)
+                .center_y();
+            if let Some(dot) = tone_dot(t.tone(item.tone), L.px.list.tone_dot) {
                 value = value.child(dot);
             }
             // A value that does not fit is cut at the tile's edge.
@@ -1005,9 +983,9 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
                     .min_w(0.0)
             };
             let line = line
-                .min_h(FIELD_ROW_HEIGHT)
-                .px(FIELD_INSET)
-                .gap(FIELD_ROW_GAP);
+                .min_h(L.px.list.field_row_height)
+                .px(L.px.list.field_inset)
+                .gap(L.px.list.field_row_gap);
             match aside {
                 Some(aside) => line
                     .child(
@@ -1019,7 +997,7 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
                                 t.ink_dim()
                             })
                             .truncate()
-                            .w(FIELD_NAME_WIDTH),
+                            .w(L.px.list.field_name_width),
                     )
                     .child(value.child(words(aside))),
                 None => line.child(value.child(words(&item.primary))),
@@ -1027,7 +1005,7 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
         }
     };
     if unavailable {
-        line = line.opacity(0.5);
+        line = line.opacity(L.px.list.unavailable_opacity);
     } else {
         let choose_key = instance.clone();
         let item_id = item.id.clone();
@@ -1049,7 +1027,7 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
         let expanded = item.expanded;
         head = head.child(
             col()
-                .w(34.0)
+                .w(L.px.list.record_disclosure_width)
                 .center()
                 .border_sides([0.0, 0.0, 0.0, if rows_style { 1.0 } else { 0.0 }], p.line)
                 .fill(if !rows_style {
@@ -1067,7 +1045,7 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
                     item.primary
                 ))
                 .expanded(expanded)
-                .child(disclosure_icon(expanded, 13.0))
+                .child(disclosure_icon(expanded, L.px.icons.disclosure))
                 .on_press(move |app: &mut App| {
                     app.ui(RyeOsUiEvent::ToggleViewItemExpansion {
                         instance_key: expand_key.clone(),
@@ -1091,9 +1069,9 @@ fn text_view(instance: &RyeOsViewInstanceKey, title: &str, lines: &[RyeOsTextLin
         .w_full()
         .shrink()
         .min_h(0.0)
-        .px(28.0)
-        .py(22.0)
-        .gap(8.0)
+        .px(L.px.list.text_px)
+        .py(L.px.list.text_py)
+        .gap(L.px.list.text_gap)
         .label(title.to_owned())
         .scroll(ScrollSpec {
             stick_bottom: false,
@@ -1101,7 +1079,7 @@ fn text_view(instance: &RyeOsViewInstanceKey, title: &str, lines: &[RyeOsTextLin
     for line in lines {
         body = body.child(
             text(line.text.clone())
-                .font(theme::data(12.0))
+                .font(theme::data(L.px.type_scale.s12))
                 .color(p.tone(line.tone, p.text))
                 .wrap_anywhere()
                 .selectable(true)
@@ -1122,13 +1100,13 @@ fn document_view(
     let p = Palette::get();
     let mut header = row()
         .w_full()
-        .px(16.0)
-        .py(9.0)
-        .gap(16.0)
+        .px(L.px.list.doc_header_px)
+        .py(L.px.list.doc_header_py)
+        .gap(L.px.list.doc_header_gap)
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
         .child(
             text(path.to_owned())
-                .font(theme::data(9.0))
+                .font(theme::data(L.px.type_scale.s9))
                 .color(p.muted)
                 .truncate_head()
                 .grow(1.0)
@@ -1137,7 +1115,7 @@ fn document_view(
     if truncated {
         header = header.child(
             text("BOUNDED PREVIEW")
-                .font(theme::data(9.0))
+                .font(theme::data(L.px.type_scale.s9))
                 .color(p.yellow),
         );
     }
@@ -1156,47 +1134,20 @@ fn document_view(
             })
             .child(
                 text(content.to_owned())
-                    .font(theme::data(11.0))
+                    .font(theme::data(L.px.type_scale.s11))
                     .color(p.text)
                     .wrap_anywhere()
                     .selectable(true)
                     .w_full()
-                    .pt(18.0)
-                    .px(20.0)
-                    .pb(32.0),
+                    .pt(L.px.list.doc_pt)
+                    .px(L.px.list.doc_px)
+                    .pb(L.px.list.doc_pb),
             ),
     )
 }
 
-/// The disclosure column of a table whose rows do not open on activation.
-const TABLE_ACTION_WIDTH: f32 = 24.0;
-
-/// A table's header row, and the ink of its labels.
-const TABLE_HEADER_HEIGHT: f32 = 28.0;
-const TABLE_HEADER_INK: f32 = 0.40;
-/// A table row: its height, its padding either side, and the gap between its
-/// cells. Rows sit 1 apart, inset from the tile so a selection fill has a
-/// margin.
-const TABLE_ROW_HEIGHT: f32 = 28.0;
-/// A hierarchy table's row.
-const TABLE_ROW_HEIGHT_TREE: f32 = 26.0;
-const TABLE_ROW_PAD: f32 = 10.0;
-const TABLE_CELL_GAP: f32 = 12.0;
-const TABLE_ROW_GAP: f32 = 1.0;
-const TABLE_INSET: f32 = 8.0;
-/// Indent per level of a hierarchical table.
-const TABLE_INDENT: f32 = 16.0;
-/// The width of the fold mark's place, so rows without children line up.
-const FOLD_MARK_WIDTH: f32 = 16.0;
-
 /// The table's padding: rows inset from the tile.
-const TABLE_PAD: ListPad = ListPad {
-    x: TABLE_INSET,
-    top: 0.0,
-    bottom: 8.0,
-    gap: TABLE_ROW_GAP,
-    column: None,
-};
+const TABLE_PAD: ListPad = L.px.table.list_inset;
 
 /// Whether a source's status says it could not be read.
 fn unreadable(status: Option<&RyeOsSourceStatusVm>) -> bool {
@@ -1228,7 +1179,7 @@ fn table_view(
     let t = Tokens::get();
     let action = table_has_action(rows);
     let plan = table_plan(shape, action);
-    if rows.len() > VIRTUAL_ROWS_FROM {
+    if rows.len() > L.px.list.virtual_rows_from {
         let head = col()
             .w_full()
             .children(table_head(status, shape, &plan, action));
@@ -1243,7 +1194,7 @@ fn table_view(
             Some(head),
             instance,
             keys,
-            TABLE_ROW_ESTIMATE,
+            L.px.list.table_row_estimate,
             false,
             TABLE_PAD,
             move |view, instance, index| match view {
@@ -1264,7 +1215,7 @@ fn table_view(
         .px(TABLE_PAD.x)
         .pt(TABLE_PAD.top)
         .pb(TABLE_PAD.bottom)
-        .gap(TABLE_ROW_GAP)
+        .gap(L.px.table.row_gap)
         .role("table")
         .label(title.to_owned())
         .scroll(ScrollSpec {
@@ -1278,8 +1229,8 @@ fn table_view(
             text(empty.to_owned())
                 .font(theme::TYPE_SMALL)
                 .color(t.ink_dim())
-                .px(TABLE_ROW_PAD)
-                .py(TABLE_CELL_GAP)
+                .px(L.px.table.row_pad)
+                .py(L.px.table.cell_gap)
                 .role("status"),
         );
     }
@@ -1317,7 +1268,7 @@ pub fn table_foot(view: &RyeOsViewVm) -> Option<El> {
                     .truncate()
                     .w_full()
                     .px(theme::PAD_TILE)
-                    .py(11.0)
+                    .py(L.px.table.foot_py)
                     .role("status"),
             ),
     )
@@ -1337,9 +1288,9 @@ fn table_head(
     }
     let mut columns_row = row()
         .w_full()
-        .min_h(TABLE_HEADER_HEIGHT)
-        .px(TABLE_ROW_PAD)
-        .gap(TABLE_CELL_GAP)
+        .min_h(L.px.table.header_height)
+        .px(L.px.table.row_pad)
+        .gap(L.px.table.cell_gap)
         .center_y()
         .role("row");
     for (index, column) in shape.columns.iter().enumerate() {
@@ -1349,7 +1300,7 @@ fn table_head(
         let role = role_at(shape.roles, index);
         let label = text(column.to_uppercase())
             .font(theme::TYPE_LABEL)
-            .color(t.ink_at(TABLE_HEADER_INK))
+            .color(t.ink_at(L.px.table.header_ink))
             .truncate()
             .min_w(0.0);
         // A right-aligned column's heading sits over its figures.
@@ -1361,7 +1312,7 @@ fn table_head(
         columns_row = columns_row.child(sized(cell, width).min_w(0.0).role("columnheader"));
     }
     if action {
-        columns_row = columns_row.child(col().w(TABLE_ACTION_WIDTH).role("columnheader"));
+        columns_row = columns_row.child(col().w(L.px.table.action_width).role("columnheader"));
     }
     head.push(columns_row);
     head
@@ -1372,34 +1323,6 @@ fn role_at(roles: &[ColumnRole], index: usize) -> ColumnRole {
     roles.get(index).copied().unwrap_or_default()
 }
 
-/// How wide a column is: a fixed width, or a share of the room left over.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum ColumnWidth {
-    Fixed(f32),
-    Grow {
-        min: f32,
-        weight: f32,
-        max: Option<f32>,
-    },
-}
-
-impl ColumnWidth {
-    /// The least room the column needs.
-    fn least(self) -> f32 {
-        match self {
-            Self::Fixed(width) => width,
-            Self::Grow { min, .. } => min,
-        }
-    }
-}
-
-/// A text column's least width, and the widest it grows beside a ref or path
-/// column, which takes the room instead.
-const TEXT_LEAST: f32 = 80.0;
-const TEXT_MOST: f32 = 160.0;
-/// A ref or path column's least width.
-const REF_LEAST: f32 = 150.0;
-
 /// The width a role asks for. Ids, kinds, statuses, counts and hashes are
 /// fixed so rows line up. A time column takes the room left over; refs and
 /// paths then hold a fixed width and text columns a short one, so slack
@@ -1407,66 +1330,14 @@ const REF_LEAST: f32 = 150.0;
 /// column, refs and paths take the room instead, with text columns beside
 /// them held to a bounded share (or sharing it equally with no ref or path).
 fn role_width(role: ColumnRole, has_ref: bool, has_time: bool) -> ColumnWidth {
-    match role {
-        ColumnRole::Id => ColumnWidth::Fixed(112.0),
-        ColumnRole::Kind => ColumnWidth::Fixed(78.0),
-        ColumnRole::Status => ColumnWidth::Fixed(104.0),
-        ColumnRole::Time => ColumnWidth::Grow {
-            min: 100.0,
-            weight: 1.0,
-            max: None,
-        },
-        ColumnRole::Hash => ColumnWidth::Fixed(84.0),
-        ColumnRole::Count => ColumnWidth::Fixed(56.0),
-        ColumnRole::Action => ColumnWidth::Fixed(TABLE_ACTION_WIDTH),
-        ColumnRole::Ref | ColumnRole::Path if has_time => ColumnWidth::Fixed(REF_FIXED),
-        ColumnRole::Ref | ColumnRole::Path => ColumnWidth::Grow {
-            min: REF_LEAST,
-            weight: 2.0,
-            max: None,
-        },
-        ColumnRole::Text if has_time => ColumnWidth::Fixed(TEXT_LEAST),
-        ColumnRole::Text => ColumnWidth::Grow {
-            min: TEXT_LEAST,
-            weight: 1.0,
-            max: has_ref.then_some(TEXT_MOST),
-        },
-    }
+    L.px.table.columns.width(role, has_ref, has_time)
 }
 
-/// A ref or path column's width beside a time column.
-const REF_FIXED: f32 = 150.0;
-
-/// Which of two field-pair choices a narrow table makes. When true, a table
-/// keeps what a row is (its kind and item) and drops its id and time first;
-/// the project review's History tile reads this way. When false it keeps
-/// which run and when (id and time) and drops kind and item first, as the
-/// Runs list of the graphs tab does. This constant is the only place the
-/// choice is made: flip it and the drop order below follows.
-const KEEP_KIND_AND_ITEM: bool = true;
-
-/// When a tile is too narrow for every column, columns go in this order,
-/// lowest first. A status says what happened to a row and never goes. With
-/// `KEEP_KIND_AND_ITEM` an id goes after the text columns, since the item says
-/// what the row is, and a time goes first of the data columns.
+/// When a tile is too narrow for every column, columns go in the table's
+/// drop order, lowest first. A status says what happened to a row and never
+/// goes.
 fn drop_rank(role: ColumnRole) -> Option<u8> {
-    match (role, KEEP_KIND_AND_ITEM) {
-        (ColumnRole::Hash, _) => Some(0),
-        (ColumnRole::Time, true) => Some(1),
-        (ColumnRole::Count, _) => Some(2),
-        (ColumnRole::Text, _) => Some(3),
-        (ColumnRole::Id, true) => Some(3),
-        (ColumnRole::Kind, true) => Some(4),
-        (ColumnRole::Path, true) => Some(5),
-        (ColumnRole::Ref, true) => Some(6),
-        // Kind and item leave before the id and the time.
-        (ColumnRole::Kind, false) => Some(1),
-        (ColumnRole::Path, false) => Some(1),
-        (ColumnRole::Ref, false) => Some(1),
-        (ColumnRole::Time, false) => Some(5),
-        (ColumnRole::Id, false) => Some(6),
-        (ColumnRole::Status | ColumnRole::Action, _) => None,
-    }
+    L.px.table.columns.drop_rank(role)
 }
 
 /// Each column's width, or `None` for one the tile has no room for. Columns
@@ -1491,14 +1362,14 @@ fn table_plan(shape: TableShape<'_>, action: bool) -> Vec<Option<ColumnWidth>> {
     };
     let mut plan = settle(&|_| true);
     let disclosure = if action {
-        TABLE_ACTION_WIDTH + TABLE_CELL_GAP
+        L.px.table.action_width + L.px.table.cell_gap
     } else {
         0.0
     };
-    let room = shape.width - 2.0 * (TABLE_INSET + TABLE_ROW_PAD) - disclosure;
+    let room = shape.width - 2.0 * (L.px.table.inset + L.px.table.row_pad) - disclosure;
     let needed = |plan: &[Option<ColumnWidth>]| {
         let shown: Vec<f32> = plan.iter().flatten().map(|width| width.least()).collect();
-        shown.iter().sum::<f32>() + shown.len().saturating_sub(1) as f32 * TABLE_CELL_GAP
+        shown.iter().sum::<f32>() + shown.len().saturating_sub(1) as f32 * L.px.table.cell_gap
     };
     while needed(&plan) > room {
         let rank = |index: usize| drop_rank(role_at(shape.roles, index));
@@ -1538,18 +1409,11 @@ fn role_is_mono(role: ColumnRole) -> bool {
     )
 }
 
-/// The characters of an id that fit its column: longer ids keep their head
-/// and tail around an ellipsis.
-const ID_CHARS: usize = 13;
-
-/// The characters of a hash that are shown.
-const HASH_CHARS: usize = 8;
-
 /// `text` cut to at most `max` characters by replacing the middle with an
 /// ellipsis, so both ends of an id stay readable.
 fn middle_ellipsis(text: &str, max: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max || max < 3 {
+    if chars.len() <= max || max <= 2 {
         return text.to_owned();
     }
     let keep = max - 1;
@@ -1566,8 +1430,8 @@ fn middle_ellipsis(text: &str, max: usize) -> String {
 /// `path` cells at the end, since it offers no middle or left cut.
 fn role_text(role: ColumnRole, cell: &str) -> String {
     match role {
-        ColumnRole::Hash => cell.chars().take(HASH_CHARS).collect(),
-        ColumnRole::Id => middle_ellipsis(cell, ID_CHARS),
+        ColumnRole::Hash => cell.chars().take(L.px.table.columns.hash_chars).collect(),
+        ColumnRole::Id => middle_ellipsis(cell, L.px.table.columns.id_chars),
         _ => cell.to_owned(),
     }
 }
@@ -1585,12 +1449,12 @@ fn table_record(
         .w_full()
         .min_w(0.0)
         .min_h(if item.hierarchy.is_some() {
-            TABLE_ROW_HEIGHT_TREE
+            L.px.table.row_height_tree
         } else {
-            TABLE_ROW_HEIGHT
+            L.px.table.row_height
         })
-        .px(TABLE_ROW_PAD)
-        .gap(TABLE_CELL_GAP)
+        .px(L.px.table.row_pad)
+        .gap(L.px.table.cell_gap)
         .center_y()
         .role("row");
     if item.selected {
@@ -1624,7 +1488,11 @@ fn table_record(
         {
             slot = slot.child(tree_prefix(instance, &item.id, cell, hierarchy));
         }
-        let mut words = row().grow(1.0).min_w(0.0).gap(TONE_DOT_GAP).center_y();
+        let mut words = row()
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(L.px.list.tone_dot_gap)
+            .center_y();
         if role == ColumnRole::Count {
             words = words.justify_end();
         }
@@ -1636,12 +1504,12 @@ fn table_record(
             cell_tone
         };
         if let Some(tone) = dot_tone {
-            words = words.child(match tone_dot(t.tone(tone), TONE_DOT) {
+            words = words.child(match tone_dot(t.tone(tone), L.px.list.tone_dot) {
                 Some(dot) => dot,
-                None => el().size(TONE_DOT, TONE_DOT),
+                None => el().size(L.px.list.tone_dot, L.px.list.tone_dot),
             });
         } else if index == 0
-            && let Some(dot) = tone_dot(row_tone, TONE_DOT)
+            && let Some(dot) = tone_dot(row_tone, L.px.list.tone_dot)
         {
             words = words.child(dot);
         }
@@ -1666,7 +1534,7 @@ fn table_record(
                         .grow(1.0)
                         .min_w(0.0),
                 )
-                .py(6.0)
+                .py(L.px.table.cell_py)
                 .role("button")
                 .label(format!("Select row: {cell}"))
                 .focus_selected(index == 0 && item.selected)
@@ -1682,14 +1550,14 @@ fn table_record(
         line = line.child(slot);
     }
     if action {
-        let mut disclosure = col().w(TABLE_ACTION_WIDTH).h_full().role("cell");
+        let mut disclosure = col().w(L.px.table.action_width).h_full().role("cell");
         if item.expandable {
             disclosure = disclosure.child(chevron(
                 instance,
                 &item.id,
                 item.expanded,
                 "row".to_owned(),
-                TABLE_ACTION_WIDTH,
+                L.px.table.action_width,
             ));
         }
         line = line.child(disclosure);
@@ -1706,8 +1574,8 @@ fn table_record(
     record
 }
 
-/// The place before a hierarchical table row's first cell: an indent of
-/// `TABLE_INDENT` per level, then the fold mark when the row has children. The
+/// The place before a hierarchical table row's first cell: an indent
+/// the table's indent per level, then the fold mark when the row has children. The
 /// structure comes from the core's retained tree projection, never inferred.
 fn tree_prefix(
     instance: &RyeOsViewInstanceKey,
@@ -1720,8 +1588,8 @@ fn tree_prefix(
     let depth = hierarchy.ancestor_continues.len() as f32;
     let prefix = row()
         .center_y()
-        .pl(depth * TABLE_INDENT)
-        .w(depth * TABLE_INDENT + FOLD_MARK_WIDTH);
+        .pl(depth * L.px.table.indent)
+        .w(depth * L.px.table.indent + L.px.table.fold_mark_width);
     if !hierarchy.has_children {
         return prefix;
     }
@@ -1737,11 +1605,11 @@ fn tree_prefix(
                 } else {
                     &crate::icons::EXPANDED
                 },
-                12.0,
+                L.px.icons.fold,
                 t.ink_dim(),
             ))
-            .min_w(FOLD_MARK_WIDTH)
-            .padding(2.0)
+            .min_w(L.px.table.fold_mark_width)
+            .padding(L.px.table.fold_pad)
             .hover(p.plane_selected)
             .role("button")
             .label(format!(
@@ -1769,9 +1637,6 @@ fn disclosure_icon(expanded: bool, size: f32) -> El {
         crate::icons::glyph(&crate::icons::COLLAPSED, size, p.muted)
     }
 }
-
-/// The timeline's chevron column.
-const CHEVRON_WIDTH: f32 = 24.0;
 
 /// An expand/collapse chevron `width` points wide: `ink.mute`, turned when the
 /// record is open.
@@ -1802,7 +1667,7 @@ fn chevron(
             } else {
                 &crate::icons::COLLAPSED
             },
-            12.0,
+            L.px.icons.fold,
             t.ink_mute(),
         ))
         .on_press(move |app: &mut App| {
@@ -1855,34 +1720,7 @@ impl<'a> Timeline<'a> {
     }
 }
 
-/// Indent per call-tree level.
-const TIMELINE_INDENT: f32 = 18.0;
-/// Content sits in a column no wider than this, centred in the tile.
-const TIMELINE_COLUMN: f32 = 720.0;
-/// Tile padding either side of the column, and above and below it.
-const TIMELINE_PAD_X: f32 = 24.0;
-const TIMELINE_PAD_TOP: f32 = 14.0;
-/// The feed's viewport never gets shorter than this.
-const TIMELINE_FEED_FLOOR: f32 = 160.0;
-/// The space above the status lane, outside the feed's viewport.
-const TIMELINE_LANE_SPACE: f32 = 16.0;
-/// The tallest the dock grows once it holds more than one card; the cards
-/// scroll inside it.
-const DOCK_STACK_MAX: f32 = 260.0;
-/// How far a feed fades where its lines run out of view.
-const TIMELINE_FADE: f32 = 16.0;
-/// Between entries.
-const TIMELINE_GAP: f32 = 16.0;
-/// A selected line's fill reaches this far past the column on either side.
-const SELECT_REACH: f32 = 10.0;
-
-const TIMELINE_PAD: ListPad = ListPad {
-    x: TIMELINE_PAD_X - SELECT_REACH,
-    top: 0.0,
-    bottom: 0.0,
-    gap: TIMELINE_GAP,
-    column: Some(TIMELINE_COLUMN + 2.0 * SELECT_REACH),
-};
+const TIMELINE_PAD: ListPad = L.px.timeline.list_inset;
 
 fn timeline_view(
     instance: &RyeOsViewInstanceKey,
@@ -1891,7 +1729,7 @@ fn timeline_view(
     timeline: Timeline<'_>,
 ) -> El {
     let status = status.map(|status| row().w_full().center().child(source_status(status)));
-    if timeline.entries.len() > VIRTUAL_ROWS_FROM {
+    if timeline.entries.len() > L.px.list.virtual_rows_from {
         let keys = (0..timeline.entries.len())
             .map(|index| timeline_entry_key(instance, &timeline, index))
             .collect();
@@ -1902,7 +1740,7 @@ fn timeline_view(
             status,
             instance,
             keys,
-            TIMELINE_ENTRY_ESTIMATE,
+            L.px.list.timeline_entry_estimate,
             true,
             TIMELINE_PAD,
             |view, instance, index| {
@@ -1916,8 +1754,8 @@ fn timeline_view(
     // scrolls and a clipped line is cut 14 below the header, not flush with it.
     let mut column = col()
         .w_full()
-        .max_w(TIMELINE_COLUMN + 2.0 * SELECT_REACH)
-        .gap(TIMELINE_GAP);
+        .max_w(L.px.timeline.column + 2.0 * L.px.timeline.select_reach)
+        .gap(L.px.timeline.gap);
     if let Some(status) = status {
         column = column.child(status);
     }
@@ -1935,7 +1773,7 @@ fn timeline_view(
             .items_center()
             .label(title.to_owned())
             .scroll(ScrollSpec { stick_bottom: true })
-            .scroll_edge_fade(TIMELINE_FADE)
+            .scroll_edge_fade(L.px.timeline.fade)
             .child(column),
     )
 }
@@ -1947,26 +1785,10 @@ fn timeline_inset(feed: El) -> El {
         .w_full()
         .grow(1.0)
         .shrink()
-        .min_h(TIMELINE_FEED_FLOOR)
-        .pt(TIMELINE_PAD_TOP)
+        .min_h(L.px.timeline.feed_floor)
+        .pt(L.px.timeline.pad_top)
         .child(feed)
 }
-
-/// Height reserved for the status lane whether or not it has text, so the
-/// transcript does not move when the lane appears or clears.
-const LANE_HEIGHT: f32 = 24.0;
-/// The lane's dot.
-const LANE_DOT: f32 = 7.0;
-/// A dock card: its padding, the gap inside it, and the gap between cards.
-const DOCK_PAD: f32 = 16.0;
-const DOCK_GAP: f32 = 10.0;
-const DOCK_STACK_GAP: f32 = 8.0;
-/// The dock card's border and fill, as opacities of `warn`.
-const DOCK_BORDER: f32 = 0.50;
-const DOCK_FILL: f32 = 0.05;
-/// A dock button's height and horizontal padding.
-const DOCK_BUTTON_HEIGHT: f32 = 32.0;
-const DOCK_BUTTON_PAD: f32 = 14.0;
 
 /// The status lane, then each pending ask docked below it; a pending ask is
 /// drawn here only. Both sit in the timeline's column.
@@ -1980,12 +1802,12 @@ fn timeline_foot(
         .key(format!("lane:{instance:?}"))
         .w_full()
         .min_w(0.0)
-        .min_h(LANE_HEIGHT)
-        .gap(10.0)
+        .min_h(L.px.timeline.lane_height)
+        .gap(L.px.timeline.lane_gap)
         .center_y();
     if let Some(lane) = lane {
         lane_row = lane_row.role("status").label(lane.label.clone());
-        if let Some(dot) = tone_dot(t.tone(lane.tone), LANE_DOT) {
+        if let Some(dot) = tone_dot(t.tone(lane.tone), L.px.timeline.lane_dot) {
             lane_row = lane_row.child(dot);
         }
         lane_row = lane_row.child(
@@ -1999,10 +1821,10 @@ fn timeline_foot(
     }
     let mut foot = col()
         .w_full()
-        .max_w(TIMELINE_COLUMN)
+        .max_w(L.px.timeline.column)
         .min_w(0.0)
-        .gap(DOCK_STACK_GAP);
-    let mut cards = col().w_full().min_w(0.0).gap(DOCK_STACK_GAP);
+        .gap(L.px.timeline.dock_stack_gap);
+    let mut cards = col().w_full().min_w(0.0).gap(L.px.timeline.dock_stack_gap);
     for ask in dock {
         let (primary, meta) = match &ask.entry {
             RyeOsTimelineEntryVm::Line { primary, meta, .. } => (primary.clone(), meta.clone()),
@@ -2012,18 +1834,18 @@ fn timeline_foot(
             .key(format!("dock:{instance:?}:{}", ask.id))
             .w_full()
             .min_w(0.0)
-            .padding(DOCK_PAD)
-            .gap(DOCK_GAP)
+            .padding(L.px.timeline.dock_pad)
+            .gap(L.px.timeline.dock_gap)
             .radius(theme::RADIUS_CARD)
-            .border(1.0, t.warn.alpha(DOCK_BORDER))
-            .fill(t.warn.alpha(DOCK_FILL))
+            .border(1.0, t.warn.alpha(L.px.timeline.dock_border))
+            .fill(t.warn.alpha(L.px.timeline.dock_fill))
             .child(
                 row()
-                    .gap(10.0)
+                    .gap(L.px.timeline.dock_title_gap)
                     .center_y()
                     .child(
-                        el().size(TONE_DOT, TONE_DOT)
-                            .radius(TONE_DOT / 2.0)
+                        el().size(L.px.list.tone_dot, L.px.list.tone_dot)
+                            .radius(L.px.list.tone_dot / 2.0)
                             .fill(t.warn),
                     )
                     .child(
@@ -2049,7 +1871,7 @@ fn timeline_foot(
             .actions
             .iter()
             .position(|action| action.intent.is_some());
-        let mut actions = row().gap(DOCK_STACK_GAP).center_y();
+        let mut actions = row().gap(L.px.timeline.dock_stack_gap).center_y();
         for (index, action) in ask.actions.iter().enumerate() {
             actions = actions.child(dock_action(action, Some(index) == filled));
         }
@@ -2059,9 +1881,12 @@ fn timeline_foot(
     // within a capped height instead.
     if !dock.is_empty() {
         if dock.len() > 1 {
-            cards = cards.max_h(DOCK_STACK_MAX).shrink().scroll(ScrollSpec {
-                stick_bottom: false,
-            });
+            cards = cards
+                .max_h(L.px.timeline.dock_stack_max)
+                .shrink()
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                });
         }
         foot = foot.child(cards);
     }
@@ -2072,29 +1897,26 @@ fn timeline_foot(
     col()
         .w_full()
         .min_w(0.0)
-        .px(TIMELINE_PAD_X)
+        .px(L.px.timeline.pad_x)
         .items_center()
-        .child(el().h(TIMELINE_LANE_SPACE))
+        .child(el().h(L.px.timeline.lane_space))
         .child(foot)
 }
-
-/// The gap between a dock button's word and its key.
-const DOCK_KEY_GAP: f32 = 8.0;
 
 /// A key's cap: a small bordered chip holding the key's name.
 fn key_cap(key: &str) -> El {
     let t = Tokens::get();
     row()
-        .h(20.0)
-        .min_w(20.0)
-        .px(6.0)
+        .h(L.px.timeline.key_cap_height)
+        .min_w(L.px.timeline.key_cap_min_width)
+        .px(L.px.timeline.key_cap_px)
         .center()
-        .radius(5.0)
-        .border(1.0, t.ink_at(0.16))
+        .radius(L.px.spacing.radius_key)
+        .border(1.0, t.ink_at(L.px.timeline.key_cap_border))
         .child(
             text(key.to_owned())
                 .font(theme::TYPE_KEY)
-                .color(t.ink_at(0.60)),
+                .color(t.ink_at(L.px.timeline.key_cap_ink)),
         )
 }
 
@@ -2104,8 +1926,8 @@ fn dock_action(action: &RyeOsTimelineDockActionVm, filled: bool) -> El {
     let p = Palette::get();
     let t = Tokens::get();
     let button = row()
-        .h(DOCK_BUTTON_HEIGHT)
-        .px(DOCK_BUTTON_PAD)
+        .h(L.px.timeline.dock_button_height)
+        .px(L.px.timeline.dock_button_pad)
         .center()
         .radius(theme::RADIUS_BUTTON)
         .role("button");
@@ -2114,7 +1936,7 @@ fn dock_action(action: &RyeOsTimelineDockActionVm, filled: bool) -> El {
             let intent = intent.clone();
             let button = if filled {
                 let mut button = button
-                    .gap(DOCK_KEY_GAP)
+                    .gap(L.px.timeline.dock_key_gap)
                     .fill(t.ink)
                     .hover(t.ink_strong())
                     .child(
@@ -2127,13 +1949,13 @@ fn dock_action(action: &RyeOsTimelineDockActionVm, filled: bool) -> El {
                     button = button.child(
                         text(key.clone())
                             .font(theme::medium(theme::TYPE_NOTE))
-                            .color(t.bg.alpha(0.5)),
+                            .color(t.bg.alpha(L.px.timeline.dock_key_alpha)),
                     );
                 }
                 button
             } else {
                 let mut button = button
-                    .gap(DOCK_KEY_GAP)
+                    .gap(L.px.timeline.dock_key_gap)
                     .border(1.0, t.control_border_strong())
                     .hover(p.plane_selected)
                     .child(
@@ -2169,9 +1991,6 @@ fn dock_action(action: &RyeOsTimelineDockActionVm, filled: bool) -> El {
             ),
     }
 }
-
-/// Estimated height of a timeline entry not yet measured.
-const TIMELINE_ENTRY_ESTIMATE: f32 = 44.0;
 
 /// A timeline entry's key: its id, or its place when it has none.
 fn timeline_entry_key(
@@ -2209,7 +2028,7 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
                 .font(theme::TYPE_PROSE)
                 .color(t.ink_body())
                 .wrap()
-                .max_w(TIMELINE_COLUMN)
+                .max_w(L.px.timeline.column)
                 .grow(1.0)
                 .min_w(0.0)
         }
@@ -2274,7 +2093,7 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
     let mut head = row()
         .w_full()
         .min_w(0.0)
-        .px(SELECT_REACH)
+        .px(L.px.timeline.select_reach)
         .radius(theme::RADIUS_ROW)
         .child(button);
     if selected {
@@ -2286,7 +2105,7 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
             id,
             expanded,
             "timeline entry".to_owned(),
-            CHEVRON_WIDTH,
+            L.px.timeline.chevron_width,
         ));
     }
     // The indent narrows the record from the left, so a nested entry's chevron
@@ -2295,7 +2114,7 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
         .key(timeline_entry_key(instance, timeline, index))
         .w_full()
         .min_w(0.0)
-        .pl(indent * TIMELINE_INDENT)
+        .pl(indent * L.px.timeline.indent)
         .child(head);
     if expanded && let Some(rows) = timeline.details.get(index) {
         record = record.child(details(rows));
@@ -2303,31 +2122,12 @@ fn timeline_entry(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, inde
     record
 }
 
-/// Height of a one-line entry, and of a marker.
-const LINE_ENTRY_HEIGHT: f32 = 26.0;
-const MARKER_HEIGHT: f32 = 22.0;
-/// Between the elements of a one-line entry.
-const LINE_ENTRY_GAP: f32 = 9.0;
-/// Between a marker's rule and its word.
-const MARKER_GAP: f32 = 12.0;
-/// A message bubble: its widest, where its text wraps, and its padding.
-const BUBBLE_WIDTH: f32 = 502.0;
-const BUBBLE_WRAP: f32 = 470.0;
-const BUBBLE_PAD_X: f32 = 16.0;
-const BUBBLE_PAD_Y: f32 = 12.0;
-/// The bubble's fill, as an opacity of `ink`.
-const BUBBLE_FILL: f32 = 0.09;
-
 /// Marks the core puts before a headline that the look does not draw.
 const LEADING_MARKS: [char; 2] = ['↘', '✻'];
 
 fn undecorated(text: &str) -> &str {
     text.trim_start_matches(&LEADING_MARKS[..]).trim_start()
 }
-
-/// The least width a one-line entry's detail keeps: a long headline wraps
-/// before the detail is squeezed to a bare ellipsis against the state word.
-const DETAIL_FLOOR: f32 = 72.0;
 
 /// A one-line entry: a tone dot or nothing, the headline, detail taking the
 /// remaining width and truncating, a state word. The headline never truncates.
@@ -2342,10 +2142,10 @@ fn one_line(
     let mut line = row()
         .grow(1.0)
         .min_w(0.0)
-        .min_h(LINE_ENTRY_HEIGHT)
-        .gap(LINE_ENTRY_GAP)
+        .min_h(L.px.timeline.line_height)
+        .gap(L.px.timeline.line_gap)
         .center_y();
-    if let Some(dot) = tone_dot(tone, TONE_DOT) {
+    if let Some(dot) = tone_dot(tone, L.px.list.tone_dot) {
         line = line.child(dot);
     }
     line = line.child(
@@ -2363,7 +2163,7 @@ fn one_line(
                 .color(t.ink_dim())
                 .truncate()
                 .grow(1.0)
-                .min_w(DETAIL_FLOOR),
+                .min_w(L.px.timeline.detail_floor),
         ),
         None => line.child(el().grow(1.0)),
     };
@@ -2389,8 +2189,8 @@ fn marker_rule(word: &str, detail: Option<&str>) -> El {
     let mut line = row()
         .grow(1.0)
         .min_w(0.0)
-        .min_h(MARKER_HEIGHT)
-        .gap(MARKER_GAP)
+        .min_h(L.px.timeline.marker_height)
+        .gap(L.px.timeline.marker_gap)
         .center_y()
         .child(rule())
         .child(say(word));
@@ -2404,19 +2204,19 @@ fn marker_rule(word: &str, detail: Option<&str>) -> El {
 fn message_bubble(label: &str) -> El {
     let t = Tokens::get();
     row().grow(1.0).min_w(0.0).justify_end().child(
-        el().max_w(BUBBLE_WIDTH)
+        el().max_w(L.px.timeline.bubble_width)
             .min_w(0.0)
-            .px(BUBBLE_PAD_X)
-            .py(BUBBLE_PAD_Y)
+            .px(L.px.timeline.bubble_pad_x)
+            .py(L.px.timeline.bubble_pad_y)
             .radius(theme::RADIUS_BUBBLE)
-            .fill(t.ink_at(BUBBLE_FILL))
+            .fill(t.ink_at(L.px.timeline.bubble_fill))
             .child(
                 text(theme::drawable(label, theme::Face::Ui).into_owned())
                     .selectable(true)
                     .font(theme::TYPE_PROSE)
                     .color(t.ink_strong())
                     .wrap()
-                    .max_w(BUBBLE_WRAP),
+                    .max_w(L.px.timeline.bubble_wrap),
             ),
     )
 }
@@ -2465,17 +2265,25 @@ pub(crate) fn detail_pairs(pairs: &[(&str, String)], style: Pairs) -> El {
 fn pair_block(pairs: &[(&str, String, Option<rune::Color>)], style: Pairs) -> El {
     let t = Tokens::get();
     let (label_width, gap) = match style {
-        Pairs::Record => (110.0, FIELD_ROW_GAP),
-        Pairs::Panel => (76.0, 8.0),
+        Pairs::Record => (L.px.pairs.record_label_width, L.px.list.field_row_gap),
+        Pairs::Panel => (L.px.pairs.panel_label_width, L.px.pairs.panel_gap),
     };
     let mut block = col().w_full();
     block = match style {
-        Pairs::Record => block.pt(7.0).pb(9.0).pl(34.0).pr(12.0),
-        Pairs::Panel => block.py(5.0),
+        Pairs::Record => block
+            .pt(L.px.pairs.record_pt)
+            .pb(L.px.pairs.record_pb)
+            .pl(L.px.pairs.record_pl)
+            .pr(L.px.pairs.record_pr),
+        Pairs::Panel => block.py(L.px.pairs.panel_py),
     };
     for (field, value, tone) in pairs {
-        let mut words = row().grow(1.0).min_w(0.0).gap(TONE_DOT_GAP).center_y();
-        if let Some(dot) = tone_dot(*tone, TONE_DOT) {
+        let mut words = row()
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(L.px.list.tone_dot_gap)
+            .center_y();
+        if let Some(dot) = tone_dot(*tone, L.px.list.tone_dot) {
             words = words.child(dot);
         }
         block = block.child(
@@ -2483,7 +2291,7 @@ fn pair_block(pairs: &[(&str, String, Option<rune::Color>)], style: Pairs) -> El
                 .w_full()
                 .min_w(0.0)
                 .gap(gap)
-                .py(2.0)
+                .py(L.px.pairs.row_py)
                 .child(
                     text((*field).to_owned())
                         .font(theme::TYPE_SMALL)
@@ -2524,20 +2332,20 @@ fn source_status(status: &RyeOsSourceStatusVm) -> El {
         };
         return unavailable(said, &format!("{stale}{}", status.message));
     }
-    row().w_full().px(STATE_PAD_X).py(6.0).child(
-        text(format!("{stale}{}", status.message))
-            .font(theme::TYPE_SMALL)
-            .color(t.ink_dim())
-            .wrap_anywhere()
-            .grow(1.0)
-            .min_w(0.0)
-            .role("status"),
-    )
+    row()
+        .w_full()
+        .px(L.px.state.pad_x)
+        .py(L.px.state.status_py)
+        .child(
+            text(format!("{stale}{}", status.message))
+                .font(theme::TYPE_SMALL)
+                .color(t.ink_dim())
+                .wrap_anywhere()
+                .grow(1.0)
+                .min_w(0.0)
+                .role("status"),
+        )
 }
-
-/// The left inset of a state's lines, and the room above them.
-const STATE_PAD_X: f32 = 10.0;
-const STATE_PAD_TOP: f32 = 10.0;
 
 /// A source that could not be read: a `warn` dot and a sentence, with the
 /// reason on a line beneath it, left-aligned under the header.
@@ -2546,19 +2354,19 @@ fn unavailable(said: &str, reason: &str) -> El {
     let mut lines = col()
         .w_full()
         .min_w(0.0)
-        .px(STATE_PAD_X)
-        .pt(STATE_PAD_TOP)
-        .gap(2.0)
+        .px(L.px.state.pad_x)
+        .pt(L.px.state.pad_top)
+        .gap(L.px.state.unavailable_gap)
         .role("status")
         .label(said.to_owned())
         .child(
             row()
-                .gap(10.0)
-                .min_h(26.0)
+                .gap(L.px.state.unavailable_row_gap)
+                .min_h(L.px.state.unavailable_row_min_height)
                 .center_y()
                 .child(
-                    el().size(UNAVAILABLE_DOT, UNAVAILABLE_DOT)
-                        .radius(UNAVAILABLE_DOT / 2.0)
+                    el().size(L.px.state.unavailable_dot, L.px.state.unavailable_dot)
+                        .radius(L.px.state.unavailable_dot / 2.0)
                         .fill(t.warn),
                 )
                 .child(
@@ -2577,14 +2385,11 @@ fn unavailable(said: &str, reason: &str) -> El {
                 .color(t.ink_dim())
                 .wrap_anywhere()
                 .min_w(0.0)
-                .pl(UNAVAILABLE_DOT + 10.0),
+                .pl(L.px.state.unavailable_dot + L.px.state.unavailable_row_gap),
         );
     }
     lines
 }
-
-/// The unavailable state's dot.
-const UNAVAILABLE_DOT: f32 = 7.0;
 
 /// A view waiting for a subject: what it needs, and the open selections that
 /// can supply it.
@@ -2599,50 +2404,50 @@ fn required_subject(
         .w_full()
         .grow(1.0)
         .justify_center()
-        .gap(12.0)
-        .padding(48.0)
+        .gap(L.px.state.required_gap)
+        .padding(L.px.state.required_pad)
         .role("status")
         .label(title.to_owned())
         .child(
             text("UNRESOLVED VIEW")
-                .font(theme::data(9.0).tracking(1.2))
+                .font(theme::data(L.px.type_scale.s9).tracking(L.px.type_scale.tracking_unresolved))
                 .color(p.accent_bright),
         )
         .child(
             text(title.to_owned())
-                .font(theme::ui(32.0))
+                .font(theme::ui(L.px.type_scale.s32))
                 .color(p.text)
                 .wrap()
                 .w_full(),
         )
         .child(
             text(format!("{input} needs {}.", facets.join(", ")))
-                .font(theme::ui(13.0))
+                .font(theme::ui(L.px.type_scale.s13))
                 .color(p.muted)
                 .wrap()
-                .max_w(560.0),
+                .max_w(L.px.state.required_body_max_width),
         );
     if actions.is_empty() {
         return block.child(
             text("Select a compatible subject in another open set.")
-                .font(theme::data(10.0))
+                .font(theme::data(L.px.type_scale.s10))
                 .color(p.faint),
         );
     }
     let mut choices = row()
         .flex_wrap()
-        .gap(8.0)
-        .mt(8.0)
+        .gap(L.px.state.required_choices_gap)
+        .mt(L.px.state.required_choices_mt)
         .role("group")
         .label("Compatible current selections");
     for action in actions {
         let intent = action.intent.clone();
         choices = choices.child(
             text(action.label.clone())
-                .font(theme::ui(13.0))
+                .font(theme::ui(L.px.type_scale.s13))
                 .color(p.text)
-                .px(12.0)
-                .py(9.0)
+                .px(L.px.state.required_choice_px)
+                .py(L.px.state.required_choice_py)
                 .border(1.0, p.line_strong)
                 .fill(p.plane)
                 .hover(p.plane_selected)
@@ -2677,44 +2482,41 @@ fn empty_state(title: &str, message: &str) -> El {
         };
         return unavailable(&said, reason);
     }
-    col().w_full().px(STATE_PAD_X).pt(STATE_PAD_TOP).child(
-        text(message.to_owned())
-            .font(theme::TYPE_SMALL)
-            .color(t.ink_dim())
-            .wrap()
-            .min_w(0.0),
-    )
+    col()
+        .w_full()
+        .px(L.px.state.pad_x)
+        .pt(L.px.state.pad_top)
+        .child(
+            text(message.to_owned())
+                .font(theme::TYPE_SMALL)
+                .color(t.ink_dim())
+                .wrap()
+                .min_w(0.0),
+        )
 }
-
-/// The widths of a loading page's bars, in a row's columns.
-const SKELETON_BARS: [f32; 6] = [90.0, 62.0, 120.0, 64.0, 83.0, 56.0];
-const SKELETON_ROWS: usize = 8;
-const SKELETON_ROW_HEIGHT: f32 = 28.0;
-const SKELETON_BAR_HEIGHT: f32 = 8.0;
-const SKELETON_FILL: f32 = 0.07;
 
 /// A page that is still being read: still bars where the rows will be, and a
 /// word under them. Nothing moves, so nothing seems to be happening that is
 /// not.
 fn loading_skeleton() -> El {
     let t = Tokens::get();
-    let mut rows = col().w_full().gap(1.0);
-    for index in 0..SKELETON_ROWS {
+    let mut rows = col().w_full().gap(L.px.state.skeleton_row_gap);
+    for index in 0..L.px.state.skeleton_rows {
         let mut line = row()
             .key(format!("skeleton:{index}"))
             .w_full()
             .min_w(0.0)
-            .h(SKELETON_ROW_HEIGHT)
-            .gap(12.0)
+            .h(L.px.state.skeleton_row_height)
+            .gap(L.px.state.skeleton_line_gap)
             .center_y();
-        for width in SKELETON_BARS {
+        for width in L.px.state.skeleton_bars {
             // The bars give way, so a narrow tile never clips the last one.
             line = line.child(
-                el().size(width, SKELETON_BAR_HEIGHT)
+                el().size(width, L.px.state.skeleton_bar_height)
                     .min_w(0.0)
                     .shrink()
-                    .radius(SKELETON_BAR_HEIGHT / 2.0)
-                    .fill(t.ink_at(SKELETON_FILL)),
+                    .radius(L.px.state.skeleton_bar_height / 2.0)
+                    .fill(t.ink_at(L.px.state.skeleton_fill)),
             );
         }
         rows = rows.child(line);
@@ -2722,16 +2524,16 @@ fn loading_skeleton() -> El {
     col()
         .w_full()
         .min_w(0.0)
-        .px(STATE_PAD_X)
-        .pt(STATE_PAD_TOP)
-        .gap(10.0)
+        .px(L.px.state.pad_x)
+        .pt(L.px.state.pad_top)
+        .gap(L.px.state.skeleton_gap)
         .role("status")
         .label("Reading")
         .child(rows)
         .child(
             text("Reading…")
                 .font(theme::TYPE_MICRO)
-                .color(t.ink_at(0.40)),
+                .color(t.ink_at(L.px.state.skeleton_word_ink)),
         )
 }
 
