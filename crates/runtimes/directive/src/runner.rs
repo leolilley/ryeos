@@ -6238,6 +6238,93 @@ mod tests {
         ]));
     }
 
+    fn spill_settled(text: String) -> crate::tool_images::Settled {
+        crate::tool_images::Settled {
+            text,
+            images: Vec::new(),
+            dropped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_spilled_result_records_its_stored_text_and_validates() {
+        let output = crate::directive::ToolOutputConfig::default();
+        let mut guard = ResultGuard::new();
+        let big = "x".repeat(200 * 1024);
+        let rendered = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big.clone()),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Allowed,
+        );
+        assert_eq!(rendered.truncated_reason, Some("result_spilled"));
+        assert!(
+            rendered
+                .content
+                .starts_with(ryeos_runtime::TOOL_RESULT_PARTIAL_PREFIX)
+        );
+        assert!(rendered.content.len() < 40 * 1024);
+        let payload = rendered.payload(&"a".repeat(64), "call-1");
+        payload.validate().unwrap();
+        let spill = payload.guard.spill.as_ref().expect("spill recorded");
+        assert_eq!(payload.attachment_refs, vec![spill.attachment.clone()]);
+        assert_eq!(rendered.uploads().len(), 1);
+        assert_eq!(rendered.uploads()[0].bytes(), big.as_bytes());
+    }
+
+    #[test]
+    fn a_refused_spill_is_recorded_again_cut_with_its_cause() {
+        let output = crate::directive::ToolOutputConfig::default();
+        let mut guard = ResultGuard::new();
+        let big = "x".repeat(200 * 1024);
+        let rendered = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big.clone()),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Allowed,
+        );
+        let cut = rendered.without_spill(SPILL_MEDIA_TYPE_NOT_ADMITTED, &mut guard, &output);
+        assert!(cut.spilled.is_none());
+        assert!(cut.uploads().is_empty());
+        assert_eq!(cut.truncated_reason, Some(SPILL_MEDIA_TYPE_NOT_ADMITTED));
+        assert!(cut.content.ends_with("[...truncated at 100KB]"));
+        let payload = cut.payload(&"a".repeat(64), "call-1");
+        payload.validate().unwrap();
+        assert!(payload.attachment_refs.is_empty());
+        assert!(payload.guard.spill.is_none());
+        // The cut text is the one that was recorded, so the same result again
+        // collapses to it (the preview's key was taken back, not left behind).
+        let again = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Disabled(SPILL_MEDIA_TYPE_NOT_ADMITTED),
+        );
+        assert!(again.duplicate_of.is_some());
+    }
+
+    #[test]
+    fn node_refusals_map_to_typed_spill_reasons() {
+        assert_eq!(
+            spill_refusal_reason("attachment media type 'text/plain' is not accepted by this node"),
+            "spill_media_type_not_admitted"
+        );
+        assert_eq!(
+            spill_refusal_reason("attachment is 5000000 bytes (node limit 4194304)"),
+            "spill_over_attachment_limit"
+        );
+        assert_eq!(
+            spill_refusal_reason("append carries 17 attachments (node limit 16 per turn)"),
+            "spill_attachment_budget_spent"
+        );
+    }
+
     #[test]
     fn a_dropped_image_note_survives_truncation_and_duplicate_collapse() {
         let settled = |text: String| crate::tool_images::Settled {
