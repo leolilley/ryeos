@@ -249,7 +249,10 @@ use ryeos_app::dedicated_session_service::{
 
 /// What a restart does with the root of the dedicated session `thread_id`
 /// names, if any, keyed by the session's state through the one policy table.
-pub(crate) fn dedicated_session_root_resume(state: &AppState, thread_id: &str) -> Result<SessionRootResume> {
+pub(crate) fn dedicated_session_root_resume(
+    state: &AppState,
+    thread_id: &str,
+) -> Result<SessionRootResume> {
     Ok(session_root_resume(
         state
             .state_store
