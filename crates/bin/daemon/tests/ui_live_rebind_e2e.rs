@@ -56,12 +56,12 @@ fn write_signed(
     relative: &str,
     body: &str,
     signer: &lillux::crypto::SigningKey,
-) -> Vec<u8> {
+) -> String {
     let path = project.join(relative);
     std::fs::create_dir_all(path.parent().expect("item parent")).expect("create item directory");
     let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(&path, &signed).expect("write signed item");
-    signed.into_bytes()
+    signed
 }
 
 /// What `ryeos sign` leaves behind for the view: the new signed file and a
@@ -84,7 +84,7 @@ fn operator_signs_view(
             item: &ChainItem::parse(VIEW_REF).expect("view chain item"),
             file_ext: ".yaml",
             before: before.as_deref(),
-            after: Some(&after),
+            after: Some(after.as_str()),
             provenance: std::collections::BTreeMap::from([(
                 "action".to_owned(),
                 "sign".to_owned(),
