@@ -47,6 +47,9 @@ pub async fn push_snapshot_generation(
     project_path_for_ref: &str,
     project_name: &ryeos_state::project_identity::ProjectName,
 ) -> Result<PushResult> {
+    let project = ryeos_state::project_identity::PushedProject::Named {
+        name: project_name.clone(),
+    };
     let local_cas = authority.cas_store()?;
     let snapshot_value = local_cas
         .get_object(snapshot_hash)?
@@ -92,7 +95,7 @@ pub async fn push_snapshot_generation(
             });
         }
         let upload_session = client
-            .objects_put(None, project_name, &[], &[])
+            .objects_put(None, &project, &[], &[])
             .await?;
         let upload_closure = collect_snapshot_upload_hashes(
             &local_cas,
@@ -112,13 +115,13 @@ pub async fn push_snapshot_generation(
             &local_cas,
             &upload_closure,
             snapshot_hash,
-            project_name,
+            &project,
             upload_session,
         )
         .await?;
         client
             .push_head(
-                project_name,
+                &project,
                 snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
@@ -154,6 +157,9 @@ pub async fn push_descendant_snapshot_with_session(
     project_name: &ryeos_state::project_identity::ProjectName,
     upload_session: ObjectsPutResponse,
 ) -> Result<PushResult> {
+    let project = ryeos_state::project_identity::PushedProject::Named {
+        name: project_name.clone(),
+    };
     let expected_previous_hash = upload_session
         .expected_previous_hash
         .as_deref()
@@ -219,13 +225,13 @@ pub async fn push_descendant_snapshot_with_session(
             &local_cas,
             &upload_closure,
             snapshot_hash,
-            project_name,
+            &project,
             upload_session,
         )
         .await?;
         client
             .push_head(
-                project_name,
+                &project,
                 snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
@@ -264,6 +270,9 @@ pub async fn push_project_ai_only(
     project_name: &ryeos_state::project_identity::ProjectName,
     remote_ignore: &IgnoreMatcher,
 ) -> Result<PushResult> {
+    let project = ryeos_state::project_identity::PushedProject::Named {
+        name: project_name.clone(),
+    };
     let app_root = &state.config.app_root;
     refuse_walking_root(local_project_path, app_root)?;
     require_declared_name(
@@ -313,7 +322,7 @@ pub async fn push_project_ai_only(
         project_root.ensure_path_binding()?;
 
         let upload_session = client
-            .objects_put(None, project_name, &[], &[])
+            .objects_put(None, &project, &[], &[])
             .await?;
 
         let tree_hash = {
@@ -357,14 +366,14 @@ pub async fn push_project_ai_only(
             &local_cas,
             &upload_closure,
             &snapshot_hash,
-            project_name,
+            &project,
             upload_session,
         )
         .await?;
 
         client
             .push_head(
-                project_name,
+                &project,
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
@@ -408,6 +417,9 @@ pub async fn push_project(
     project_name: &ryeos_state::project_identity::ProjectName,
     remote_ignore: &IgnoreMatcher,
 ) -> Result<PushResult> {
+    let project = ryeos_state::project_identity::PushedProject::Named {
+        name: project_name.clone(),
+    };
     let app_root = &state.config.app_root;
 
     // Fail-fast guards: prevent the common footgun of running
@@ -457,7 +469,7 @@ pub async fn push_project(
         project_root.ensure_path_binding()?;
 
         let upload_session = client
-            .objects_put(None, project_name, &[], &[])
+            .objects_put(None, &project, &[], &[])
             .await?;
 
         let tree_hash = {
@@ -500,14 +512,14 @@ pub async fn push_project(
             &local_cas,
             &upload_closure,
             &snapshot_hash,
-            project_name,
+            &project,
             upload_session,
         )
         .await?;
 
         client
             .push_head(
-                project_name,
+                &project,
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
@@ -598,7 +610,7 @@ pub(crate) async fn upload_missing(
     local_cas: &CasStore,
     upload_closure: &SnapshotCasClosure,
     publication_root_hash: &str,
-    project_name: &ryeos_state::project_identity::ProjectName,
+    project: &ryeos_state::project_identity::PushedProject,
     upload_session: ObjectsPutResponse,
 ) -> Result<StagedUploadResult> {
     if !upload_closure
@@ -615,7 +627,7 @@ pub(crate) async fn upload_missing(
     // head, so the receiver answers them absent and they are uploaded; the
     // write deduplicates. Nothing outside the pusher's own head is revealed.
     let read_root = crate::objects_read_scope::ReadRoot::ProjectHead {
-        project_name: project_name.clone(),
+        project: project.clone(),
     };
     let has_resp = client
         .objects_has(
@@ -711,7 +723,7 @@ pub(crate) async fn upload_missing(
                 blob_index += 1;
             }
             let response = client
-                .objects_put(Some(&staging_id), project_name, &batch, &[])
+                .objects_put(Some(&staging_id), project, &batch, &[])
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
             validate_upload_response(&response.blob_hashes, &expected, "blob")?;
@@ -736,7 +748,7 @@ pub(crate) async fn upload_missing(
                 data: base64::engine::general_purpose::STANDARD.encode(&buffer[..read]),
             };
             let response = client
-                .objects_put_blob_chunk(&staging_id, project_name, &chunk)
+                .objects_put_blob_chunk(&staging_id, project, &chunk)
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
             validate_upload_response(&response.object_hashes, &[], "object")?;
@@ -755,7 +767,7 @@ pub(crate) async fn upload_missing(
     // Keep only one bounded request of raw object bodies resident at a time.
     // The empty request serialization accounts for the exact staging/path and
     // array envelope, including JSON escaping in caller-controlled paths.
-    let envelope_bytes = object_put_envelope_bytes(&staging_id, project_name)?;
+    let envelope_bytes = object_put_envelope_bytes(&staging_id, project)?;
     if envelope_bytes.saturating_add(10) > OBJECTS_PUT_BODY_BUDGET_BYTES {
         anyhow::bail!("objects/put request envelope exceeds its body budget");
     }
@@ -778,7 +790,7 @@ pub(crate) async fn upload_missing(
             send_raw_object_batch(
                 client,
                 &staging_id,
-                project_name,
+                project,
                 &object_batch,
                 expected_previous_hash.as_deref(),
             )
@@ -799,7 +811,7 @@ pub(crate) async fn upload_missing(
         send_raw_object_batch(
             client,
             &staging_id,
-            project_name,
+            project,
             &object_batch,
             expected_previous_hash.as_deref(),
         )
@@ -814,7 +826,7 @@ pub(crate) async fn upload_missing(
     })
 }
 
-/// Refuse unless the project tree declares `project_name`. The name a caller
+/// Refuse unless the project tree declares `project`. The name a caller
 /// stored (a binding) is never used without re-reading the declaration.
 fn require_declared_name(
     declared: Option<ryeos_state::project_identity::ProjectName>,
@@ -860,10 +872,10 @@ fn load_canonical_object_for_upload(
     RawObjectUpload::from_canonical_bytes(hash.to_owned(), bytes)
 }
 
-fn object_put_envelope_bytes(staging_id: &str, project_name: &ryeos_state::project_identity::ProjectName) -> Result<usize> {
+fn object_put_envelope_bytes(staging_id: &str, project: &ryeos_state::project_identity::PushedProject) -> Result<usize> {
     Ok(serde_json::to_vec(&serde_json::json!({
         "staging_id": staging_id,
-        "project_name": project_name,
+        "project": project,
         "blobs": [],
         "blob_chunks": [],
         "objects": [],
@@ -879,7 +891,7 @@ fn raw_object_entry_bytes(entry: &RawObjectUpload) -> usize {
 async fn send_raw_object_batch(
     client: &RemoteClient,
     staging_id: &str,
-    project_name: &ryeos_state::project_identity::ProjectName,
+    project: &ryeos_state::project_identity::PushedProject,
     batch: &[RawObjectUpload],
     expected_previous_hash: Option<&str>,
 ) -> Result<()> {
@@ -888,7 +900,7 @@ async fn send_raw_object_batch(
         .map(|entry| entry.hash.clone())
         .collect::<Vec<_>>();
     let response = client
-        .objects_put_raw(Some(staging_id), project_name, &[], batch)
+        .objects_put_raw(Some(staging_id), project, &[], batch)
         .await?;
     validate_upload_session(&response, staging_id, expected_previous_hash)?;
     validate_upload_response(&response.blob_hashes, &[], "blob")?;
@@ -1139,11 +1151,13 @@ mod upload_batch_tests {
             br#"{"kind":"example"}"#.to_vec(),
         )
         .unwrap();
-        let name = ryeos_state::project_identity::ProjectName::new("project").unwrap();
-        let envelope = object_put_envelope_bytes("stage", &name).unwrap();
+        let project = ryeos_state::project_identity::PushedProject::Named {
+            name: ryeos_state::project_identity::ProjectName::new("project").unwrap(),
+        };
+        let envelope = object_put_envelope_bytes("stage", &project).unwrap();
         let actual = serde_json::to_vec(&serde_json::json!({
             "staging_id": "stage",
-            "project_name": "project",
+            "project": {"kind": "named", "name": "project"},
             "blobs": [],
             "blob_chunks": [],
             "objects": [{"value": serde_json::from_str::<serde_json::Value>(value.value.get()).unwrap()}],

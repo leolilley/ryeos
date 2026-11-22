@@ -156,6 +156,55 @@ impl fmt::Display for ProjectIdentity {
     }
 }
 
+/// The reserved head name of `--no-project` pushes. Not a valid
+/// [`ProjectName`].
+pub const NO_PROJECT_HEAD_NAME: &str = "__no_project__";
+
+/// Which of the caller's heads a push, upload or head read targets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PushedProject {
+    /// A project head, keyed by the name its snapshot declares.
+    Named { name: ProjectName },
+    /// The per-principal `--no-project` head, whose snapshot is an empty tree.
+    NoProject,
+}
+
+impl PushedProject {
+    /// The head this target names for `principal_id`, the authenticated
+    /// caller.
+    pub fn head_key(&self, principal_id: &str) -> Result<ProjectHeadKey> {
+        match self {
+            Self::Named { name } => ProjectHeadKey::owned_by(principal_id, name),
+            Self::NoProject => ProjectHeadKey::no_project(principal_id),
+        }
+    }
+
+    /// Refuse unless a snapshot tree that declares `declared` and holds
+    /// `file_count` files is this target's content: a named head needs the
+    /// same declared name; the no-project head needs an empty tree.
+    pub fn require_content(&self, declared: Option<&ProjectName>, file_count: usize) -> Result<()> {
+        match self {
+            Self::Named { name } if declared == Some(name) => Ok(()),
+            Self::Named { name } => bail!(
+                "project_name_mismatch: the request names project {name} but the snapshot declares {}",
+                declared.map_or_else(|| "no name".to_owned(), ToString::to_string)
+            ),
+            Self::NoProject if file_count == 0 => Ok(()),
+            Self::NoProject => bail!("a no-project head must point at an empty project tree"),
+        }
+    }
+}
+
+impl fmt::Display for PushedProject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Named { name } => write!(formatter, "{name}"),
+            Self::NoProject => formatter.write_str("(no project)"),
+        }
+    }
+}
+
 /// Where a pushed project head lives: the owner's storage key and the
 /// sha256 of the project name, `projects/<owner hex>/<sha256(name)>/head`.
 ///
@@ -185,6 +234,17 @@ impl ProjectHeadKey {
         Ok(Self {
             owner_key,
             name_hash: lillux::cas::sha256_hex(name.as_str().as_bytes()),
+        })
+    }
+
+    /// The caller's `--no-project` head: a per-principal head of an empty
+    /// tree. Its name hash is of a reserved string no [`ProjectName`] can be
+    /// (names cannot start with `_`), so it never collides with a project.
+    pub fn no_project(principal_id: &str) -> Result<Self> {
+        let owner_key = crate::refs::principal_storage_key(principal_id)?.to_owned();
+        Ok(Self {
+            owner_key,
+            name_hash: lillux::cas::sha256_hex(NO_PROJECT_HEAD_NAME.as_bytes()),
         })
     }
 

@@ -152,10 +152,17 @@ pub async fn handle(
         }
     };
 
-    // Resolve project binding if present.
-    if let (Some(proj_path), Some(loaded)) = (abs_project_path.as_ref(), loaded_remote.as_ref()) {
-        match config::resolve_loaded_project_binding(loaded, proj_path) {
-            Ok(binding) => match binding.sync_scope {
+    // Resolve the project binding if one exists; one that exists must
+    // resolve, including its name check.
+    let mut project_name = None;
+    if let Some(proj_path) = abs_project_path.as_ref() {
+        let binding = match loaded_remote.as_ref() {
+            Some(loaded) => config::existing_project_binding(loaded, proj_path)
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
+            None => None,
+        };
+        if let Some(binding) = binding.as_ref() {
+            match binding.sync_scope {
                 ryeos_state::project_sync::ProjectSyncScope::AiOnly => {
                     return Err(HandlerError::BadRequest(format!(
                         "remote execute is not supported for ai_only binding '{}' -> '{}' yet; use remote sync-project-ai for deployment or bind as full_project",
@@ -164,21 +171,14 @@ pub async fn handle(
                     )));
                 }
                 ryeos_state::project_sync::ProjectSyncScope::FullProject => {
-                    config::validate_remote_project_path(&binding.remote_project_path).map_err(
-                        |e| {
-                            HandlerError::BadRequest(format!(
-                                "invalid remote project binding: {e:#}"
-                            ))
-                        },
-                    )?;
                     project_path_for_ref = binding.remote_project_path.clone();
                 }
-            },
-            Err(_) => {
-                // No binding is required for an unbound execute; use the
-                // canonical local project path as the remote path ref.
             }
         }
+        project_name = Some(
+            config::push_project_name(binding.as_ref(), proj_path)
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
+        );
     }
 
     // Load remote's cached ignore rules (required). Inline fetch on cache miss,
@@ -232,6 +232,7 @@ pub async fn handle(
             local_project_path: abs_project_path.as_deref(),
             source_snapshot_hash: None,
             remote_project_path: &project_path_for_ref,
+            project_name: project_name.as_ref(),
             parameters: req.parameters.clone(),
             execution_policy: &execution_policy,
             acting_principal: &ctx.fingerprint,

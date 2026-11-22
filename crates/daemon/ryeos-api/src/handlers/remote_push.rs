@@ -155,34 +155,17 @@ pub async fn handle(
         }
     };
     let mut scope = ProjectSyncScope::default();
-    let mut bound_name = None;
+    let mut binding = None;
     if let Some(loaded) = loaded_remote.as_ref() {
-        // No binding is required for the default ai_only push. A binding
-        // that exists must resolve, including its name check; its failure is
-        // never treated as "unbound".
-        let canonical = config::canonical_local_project_path(&abs_project_path)?;
-        if loaded
-            .config
-            .project_bindings
-            .contains_key(config::local_project_identity(&canonical)?)
-        {
-            let binding = config::resolve_loaded_project_binding(loaded, &abs_project_path)?;
-            scope = binding.sync_scope;
-            project_path_for_ref = binding.remote_project_path;
-            bound_name = Some(binding.project_name);
-        }
+        // No binding is required for the default ai_only push; one that
+        // exists must resolve.
+        binding = config::existing_project_binding(loaded, &abs_project_path)?;
     }
-    let project_name = match bound_name {
-        Some(name) => name,
-        None => ryeos_state::project_identity::ProjectDeclaration::declared_name(&abs_project_path)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "project_undeclared: {} declares no project name in {}; a pushed head is keyed by it",
-                    abs_project_path.display(),
-                    ryeos_state::project_identity::PROJECT_DECLARATION_PATH
-                )
-            })?,
-    };
+    if let Some(binding) = binding.as_ref() {
+        scope = binding.sync_scope;
+        project_path_for_ref = binding.remote_project_path.clone();
+    }
+    let project_name = config::push_project_name(binding.as_ref(), &abs_project_path)?;
 
     match scope {
         ProjectSyncScope::AiOnly => {

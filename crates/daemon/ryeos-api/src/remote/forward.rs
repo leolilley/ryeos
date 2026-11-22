@@ -21,6 +21,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use ryeos_state::project_identity::PushedProject;
+
 use crate::remote::client::RemoteClient;
 use crate::remote::config::ResolvedRemote;
 use crate::remote::pull::{PullResultsError, extract_snapshot_hash, pull_results};
@@ -55,8 +57,11 @@ pub struct RemoteForwardRequest<'a> {
     /// Exact already-admitted local generation to upload. When absent, the
     /// explicit remote-execute workflow captures `local_project_path` now.
     pub source_snapshot_hash: Option<&'a str>,
-    /// Remote project path used in push-head ref and /execute body.
+    /// Remote project path used in the /execute body.
     pub remote_project_path: &'a str,
+    /// The bound project name the pushed head is keyed by. `None` only for
+    /// --no-project mode, which pushes the caller's no-project head.
+    pub project_name: Option<&'a ryeos_state::project_identity::ProjectName>,
     /// Parameters for the item.
     pub parameters: Value,
     /// Exact execution contract to present to the destination node. Routing
@@ -450,8 +455,14 @@ pub async fn execute_unary_forward(
     // 1. Push project (or no-project user-space-only push).
     let push_result = match (req.source_snapshot_hash, req.local_project_path) {
         (Some(snapshot_hash), _) => {
-            push_snapshot_generation(client, &authority, snapshot_hash, req.remote_project_path)
-                .await
+            push_snapshot_generation(
+                client,
+                &authority,
+                snapshot_hash,
+                req.remote_project_path,
+                required_project_name(req.project_name)?,
+            )
+            .await
                 .map_err(|e| {
                     let message = format!("{e:#}");
                     let _ = finish_sync_job_attempt_and_update_job(
@@ -483,7 +494,7 @@ pub async fn execute_unary_forward(
             state,
             &authority,
             proj_path,
-            req.remote_project_path,
+            required_project_name(req.project_name)?,
             req.remote_ignore,
         )
         .await
@@ -521,7 +532,6 @@ pub async fn execute_unary_forward(
             match push_no_project(
                 &authority,
                 client,
-                req.remote_project_path,
                 &transfer_ignore,
             )
             .await
@@ -953,7 +963,6 @@ fn update_sync_job(
 async fn push_no_project(
     authority: &PinnedStateAuthority,
     client: &RemoteClient,
-    remote_project_path: &str,
     remote_ignore: &IgnoreMatcher,
 ) -> Result<PushResult, RemoteForwardError> {
     use crate::remote::push::{
@@ -985,7 +994,7 @@ async fn push_no_project(
         };
 
         let upload_session = client
-            .objects_put(None, remote_project_path, &[], &[])
+            .objects_put(None, &PushedProject::NoProject, &[], &[])
             .await?;
 
         let snapshot = ryeos_state::objects::ProjectSnapshot {
@@ -1025,14 +1034,14 @@ async fn push_no_project(
             &local_cas,
             &upload_closure,
             &snapshot_hash,
-            remote_project_path,
+            &PushedProject::NoProject,
             upload_session,
         )
         .await?;
 
         client
             .push_head(
-                remote_project_path,
+                &PushedProject::NoProject,
                 &snapshot_hash,
                 &upload.staging_id,
                 upload.expected_previous_hash.as_deref(),
@@ -1052,6 +1061,18 @@ async fn push_no_project(
 
     finish_staged_roots(authority, &mut staged_roots, operation)
         .map_err(|e| RemoteForwardError::PushFailed(format!("{e:#}")))
+}
+
+/// The project name a project push needs; a project push without one is a
+/// caller bug, refused before anything is uploaded.
+fn required_project_name(
+    name: Option<&ryeos_state::project_identity::ProjectName>,
+) -> Result<&ryeos_state::project_identity::ProjectName, RemoteForwardError> {
+    name.ok_or_else(|| {
+        RemoteForwardError::PushFailed(
+            "a project push needs the bound project name".to_owned(),
+        )
+    })
 }
 
 fn no_project_snapshot_policy(

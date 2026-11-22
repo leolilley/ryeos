@@ -23,9 +23,10 @@ pub struct ExplicitExpectedHash(Option<String>);
 pub struct Request {
     /// Principal-bound durable upload capability returned by `objects/put`.
     pub staging_id: String,
-    /// The project name. The head is keyed by (the caller, this name), and
-    /// the snapshot's `.ai/project.yaml` must declare the same name.
-    pub project_name: ryeos_state::project_identity::ProjectName,
+    /// The caller's head this publishes: a project, keyed by (the caller,
+    /// its name) and whose snapshot must declare that name, or the caller's
+    /// `--no-project` head of an empty tree.
+    pub project: ryeos_state::project_identity::PushedProject,
     /// CAS hash of the `ProjectSnapshot` to point HEAD at.
     pub snapshot_hash: String,
     /// Exact principal HEAD observed when the server minted `staging_id`.
@@ -49,8 +50,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     // The head is the caller's own under the requested name: the owner is
     // the authenticated principal, never request input.
-    let head_key =
-        ryeos_state::project_identity::ProjectHeadKey::owned_by(&ctx.fingerprint, &req.project_name)?;
+    let head_key = req.project.head_key(&ctx.fingerprint)?;
     let principal_key = head_key.owner_key();
     let project_hash = head_key.name_hash();
     let publication_key = ryeos_state::DurableCasPublicationKey::project_head(&head_key)?;
@@ -152,13 +152,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let tree = ryeos_state::objects::ProjectTree::from_value(&tree_obj)?;
     let declared =
         ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)?;
-    if declared.as_ref() != Some(&req.project_name) {
-        return Err(anyhow!(
-            "project_name_mismatch: push-head names project {} but the snapshot declares {}",
-            req.project_name,
-            declared.map_or_else(|| "no name".to_owned(), |name| name.to_string())
-        ));
-    }
+    req.project
+        .require_content(declared.as_ref(), tree.files.len())?;
     let policy_obj = cas
         .get_object(&snapshot.effective_policy_hash)?
         .ok_or_else(|| {
@@ -222,7 +217,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     Ok(serde_json::json!({
         "principal_key": principal_key,
         "project_hash": project_hash,
-        "project_name": req.project_name,
+        "project": req.project,
         "snapshot_hash": req.snapshot_hash,
         "tree_entries": tree.files.len(),
     }))

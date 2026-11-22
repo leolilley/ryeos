@@ -827,6 +827,43 @@ pub fn require_bound_name(canonical: &Path, bound: &ryeos_state::project_identit
     Ok(())
 }
 
+/// The binding for `local_project_path` when one exists. A binding that
+/// exists must resolve, including its name check: its failure is an error,
+/// never "unbound".
+pub fn existing_project_binding(
+    loaded: &LoadedRemote,
+    local_project_path: &Path,
+) -> Result<Option<ResolvedProjectBinding>> {
+    let canonical = canonical_local_project_path(local_project_path)?;
+    if !loaded
+        .config
+        .project_bindings
+        .contains_key(local_project_identity(&canonical)?)
+    {
+        return Ok(None);
+    }
+    resolve_project_binding(&loaded.config, local_project_path).map(Some)
+}
+
+/// The name a push of `local_project_path` keys its head by: the binding's
+/// (already re-checked against the tree), else what the tree declares now.
+pub fn push_project_name(
+    binding: Option<&ResolvedProjectBinding>,
+    local_project_path: &Path,
+) -> Result<ryeos_state::project_identity::ProjectName> {
+    if let Some(binding) = binding {
+        return Ok(binding.project_name.clone());
+    }
+    ryeos_state::project_identity::ProjectDeclaration::declared_name(local_project_path)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "project_undeclared: {} declares no project name in {}; a pushed head is keyed by it",
+                local_project_path.display(),
+                ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+            )
+        })
+}
+
 /// Resolve a local->remote binding from operator-local project_bindings.
 pub fn resolve_loaded_project_binding(
     loaded: &LoadedRemote,
