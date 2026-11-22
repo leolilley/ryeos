@@ -1194,18 +1194,26 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(selectors[".tmp/**"]["class"], "rebuildable_cache")
         self.assertEqual(selectors["tmp/**"]["class"], "rebuildable_cache")
 
-    def test_every_profile_pins_the_app_server_version_the_activation_installs(self) -> None:
-        activation = (BUNDLE / ".ai/config/codex/activation.yaml").read_text()
-        match = re.search(r"/codex/releases/([0-9.]+)/codex-package", activation)
-        self.assertIsNotNone(match)
-        for name in ("structured-session.profile.json", "authoring.profile.json",
-                     "external-authoring.profile.json"):
-            with self.subTest(profile=name):
-                profile = json.loads((SOURCE / name).read_text())
-                pins = [step["expected_server_version"]
+    def test_every_profile_pins_the_version_every_activation_installs(self) -> None:
+        # The pin is the version reported by the workload, a drift guard; the
+        # activation sha256 pins are the binary identity evidence.
+        versions = {}
+        for path in sorted((BUNDLE / ".ai/config/codex").glob("*activation*.yaml")):
+            found = set(re.findall(r"/codex/releases/([0-9.]+)/codex-package", path.read_text()))
+            if found:
+                versions[path.name] = found
+        self.assertGreaterEqual(len(versions), 5, versions)
+        distinct = set().union(*versions.values())
+        self.assertEqual(len(distinct), 1, versions)
+        profiles = sorted(BUNDLE.glob("**/*.profile.json"))
+        self.assertTrue(profiles)
+        for path in profiles:
+            with self.subTest(profile=path.name):
+                profile = json.loads(path.read_text())
+                pins = [step.get("expected_server_version")
                         for step in profile["initialization"]
                         if step["method"] == "initialize"]
-                self.assertEqual(pins, [match.group(1)])
+                self.assertEqual(pins, list(distinct))
 
     def test_every_pinned_server_notification_is_classified_by_every_profile(self) -> None:
         # The bridge ends a session on any notification its profile neither

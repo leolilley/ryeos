@@ -398,22 +398,37 @@ struct InitializationStep {
 }
 
 /// Refuse a workload whose initialize response reports a version other than
-/// the pinned one. The response carries it as `userAgent`, whose first
-/// `<originator>/<version>` token names the binary release.
+/// the pinned one. The version reported by the workload is the first
+/// `<originator>/<version>` token of `userAgent`. It is a drift guard against
+/// a wrong or stale install, never evidence of binary identity; the
+/// activation sha256 pins are that evidence.
 fn check_server_version(pinned: &str, result: &Value) -> Result<()> {
-    let found = result
+    let agent = result
         .get("userAgent")
         .and_then(Value::as_str)
-        .and_then(|agent| agent.split_whitespace().next())
+        .unwrap_or("");
+    let found = agent
+        .split_whitespace()
+        .next()
         .and_then(|token| token.rsplit_once('/'))
         .map(|(_, version)| version)
-        .unwrap_or("unreported");
-    if found != pinned {
-        bail!(
-            "structured-session workload reports app-server version `{found}` but the pinned version is `{pinned}`; install the pinned release or update the profile pin and activation together"
-        );
+        .filter(|version| !version.is_empty());
+    match found {
+        None => {
+            let raw: String = agent
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(120)
+                .collect();
+            bail!(
+                "structured-session workload did not report a version in its initialize userAgent (`{raw}`); the pinned version is `{pinned}`"
+            );
+        }
+        Some(found) if found != pinned => bail!(
+            "structured-session workload reported app-server version `{found}` but the pinned version is `{pinned}`; profiles and activations are signed data: update the profile pin and activation together, re-sign them, and re-derive bindings"
+        ),
+        Some(_) => Ok(()),
     }
-    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
