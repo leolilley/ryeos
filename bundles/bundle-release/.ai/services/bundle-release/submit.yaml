@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-19T03:51:21Z:ac8ba2adaee2d34dbc140f4e57768138a82f924d1292bfe8d0f25048b36920e7:vmoO8XLxu8Zy0gAr7QfCFxeaFcc9sbz9TbkXzvCZVAdcl6C6SN80bSzcqUouLACHt7mrUF+GOBpVwmLoQQ03Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:45b0621b76c99131cd1101d2b03fa39750a129ecb1ac1426ab6e21244eada0c0:jS7h9SbSiD4hE+KGO/FPURUoL5vaIYoAk3GMcla0jhrEtPbTeOfwshLEBIskbeY+aF7A9MzzXrUFmnGxcT82DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: submit
 version: "1.0.0"
 description: Submit the canonical native release Graph from an admitted RyeOS development project.
-endpoint: bundle_release.submit
+endpoint: bundle-release.submit
 availability: daemon_only
 required_caps: ["ryeos.execute.service.bundle-release/submit"]
 schema:

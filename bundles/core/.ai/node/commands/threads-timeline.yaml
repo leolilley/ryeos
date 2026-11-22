@@ -1,0 +1,19 @@
+# ryeos:signed:2026-11-17T14:51:24Z:01f1461fae2f1b4d573665b4e7390ef51e78c73f2534b837c55b649e3b275793:osmuf6x8/VN20Rp4cxSVUfgo6YOzFgWAXpnmtJtCMRPHHUEvYbQnDMlHxkFu/HFuNtIMnluuw28ma/KcR2i7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- threads
+- timeline
+description: "Show a chain as a readable timeline: one line per entry, clusters and recaps with their members beneath. --json prints the raw response."
+help:
+  usage: "ryeos threads timeline <chain_root_id> [--limit N] [--json]"
+  examples:
+  - "ryeos threads timeline T-0123456789abcdef --limit 50"
+forms:
+- slots:
+  - field: chain_root_id
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: local_handler
+  handler: threads_timeline
+  bootstrap: false

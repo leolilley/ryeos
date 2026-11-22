@@ -181,25 +181,171 @@ pub fn append_admission_refused(
     )
 }
 
-/// Read the newest admission events for a project (for the field projection).
-pub fn read_admission_events(
+/// Principal-scoped, bounded observation of one project's daemon-authored
+/// admissions. Other principals' payloads never leave this owner for UI
+/// projection. A signed chain cursor locates older pages; it is not an
+/// assertion that missing admissions were never attempted or emitted.
+pub struct PrincipalAdmissionEvents {
+    pub records: Vec<ryeos_state::BundleEventRecord>,
+    pub incomplete: bool,
+}
+
+fn admission_payload_owned_by(payload: &Value, principal: &str) -> bool {
+    payload.get("acting_principal").and_then(Value::as_str) == Some(principal)
+}
+
+/// Principals are matched exactly as the emit sites recorded them: durable
+/// callers by their canonical `fp:<fingerprint>` id, browser sessions by their
+/// `session:<id>` id. The reader never normalises or guesses between forms.
+pub fn read_admission_events_for_principal(
     state_store: &StateStore,
     project_path: &Path,
+    principal: &str,
     limit: usize,
-) -> Result<ryeos_state::BundleEventChainPage> {
-    state_store.read_bundle_event_chain_page(
-        ADMISSION_BUNDLE_ID,
-        ADMISSION_EVENT_KIND,
-        &admission_chain_id(project_path),
-        None,
-        limit,
-        MAX_ADMISSION_PAYLOAD_BYTES * limit.max(1),
-    )
+) -> Result<PrincipalAdmissionEvents> {
+    anyhow::ensure!(!principal.is_empty(), "admission principal must be present");
+    anyhow::ensure!((1..=50).contains(&limit), "admission limit is invalid");
+    const MAX_SCANNED: usize = 500;
+    const PAGE_SIZE: usize = 50;
+    let chain_id = admission_chain_id(project_path);
+    let mut cursor = None;
+    let mut scanned = 0usize;
+    let mut records = Vec::new();
+    let mut extra_owned = false;
+    while scanned < MAX_SCANNED && records.len() < limit {
+        let page_limit = PAGE_SIZE.min(MAX_SCANNED - scanned);
+        let page = state_store.read_bundle_event_chain_page(
+            ADMISSION_BUNDLE_ID,
+            ADMISSION_EVENT_KIND,
+            &chain_id,
+            cursor.as_ref(),
+            page_limit,
+            MAX_ADMISSION_PAYLOAD_BYTES * page_limit,
+        )?;
+        if page.records.is_empty() && page.next_cursor.is_some() {
+            anyhow::bail!("admission history page made no progress");
+        }
+        scanned += page.records.len();
+        for record in page.records {
+            if !admission_payload_owned_by(&record.event.payload, principal) {
+                continue;
+            }
+            if records.len() < limit {
+                records.push(record);
+            } else {
+                extra_owned = true;
+            }
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() || extra_owned {
+            break;
+        }
+    }
+    Ok(PrincipalAdmissionEvents {
+        records,
+        incomplete: cursor.is_some() || extra_owned,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_reader_accepts_only_exact_payload_principal() {
+        assert!(admission_payload_owned_by(
+            &json!({"acting_principal":"owner"}),
+            "owner"
+        ));
+        assert!(!admission_payload_owned_by(
+            &json!({"acting_principal":"other","detail":"private refusal"}),
+            "owner"
+        ));
+        assert!(!admission_payload_owned_by(&json!({}), "owner"));
+        assert!(!admission_payload_owned_by(
+            &json!({"acting_principal":"owner-extra"}),
+            "owner"
+        ));
+    }
+
+    #[test]
+    fn principal_reader_returns_only_owned_admissions_and_refuses_bad_bounds() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = crate::state::test_support::build(root.path()).unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let fp = format!("fp:{}", "ab".repeat(32));
+        let bare = "ab".repeat(32);
+        let session = "session:browser-1";
+        for (principal, thread) in [
+            (fp.as_str(), "T-4"),
+            (bare.as_str(), "T-5"),
+            (session, "T-6"),
+        ] {
+            append_admission_recorded(
+                &state.state_store,
+                AdmissionRecorded {
+                    project_path: &project,
+                    canonical_ref: "tool:demo",
+                    thread_id: thread,
+                    chain_root_id: thread,
+                    root_raw_content_digest: "d1",
+                    effective_definition_digest: "d2",
+                    admitted_launch_capsule_hash: "d3",
+                    acting_principal: principal,
+                },
+            )
+            .unwrap();
+        }
+        for (principal, thread) in [("owner", "T-1"), ("other", "T-2"), ("owner", "T-3")] {
+            append_admission_recorded(
+                &state.state_store,
+                AdmissionRecorded {
+                    project_path: &project,
+                    canonical_ref: "tool:demo",
+                    thread_id: thread,
+                    chain_root_id: thread,
+                    root_raw_content_digest: "d1",
+                    effective_definition_digest: "d2",
+                    admitted_launch_capsule_hash: "d3",
+                    acting_principal: principal,
+                },
+            )
+            .unwrap();
+        }
+        let owned =
+            read_admission_events_for_principal(&state.state_store, &project, "owner", 10).unwrap();
+        assert_eq!(owned.records.len(), 2);
+        assert!(!owned.incomplete);
+        assert!(
+            owned
+                .records
+                .iter()
+                .all(|record| { record.event.payload["acting_principal"] == "owner" })
+        );
+        for (principal, thread) in [(fp.as_str(), "T-4"), (session, "T-6")] {
+            let read =
+                read_admission_events_for_principal(&state.state_store, &project, principal, 10)
+                    .unwrap();
+            assert_eq!(read.records.len(), 1);
+            assert_eq!(read.records[0].event.payload["thread_id"], thread);
+        }
+        // The bare fingerprint is a different principal string, not an alias.
+        let bare_read =
+            read_admission_events_for_principal(&state.state_store, &project, &bare, 10).unwrap();
+        assert_eq!(bare_read.records.len(), 1);
+        assert_eq!(bare_read.records[0].event.payload["thread_id"], "T-5");
+        let capped =
+            read_admission_events_for_principal(&state.state_store, &project, "owner", 1).unwrap();
+        assert_eq!(capped.records.len(), 1);
+        assert!(capped.incomplete);
+        for (principal, limit) in [("", 1), ("owner", 0), ("owner", 51)] {
+            assert!(
+                read_admission_events_for_principal(&state.state_store, &project, principal, limit)
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn chain_id_is_stable_and_path_free() {

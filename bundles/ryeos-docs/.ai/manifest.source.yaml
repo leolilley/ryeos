@@ -1,0 +1,6 @@
+name: ryeos-docs
+version: "0.5.0"
+description: "RyeOS reference knowledge: concepts, operations, and workflow documentation"
+requires_kinds:
+  - knowledge
+uses_kinds: []

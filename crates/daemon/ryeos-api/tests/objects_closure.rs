@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -8,6 +8,7 @@ use ryeos_api::handlers::{objects_closure_describe, objects_closure_get};
 
 fn request(root: String, max_objects: usize) -> objects_closure_describe::Request {
     objects_closure_describe::Request {
+        root: None,
         roots: vec![root],
         max_objects: Some(max_objects),
         max_blobs: Some(16),
@@ -84,13 +85,15 @@ fn values<'a>(entries: &'a [Value], kind: &str) -> Vec<&'a Value> {
 
 #[tokio::test]
 async fn closure_describe_reports_objects_and_blobs() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, blob_hash, _blob) = store_fixture(&state);
 
-    let value =
-        objects_closure_describe::handle(request(snapshot_hash.clone(), 16), Arc::new(state))
-            .await
-            .unwrap();
+    let value = objects_closure_describe::handle_authorized(
+        request(snapshot_hash.clone(), 16),
+        Arc::new(state),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(value["complete"], true);
     assert_eq!(value["roots"], json!([snapshot_hash]));
@@ -100,10 +103,10 @@ async fn closure_describe_reports_objects_and_blobs() {
 
 #[tokio::test]
 async fn closure_get_returns_present_entries() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, blob_hash, blob) = store_fixture(&state);
 
-    let value = objects_closure_get::handle(request(snapshot_hash, 16), Arc::new(state))
+    let value = objects_closure_get::handle_authorized(request(snapshot_hash, 16), Arc::new(state))
         .await
         .unwrap();
 
@@ -125,12 +128,12 @@ async fn closure_get_returns_present_entries() {
 
 #[tokio::test]
 async fn closure_get_enforces_blob_byte_budget() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
     let mut req = request(snapshot_hash, 16);
     req.max_blob_bytes = Some(1);
 
-    let err = objects_closure_get::handle(req, Arc::new(state))
+    let err = objects_closure_get::handle_authorized(req, Arc::new(state))
         .await
         .unwrap_err();
 
@@ -139,7 +142,7 @@ async fn closure_get_enforces_blob_byte_budget() {
 
 #[tokio::test]
 async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_transport() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
     let state = Arc::new(state);
     let large_hash = "ab".repeat(32);
@@ -161,15 +164,20 @@ async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_t
         }))
         .unwrap();
 
-    let described =
-        objects_closure_describe::handle(request(manifest_hash.clone(), 16), Arc::clone(&state))
-            .await
-            .unwrap();
+    let described = objects_closure_describe::handle_authorized(
+        request(manifest_hash.clone(), 16),
+        Arc::clone(&state),
+    )
+    .await
+    .unwrap();
     assert_eq!(described["large_object_hashes"], json!([large_hash]));
 
-    let error = objects_closure_get::handle(request(manifest_hash.clone(), 16), Arc::clone(&state))
-        .await
-        .unwrap_err();
+    let error = objects_closure_get::handle_authorized(
+        request(manifest_hash.clone(), 16),
+        Arc::clone(&state),
+    )
+    .await
+    .unwrap_err();
     assert!(
         error
             .to_string()
@@ -178,7 +186,7 @@ async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_t
 
     let mut requirements_only = request(manifest_hash, 16);
     requirements_only.allow_untransported_large_objects = true;
-    let value = objects_closure_get::handle(requirements_only, state)
+    let value = objects_closure_get::handle_authorized(requirements_only, state)
         .await
         .unwrap();
     assert_eq!(value["closure"]["large_object_hashes"], json!([large_hash]));
@@ -193,24 +201,29 @@ async fn closure_get_refuses_large_object_edges_instead_of_returning_a_partial_t
 
 #[tokio::test]
 async fn closure_get_enforces_object_byte_budget() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
     let mut req = request(snapshot_hash, 16);
     req.max_total_object_bytes = Some(1);
 
-    let err = objects_closure_get::handle(req, Arc::new(state))
+    let err = objects_closure_get::handle_authorized(req, Arc::new(state))
         .await
         .unwrap_err();
 
-    assert!(err.to_string().contains("exceeds max_total_object_bytes"));
+    // The walk bounds each read by the aggregate bytes that remain, so the
+    // first object larger than that refuses before its bytes are read.
+    assert!(
+        err.to_string().contains("exceeds byte limit 1"),
+        "unexpected refusal: {err:#}"
+    );
 }
 
 #[tokio::test]
 async fn closure_get_rejects_incomplete_by_default() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let missing = "12".repeat(32);
 
-    let err = objects_closure_get::handle(request(missing, 16), Arc::new(state))
+    let err = objects_closure_get::handle_authorized(request(missing, 16), Arc::new(state))
         .await
         .unwrap_err();
 
@@ -219,23 +232,24 @@ async fn closure_get_rejects_incomplete_by_default() {
 
 #[tokio::test]
 async fn closure_describe_enforces_max_objects() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (snapshot_hash, _blob_hash, _blob) = store_fixture(&state);
 
-    let err = objects_closure_describe::handle(request(snapshot_hash, 2), Arc::new(state))
-        .await
-        .unwrap_err();
+    let err =
+        objects_closure_describe::handle_authorized(request(snapshot_hash, 2), Arc::new(state))
+            .await
+            .unwrap_err();
 
     assert!(err.to_string().contains("exceeds max_objects"));
 }
 
 #[tokio::test]
 async fn closure_serving_intersects_peer_ceiling_with_node_policy() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (root, _, _) = store_fixture(&state);
     let mut req = request(root.clone(), 16);
     req.max_total_blob_bytes = Some(128 * 1024 * 1024 + 1);
-    let response = objects_closure_describe::handle(req, Arc::new(state))
+    let response = objects_closure_describe::handle_authorized(req, Arc::new(state))
         .await
         .unwrap();
     assert_eq!(response["complete"], true);
@@ -244,11 +258,11 @@ async fn closure_serving_intersects_peer_ceiling_with_node_policy() {
 
 #[tokio::test]
 async fn closure_request_root_fan_in_cannot_exceed_node_policy() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (root, _, _) = store_fixture(&state);
     let mut req = request(root.clone(), 16);
     req.roots = vec![root; 257];
-    let error = objects_closure_describe::handle(req, Arc::new(state))
+    let error = objects_closure_describe::handle_authorized(req, Arc::new(state))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("root count exceeds node policy"));
@@ -256,11 +270,11 @@ async fn closure_request_root_fan_in_cannot_exceed_node_policy() {
 
 #[tokio::test]
 async fn closure_describe_enforces_exact_serialized_response_budget() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let (root, _, _) = store_fixture(&state);
     let mut req = request(root, 16);
     req.max_response_bytes = Some(1);
-    let error = objects_closure_describe::handle(req, Arc::new(state))
+    let error = objects_closure_describe::handle_authorized(req, Arc::new(state))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("exceeds max_response_bytes"));

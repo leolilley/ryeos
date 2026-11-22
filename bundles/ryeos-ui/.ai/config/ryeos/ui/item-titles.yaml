@@ -1,0 +1,28 @@
+# ryeos:signed:2026-11-18T10:23:29Z:a64dcf91e43697bea76c794699e505268dc7b751bca6c75b1af8a40a51dfb4be:i0hUGuVeRciCsMGwk4433uQBTdm0uvBfMwnd1L+UJ0Msb1HL9KkNuRYL0HDBqz/KlmDBBZMaiFb0+G+bOm4VCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
+version: "1.0.0"
+description: Where the interface takes an item's display name from, per kind.
+
+# Tried in order for each item; the first that yields a non-empty line wins.
+#   authored: top-level keys of the item's own document, in order
+#   heading:  the first level-one heading of a markdown body, after frontmatter
+# When nothing yields, the name is the leaf of the bare id with - and _ as
+# spaces, and its source is "derived". A kind not listed uses `default`.
+kinds:
+  directive: { authored: [title], heading: true }
+  knowledge: { authored: [title], heading: true }
+  graph: { authored: [title] }
+  tool: { authored: [title] }
+  view: { authored: [title] }
+  surface: { authored: [title] }
+default: { authored: [title] }
+
+# A name read from an item is shown only when the item's effective trust class
+# is trusted; otherwise the derived name is shown.
+authored_requires_trust: true
+
+# heading_scan_bytes bounds how much of a body is scanned for a heading;
+# max_chars caps every name read from an item.
+limits:
+  heading_scan_bytes: 65536
+  max_chars: 120

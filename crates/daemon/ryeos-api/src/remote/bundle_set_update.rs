@@ -57,7 +57,7 @@ pub async fn update_stopped_bundle_set(
 struct RemoteAuthority {
     app_root: PathBuf,
     remote: config::RemoteConfig,
-    identity: Arc<ryeos_app::identity::NodeIdentity>,
+    identity: Arc<ryeos_node_runtime::identity::NodeIdentity>,
     policy: consumer::CurrentConsumerPublicationPolicy,
     closure_options: NodeAdmittedObjectsClosureRequestOptions,
     completion: ryeos_node::InitCompletionReport,
@@ -69,28 +69,26 @@ impl RemoteAuthority {
         let completion = ryeos_node::verify_init_completion(app_root)?
             .context("node has no verified initialization completion")?;
         let substrate = ryeos_node::load_verified_substrate_identity(app_root)?;
-        let remotes = config::load_remotes_layered(app_root, None)?;
+        let remotes = config::load_remotes(app_root)?;
         let remote = config::get_remote(&remotes, &request.catalog_remote)?;
-        let identity = Arc::new(ryeos_app::identity::NodeIdentity::load(
+        let identity = Arc::new(ryeos_node_runtime::identity::NodeIdentity::load(
             &request.operator_signing_key,
         )?);
         if identity.fingerprint() != completion.operator_fingerprint {
             bail!("explicit update signer is not the init-completion operator");
         }
-        let trust = ryeos_engine::trust::TrustStore::load(
-            None,
-            &app_root.join(ryeos_engine::AI_DIR).join("config"),
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(app_root)?;
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+        let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
+            app_root, &trust, &table,
         )?;
-        let table = ryeos_app::node_policy::NodePolicyTable::new();
-        let generation =
-            ryeos_app::node_policy::generation::load_policy_generation(app_root, &trust, &table)?;
-        let snapshot = ryeos_app::node_policy::compile_generation(
+        let snapshot = ryeos_node_runtime::node_policy::compile_generation(
             app_root,
             &table,
             &generation,
             &completion.node_fingerprint,
         )?;
-        let closure_policy = snapshot.require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
+        let closure_policy = snapshot.require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
         let closure_options = NodeAdmittedObjectsClosureRequestOptions::for_policy(
             closure_policy,
             ObjectsClosureRequestOptions::default(),
@@ -110,13 +108,16 @@ impl RemoteAuthority {
         })
     }
 
+    /// Fetch the catalog closure and resolve it against `high_water`, the
+    /// active selection's high-water for the requested namespace.
     async fn fetch(
         &self,
         request: &StoppedBundleSetUpdateRequest,
+        high_water: Option<&consumer::CatalogPosition>,
         cas: &lillux::CasStore,
-    ) -> anyhow::Result<consumer::ResolvedSetCoordinate> {
+    ) -> anyhow::Result<consumer::CatalogResolution> {
         let client = RemoteClient::new(
-            &self.remote.url,
+            self.remote.outbound_url()?,
             &self.remote.principal_id,
             self.identity.clone(),
         );
@@ -141,7 +142,13 @@ impl RemoteAuthority {
             } => catalog_publication_attestation_hash.clone(),
         };
         let response = client
-            .objects_closure_get(&[root.clone()], self.closure_options.clone())
+            .objects_closure_get(
+                &crate::objects_read_scope::ReadRoot::CatalogPublication {
+                    catalog_namespace: request.catalog_namespace.clone(),
+                },
+                std::slice::from_ref(&root),
+                self.closure_options.clone(),
+            )
             .await?;
         for entry in response.entries {
             match entry.kind.as_str() {
@@ -171,6 +178,7 @@ impl RemoteAuthority {
                 &request.catalog_namespace,
                 set_name,
                 channel,
+                high_water,
                 cas,
                 &self.policy,
             ),
@@ -192,10 +200,11 @@ impl RemoteAuthority {
                 consumer::verify_exact_coordinate(
                     &coordinate,
                     &request.catalog_namespace,
+                    high_water,
+                    request.allow_catalog_rollback,
                     cas,
                     &self.policy,
-                )?;
-                Ok(coordinate)
+                )
             }
         }
     }
@@ -248,7 +257,26 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
         let cas = Arc::new(ryeos_node::bundle_set_update::open_stopped_bundle_cas(
             app_root,
         )?);
-        let coordinate = self.fetch(request, &cas).await?;
+        let active =
+            ryeos_node::bundle_set_update::load_active_published_set(app_root, cas.as_ref())?;
+        let old_catalog_high_water = active
+            .as_ref()
+            .map(|(value, _, _)| value.catalog_high_water.clone())
+            .unwrap_or_default();
+        let resolution = self
+            .fetch(
+                request,
+                old_catalog_high_water.get(&request.catalog_namespace),
+                &cas,
+            )
+            .await?;
+        let coordinate = resolution.coordinate;
+        let mut new_catalog_high_water = old_catalog_high_water.clone();
+        new_catalog_high_water.insert(
+            request.catalog_namespace.clone(),
+            resolution.admission.high_water,
+        );
+        let catalog_rollback = resolution.admission.rollback;
         let binding = ryeos_app::bundle_publication::ReleasePolicyBinding {
             catalog_namespace: request.catalog_namespace.clone(),
             bundle_publication_policy_section_digest: self
@@ -258,6 +286,8 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
                 .clone(),
             trust_epoch: self.policy.release_proof_policy().trust_epoch,
         };
+        // Each release input's ownership is resolved from the fetched CAS by
+        // the hash the input commits to; no bundle-release install is needed.
         let proof = self.policy.fetched_cas_release_proof(cas.clone())?;
         let verified = consumer::verify_curated_set(
             &coordinate.set_attestation_hash,
@@ -273,8 +303,6 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
             self.substrate.protocol,
             env!("RYEOS_CONSUMER_TARGET"),
         )?;
-        let active =
-            ryeos_node::bundle_set_update::load_active_published_set(app_root, cas.as_ref())?;
         let live = self.live_identities()?;
         let installed = match active.as_ref() {
             Some((_, _, set)) => ryeos_node::bundle_set_update::installed_generation_map(Some(set)),
@@ -313,6 +341,8 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
                     .clone(),
                 node_policy_generation_digest: self.completion.policy_generation_digest.clone(),
                 expected_active_selection: expected_active.clone(),
+                catalog_publication_sequence: resolution.catalog_publication_sequence,
+                catalog_rollback: catalog_rollback.clone(),
                 issued_at: lillux::time::iso8601_now(),
             },
         )?;
@@ -344,15 +374,14 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
         let transaction_id = lillux::sha256_hex(
             format!("{}:{}", offline.selection_hash, lillux::time::iso8601_now()).as_bytes(),
         );
-        let prep_root = app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("transactions/bundle-set-prepared")
-            .join(&transaction_id);
+        let prep_root =
+            ryeos_app::bundle_set_transaction::prepared_sources_root(app_root, &transaction_id);
         std::fs::create_dir_all(&prep_root)?;
-        let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-            app_root: Some(app_root.to_owned()),
-            ..Default::default()
-        })?;
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(app_root.to_owned()),
+                ..Default::default()
+            })?;
         let mut actions = Vec::new();
         let mut future = live.clone();
         for entry in &plan.entries {
@@ -478,10 +507,14 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
             new_completion_bytes: next_completion.bytes,
             old_installed_set_digest,
             new_installed_set_digest: new_installed_set_digest.clone(),
+            old_catalog_high_water,
+            new_catalog_high_water,
+            catalog_rollback,
             actions,
         };
         Ok(PreparedStoppedBundleSetUpdate {
             coordinate,
+            catalog_publication_sequence: resolution.catalog_publication_sequence,
             plan,
             apply,
             installed_set_digest: new_installed_set_digest,
@@ -495,6 +528,9 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
     ) -> anyhow::Result<()> {
         if journal.selection_hash != prepared.apply.selection_hash
             || journal.new_installed_set_digest != prepared.installed_set_digest
+            || journal.old_catalog_high_water != prepared.apply.old_catalog_high_water
+            || journal.new_catalog_high_water != prepared.apply.new_catalog_high_water
+            || journal.catalog_rollback != prepared.apply.catalog_rollback
             || journal.actions.len() != prepared.plan.entries.len()
         {
             bail!("transaction journal differs from admitted exact-set plan");

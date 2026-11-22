@@ -16,7 +16,6 @@ use ryeos_api::{ServiceDescriptor, handlers as service_handlers};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::trust::TrustStore;
 
 /// Iterate the canonical descriptor table.
 fn descriptors() -> &'static [ServiceDescriptor] {
@@ -45,6 +44,7 @@ fn service_refs(engine: &ryeos_engine::engine::Engine) -> Vec<CanonicalRef> {
         .filter(|canonical| {
             let effective = engine
                 .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: canonical.clone(),
                     expected_kind: Some(canonical.kind.clone()),
                     project_root: None,
@@ -64,36 +64,37 @@ fn service_refs(engine: &ryeos_engine::engine::Engine) -> Vec<CanonicalRef> {
         .collect()
 }
 
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn workspace_root() -> PathBuf {
     ryeos_engine::test_support::workspace_root()
 }
 
 /// Build an engine-like fixture using the live bundle + trusted signers.
 /// Mirrors `engine_init::build_engine` but uses the test fixture trust store
-/// instead of the daemon's three-tier loader. Loads both core and standard
+/// instead of the daemon's three-tier loader. Loads core and the workflow
 /// bundles so all services in the descriptor table can resolve.
 fn build_test_engine() -> ryeos_engine::engine::Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let workspace = workspace_root();
     let core_bundle = workspace.join("bundles/core");
-    let std_bundle = workspace.join("bundles/standard");
+    let workflow_bundles: Vec<PathBuf> = ["knowledge", "directive", "graph"]
+        .iter()
+        .map(|name| workspace.join("bundles").join(name))
+        .collect();
 
-    // Kind schemas from both bundles (core has service/tool/parser/etc,
-    // standard has directive/graph/knowledge).
-    let kinds_dirs = vec![
-        core_bundle.join(".ai/node/engine/kinds"),
-        std_bundle.join(".ai/node/engine/kinds"),
-    ];
+    // Kind schemas from every bundle (core has service/tool/parser/etc,
+    // the workflow bundles have directive/graph/knowledge).
+    let mut kinds_dirs = vec![core_bundle.join(".ai/node/engine/kinds")];
+    kinds_dirs.extend(
+        workflow_bundles
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
     let kinds = KindRegistry::load_base(&kinds_dirs, &trust_store).expect("load kind registry");
 
-    // Parser tools from both bundles.
-    let bundle_roots: Vec<PathBuf> = vec![core_bundle.clone(), std_bundle];
+    // Parser tools from every bundle.
+    let mut bundle_roots: Vec<PathBuf> = vec![core_bundle.clone()];
+    bundle_roots.extend(workflow_bundles);
     let (parser_tools, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
             .expect("load parser tools");
@@ -115,6 +116,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
 fn local_plan_ctx() -> PlanContext {
     PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-gate".into(),
             scopes: vec![],
@@ -357,8 +359,7 @@ fn gate_cap_enforcement_logic() {
 /// in-process registry. The concrete kind name is deliberately irrelevant.
 #[test]
 fn gate_services_registry_has_an_admitted_kind() {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let kinds_dir = workspace_root().join("bundles/core/.ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("load kinds");

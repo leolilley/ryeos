@@ -2,6 +2,10 @@
 
 use ryeos_api::registry::ServiceDescriptor;
 
+pub mod item_titles;
+pub mod signed_item_topology;
+pub mod ui_attention;
+pub mod ui_coverage_wording;
 pub mod ui_dimension;
 pub mod ui_field;
 pub mod ui_field_comparison;
@@ -11,35 +15,46 @@ pub mod ui_field_project;
 pub mod ui_field_runs;
 pub mod ui_files;
 pub mod ui_gc;
-pub mod ui_graph_topology;
 pub mod ui_invocations_dispatch;
 pub mod ui_items;
 pub mod ui_launch;
 pub mod ui_launch_mint;
+pub mod ui_machines;
 pub mod ui_node;
+pub mod ui_node_capabilities;
 pub mod ui_projects;
 pub mod ui_remotes;
+#[cfg(feature = "scheduling")]
 pub mod ui_schedules;
 pub mod ui_seat;
 pub mod ui_session_attachments;
 pub mod ui_session_current;
+pub mod ui_session_end;
+pub mod ui_sessions_admin;
 pub mod ui_thread_tree;
 pub mod ui_threads;
+pub mod ui_timeline;
+pub mod ui_timeline_raw;
+pub mod ui_usage;
 pub mod ui_work;
 
 pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
     ui_launch_mint::DESCRIPTOR,
     ui_session_current::DESCRIPTOR,
+    ui_session_end::DESCRIPTOR,
+    ui_sessions_admin::LIST_DESCRIPTOR,
+    ui_sessions_admin::REVOKE_DESCRIPTOR,
+    ui_session_attachments::OPEN_SURFACE_DESCRIPTOR,
     ui_session_attachments::DETACH_DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
-    ui_graph_topology::DESCRIPTOR,
     ui_field_comparison::DESCRIPTOR,
     ui_field_definition::DESCRIPTOR,
     ui_field_execution::DESCRIPTOR,
     ui_field_execution::OCCURRENCE_DESCRIPTOR,
     ui_field_project::DESCRIPTOR,
     ui_field_runs::DESCRIPTOR,
+    ui_coverage_wording::DESCRIPTOR,
     ui_dimension::DESCRIPTOR,
     ui_items::ITEMS_LIST_DESCRIPTOR,
     ui_items::ITEM_INSPECT_DESCRIPTOR,
@@ -47,14 +62,23 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_threads::INSPECT_DESCRIPTOR,
     ui_work::DESCRIPTOR,
     ui_work::ATTENTION_DESCRIPTOR,
+    ui_work::ACKNOWLEDGE_DESCRIPTOR,
     ui_work::APPROVAL_HISTORY_DESCRIPTOR,
     ui_work::CANDIDATE_DESCRIPTOR,
     ui_thread_tree::DESCRIPTOR,
+    ui_timeline::DESCRIPTOR,
+    ui_timeline_raw::DESCRIPTOR,
     ui_node::ACTIVITY_DESCRIPTOR,
+    ui_node_capabilities::FACTS_DESCRIPTOR,
+    ui_node_capabilities::WORDING_DESCRIPTOR,
+    ui_usage::USAGE_DESCRIPTOR,
+    ui_machines::MACHINES_DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     ui_schedules::DESCRIPTOR,
     ui_gc::DESCRIPTOR,
     ui_seat::OPEN_DESCRIPTOR,
     ui_seat::APPEND_DESCRIPTOR,
+    ui_seat::TRANSFER_DESCRIPTOR,
     ui_seat::REPLAY_DESCRIPTOR,
     ui_seat::TOUCH_DESCRIPTOR,
     ui_seat::CLOSE_DESCRIPTOR,
@@ -81,6 +105,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_projects::CONFIG_GET_DESCRIPTOR,
     ui_projects::CONFIG_UPDATE_DESCRIPTOR,
     ui_projects::PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
+    ui_projects::PARTICULAR_SURFACE_RESUME_DESCRIPTOR,
     ui_remotes::REMOTES_LIST_DESCRIPTOR,
     ui_remotes::REMOTES_PROBE_DESCRIPTOR,
 ];
@@ -97,5 +122,23 @@ mod tests {
             matches!(desc.availability, ServiceAvailability::DaemonOnly),
             "ui.launch must be DaemonOnly (requires UiState from daemon composition)"
         );
+    }
+
+    #[test]
+    fn transfer_has_one_dedicated_daemon_owner() {
+        let descriptors = ALL
+            .iter()
+            .filter(|descriptor| {
+                descriptor.service_ref == "service:ui/seat/transfer"
+                    || descriptor.endpoint == "ui.seat.transfer"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].service_ref, "service:ui/seat/transfer");
+        assert_eq!(descriptors[0].endpoint, "ui.seat.transfer");
+        assert!(matches!(
+            descriptors[0].availability,
+            ServiceAvailability::DaemonOnly
+        ));
     }
 }

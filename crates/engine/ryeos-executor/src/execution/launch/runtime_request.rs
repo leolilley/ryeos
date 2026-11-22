@@ -8,7 +8,10 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 
 use crate::dispatch_error::DispatchError;
 
-use super::super::process_attachment::AttachedProcessGuard;
+use super::super::process_attachment::{
+    AttachOptions, AttachedLaunch, AttachedProcessGuard, AuthorizedLaunch, HeldLaunch, HeldProcess,
+    LaunchFailure, LaunchOwnerCoordinate, ReleaseTestimony, ReleasedLaunch,
+};
 use super::{EnvelopeCallback, LaunchEnvelope, RuntimeResult};
 use ryeos_runtime::envelope::RuntimeResultStatus;
 use ryeos_runtime::process_outcome::RuntimeProcessOutcome;
@@ -30,6 +33,9 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub project_state_scope: Option<&'a str>,
     pub live_access: Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
+    /// The one node-owned bundle state namespace this launch opened, derived
+    /// from its sealed access capability.
+    pub bundle_state_home: Option<&'a ryeos_engine::isolation::IsolationBundleStateHome>,
     pub workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     /// Whether this launch owns the journal lifecycle for the supplied
     /// workspace. Callback children may borrow the path but never its owner
@@ -37,16 +43,24 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub owns_workspace: bool,
     pub envelope: &'a LaunchEnvelope,
     pub timeout_secs: u64,
-    /// Durable execution-tree deadline minted under the shared accounting
-    /// scope. Kept absolute until the final pre-spawn boundary so queueing and
-    /// launch preparation cannot restart or extend the remaining window.
+    /// This execution's absolute end: the durable execution-tree deadline
+    /// minted under the shared accounting scope, less the hold-back sealed for
+    /// this execution. Kept absolute until the final pre-spawn boundary so
+    /// queueing and launch preparation cannot restart or extend the remaining
+    /// window.
     pub aggregate_deadline_at_ms: Option<i64>,
+    /// The same absolute end when this launch is a continuation, resume,
+    /// follow or same-thread recovery successor; `None` for a fresh launch. A
+    /// successor that finds the end passed at the spawn boundary settles as a
+    /// deadline stop instead of a failed launch.
+    pub successor_end_at_ms: Option<i64>,
     pub callback: &'a EnvelopeCallback,
     pub thread_id: &'a str,
     pub launch_owner: &'a str,
     pub chain_root_id: &'a str,
     pub accounting_scope: Option<&'a ryeos_state::objects::AdmittedAccountingScope>,
-    pub vault_bindings: &'a [(String, String)],
+    /// Authorized values; the protocol spec receives their names only.
+    pub secret_env: &'a ryeos_engine::contracts::DeliveredSecretEnv,
     pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
     pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
@@ -65,6 +79,10 @@ pub(super) struct SpawnRuntimeParams<'a> {
     /// later same-thread restart budget is a distinct recovery coordinate.
     pub rearm_native_resume_budget_after_attach: bool,
     pub selected_resources: ryeos_app::execution_resources::SelectedExecutionResources,
+    /// Stop policy recorded in launch metadata at attachment: the policy the
+    /// row already carries, else the one resolved from the signed execution
+    /// config for this launch.
+    pub stop_policy: ryeos_engine::contracts::CancellationMode,
 }
 
 pub(super) struct SpawnedRuntime {
@@ -186,6 +204,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         project_state_scope,
         live_access,
         state_root,
+        bundle_state_home,
         workspace_lifeline,
         owns_workspace,
         envelope,
@@ -196,7 +215,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         launch_owner,
         chain_root_id,
         accounting_scope,
-        vault_bindings,
+        secret_env,
         thread_auth_token,
         roots,
         isolation,
@@ -209,12 +228,13 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         is_resume,
         rearm_native_resume_budget_after_attach,
         selected_resources,
+        stop_policy,
+        successor_end_at_ms,
     } = params;
     // Only this bounded protocol/environment construction precedes all
     // isolation setup and process contact. An arbitrary error returned later
     // must not be retroactively classified as a preparation refusal.
     let (spec, request, isolation_daemon_socket_path) = (|| -> Result<_> {
-        let secret_map: BTreeMap<String, String> = vault_bindings.iter().cloned().collect();
         let callback_socket_requested = descriptor.env_injections.iter().any(|injection| {
             injection.source
                 == ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
@@ -245,6 +265,17 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             args: &["--project-path".to_string(), project_path_string],
             cwd: project_path,
             project_path,
+            // Under enforced isolation the workload sees the fixed mount
+            // destination; otherwise there is no mount and it uses the real
+            // directory.
+            bundle_state_home: bundle_state_home.map(|home| {
+                if isolation.is_enforced() {
+                    Path::new(ryeos_engine::isolation::BUNDLE_STATE_ISOLATION_DESTINATION)
+                } else {
+                    home.namespace_dir.as_path()
+                }
+            }),
+            runtime_state_root: state_root.unwrap_or(project_path),
             project_state_scope,
             thread_id,
             callback: Some(&callback_bindings),
@@ -299,6 +330,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 bound.sealed_set_env(),
                 ryeos_app::env_contract::EnvSourceDetail::PerSpawnDaemon,
             ));
+            protocol_bindings.extend(bound.delivery_env_bindings()?);
         }
         if let Some(bound) = &source_closure {
             protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
@@ -308,9 +340,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             ));
         }
 
-        let declared_secret_bindings = secret_map
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()));
         spec.env = ryeos_app::env_contract::EnvContractBuilder::new()
             .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
                 (
@@ -319,17 +348,41 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 )
             }))?
             .with_daemon_roots(roots)?
-            .with_bindings(
-                ryeos_app::env_contract::EnvSourceKind::DeclaredSecret,
-                declared_secret_bindings,
-            )?
+            .with_declared_secret_names(secret_env.names())?
             .with_typed_bindings(protocol_bindings)?
             .build();
 
-        let request = super::super::lillux_bridge::to_lillux_request(&spec)?;
+        let mut request = super::super::lillux_bridge::to_lillux_request(&spec)?;
+        // Values join only this final request; the spec carries names only.
+        secret_env.append_to(&mut request.envs).map_err(|name| {
+            anyhow::anyhow!(
+                "delivered secret `{name}` collides with an environment name already bound by the runtime protocol"
+            )
+        })?;
         Ok((spec, request, isolation_daemon_socket_path))
     })()
-    .map_err(|error| settle_unattached_runtime_failure(state, thread_id, launch_owner, error))?;
+    .map_err(|error| {
+        let elapsed_end = error
+            .downcast_ref::<RunEndElapsedAtSpawn>()
+            .map(|elapsed| elapsed.end_at_ms);
+        let settlement = settlement_for(elapsed_end, successor_end_at_ms);
+        let error = match (&settlement, elapsed_end) {
+            (UnattachedSettlement::DeadlineElapsed { .. }, _) => deadline_elapsed_refusal(),
+            // A fresh launch keeps the plain budget refusal.
+            (UnattachedSettlement::Failed, Some(_)) => {
+                anyhow::Error::new(DispatchError::LaunchPreparationFailed {
+                    code: "budget_exhausted".to_owned(),
+                    message: "aggregate execution duration elapsed before runtime spawn"
+                        .to_owned(),
+                    classification: "policy".to_owned(),
+                    binding: None,
+                    details: Box::new(BTreeMap::new()),
+                })
+            }
+            (UnattachedSettlement::Failed, None) => error,
+        };
+        settle_unattached_runtime(state, thread_id, launch_owner, error, settlement)
+    })?;
     let isolation_item_ref = item_ref.to_string();
     let mut admitted_mounts = external_realizations
         .as_ref()
@@ -363,6 +416,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         // above; its original owner explicitly returns no template descriptor.
         None
     };
+    let verbatim_env_names: Vec<String> = secret_env.names().map(str::to_owned).collect();
     let isolation_context = ryeos_engine::isolation::IsolationLaunchContext {
         project_path: &spec.project_path,
         project_authority,
@@ -372,19 +426,22 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         network_authority_ceiling,
         live_access: live_access.as_ref(),
         state_root,
+        bundle_state_home,
         checkpoint_dir,
         checkpoint_authority,
         daemon_socket_path: isolation_daemon_socket_path,
+        captured_callback_socket: false,
         bundle_roots: &envelope.roots.bundle_roots,
-        node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
         verified_code: &[],
         verified_command: Some(verified_command),
         external_read_only_mounts: &admitted_mounts,
         writable_runtime_view_mounts: &[],
         producer_prepared_mounts: &[],
         target_channels: &[],
+        target_sealed_payloads: &[],
         item_ref: &isolation_item_ref,
         thread_id,
+        verbatim_env_names: &verbatim_env_names,
     };
     let mut resource_scope = ryeos_app::execution_resources::prepare_process_resource_scope(
         state,
@@ -623,217 +680,135 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     };
     // The runtime cannot self-attach before release. An existing identity at
     // this boundary is therefore an invariant violation, not an adoption race.
-    let attach_params = ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
-        thread_id: thread_id.to_string(),
-        pid: spawned.pid() as i64,
-        pgid: spawned.pgid(),
-        process_identity: Some(process_identity.clone()),
-        metadata: None,
-        // Spawn metadata was seeded before launch. An empty self-attach
-        // preserves it while establishing the immutable process identity.
-        launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
-    };
-    let attach_result = if rearm_native_resume_budget_after_attach {
-        state
-            .threads
-            .attach_new_process_owned_rearming_resume_budget(&attach_params, launch_owner)
-    } else {
-        state
-            .threads
-            .attach_new_process_owned(&attach_params, launch_owner)
-    };
-    if let Err(error) = attach_result {
-        let error = error.context("attach held managed runtime process identity");
-        return match abort_unattached_runtime_resource_scope(
-            state,
-            resource_reservation.as_ref(),
+    // Spawn metadata was seeded before launch; the attach metadata carries
+    // only the stop policy, which merges into it while establishing the
+    // immutable process identity.
+    let resource_occupancy_limit = process_identity.resource_occupancy_limit.clone();
+    let resource_cleanup_allowance_ms = process_identity.resource_cleanup_allowance_ms;
+    let held = HeldLaunch::new(
+        state,
+        LaunchOwnerCoordinate::thread(thread_id, launch_owner),
+        process_identity,
+        ManagedHeld {
             spawned,
-        ) {
-            Err(cleanup) => {
-                Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
-            }
-            Ok(_) => {
-                let evidence = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
-                    &process_identity,
-                );
-                let financial = ryeos_app::execution_resources::
-                    settle_process_resource_operations_after_cleanup(
-                        state,
-                        &process_identity,
-                        &evidence?,
-                    );
-                Err(match financial {
-                    Ok(()) => {
-                        settle_unattached_runtime_failure(state, thread_id, launch_owner, error)
-                    }
-                    Err(financial) => {
-                        error.context(format!("resource cleanup settlement failed: {financial:#}"))
-                    }
-                })
-            }
-        };
-    }
-    let mut attached_process =
-        match AttachedProcessGuard::new(state, thread_id, launch_owner, process_identity.clone()) {
-            Ok(guard) => guard,
-            Err(error) => {
-                let cleanup = spawned
-                    .abort_and_reap()
-                    .map_err(anyhow::Error::from)
-                    .and_then(|_| {
-                        super::super::runner::clear_finished_process(
-                            state,
-                            thread_id,
-                            &process_identity,
-                            launch_owner,
-                        )
-                    });
-                return Err(match cleanup {
-                    Ok(()) => {
-                        settle_unattached_runtime_failure(state, thread_id, launch_owner, error)
-                    }
-                    Err(cleanup) => error.context(format!(
-                        "pending attachment owner cleanup failed; retaining authority: {cleanup:#}"
-                    )),
-                });
-            }
-        };
-    if let Err(error) = super::super::runner::activate_workspace_after_process_attachment(
-        state,
-        workspace_lifeline.as_ref(),
-        owns_workspace,
-        thread_id,
-        launch_owner,
-        &process_identity,
-    ) {
-        let cleanup = spawned
-            .abort_and_reap()
-            .map_err(anyhow::Error::from)
-            .and_then(|_| attached_process.settle_after_reap())
-            .err();
-        let error = error.context("activate managed-runtime workspace after attachment");
-        return Err(match cleanup {
-            Some(cleanup) => error.context(format!("pending-process cleanup failed: {cleanup}")),
-            None => settle_unattached_runtime_failure(state, thread_id, launch_owner, error),
-        });
-    }
-    if let Err(error) = ryeos_app::execution_resources::issue_process_resource_operations(
-        state,
-        &process_identity.resource_operations,
-    ) {
-        let cleanup = spawned
-            .abort_and_reap()
-            .map_err(anyhow::Error::from)
-            .and_then(|_| {
-                let proposed = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
-                    &process_identity,
-                )?;
-                let evidence = state.state_store.prove_thread_resource_owner_cleanup(
-                    thread_id,
-                    &process_identity,
-                    &proposed,
-                )?;
-                ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
-                    state,
-                    &process_identity,
-                    &evidence,
-                )
-            })
-            .and_then(|_| attached_process.settle_after_reap())
-            .err();
-        return Err(match cleanup {
-            Some(cleanup) => error.context(format!(
-                "resource issue failed and cleanup remains unresolved: {cleanup:#}"
-            )),
-            None => settle_unattached_runtime_failure(state, thread_id, launch_owner, error),
-        });
-    }
-    if let Err(error) = ryeos_app::execution_resources::authorize_process_resource_release(
-        state,
-        &process_identity.resource_operations,
-    )
-    .and_then(|()| {
-        state
-            .threads
-            .authorize_process_release_owned(thread_id, &process_identity, launch_owner)
-    }) {
-        let cleanup = spawned
-            .abort_and_reap()
-            .map_err(anyhow::Error::from)
-            .and_then(|_| attached_process.settle_after_reap())
-            .err();
-        if let Some(cleanup) = cleanup {
-            return Err(error.context(format!(
-                "pending-process cleanup failed; retaining authority: {cleanup}"
-            )));
-        }
-        let stop_settlement =
-            super::super::process_attachment::finalize_requested_stop_if_present(state, thread_id);
-        let error = match stop_settlement {
-            Ok(true) => {
-                anyhow::anyhow!("managed runtime stopped before attachment release: {error}")
-            }
-            Ok(false) => error.context("authorize managed runtime release after durable attachment"),
-            Err(stop_error) => error.context(format!(
-                "authorize managed runtime release after durable attachment; stop settlement also failed: {stop_error:#}"
-            )),
-        };
-        return Err(settle_unattached_runtime_failure(
-            state,
-            thread_id,
-            launch_owner,
-            error,
-        ));
-    }
-    let release = match (
-        process_identity.resource_occupancy_limit.clone(),
-        process_identity.resource_cleanup_allowance_ms,
-    ) {
-        (Some(limit), Some(cleanup_ms)) => spawned.release_after_attachment_with_occupancy(
-            limit,
-            lillux::time::Duration::from_millis(cleanup_ms),
-        ),
-        (None, None) => spawned.release_after_attachment(),
-        _ => unreachable!("validated process identity has a complete occupancy contract"),
-    };
-    let spawned = match release {
-        Ok(spawned) => spawned,
-        Err(error) => {
-            if !error.cleanup_is_settled() {
-                // A dead numeric process/group is not proof that the selected
-                // scope and release-wrapper resources were settled. Preserve
-                // the exact attachment and membership for existing recovery.
-                return Err(anyhow::Error::new(error)
-                    .context("managed runtime release cleanup is unproved; retaining authority"));
-            }
-            let settlement = attached_process.settle_after_reap();
-            return Err(match settlement {
-                Ok(()) => settle_unattached_runtime_failure(
-                    state,
-                    thread_id,
-                    launch_owner,
-                    anyhow::Error::new(error)
-                        .context("release managed runtime after durable process attachment"),
-                ),
-                Err(settlement) => anyhow::Error::new(error).context(format!(
-                    "release failed; exact attachment retained: {settlement:#}"
-                )),
-            });
+            reservation: resource_reservation,
+        },
+    );
+    let launch = held
+        .attach(AttachOptions {
+            workspace_lifeline: workspace_lifeline.as_ref(),
+            owns_workspace,
+            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+                cancellation_mode: Some(stop_policy),
+                ..ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+            },
+            rearm_resume_budget: rearm_native_resume_budget_after_attach,
+        })
+        .and_then(AttachedLaunch::authorize_release)
+        .and_then(AuthorizedLaunch::release);
+    let ReleasedLaunch {
+        running,
+        settlement,
+    } = match launch {
+        Ok(released) => released,
+        // Unproved cleanup retains the exact attachment and membership for
+        // existing recovery; it is never settled or terminalized here.
+        Err(failure) if failure.is_unsettled() => return Err(anyhow::Error::new(failure)),
+        Err(failure) => {
+            let LaunchFailure { error, .. } = failure;
+            return Err(settle_unattached_runtime_failure(
+                state,
+                thread_id,
+                launch_owner,
+                error.context("managed runtime launch"),
+            ));
         }
     };
     Ok(SpawnedRuntime {
         thread_id: thread_id.to_string(),
         runtime_ref: item_ref.to_string(),
         observation_declarations: observation_declarations.clone(),
-        process: Some(spawned),
-        resource_occupancy_limit: process_identity.resource_occupancy_limit.clone(),
-        resource_cleanup_allowance_ms: process_identity.resource_cleanup_allowance_ms,
-        attached_process: Some(attached_process),
+        process: Some(running),
+        resource_occupancy_limit,
+        resource_cleanup_allowance_ms,
+        attached_process: Some(settlement),
         workspace_lifeline,
         external_realizations,
         source_closure,
         immediate_result: None,
     })
+}
+
+/// Class A held process: the managed runtime plus its selected resource scope
+/// reservation, which an unattached abort retires.
+struct ManagedHeld {
+    spawned: lillux::ProcessAwaitingAttachment,
+    reservation: Option<ryeos_app::runtime_db::ProcessResourceReservationRecord>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ManagedReleaseError {
+    /// Refused before Lillux release; the held process was dropped without
+    /// abort proof, so its cleanup is unproved.
+    #[error("resource occupancy release contract is incomplete")]
+    IncompleteOccupancyContract,
+    #[error("release managed runtime after durable process attachment")]
+    Release(#[source] lillux::exec::AttachmentReleaseError),
+}
+
+impl ReleaseTestimony for ManagedReleaseError {
+    fn cleanup_is_settled(&self) -> bool {
+        matches!(self, Self::Release(error) if error.cleanup_is_settled())
+    }
+}
+
+impl HeldProcess for ManagedHeld {
+    type Running = lillux::RunningProcess;
+    type ReleaseError = ManagedReleaseError;
+    fn pid(&self) -> u32 {
+        self.spawned.pid()
+    }
+    fn pgid(&self) -> i64 {
+        self.spawned.pgid()
+    }
+    fn abort_unattached(
+        self,
+        state: &ryeos_app::state::AppState,
+        identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        abort_unattached_runtime_resource_scope(state, self.reservation.as_ref(), self.spawned)?;
+        let evidence = ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(identity)?;
+        ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+            state, identity, &evidence,
+        )
+        .context("resource cleanup settlement failed")
+    }
+    fn abort_attached(self) -> Result<()> {
+        self.spawned
+            .abort_and_reap()
+            .map(drop)
+            .map_err(anyhow::Error::from)
+            .context("abort and reap attached managed runtime")
+    }
+    fn release(
+        self,
+        identity: &ryeos_app::process::ExecutionProcessIdentity,
+    ) -> std::result::Result<lillux::RunningProcess, ManagedReleaseError> {
+        match (
+            identity.resource_occupancy_limit.clone(),
+            identity.resource_cleanup_allowance_ms,
+        ) {
+            (Some(limit), Some(cleanup_ms)) => {
+                self.spawned.release_after_attachment_with_occupancy(
+                    limit,
+                    lillux::time::Duration::from_millis(cleanup_ms),
+                )
+            }
+            (None, None) => self.spawned.release_after_attachment(),
+            _ => return Err(ManagedReleaseError::IncompleteOccupancyContract),
+        }
+        .map_err(ManagedReleaseError::Release)
+    }
 }
 
 /// Called only from a bounded pre-contact region or after checked abort/reap.
@@ -847,6 +822,56 @@ fn settle_unattached_runtime_failure(
     launch_owner: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    settle_unattached_runtime(
+        state,
+        thread_id,
+        launch_owner,
+        error,
+        UnattachedSettlement::Failed,
+    )
+}
+
+/// How an unattached launch's thread is finalized.
+enum UnattachedSettlement {
+    /// `failed`, with the error's code as the outcome.
+    Failed,
+    /// The run end passed before anything spawned: `timed_out` / `deadline`
+    /// in the elapsed-before-launch phase.
+    DeadlineElapsed { end_at_ms: i64 },
+}
+
+/// A successor whose run end passed before spawn settles as a deadline stop;
+/// anything else, including a successor without an end, settles `failed`.
+fn settlement_for(
+    elapsed_end_at_ms: Option<i64>,
+    successor_end_at_ms: Option<i64>,
+) -> UnattachedSettlement {
+    match (elapsed_end_at_ms, successor_end_at_ms) {
+        (Some(end_at_ms), Some(_)) => UnattachedSettlement::DeadlineElapsed { end_at_ms },
+        _ => UnattachedSettlement::Failed,
+    }
+}
+
+/// The typed refusal a successor returns when its end passed before launch.
+fn deadline_elapsed_refusal() -> anyhow::Error {
+    anyhow::Error::new(DispatchError::LaunchPreparationFailed {
+        code: "deadline_elapsed".to_owned(),
+        message: "the run deadline passed before this thread could launch; it settled as a \
+                  deadline stop"
+            .to_owned(),
+        classification: "policy".to_owned(),
+        binding: None,
+        details: Box::new(BTreeMap::new()),
+    })
+}
+
+fn settle_unattached_runtime(
+    state: &ryeos_app::state::AppState,
+    thread_id: &str,
+    launch_owner: &str,
+    error: anyhow::Error,
+    how: UnattachedSettlement,
+) -> anyhow::Error {
     let settlement = (|| -> Result<()> {
         // Shutdown owns recovery once attachment admission closes. An active
         // request must not erase the coordinator's retained obligations.
@@ -858,29 +883,41 @@ fn settle_unattached_runtime_failure(
             .assert_launch_owner(thread_id, launch_owner)?;
         if !super::super::process_attachment::finalize_requested_stop_if_present(state, thread_id)?
         {
-            let code = error
-                .downcast_ref::<DispatchError>()
-                .map(DispatchError::code)
-                .unwrap_or("pre_runtime_failure");
-            if let Err(finalize_error) = state.threads.finalize_thread_owned(
-                &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: thread_id.to_owned(),
-                    status: "failed".to_owned(),
-                    outcome_code: Some(code.to_owned()),
-                    result: None,
-                    error: Some(json!({"code": code, "message": format!("{error:#}")})),
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                },
-                launch_owner,
-            ) {
-                if !state.threads.get_thread(thread_id)?.is_some_and(|thread| {
-                    ryeos_app::state_store::is_terminal_status(&thread.status)
-                }) {
-                    return Err(finalize_error);
+            let finalize_params = match how {
+                UnattachedSettlement::Failed => {
+                    let code = error
+                        .downcast_ref::<DispatchError>()
+                        .map(DispatchError::code)
+                        .unwrap_or("pre_runtime_failure");
+                    ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                        thread_id: thread_id.to_owned(),
+                        status: "failed".to_owned(),
+                        outcome_code: Some(code.to_owned()),
+                        result: None,
+                        error: Some(json!({"code": code, "message": format!("{error:#}")})),
+                        metadata: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                        summary_json: None,
+                    }
                 }
+                UnattachedSettlement::DeadlineElapsed { end_at_ms } => {
+                    ryeos_app::run_deadline::elapsed_finalize_params(
+                        thread_id,
+                        ryeos_app::run_deadline::REASON_ELAPSED_BEFORE_LAUNCH,
+                        end_at_ms,
+                        lillux::time::timestamp_millis(),
+                    )
+                }
+            };
+            if let Err(finalize_error) = state
+                .threads
+                .finalize_thread_owned(&finalize_params, launch_owner)
+                && !state.threads.get_thread(thread_id)?.is_some_and(|thread| {
+                    ryeos_app::state_store::is_terminal_status(&thread.status)
+                })
+            {
+                return Err(finalize_error);
             }
         }
         if let Some(binding) = state.state_store.thread_workspace_binding(thread_id)? {
@@ -909,24 +946,50 @@ fn settle_unattached_runtime_failure(
     }
 }
 
+/// The run end passed before the runtime could spawn.
+#[derive(Debug)]
+struct RunEndElapsedAtSpawn {
+    end_at_ms: i64,
+}
+
+impl std::fmt::Display for RunEndElapsedAtSpawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "aggregate execution duration elapsed before runtime spawn"
+        )
+    }
+}
+
+impl std::error::Error for RunEndElapsedAtSpawn {}
+
+/// `aggregate_end_at_ms` is the run's effective end (tree deadline less this
+/// execution's hold-back), the value launch admission compares against, so
+/// both clocks agree. An end at or before now is a `RunEndElapsedAtSpawn`.
 fn effective_runtime_timeout(
     execution_timeout_secs: u64,
-    aggregate_deadline_at_ms: Option<i64>,
+    aggregate_end_at_ms: Option<i64>,
+) -> Result<std::time::Duration> {
+    effective_runtime_timeout_at(
+        execution_timeout_secs,
+        aggregate_end_at_ms,
+        lillux::time::timestamp_millis(),
+    )
+}
+
+fn effective_runtime_timeout_at(
+    execution_timeout_secs: u64,
+    aggregate_end_at_ms: Option<i64>,
+    now_ms: i64,
 ) -> Result<std::time::Duration> {
     let execution = (execution_timeout_secs != 0)
         .then(|| std::time::Duration::from_secs(execution_timeout_secs));
-    let aggregate = aggregate_deadline_at_ms
-        .map(|deadline| {
-            let remaining_ms = deadline
-                .checked_sub(lillux::time::timestamp_millis())
+    let aggregate = aggregate_end_at_ms
+        .map(|end_at_ms| {
+            let remaining_ms = end_at_ms
+                .checked_sub(now_ms)
                 .filter(|remaining| *remaining > 0)
-                .ok_or_else(|| DispatchError::LaunchPreparationFailed {
-                    code: "budget_exhausted".to_owned(),
-                    message: "aggregate execution duration elapsed before runtime spawn".to_owned(),
-                    classification: "policy".to_owned(),
-                    binding: None,
-                    details: Box::new(BTreeMap::new()),
-                })?;
+                .ok_or(RunEndElapsedAtSpawn { end_at_ms })?;
             Ok::<_, anyhow::Error>(std::time::Duration::from_millis(u64::try_from(
                 remaining_ms,
             )?))
@@ -1086,7 +1149,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn managed_precontact_failure_settles_only_exact_bound_child() {
-        let (_temp, state) = bound_runtime_children_fixture();
+        let (_temp, _store_owner, state) = bound_runtime_children_fixture();
         let store = &state.state_store;
         let child = "T-runtime-child";
         let owner = store.get_launch_claim(child).unwrap().unwrap();
@@ -1125,7 +1188,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn managed_wrong_owner_and_unknown_contact_preserve_membership() {
-        let (_temp, state) = bound_runtime_children_fixture();
+        let (_temp, _store_owner, state) = bound_runtime_children_fixture();
         let store = &state.state_store;
         let child = "T-runtime-child";
         let binding = store.thread_workspace_binding(child).unwrap();
@@ -1210,6 +1273,119 @@ mod tests {
             waited.result,
             Ok(RuntimeProcessOutcome::Terminal(_))
         ));
+    }
+
+    #[test]
+    fn spawn_timeout_is_the_nearer_of_the_segment_cap_and_the_run_end() {
+        let in_ms = |offset: i64| Some(lillux::time::timestamp_millis() + offset);
+        // A run end well inside the segment cap bounds the spawn.
+        let bounded = effective_runtime_timeout(3_600, in_ms(60_000)).unwrap();
+        assert!(bounded <= std::time::Duration::from_secs(60), "{bounded:?}");
+        assert!(bounded > std::time::Duration::from_secs(50), "{bounded:?}");
+        // A segment cap inside the run end bounds the spawn.
+        let capped = effective_runtime_timeout(30, in_ms(3_600_000)).unwrap();
+        assert_eq!(capped, std::time::Duration::from_secs(30));
+        // Neither bound means no timeout; a run end alone still bounds it.
+        assert_eq!(
+            effective_runtime_timeout(0, None).unwrap(),
+            std::time::Duration::ZERO
+        );
+        assert!(effective_runtime_timeout(0, in_ms(10_000)).unwrap() > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn a_run_end_that_has_passed_refuses_the_spawn() {
+        let past = Some(lillux::time::timestamp_millis() - 1);
+        assert!(effective_runtime_timeout(60, past).is_err());
+    }
+
+    fn elapsed_end(result: Result<std::time::Duration>) -> Option<i64> {
+        result
+            .unwrap_err()
+            .downcast_ref::<RunEndElapsedAtSpawn>()
+            .map(|elapsed| elapsed.end_at_ms)
+    }
+
+    #[test]
+    fn an_elapsed_run_end_is_a_typed_error_carrying_the_end() {
+        // Exactly at the end counts as elapsed, as launch admission does.
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(60, Some(1_000), 1_000)),
+            Some(1_000)
+        );
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(0, Some(1_000), 5_000)),
+            Some(1_000)
+        );
+        // Zero and negative ends are elapsed too.
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(60, Some(0), 1)),
+            Some(0)
+        );
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(60, Some(-5), 1)),
+            Some(-5)
+        );
+        // One millisecond left still spawns.
+        assert_eq!(
+            effective_runtime_timeout_at(0, Some(1_001), 1_000).unwrap(),
+            std::time::Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn only_a_successor_with_an_end_settles_as_a_deadline_stop() {
+        assert!(matches!(
+            settlement_for(Some(7), Some(7)),
+            UnattachedSettlement::DeadlineElapsed { end_at_ms: 7 }
+        ));
+        assert!(matches!(
+            settlement_for(Some(7), None),
+            UnattachedSettlement::Failed
+        ));
+        assert!(matches!(
+            settlement_for(None, Some(7)),
+            UnattachedSettlement::Failed
+        ));
+    }
+
+    #[test]
+    fn a_subtraction_overflow_is_the_elapsed_error() {
+        assert_eq!(
+            elapsed_end(effective_runtime_timeout_at(60, Some(i64::MIN), 1)),
+            Some(i64::MIN)
+        );
+    }
+
+    #[test]
+    fn a_respawn_restarts_the_per_spawn_clock_and_only_the_run_end_clamps_it() {
+        // Pins current behaviour. A resume or continuation spawn passes the
+        // same `duration_seconds` again and the timeout is measured from its
+        // own spawn instant, so without a run end each spawn gets the full
+        // duration and the total wall clock across spawns is unbounded.
+        let first_spawn = effective_runtime_timeout_at(60, None, 0).unwrap();
+        let resumed_spawn = effective_runtime_timeout_at(60, None, 50_000).unwrap();
+        assert_eq!(first_spawn, std::time::Duration::from_secs(60));
+        assert_eq!(resumed_spawn, std::time::Duration::from_secs(60));
+        // With an absolute run end the later spawn is clamped to what is
+        // left of it, which is the only cross-spawn bound.
+        let run_end = Some(70_000);
+        assert_eq!(
+            effective_runtime_timeout_at(60, run_end, 0).unwrap(),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            effective_runtime_timeout_at(60, run_end, 50_000).unwrap(),
+            std::time::Duration::from_secs(20)
+        );
+    }
+
+    #[test]
+    fn a_far_end_is_bounded_by_the_segment_cap() {
+        assert_eq!(
+            effective_runtime_timeout_at(30, Some(i64::MAX), 0).unwrap(),
+            std::time::Duration::from_secs(30)
+        );
     }
 
     #[test]

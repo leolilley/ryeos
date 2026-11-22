@@ -1,0 +1,218 @@
+<!-- ryeos:signed:2026-11-13T09:40:08Z:a3475b6e8be5479ab63c44e9e7ce15ee0c8bc833d60a2f2e6391a65b2f154f15:tQcp9hzoNMACeCQSkghoqGrmPmONzsRZHE6lql00UnjaeMkoeI3UgXENfBDY6KH7Gcs0zJrqyKBCZgRRGVzbAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+
+---
+category: ryeos/core/engine
+tags: [architecture, isolation, hermetic, env, security, subprocess]
+version: "2.5.1"
+description: >
+  Hermetic execution and optional OS isolation — env_clear, explicit env
+  injection, node-owned policy, signed backend bundles, per-route semaphores,
+  and callback
+  capability boundaries.
+---
+
+# Execution Isolation
+
+Rye OS enforces isolation at multiple layers to prevent privilege
+escalation, secret leakage, and environment-dependent behavior.
+
+## Node-owned OS isolation
+
+Tool and runtime item launches can additionally pass through the immutable strict
+node isolation snapshot. The mode comes from the node's init profile and host
+class: the `local` class of every packaged profile that declares one selects
+enforce, `hosted` classes select disabled, and each profile with a local lane
+also declares an explicit `local_unconfined` class (disabled) that an operator
+must name with `--host-class local_unconfined`. Init never falls back to it:
+when the host cannot prove the enforced lane, init refuses and names that
+opt-out. In enforce mode, the node—not the
+item—owns filesystem/network policy, environment filtering, and
+the Lillux open-file cap. Policy is resolved once at startup and shared across
+launch paths; edits require restart. Parser/composer handlers are trusted engine
+infrastructure and retain the hermetic handler boundary below.
+
+The engine emits a typed backend-neutral launch plan. The selected signed bundle
+declares an exact adapter, any optional external artifacts it requires, target
+triples, and a capability upper bound; a self-contained adapter legitimately
+declares an empty artifact set. Live inspection may narrow but never broaden
+that authority. Backends are independently authored installed data. Items may
+narrow node policy but may not select a backend, enable isolation, or request
+fallback.
+
+Signed execution-kind projections retain filesystem and network ceilings in
+the admitted plan. `captured_execution` and `isolated` are irreversible
+restrictions: a parent, restart, or current node default cannot widen them.
+Captured execution excludes ambient system, bundle, trust and parent
+environment authority, and refuses daemon callback and thread-auth credentials
+except on one protocol class. A protocol may declare
+`captured_compatible_callback` with the digest of a closed callback
+method surface. The registry accepts the declaration only on the remote-consumer
+qualification callback protocol (never the scoped-producer one) with managed
+`runtime_socket` callbacks, a bounded single-call evidence projector, no session and no remote or detached dispatch. Admission then
+requires the declared digest to equal the digest of the surface the daemon
+itself issues for that authority. The sandbox then receives exactly the pinned
+daemon socket entry, read-only, and never its parent directory or any other
+ambient mount; any other callback
+protocol, including an ordinary tool callback, stays refused. The thread-auth
+credential only pairs with the callback bearer and never authorizes a method
+outside that bearer's closed surface, so the class grants no project-write,
+dispatch, authoring, publishing or secret authority. Host-environment templates are denied during plan
+compilation, not merely filtered from the final process environment. These
+restrictions require enforced isolation; disabled mode refuses them.
+
+External realizations have an explicit logical `mount_root` plus relative
+`mount`. The signed kind/runtime contract owns `allowed_mount_roots`.
+`project` targets the admitted workspace. Under enforced isolation,
+`execution_runtime` targets a strict child of `/ryeos/realizations` inside the
+private root and is exact descriptor-pinned read-only content. An explicitly
+trusted process-group session can instead bind both logical roots into a
+bounded daemon-owned private runtime view and resolve them through retained
+descriptors. That delivery does not claim read-only namespace enforcement or
+hostile-worker containment. Both modes reject overlapping destinations, keep
+runtime content out of project candidate capture, and retain the same logical
+mount root, relative member, and content identity through recovery.
+
+Persistent-session execution testimony uses the retained plan's effective
+ceilings, including restrictions from its signed session protocol. Recovery
+verifies the exact retained signed protocol document against current trust;
+an updated installed descriptor at the same ref cannot change admitted
+workspace, network or runtime-environment authority.
+
+At bootstrap and prospective bundle admission, the selected adapter and
+payloads are signature-verified and copied into immutable sealed executable
+handles. Registry construction receives that exact runtime snapshot. Managed
+launch metadata records the policy, backend, signer, executable digests,
+effective capability set, and a canonical plan digest whose argument and
+environment plaintext has been redacted.
+
+See [Execution Isolation](../node/execution-isolation.md) for the complete node-owner
+schema, pickup behavior, diagnostics, and security limits.
+
+## Attachment is not isolation
+
+Daemon-owned process durability does not depend on isolation being enabled.
+The executor requests an attachment-prepared launch, Lillux obtains the exact
+target identity while that target is unable to execute, RyeOS persists the
+identity, and only then is execution released. Disabled isolation uses the
+native direct hold; enforced isolation uses the selected backend's target hold.
+The lifecycle transition is otherwise identical.
+
+This separation is deliberate: isolation controls what a process may access,
+while attachment controls whether RyeOS durably owns the process before it can
+run. No backend, bundle, helper binary, item kind, launch mode, or filesystem
+layout is hardcoded into the lifecycle contract. See
+[Attachment Before Execution](../execution/attachment-before-execution.md).
+
+## Hermetic Handler Execution
+
+Every handler binary (parsers, composers) runs with `Command::env_clear()`
+— a completely scrubbed environment. Only explicitly declared environment
+variables are passed through.
+
+### How It Works
+
+The `SubprocessRequest.envs` field is **authoritative**: the runner
+calls `env_clear()` before applying the envs, so callers MUST populate
+every variable the subprocess needs. An empty `envs` vec means the
+subprocess receives **zero** environment variables from the parent.
+
+This applies at two levels:
+
+1. **Handler binaries** — parser and composer handlers receive an empty
+   env vec. No daemon secrets, no API keys, no PATH.
+2. **Runtime subprocesses** — directive, graph, and knowledge runtimes
+   receive only the typed bindings composed by the final environment-contract
+   builder.
+
+### What This Prevents
+
+- **Secret leakage**: shell-exported variables on the daemon process
+  cannot bypass `required_secrets` scoping
+- **Non-determinism**: parser/composer behavior is independent of the
+  daemon's environment
+- **Reproducibility**: the same handler binary produces the same output
+  regardless of what machine it runs on
+
+## Subprocess Env Allowlist
+
+For runtime subprocesses (directive-runtime, graph-runtime,
+knowledge-runtime), the daemon composes the environment from an explicit
+allowlist plus dynamic injection:
+
+### Daemon-propagated vars
+
+Only these OS-level vars are passed to every subprocess:
+
+```
+PATH, HOME, LANG, LC_ALL, LC_CTYPE, TZ, TMPDIR,
+RUST_LOG, RUST_BACKTRACE, RYEOSD_TEST_STDERR_DIR,
+HTTP_PROXY, HTTPS_PROXY, NO_PROXY, SSL_CERT_FILE, SSL_CERT_DIR
+(and lowercase proxy forms)
+```
+
+### Protocol and daemon bindings
+
+The verified protocol declares its own environment injections; the daemon
+produces only those requested values. The table below is the union of common
+protocol and lifecycle bindings, not a list granted to every subprocess:
+
+| Variable | Purpose |
+|---|---|
+| `RYEOSD_SOCKET_PATH` | Daemon callback-only UDS path |
+| `RYEOSD_CALLBACK_TOKEN` | Auth token for daemon callbacks |
+| `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token |
+| `RYEOSD_THREAD_ID` | Thread identifier |
+| `RYEOSD_PROJECT_STATE_SCOPE` | Opaque logical-project state namespace; stable across pinned COW relocation and generation advance, empty for projectless execution, and never an authority token |
+| `RYEOSD_RUNTIME_STATE_ROOT` | Daemon-owned directory the launch may write its own state into, when its protocol declares it; mounted writable at this exact path |
+| `RYE_THREAD_ID` | Thread ID for tool primitives |
+| `RYEOS_ITEM_PATH` | Resolved item source path |
+| `RYEOS_ITEM_KIND` | Resolved item kind |
+| `RYEOS_ITEM_REF` | Canonical item reference |
+| `RYEOS_PROJECT_ROOT` | Materialized project root |
+| `RYEOS_SITE_ID` / `RYEOS_ORIGIN_SITE_ID` | Site identifiers |
+| `RYEOS_APP_ROOT` | App root path |
+| `RYEOS_CHECKPOINT_DIR` | Per-thread checkpoint directory |
+| `RYEOS_RESUME` | Set to `1` on resume re-spawns |
+
+For example, `runtime` and the default `tool_callback` declare their
+`RYEOSD_*` callback bindings, while `opaque` and `tool_streaming` declare only
+callback-free `RYE_*` identity/project bindings. Callback-free launches receive
+no callback tokens or daemon-socket sandbox mount.
+
+### Host env passthrough (tools only)
+
+Tool `env_config.env` values can request host environment passthrough
+via `${VAR}` syntax, but only for vars in the
+`RYEOS_TOOL_ENV_PASSTHROUGH` allowlist. Reserved `RYEOS_*` names are
+rejected.
+
+## Per-Route Semaphores
+
+See [routes.md](../node/routes.md) for details. Each route gets its own
+`tokio::sync::Semaphore` from `limits.concurrent_max`. Non-blocking
+acquisition returns 503 if saturated. Per-route isolation means a
+heavy upload endpoint cannot starve a lightweight health check.
+
+## Callback Capability Boundaries
+
+Child processes cannot escalate beyond their parent's capabilities. Callback
+tokens carry `effective_caps` — the composed capability set from the kind's
+permission model. Capability-gated callback operations enforce these caps at
+dispatch:
+
+1. Empty `effective_caps` = deny all capability-gated resource operations
+2. Wildcard `"*"` in `effective_caps` = allow everything
+3. Otherwise: structured + regex matching against the required caps
+
+Exact-thread and chain-local lifecycle methods instead enforce their declared
+callback-token, thread-auth, or two-proof access class. The daemon does not
+trust the runtime to self-police; enforcement happens at the UDS callback trust
+boundary. See [callback-auth](../protocols/callback-auth.md) for details.
+
+## Resume Capability Preservation
+
+When a daemon restarts and auto-resumes a thread, the resumed process
+gets a fresh callback token but with the **same** `effective_caps` the
+pre-crash run had. The caps are persisted in `ResumeContext` in the
+runtime database and restored verbatim on resume — the reconciler does
+not re-derive them.

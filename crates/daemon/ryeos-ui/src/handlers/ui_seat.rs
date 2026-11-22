@@ -21,40 +21,124 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::NewEventRecord;
-use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadFinalizeParams};
+use ryeos_app::state_store::{CutAppendResult, ExactSeat, NewEventRecord, SeatCut};
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_node_runtime::node_policy::sections::ui_seat_reads::SeatClass;
+use ryeos_ui_presentation_contract::seat_control::{SEAT_APPEND_RECEIPT_SCHEMA, SeatAppendReceipt};
 
+use crate::browser_session::transfer_reservation::CompletedPairedCut;
 use crate::browser_session::{BindingAttachmentCoordinate, BrowserSession};
 use crate::state::get_ui_state;
 
-const SEAT_KIND: &str = "seat_session";
-const SEAT_EVENT_PREFIX: &str = "seat.";
-const SEAT_PRODUCER_EVENT: &str = "ui_seat.producer.v1";
-const SEAT_APPEND_RECEIPT_EVENT: &str = "ui_seat.append_receipt.v1";
-const MAX_SEAT_APPEND_EVENTS: usize = 128;
+mod append_ack;
+mod authenticated_history;
+mod composition;
+pub(crate) mod initialization;
+pub(crate) mod paired_read;
+mod transfer_ingress;
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OpenRequest {
-    binding_attachment_id: String,
-    binding_generation: u64,
-    binding_digest: String,
-}
+pub(crate) use authenticated_history::{
+    FixedAnchorReplay, FixedAnchorReplayStep, LiveSeatReplayAdvance, ReplayFrameBounds,
+    replay_frame_bounds,
+};
 
-impl OpenRequest {
-    fn coordinate(&self) -> BindingAttachmentCoordinate {
-        BindingAttachmentCoordinate {
-            binding_attachment_id: self.binding_attachment_id.clone(),
-            binding_generation: self.binding_generation,
-            binding_digest: self.binding_digest.clone(),
+fn initial_surface_seeds(
+    definition: &ryeos_client_base::presentation::UiCompositionDefinition,
+) -> Result<Vec<ryeos_client_base::presentation::PresentationSurfaceSeed>> {
+    match definition {
+        ryeos_client_base::presentation::UiCompositionDefinition::SharedPresentation { config } => {
+            Ok(config.shared_presentation.initial_surfaces.clone())
+        }
+        ryeos_client_base::presentation::UiCompositionDefinition::Surface { .. } => {
+            Err(HandlerError::BadRequest(
+                "presentation Prepare requires its admitted Shared Config root".into(),
+            )
+            .into())
         }
     }
 }
 
+#[cfg(test)]
+mod initial_surface_contract_tests {
+    use super::*;
+
+    fn config(seeds: Value) -> ryeos_client_base::presentation::UiCompositionDefinition {
+        serde_json::from_value(json!({"kind":"shared_presentation","config": {
+            "category":"ui", "shared_presentation": {
+                "schema":2,"title":"Presentation","launcher":"launch",
+                "dialogs":[{"id":"launch","title":"Launch","view":"view:test/launcher"}],
+                "initial_surfaces":seeds,"capabilities":{"sources":[],"affordances":[]}
+            }
+        }}))
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_config_seeds_are_valid_without_a_fabricated_surface() {
+        assert!(
+            initial_surface_seeds(&config(json!([])))
+                .unwrap()
+                .is_empty()
+        );
+        let surface = serde_json::from_value(
+            json!({"kind":"surface","surface":{"name":"not-config","tiles":[]}}),
+        )
+        .unwrap();
+        assert!(initial_surface_seeds(&surface).is_err());
+    }
+
+    #[test]
+    fn seed_selection_and_label_come_from_the_exact_admitted_definition() {
+        let seeds = initial_surface_seeds(&config(json!([
+            {"id":"development","title":"Development","surface":"surface:test/development"},
+            {"id":"solve","title":"Solve","surface":"surface:test/solve"}
+        ])))
+        .unwrap();
+        assert_eq!(seeds[0].id, "development");
+        assert_eq!(seeds[1].title, "Solve");
+        assert_eq!(seeds[1].surface, "surface:test/solve");
+    }
+}
+const SEAT_EVENT_PREFIX: &str = "seat.";
+const SEAT_APPEND_RECEIPT_EVENT: &str = "ui_seat.append_receipt.v2";
+const MAX_SEAT_APPEND_EVENTS: usize = 128;
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum OpenRequest {
+    Observe {
+        presentation_id: String,
+        thread_id: String,
+        chain_root_id: String,
+    },
+    Prepare {
+        creation_request_id: String,
+        binding_attachment_id: String,
+        binding_generation: u64,
+        binding_digest: String,
+    },
+    Claim {
+        schema: u32,
+        presentation_id: String,
+        thread_id: String,
+        chain_root_id: String,
+        operation_id: String,
+        predecessor: ryeos_client_base::ui::UiSeatControlPredecessor,
+        intent_nonce: String,
+        claim: ryeos_client_base::ui::UiSeatProducerClaim,
+    },
+}
+
+use ryeos_ui_presentation_contract::seat_control::{
+    SEAT_PRODUCER_EVENT, SEAT_PRODUCER_SCHEMA, UiSeatControlRequest,
+    UiSeatProducer as SeatProducer, UiSeatProducerClaim as ProducerClaim,
+    UiSeatProducerState as ProducerState,
+};
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AppendRequest {
+    presentation_id: String,
     thread_id: String,
     producer_incarnation: String,
     operation_id: String,
@@ -74,18 +158,31 @@ struct AppendEvent {
     payload: Value,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SeatProducer {
-    schema_version: String,
-    producer_incarnation: String,
-    next_engine_seq: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CloseAction {
+    Close,
+    Relinquish,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SeatAppendReceipt {
-    schema_version: String,
+struct CloseRequest {
+    schema: u32,
+    presentation_id: String,
+    thread_id: String,
+    chain_root_id: String,
+    predecessor: ryeos_client_base::ui::UiSeatControlPredecessor,
+    intent_nonce: String,
+    producer_incarnation: String,
+    operation_id: String,
+    action: CloseAction,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptLookup {
+    thread_id: String,
     producer_incarnation: String,
     operation_id: String,
     first_engine_seq: u64,
@@ -96,22 +193,10 @@ struct SeatAppendReceipt {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CloseRequest {
-    thread_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplayRequest {
+struct ReceiptLookupRequest {
+    presentation_id: String,
     chain_root_id: String,
-    #[serde(default)]
-    after_chain_seq: Option<i64>,
-    #[serde(default = "default_replay_limit")]
-    limit: usize,
-}
-
-fn default_replay_limit() -> usize {
-    500
+    receipt: ReceiptLookup,
 }
 
 fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
@@ -136,120 +221,20 @@ fn canonical_digest(value: &str) -> bool {
     lillux::valid_hash(value) && !value.bytes().any(|byte| byte.is_ascii_uppercase())
 }
 
-/// Hash a seat event batch with the browser's explicitly typed digest format.
-///
-/// JSON text itself is not used as the digest input because JavaScript and
-/// serde_json can choose different, equally valid spellings for one f64. Exact
-/// integers retain their decimal value while non-integral numbers commit their
-/// IEEE-754 bits.
-pub fn seat_payload_digest(value: &Value) -> Result<String> {
-    fn encode(value: &Value, output: &mut String) -> Result<()> {
-        use std::fmt::Write as _;
-
-        match value {
-            Value::Null => output.push('n'),
-            Value::Bool(false) => output.push('f'),
-            Value::Bool(true) => output.push('t'),
-            Value::String(value) => {
-                write!(output, "s{}:{value}", value.len())?;
-            }
-            Value::Number(number) => {
-                if let Some(value) = number.as_i64() {
-                    write!(output, "i{value};")?;
-                } else if let Some(value) = number.as_u64() {
-                    write!(output, "i{value};")?;
-                } else if let Some(value) = number.as_f64() {
-                    write!(output, "d{:016x};", value.to_bits())?;
-                } else {
-                    anyhow::bail!("seat digest contains a number outside the daemon value domain");
-                }
-            }
-            Value::Array(values) => {
-                write!(output, "a{}:{{", values.len())?;
-                for value in values {
-                    encode(value, output)?;
-                }
-                output.push('}');
-            }
-            Value::Object(values) => {
-                let mut keys = values.keys().collect::<Vec<_>>();
-                keys.sort();
-                write!(output, "o{}:{{", keys.len())?;
-                for key in keys {
-                    encode(&Value::String(key.clone()), output)?;
-                    encode(&values[key], output)?;
-                }
-                output.push('}');
-            }
-        }
-        Ok(())
-    }
-
-    let mut typed = String::from("ryeos.seat.payload.v1|");
-    encode(value, &mut typed)?;
-    Ok(lillux::sha256_hex(typed.as_bytes()))
-}
+use ryeos_client_base::ui::seat_payload_digest;
 
 fn canonical_operation_id(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.hyphenated().to_string() == value)
 }
 
-fn decode_control<T: serde::de::DeserializeOwned>(
-    event: ryeos_app::state_store::PersistedEventRecord,
-    label: &str,
-) -> Result<T, HandlerError> {
-    serde_json::from_value(event.payload).map_err(|error| {
-        HandlerError::Internal(format!("retained {label} event is malformed: {error}"))
-    })
-}
-
-fn latest_receipt(
-    state: &AppState,
-    thread_id: &str,
-) -> Result<Option<(SeatAppendReceipt, i64)>, HandlerError> {
-    state
-        .state_store
-        .latest_thread_event_by_type(thread_id, SEAT_APPEND_RECEIPT_EVENT)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
-        .map(|event| {
-            let chain_seq = event.chain_seq;
-            let receipt: SeatAppendReceipt = decode_control(event, "seat append receipt")?;
-            if receipt.schema_version != "ryeos.ui.seat.append-receipt.v1" {
-                return Err(HandlerError::Internal(
-                    "retained seat append receipt has an unsupported schema".into(),
-                ));
-            }
-            Ok((receipt, chain_seq))
-        })
-        .transpose()
-}
-
-fn next_engine_seq(state: &AppState, thread_id: &str) -> Result<u64, HandlerError> {
-    if let Some((receipt, _)) = latest_receipt(state, thread_id)? {
-        return receipt
-            .last_engine_seq
-            .checked_add(1)
-            .ok_or_else(|| HandlerError::BadRequest("seat engine sequence is exhausted".into()));
-    }
-    let Some(event) = state
-        .state_store
-        .latest_thread_event_by_type_prefix(thread_id, SEAT_EVENT_PREFIX)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
-    else {
-        return Ok(0);
-    };
-    let seq = event
-        .payload
-        .get("seq")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            HandlerError::Internal("retained seat event has no engine sequence".into())
-        })?;
-    seq.checked_add(1)
-        .ok_or_else(|| HandlerError::BadRequest("seat engine sequence is exhausted".into()))
-}
-
-fn append_acknowledgement(receipt: &SeatAppendReceipt, chain_seq: i64) -> Value {
+fn append_acknowledgement(
+    receipt: &SeatAppendReceipt,
+    chain_seq: i64,
+    receipt_thread_seq: i64,
+    receipt_event_hash: &str,
+    events: &[ryeos_app::state_store::PersistedEventRecord],
+    events_authority: &str,
+) -> Value {
     json!({
         "producer_incarnation": receipt.producer_incarnation,
         "operation_id": receipt.operation_id,
@@ -259,50 +244,1065 @@ fn append_acknowledgement(receipt: &SeatAppendReceipt, chain_seq: i64) -> Value 
         "payload_digest": receipt.payload_digest,
         "appended": receipt.event_count,
         "chain_seq": chain_seq.to_string(),
+        "receipt_thread_seq": receipt_thread_seq.to_string(),
+        "receipt_event_hash": receipt_event_hash,
+        "events_authority": events_authority,
+        "events": append_ack::wire_events(events),
     })
 }
 
-fn issue_producer(
+fn retained_control(
     state: &AppState,
-    detail: &ryeos_app::state_store::ThreadDetail,
-    owner: &str,
-) -> Result<(String, u64), HandlerError> {
-    state
+    thread_id: &str,
+    operation_id: &str,
+) -> Result<Option<SeatProducer>, HandlerError> {
+    let detail = state
         .state_store
-        .touch_seat_lease(
-            &detail.thread_id,
-            owner,
-            &detail.item_ref,
-            &detail.executor_ref,
-        )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let next_engine_seq = next_engine_seq(state, &detail.thread_id)?;
-    let producer_incarnation = lillux::sha256_hex(&rand::random::<[u8; 32]>());
-    let producer = SeatProducer {
-        schema_version: "ryeos.ui.seat.producer.v1".to_string(),
-        producer_incarnation: producer_incarnation.clone(),
-        next_engine_seq,
-    };
-    let persisted = state
-        .threads
-        .append_thread_events(
-            &detail.chain_root_id,
-            &detail.thread_id,
+        .get_thread(thread_id)
+        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .ok_or(HandlerError::NotFound)?;
+    authenticated_history::retained_control(state, &detail.chain_root_id, thread_id, operation_id)
+}
+
+fn append_control(
+    state: &AppState,
+    session: &BrowserSession,
+    detail: &ryeos_app::state_store::ThreadDetail,
+    control: &SeatProducer,
+    anchor: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+    anchors: &[ryeos_state::AuthoritativeThreadEventReadAnchor],
+    retired: &[ryeos_state::RetiredChainDependency],
+) -> Result<(), HandlerError> {
+    control
+        .validate()
+        .map_err(|error| HandlerError::Internal(error.into()))?;
+    let owner = seat_owner(session);
+    let outcome = state
+        .state_store
+        .append_seat_events_and_renew_if_mixed_cut(
+            &ExactSeat {
+                root_id: &detail.chain_root_id,
+                owner: &owner,
+                item_ref: &detail.item_ref,
+                executor_ref: &detail.executor_ref,
+            },
             &[NewEventRecord {
-                event_type: SEAT_PRODUCER_EVENT.to_string(),
-                storage_class: "indexed".to_string(),
-                payload: serde_json::to_value(producer)
+                event_type: SEAT_PRODUCER_EVENT.into(),
+                storage_class: "indexed".into(),
+                payload: serde_json::to_value(control)
                     .map_err(|error| HandlerError::Internal(error.to_string()))?,
             }],
+            &SeatCut {
+                expected: anchor,
+                anchors,
+                retired,
+            },
         )
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
-        .ok_or_else(|| HandlerError::BadRequest("seat session is not running".into()))?;
-    if persisted.len() != 1 {
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    let records = match outcome {
+        CutAppendResult::Committed(records) => records,
+        CutAppendResult::Conflict => {
+            return Err(HandlerError::Conflict(
+                "seat control predecessor changed".into(),
+            ));
+        }
+        CutAppendResult::NotRunning => {
+            return Err(HandlerError::Conflict("seat is no longer running".into()));
+        }
+    };
+    if records.len() != 1 {
         return Err(HandlerError::Internal(
-            "seat producer append returned an invalid acknowledgement".into(),
+            "producer transition acknowledgement is invalid".into(),
         ));
     }
-    Ok((producer_incarnation, next_engine_seq))
+    Ok(())
+}
+
+/// The thread kind of a presentation seat, as the signed node policy declares
+/// it. The kind must be one an installed kind profile fences.
+pub(crate) fn seat_kind(state: &AppState) -> Result<String, HandlerError> {
+    let policy = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    policy
+        .require_fenced_seat_kind(
+            state
+                .state_store
+                .fenced_chain_kinds()
+                .map_err(|error| HandlerError::Internal(error.to_string()))?,
+        )
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    Ok(policy.seat.kind.clone())
+}
+
+/// Admit the root of a seat presenting `surface_ref`. A seat bound to a
+/// project is admitted only through the project's retained directory: the
+/// project is never re-walked by name, so a directory substituted at the
+/// project's path after attachment cannot redirect admission. A seat without
+/// a project is admitted against the app root.
+pub fn admit_seat_root(
+    state: &AppState,
+    surface_ref: &str,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
+    owner: &str,
+    granted_caps: Vec<String>,
+) -> Result<ryeos_app::thread_lifecycle::NonExecutionRootAdmission, HandlerError> {
+    let node_history_policy = state
+        .node_history_policy()
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    let request = ryeos_app::thread_lifecycle::NonExecutionRootRequest {
+        item_ref: surface_ref,
+        requested_by: owner,
+        caller_scopes: granted_caps,
+        current_site_id: state.threads.site_id(),
+        origin_site_id: state.threads.site_id(),
+        thread_profile: seat_kind(state)?,
+    };
+    // The admission resolves, verifies and seals one subject through several
+    // guarded engine calls. They run as one guarded operation, so the
+    // installed bundles are verified once before and once after the whole
+    // admission, and a change during it refuses the admission. Nothing is
+    // written here; the caller creates the seat thread from the result.
+    let admission = state
+        .engine
+        .with_checked_bundle_generation(|_| match project_access {
+            Some(access) => {
+                ryeos_app::thread_lifecycle::admit_non_execution_root_under_project_authority(
+                    &state.engine,
+                    node_history_policy,
+                    access.directory(),
+                    request,
+                )
+            }
+            None => ryeos_app::thread_lifecycle::admit_non_execution_root(
+                &state.engine,
+                node_history_policy,
+                &state.config.app_root,
+                request,
+            ),
+        })
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    // A shared-presentation Config root names the shell's mount, dialogs and
+    // initial Surfaces, and the session's binding reads it from installed
+    // bundles only. The seat's recorded root must be that same item: a
+    // project file that took the Config's ref would otherwise become the
+    // recorded root of a session whose binding names the node's.
+    let root = &admission.verified_subject().resolved;
+    if root.kind == "config" && root.source_space == ryeos_engine::contracts::ItemSpace::Project {
+        return Err(HandlerError::Structured {
+            code: "shell_config_from_project".to_string(),
+            status: 409,
+            body: serde_json::json!({
+                "code": "shell_config_from_project",
+                "error": format!(
+                    "shell presentation config `{surface_ref}` is also supplied by the project at {}; the shell reads it from installed bundles only, so the project file must be renamed or removed",
+                    root.source_path.display()
+                ),
+                "item_ref": surface_ref,
+                "project_path": root.source_path.display().to_string(),
+                "retryable": false,
+                "remediation": "rename or remove the project file",
+            }),
+        });
+    }
+    Ok(admission)
+}
+
+fn presentation_executor_ref(presentation_id: &str, root: &BindingAttachmentCoordinate) -> String {
+    format!(
+        "client:ryeos/ui-presentation/{presentation_id}/{}:{}:{}",
+        root.binding_attachment_id, root.binding_generation, root.binding_digest
+    )
+}
+
+fn require_presentation_seat(
+    state: &AppState,
+    session: &BrowserSession,
+    presentation_id: &str,
+    thread_id: Option<&str>,
+    chain_root_id: Option<&str>,
+) -> Result<ryeos_app::state_store::ThreadDetail, HandlerError> {
+    require_presentation_seat_with_reconcile(
+        state,
+        session,
+        presentation_id,
+        thread_id,
+        chain_root_id,
+    )
+    .map(|(detail, _)| detail)
+}
+
+fn require_presentation_seat_with_reconcile(
+    state: &AppState,
+    session: &BrowserSession,
+    presentation_id: &str,
+    thread_id: Option<&str>,
+    chain_root_id: Option<&str>,
+) -> Result<(ryeos_app::state_store::ThreadDetail, bool), HandlerError> {
+    let (detail, membership) = require_presentation_seat_for_read(
+        state,
+        session,
+        presentation_id,
+        thread_id,
+        chain_root_id,
+    )?;
+    let transfer_bearing = reconcile_surface_closures(state, session, &membership, &detail)?;
+    Ok((detail, transfer_bearing))
+}
+
+/// Read-only seat authorization. Unlike mutation admission, historical replay
+/// must not repair transient Surface membership while holding the global seat
+/// transition lock through a potentially long signed-history scan.
+fn require_presentation_seat_for_read(
+    state: &AppState,
+    session: &BrowserSession,
+    presentation_id: &str,
+    thread_id: Option<&str>,
+    chain_root_id: Option<&str>,
+) -> Result<
+    (
+        ryeos_app::state_store::ThreadDetail,
+        crate::browser_session::PresentationMembership,
+    ),
+    HandlerError,
+> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let membership = ui
+        .browser_sessions
+        .require_presentation(
+            &session.session_id,
+            presentation_id,
+            thread_id,
+            chain_root_id,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let thread = membership
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| HandlerError::Conflict("presentation seat is not prepared".into()))?;
+    let detail = require_owned_seat(state, thread, &seat_owner(session))?;
+    let attachment = ui
+        .browser_sessions
+        .resolve_attachment(&session.session_id, &membership.root_coordinate)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if membership.chain_root_id.as_deref() != Some(detail.chain_root_id.as_str())
+        || detail.item_ref != attachment.root_ref
+        || detail.executor_ref
+            != presentation_executor_ref(presentation_id, &membership.root_coordinate)
+    {
+        return Err(HandlerError::Forbidden(
+            "presentation seat authority does not match retained membership".into(),
+        ));
+    }
+    Ok((detail, membership))
+}
+
+/// Revalidate one exact browser-session seat before disclosing each bounded
+/// historical stream batch. This is read-only: streaming must neither repair
+/// Surface membership nor renew a writer lease. The caller also compares the
+/// returned immutable thread association with the one captured at begin.
+pub(crate) fn authorize_history_stream_batch(
+    state: &AppState,
+    session_id: &str,
+    presentation_id: &str,
+    chain_root_id: &str,
+    thread_id: Option<&str>,
+) -> Result<ryeos_app::state_store::ThreadDetail, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    require_presentation_seat_for_read(
+        state,
+        &session,
+        presentation_id,
+        thread_id,
+        Some(chain_root_id),
+    )
+    .map(|(detail, _)| detail)
+}
+
+fn send_or_report_full(
+    sender: &tokio::sync::mpsc::Sender<ryeos_app::stream_envelope::RouteStreamEnvelope>,
+    frame: &ryeos_app::stream_envelope::RouteStreamEnvelope,
+) -> Result<bool, HandlerError> {
+    match sender.try_send(frame.clone()) {
+        Ok(()) => Ok(true),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(false),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(HandlerError::Conflict(
+            "seat history stream receiver closed".into(),
+        )),
+    }
+}
+
+/// Send a provisional history frame while the same transition guard that
+/// admits seat reads still protects its session association. Never wait for
+/// channel capacity under that guard: a full channel asks the producer to
+/// yield and retry authorization before another attempt.
+pub(crate) fn try_send_authorized_history_frame(
+    state: &AppState,
+    session_id: &str,
+    presentation_id: &str,
+    expected: &ryeos_app::state_store::ThreadDetail,
+    sender: &tokio::sync::mpsc::Sender<ryeos_app::stream_envelope::RouteStreamEnvelope>,
+    frame: &ryeos_app::stream_envelope::RouteStreamEnvelope,
+    expected_tip: Option<(&str, u64)>,
+) -> Result<bool, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let (current, _) = require_presentation_seat_for_read(
+        state,
+        &session,
+        presentation_id,
+        Some(&expected.thread_id),
+        Some(&expected.chain_root_id),
+    )?;
+    if current.item_ref != expected.item_ref
+        || current.executor_ref != expected.executor_ref
+        || current.requested_by != expected.requested_by
+    {
+        return Err(HandlerError::Forbidden(
+            "presentation seat association changed during history stream".into(),
+        ));
+    }
+    if let Some(tip) = expected_tip {
+        let anchor = state
+            .state_store
+            .capture_thread_event_read_anchor(&expected.chain_root_id, &expected.thread_id)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                HandlerError::Conflict("seat history signed anchor disappeared".into())
+            })?;
+        if anchor.tip() != Some(tip) {
+            return Err(HandlerError::Conflict(
+                "seat history signed tip changed before completion".into(),
+            ));
+        }
+    }
+    send_or_report_full(sender, frame)
+}
+
+/// Paired disclosure is atomic with every completed cut, not just the root
+/// tip. A full channel releases both exclusions before retrying.
+pub(crate) fn try_send_authorized_transfer_history_frame(
+    state: &AppState,
+    session_id: &str,
+    cut: &paired_read::FixedTransferCut,
+    sender: &tokio::sync::mpsc::Sender<ryeos_app::stream_envelope::RouteStreamEnvelope>,
+    frame: &ryeos_app::stream_envelope::RouteStreamEnvelope,
+) -> Result<bool, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let (anchors, retired) = cut
+        .publication_cut(state, &session)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let held = |chain_root_id: &str, thread_id: &str| {
+        session
+            .presentations
+            .values()
+            .find(|membership| {
+                membership.thread_id.as_deref() == Some(thread_id)
+                    && membership.chain_root_id.as_deref() == Some(chain_root_id)
+            })
+            .cloned()
+            .ok_or_else(|| HandlerError::Forbidden("paired history membership disappeared".into()))
+    };
+    let memberships = anchors
+        .iter()
+        .map(|anchor| held(anchor.chain_root_id(), anchor.thread_id()))
+        .chain(
+            retired
+                .iter()
+                .map(|fence| held(&fence.chain_root_id, &fence.chain_root_id)),
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    ui.browser_sessions
+        .with_exact_presentation_read_session(
+            session_id,
+            &memberships,
+            state.node_policy.generation_digest(),
+            || {
+                paired_read::with_publication_cut(state, &anchors, &retired, || {
+                    // The live session owner is already held. No additional locks,
+                    // state/CAS reentry, authorization, or writes inside this callback.
+                    send_or_report_full(sender, frame).map_err(anyhow::Error::from)
+                })
+            },
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?
+        .map_err(|error| HandlerError::Conflict(error.to_string()))?
+        .ok_or_else(|| HandlerError::Conflict("paired history signed cut advanced".into()))
+}
+
+/// Complete transport and transient cleanup share one original cut. A full
+/// channel commits neither the candidate session nor a completion frame.
+pub(crate) fn try_send_reconciled_transfer_complete(
+    state: &AppState,
+    session_id: &str,
+    presentation_id: &str,
+    chain_root_id: &str,
+    thread_id: &str,
+    tip: (&str, u64),
+    cut: &paired_read::FixedTransferCut,
+    replay: &ryeos_client_base::ui::composition_replay::UiCompositionReplay,
+    sender: &tokio::sync::mpsc::Sender<ryeos_app::stream_envelope::RouteStreamEnvelope>,
+    frame: &ryeos_app::stream_envelope::RouteStreamEnvelope,
+) -> Result<bool, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let (anchors, retired) = cut
+        .publication_cut(state, &session)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if !anchors.iter().any(|anchor| {
+        anchor.chain_root_id() == chain_root_id
+            && anchor.thread_id() == thread_id
+            && anchor.tip() == Some(tip)
+    }) {
+        return Err(HandlerError::Conflict(
+            "paired completion root tip differs".into(),
+        ));
+    }
+    let membership = session
+        .presentations
+        .get(presentation_id)
+        .filter(|membership| {
+            membership.chain_root_id.as_deref() == Some(chain_root_id)
+                && membership.thread_id.as_deref() == Some(thread_id)
+        })
+        .ok_or_else(|| {
+            HandlerError::Forbidden("paired completion root membership disappeared".into())
+        })?;
+    let expected = session.presentations.values().cloned().collect::<Vec<_>>();
+    let roots = [(membership, replay, cut as &dyn CompletedPairedCut)];
+    ui.browser_sessions
+        .with_reconciled_paired_roots_at_anchors(
+            &state.state_store,
+            &anchors,
+            &retired,
+            session_id,
+            &expected,
+            state.node_policy.generation_digest(),
+            &roots,
+            |_| match sender.try_send(frame.clone()) {
+                Ok(()) => Ok(Some(true)),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(None),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    anyhow::bail!("seat history stream receiver closed")
+                }
+            },
+        )
+        .map_err(|error| HandlerError::Conflict(error.to_string()))
+        .map(|sent| sent.unwrap_or(false))
+}
+
+/// Repair the transient membership projection from its existing durable seat
+/// owner. This is also used before authorization: a lost response after append
+/// must not leave a closed Surface usable by another document. The caller holds
+/// the seat-transition lock; no producer claim or lease renewal occurs here.
+fn reconcile_surface_closures(
+    state: &AppState,
+    session: &BrowserSession,
+    membership: &crate::browser_session::PresentationMembership,
+    detail: &ryeos_app::state_store::ThreadDetail,
+) -> Result<bool, HandlerError> {
+    let ui = get_ui_state(state).expect("UiState not set");
+    if state
+        .state_store
+        .capture_thread_event_read_anchor(&detail.chain_root_id, &detail.thread_id)
+        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .is_none()
+    {
+        // A newly reserved seat has no signed initialization or producer
+        // history. Later admission still requires that initialization.
+        return Ok(false);
+    }
+    // A seat without a signed initialization has nothing to reconcile; the
+    // complete signed absence proof comes before Prepare may append one.
+    if authenticated_history::initialization_record(
+        state,
+        &detail.chain_root_id,
+        &detail.thread_id,
+    )?
+    .is_none()
+    {
+        return Ok(false);
+    }
+    let verified = composition::read_history(state, detail, &membership.initialization)
+        .map_err(|error| HandlerError::Conflict(error.to_string()))?;
+    if verified.transfer_testimony_seen {
+        // Session-wide inspection must remain available. A transfer-bearing
+        // seat cannot use one-seat composition to retire memberships or
+        // activated imports; the paired phase owner will settle them.
+        return Ok(true);
+    }
+    let replay = verified.replay;
+    for surface in membership
+        .surfaces
+        .values()
+        .filter(|surface| !surface.closed)
+    {
+        let Some(closure) = replay.closed_surfaces.get(&surface.surface_instance_id) else {
+            continue;
+        };
+        let coordinate = BindingAttachmentCoordinate {
+            binding_attachment_id: closure.binding.binding_attachment_id.clone(),
+            binding_generation: closure.binding.binding_generation,
+            binding_digest: closure.binding.binding_digest.clone(),
+        };
+        if closure.presentation_id != membership.presentation_id
+            || closure.surface_instance_id != surface.surface_instance_id
+            || coordinate != surface.coordinate
+        {
+            return Err(HandlerError::Internal(
+                "retained Surface closure contradicts membership".into(),
+            ));
+        }
+        ui.browser_sessions
+            .retire_surface_membership(
+                &session.session_id,
+                &membership.presentation_id,
+                &surface.surface_instance_id,
+                &coordinate,
+                state.node_policy.generation_digest(),
+            )
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    }
+    // The same authenticated replay is the current composition after a lost
+    // append ACK, retry or document reconnect. Retire only activated imported
+    // ownership absent from that signed state; hidden Accepted batches remain
+    // governed by their separate activation/abort protocol.
+    ui.browser_sessions
+        .reconcile_activated_transfer_ownership(
+            &session.session_id,
+            &membership.presentation_id,
+            &membership.root_coordinate,
+            &replay,
+        )
+        .map_err(|error| HandlerError::Conflict(error.to_string()))?;
+    Ok(false)
+}
+
+/// Whether the seat's exhaustively scanned signed history names a transfer.
+fn seat_history_names_transfer(
+    state: &AppState,
+    chain_root_id: &str,
+    thread_id: &str,
+) -> Result<bool, HandlerError> {
+    let anchor = state
+        .state_store
+        .capture_thread_event_read_anchor(chain_root_id, thread_id)
+        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .ok_or_else(|| HandlerError::Conflict("seat history has no signed anchor".into()))?;
+    crate::transfer_store::discovery::discover_seat_transfer_identities(
+        state.state_store.as_ref(),
+        chain_root_id,
+        &anchor,
+    )
+    .map(|identities| !identities.is_empty())
+    .map_err(|error| HandlerError::Internal(error.to_string()))
+}
+
+/// What session bootstrap found while repairing the closure projection of
+/// every seat the session holds.
+pub(crate) struct SessionReconciliation {
+    /// Live seats whose history names transfers: their composition is only
+    /// readable through a completed paired cut.
+    pub paired: Vec<crate::browser_session::PresentationMembership>,
+    /// Seats whose chains were retired, read through their retirement fences.
+    pub retired: Vec<(
+        crate::browser_session::PresentationMembership,
+        crate::transfer_store::retained::RetiredSeatEvidence,
+    )>,
+}
+
+/// Session bootstrap observes the same retained closure projection as
+/// dispatch. Prepared-but-unbound memberships have no seat history to
+/// reconcile.
+pub(crate) fn reconcile_session_surface_closures(
+    state: &AppState,
+    session: &BrowserSession,
+) -> Result<SessionReconciliation, HandlerError> {
+    let mut reconciliation = SessionReconciliation {
+        paired: Vec::new(),
+        retired: Vec::new(),
+    };
+    for membership in session.presentations.values() {
+        let Some(thread_id) = membership.thread_id.as_deref() else {
+            continue;
+        };
+        let root = membership
+            .chain_root_id
+            .as_deref()
+            .ok_or_else(|| HandlerError::Conflict("session seat has no chain root".into()))?;
+        if state
+            .state_store
+            .capture_thread_event_read_anchor(root, thread_id)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?
+            .is_none()
+        {
+            if root != thread_id {
+                return Err(HandlerError::Conflict(
+                    "retired session seat is not an exact root".into(),
+                ));
+            }
+            let evidence = crate::transfer_store::retained::capture_retired_seat(
+                state.state_store.as_ref(),
+                root,
+            )
+            .map_err(|error| HandlerError::Conflict(error.to_string()))?
+            .ok_or_else(|| {
+                HandlerError::Conflict(
+                    "session seat has neither live head nor retired fence".into(),
+                )
+            })?;
+            reconciliation.retired.push((membership.clone(), evidence));
+            continue;
+        }
+        let transfer_bearing = match require_presentation_seat_with_reconcile(
+            state,
+            session,
+            &membership.presentation_id,
+            None,
+            None,
+        ) {
+            Ok((_, transfer_bearing)) => transfer_bearing,
+            // The singleton fold can fail once transfer phases follow later
+            // edits. That is a request for the full fixed-cut reader only
+            // when the seat's signed history itself names a transfer; every
+            // other failure, and every other error class, is the failure it
+            // is.
+            Err(HandlerError::Conflict(_))
+                if seat_history_names_transfer(state, root, thread_id)? =>
+            {
+                true
+            }
+            Err(error) => return Err(error),
+        };
+        if transfer_bearing {
+            reconciliation.paired.push(membership.clone());
+        }
+    }
+    Ok(reconciliation)
+}
+
+fn require_writer(
+    detail: &ryeos_app::state_store::ThreadDetail,
+    incarnation: &str,
+    control: Option<&SeatProducer>,
+) -> Result<SeatProducer, HandlerError> {
+    if !canonical_digest(incarnation) {
+        return Err(HandlerError::BadRequest(
+            "producer incarnation must be canonical".into(),
+        ));
+    }
+    let control = control
+        .cloned()
+        .ok_or_else(|| HandlerError::Conflict("presentation has no producer".into()))?;
+    if control.producer_incarnation != incarnation
+        || control.state != ProducerState::Active
+        || detail.status != "running"
+    {
+        return Err(HandlerError::Conflict(
+            "presentation producer is not current and active".into(),
+        ));
+    }
+    Ok(control)
+}
+
+/// Return the exact authenticated frontier used by a subsequent short
+/// StateStore action callback. A stale frontier is a retry, never authority.
+pub(crate) struct UiSeatActionAdmission {
+    pub anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    pub owner: String,
+    pub item_ref: String,
+    pub executor_ref: String,
+}
+
+const PRESENTATION_PREPARED_EVENT: &str = "seat.presentation_operation.prepared";
+const PRESENTATION_COMPLETED_EVENT: &str = "seat.presentation_operation.completed";
+
+/// Validate a retained admission description, not layout/tab ownership. The
+/// current writer fence is separate: its incarnation may replace the original.
+fn validate_prepared_operation(
+    state: &AppState,
+    session: &BrowserSession,
+    operation: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
+) -> Result<()> {
+    operation
+        .validate()
+        .map_err(|error| HandlerError::BadRequest(error.into()))?;
+    let admission = operation.admission().ok_or_else(|| {
+        HandlerError::BadRequest(
+            "composition operations are not supported until causal validation is integrated".into(),
+        )
+    })?;
+    if !canonical_operation_id(&operation.operation_id)
+        || !canonical_digest(&operation.producer.producer_incarnation)
+    {
+        return Err(HandlerError::BadRequest("invalid prepared operation identity".into()).into());
+    }
+    let ui = get_ui_state(state).expect("UiState not set");
+    let membership = ui
+        .browser_sessions
+        .require_presentation(
+            &session.session_id,
+            &operation.producer.presentation_id,
+            Some(&operation.producer.thread_id),
+            None,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let root = &operation.root_binding;
+    if membership.root_coordinate.binding_attachment_id != root.binding_attachment_id
+        || membership.root_coordinate.binding_generation != root.binding_generation
+        || membership.root_coordinate.binding_digest != root.binding_digest
+        || operation.request_bounds != super::ui_launch_mint::binding_request_bounds(state)?
+    {
+        return Err(HandlerError::Forbidden(
+            "prepared operation root or bounds differ from retained presentation".into(),
+        )
+        .into());
+    }
+    let coordinate = BindingAttachmentCoordinate {
+        binding_attachment_id: admission.request.binding_attachment_id.clone(),
+        binding_generation: admission.request.binding_generation,
+        binding_digest: admission.request.binding_digest.clone(),
+    };
+    let attachment = ui
+        .browser_sessions
+        .require_presentation_attachment(
+            &session.session_id,
+            &operation.producer.presentation_id,
+            &coordinate,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    use ryeos_client_base::ids::UiViewMountOwner;
+    let owned = match admission.invocation_origin.mount_owner() {
+        Some(UiViewMountOwner::Shared { presentation_id }) => {
+            presentation_id.as_str() == operation.producer.presentation_id
+                && coordinate == membership.root_coordinate
+        }
+        Some(UiViewMountOwner::Surface {
+            presentation_id,
+            surface_instance_id,
+        }) => {
+            presentation_id.as_str() == operation.producer.presentation_id
+                && membership
+                    .surfaces
+                    .get(surface_instance_id.as_str())
+                    .is_some_and(|surface| surface.owns_coordinate(&coordinate))
+        }
+        None => false,
+    };
+    if !owned {
+        return Err(HandlerError::Forbidden(
+            "prepared operation origin is not owned by its binding".into(),
+        )
+        .into());
+    }
+    super::ui_invocations_dispatch::validate_prepared_operation_binding(&attachment, operation)
+}
+
+fn validate_completed_operation(
+    state: &AppState,
+    session: &BrowserSession,
+    producer: &ryeos_client_base::ui::UiPresentationProducer,
+    completed: &ryeos_client_base::ui::admission_operation::UiCompletedPresentationOperation,
+    prepared: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
+) -> Result<()> {
+    completed
+        .validate_for(prepared)
+        .map_err(|error| HandlerError::BadRequest(error.into()))?;
+    let admission = prepared.admission().ok_or_else(|| {
+        HandlerError::BadRequest("composition completion is not an executable admission".into())
+    })?;
+    if admission.purpose == ryeos_client_base::ui::admission_operation::UiPresentationOperationKind::OpenPresentationDocument {
+        let transition:ryeos_client_base::ui::binding::UiPreparedPresentationDocumentTransition=serde_json::from_value(
+            completed.result.get("ui_transition").cloned().ok_or_else(||HandlerError::BadRequest("prepared document receipt absent".into()))?
+        ).map_err(|error|HandlerError::BadRequest(format!("invalid prepared document: {error}")))?;
+        transition.validate().map_err(HandlerError::BadRequest)?;
+        if transition.presentation_id!=producer.presentation_id { return Err(HandlerError::Forbidden("prepared document parent differs".into()).into()); }
+        let child=&transition.prepared;
+        let membership=get_ui_state(state).expect("UiState not set").browser_sessions.require_presentation(
+            &session.session_id,&child.presentation_id,Some(&child.thread_id),Some(&child.chain_root_id),state.node_policy.generation_digest(),
+        ).map_err(|error|HandlerError::Forbidden(error.to_string()))?;
+        if !membership.matches_prepared_document(&completed.operation_id,child) {
+            return Err(HandlerError::Forbidden("prepared document differs from retained initialization".into()).into());
+        }
+        let signed=authenticated_history::initialization_record(state,&child.chain_root_id,&child.thread_id)?
+            .ok_or_else(||HandlerError::Conflict("prepared document initialization not durably published".into()))?;
+        if signed.initialization!=child.initialization || signed.operation_id!=completed.operation_id {
+            return Err(HandlerError::Forbidden("prepared document testimony differs".into()).into());
+        }
+        state.engine.with_checked_bundle_generation(|generation| initialization::revalidate_current_admission(generation,state,&session.session_id,&membership))?;
+        return Ok(());
+    }
+    if admission.purpose == ryeos_client_base::ui::admission_operation::UiPresentationOperationKind::ImportSurfaceTabs {
+        let transition: ryeos_client_base::ui::binding::UiSurfaceTabsAdmissionTransition = serde_json::from_value(
+            completed.result.get("ui_transition").cloned().ok_or_else(||HandlerError::BadRequest("completed import has no transition".into()))?
+        ).map_err(|error|HandlerError::BadRequest(format!("invalid completed import: {error}")))?;
+        transition.validate().map_err(HandlerError::BadRequest)?;
+        let ryeos_client_base::surface::opening::SurfaceOpenPlacement::AppendTabs {destination_surface_instance_id,destination_binding,..}=&transition.opening.placement else {
+            return Err(HandlerError::BadRequest("import has no destination placement".into()).into());
+        };
+        let ui=get_ui_state(state).expect("UiState not set");
+        let membership=ui.browser_sessions.require_presentation(&session.session_id,&producer.presentation_id,Some(&producer.thread_id),None,state.node_policy.generation_digest())
+            .map_err(|error|HandlerError::Forbidden(error.to_string()))?;
+        let surface=membership.surfaces.get(destination_surface_instance_id.as_str()).filter(|surface| !surface.closed
+            && surface.coordinate.binding_attachment_id==destination_binding.binding_attachment_id
+            && surface.coordinate.binding_generation==destination_binding.binding_generation
+            && surface.coordinate.binding_digest==destination_binding.binding_digest)
+            .ok_or_else(||HandlerError::Forbidden("import completion has no exact live destination".into()))?;
+        let retained=surface.tab_openings.get(&completed.operation_id)
+            .ok_or_else(||HandlerError::Forbidden("import completion has no retained admission receipt".into()))?;
+        if transition.presentation_id!=producer.presentation_id || transition!=retained.result {
+            return Err(HandlerError::Forbidden("import completion differs from retained atomic admission".into()).into());
+        }
+        let bounds=super::ui_launch_mint::binding_request_bounds(state)?;
+        for descriptor in std::iter::once(&transition.origin_attachment).chain(&transition.tab_attachments) {
+            let coordinate=BindingAttachmentCoordinate {binding_attachment_id:descriptor.binding_attachment_id.clone(),binding_generation:descriptor.binding_generation,binding_digest:descriptor.binding_digest.clone()};
+            if !retained.current_coordinates.contains(&coordinate) {
+                return Err(HandlerError::Forbidden("import admission attachment was retired".into()).into());
+            }
+            let admitted=ui.browser_sessions.require_presentation_attachment(&session.session_id,&producer.presentation_id,&coordinate,state.node_policy.generation_digest())
+                .map_err(|error|HandlerError::Forbidden(error.to_string()))?;
+            if admitted.public_descriptor(bounds)!=*descriptor {
+                return Err(HandlerError::Forbidden("import completion attachment changed".into()).into());
+            }
+        }
+        return Ok(());
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Transition {
+        kind: String,
+        presentation_id: String,
+        surface: ryeos_client_base::ui::binding::UiSurfaceMembership,
+        attachment: ryeos_client_base::ui::UiBindingAttachment,
+        #[serde(default)]
+        creation_request_id: Option<String>,
+        #[serde(default)]
+        tab_attachments: Option<Vec<ryeos_client_base::ui::UiBindingAttachment>>,
+        #[serde(default)]
+        opening: Option<ryeos_client_base::surface::opening::SurfaceOpenRequest>,
+    }
+    let transition: Transition =
+        serde_json::from_value(completed.result.get("ui_transition").cloned().ok_or_else(
+            || HandlerError::BadRequest("completed admission has no transition".into()),
+        )?)
+        .map_err(|error| {
+            HandlerError::BadRequest(format!("invalid completed admission: {error}"))
+        })?;
+    let membership = get_ui_state(state)
+        .expect("UiState not set")
+        .browser_sessions
+        .require_presentation(
+            &session.session_id,
+            &producer.presentation_id,
+            Some(&producer.thread_id),
+            None,
+            state.node_policy.generation_digest(),
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    let surface = membership
+        .surfaces
+        .get(&transition.surface.surface_instance_id)
+        .filter(|surface| !surface.closed && surface.creation_request_id == completed.operation_id)
+        .ok_or_else(|| {
+            HandlerError::Forbidden("completion has no exact admitted Surface".into())
+        })?;
+    let attachment = get_ui_state(state)
+        .expect("UiState not set")
+        .browser_sessions
+        .resolve_attachment(&session.session_id, &surface.coordinate)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    use ryeos_client_base::ui::admission_operation::UiPresentationOperationKind;
+    let expected_kind = match admission.purpose {
+        UiPresentationOperationKind::OpenSurface => "open_surface",
+        UiPresentationOperationKind::ResumeParticularViewSet => "resume_particular_view_set",
+        UiPresentationOperationKind::ResumeParticularSurface => "resume_particular_surface",
+        UiPresentationOperationKind::ImportSurfaceTabs => unreachable!("handled import receipt"),
+        UiPresentationOperationKind::OpenPresentationDocument => {
+            unreachable!("handled prepared document receipt")
+        }
+    };
+    if transition.kind != expected_kind
+        || (admission.purpose == UiPresentationOperationKind::OpenSurface)
+            != transition.opening.is_some()
+        || transition.presentation_id != producer.presentation_id
+        || transition.surface != surface.public_descriptor()
+        || transition.attachment
+            != attachment.public_descriptor(super::ui_launch_mint::binding_request_bounds(state)?)
+        || transition
+            .creation_request_id
+            .as_ref()
+            .is_some_and(|id| id != &completed.operation_id)
+    {
+        return Err(HandlerError::Forbidden(
+            "completion differs from retained admission membership".into(),
+        )
+        .into());
+    }
+    let received_particular_selection = completed
+        .result
+        .get("particular_selection")
+        .cloned()
+        .map(
+            serde_json::from_value::<
+                ryeos_client_base::ui::admission_operation::UiParticularAdmissionSelection,
+            >,
+        )
+        .transpose()
+        .map_err(|_| {
+            HandlerError::BadRequest(
+                "completion has an invalid particular selection receipt".into(),
+            )
+        })?;
+    let retained_particular_selection = match (
+        &surface.particular_resume,
+        &surface.saved_resume,
+        admission.purpose,
+    ) {
+        (Some(receipt), None, UiPresentationOperationKind::ResumeParticularViewSet) => {
+            Some(receipt.particular_selection())
+        }
+        (None, Some(receipt), UiPresentationOperationKind::ResumeParticularSurface) => {
+            receipt.particular_selection()
+        }
+        (None, None, UiPresentationOperationKind::OpenSurface)
+        | (None, Some(_), UiPresentationOperationKind::OpenSurface) => None,
+        _ => {
+            return Err(HandlerError::Forbidden(
+                "completion purpose has no exact retained particular receipt".into(),
+            )
+            .into());
+        }
+    };
+    if received_particular_selection != retained_particular_selection
+        || admission.particular_selection != retained_particular_selection
+    {
+        return Err(HandlerError::Forbidden(
+            "completion particular selection differs from its retained receipt".into(),
+        )
+        .into());
+    }
+    match (
+        &surface.particular_resume,
+        &surface.saved_resume,
+        admission.purpose,
+    ) {
+        (None, None, UiPresentationOperationKind::OpenSurface)
+            if transition.creation_request_id.as_deref()
+                == Some(completed.operation_id.as_str())
+                && transition
+                    .tab_attachments
+                    .as_ref()
+                    .is_some_and(Vec::is_empty) => {}
+        (Some(receipt), None, UiPresentationOperationKind::ResumeParticularViewSet)
+            if transition.creation_request_id.as_deref()
+                == Some(completed.operation_id.as_str())
+                && transition.tab_attachments.is_none()
+                && completed.result.get("particular_view_set")
+                    == Some(&serde_json::to_value(&receipt.resolved)?) => {}
+        (None, Some(receipt), purpose)
+            if transition.creation_request_id.as_deref()
+                == Some(completed.operation_id.as_str())
+                && match (&receipt.body, purpose) {
+                    (
+                        crate::browser_session::SavedSurfaceReceiptBody::Particular { .. },
+                        UiPresentationOperationKind::ResumeParticularSurface,
+                    ) => {
+                        completed.result.get("particular_surface")
+                            == Some(&serde_json::to_value(receipt.public_descriptor())?)
+                    }
+                    (
+                        crate::browser_session::SavedSurfaceReceiptBody::Reusable { .. }
+                        | crate::browser_session::SavedSurfaceReceiptBody::Composed { .. },
+                        UiPresentationOperationKind::OpenSurface,
+                    ) => completed.result.get("particular_surface").is_none(),
+                    _ => false,
+                } =>
+        {
+            let received = transition.tab_attachments.as_ref().ok_or_else(|| {
+                HandlerError::Forbidden(
+                    "saved Surface completion has no exact tab attachments".into(),
+                )
+            })?;
+            let mut exact = std::collections::BTreeMap::new();
+            for coordinate in receipt.coordinates() {
+                let admitted = get_ui_state(state)
+                    .expect("UiState not set")
+                    .browser_sessions
+                    .resolve_attachment(&session.session_id, coordinate)
+                    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+                exact.insert(
+                    admitted.binding_attachment_id.clone(),
+                    admitted
+                        .public_descriptor(super::ui_launch_mint::binding_request_bounds(state)?),
+                );
+            }
+            let mut supplied = std::collections::BTreeMap::new();
+            for descriptor in received {
+                if supplied
+                    .insert(descriptor.binding_attachment_id.clone(), descriptor.clone())
+                    .is_some()
+                {
+                    return Err(HandlerError::Forbidden(
+                        "saved Surface completion duplicates tab attachments".into(),
+                    )
+                    .into());
+                }
+            }
+            if supplied != exact {
+                return Err(HandlerError::Forbidden(
+                    "saved Surface completion differs from retained tab attachments".into(),
+                )
+                .into());
+            }
+        }
+        _ => {
+            return Err(HandlerError::Forbidden(
+                "completion purpose or particular receipt differs".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn producer_response(
+    presentation_id: &str,
+    detail: &ryeos_app::state_store::ThreadDetail,
+    control: &SeatProducer,
+) -> Value {
+    json!({"presentation_id":presentation_id,"thread_id":detail.thread_id,"chain_root_id":detail.chain_root_id,
+        "operation_id":control.operation_id,"producer_incarnation":control.producer_incarnation,
+        "state":control.state,"next_engine_seq":control.next_engine_seq.to_string()})
 }
 
 fn require_owned_seat(
@@ -315,7 +1315,7 @@ fn require_owned_seat(
         .get_thread(thread_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
-    if detail.kind != SEAT_KIND {
+    if detail.kind != seat_kind(state)? {
         return Err(HandlerError::BadRequest(format!(
             "thread {thread_id} is not a seat session"
         )));
@@ -326,38 +1326,122 @@ fn require_owned_seat(
     Ok(detail)
 }
 
-/// Settle every running seat owned by an exact predecessor UI session. This
-/// runs at daemon-side session activation because the successor renderer must
-/// never receive authority to close a predecessor-owned thread. Replays are
-/// harmless and finish any cleanup whose first response was lost.
-pub(crate) fn retire_session_seats(state: &AppState, session_id: &str) -> Result<()> {
-    let owner = format!("session:{session_id}");
-    loop {
-        let running = state
-            .state_store
-            .list_threads_sorted(100, Some(&owner), ryeos_state::queries::ThreadSort::Watch)?
-            .into_iter()
-            .filter(|thread| thread.kind == SEAT_KIND && thread.status == "running")
-            .collect::<Vec<_>>();
-        if running.is_empty() {
-            break;
+/// Read-only observation folds the same authenticated history as append,
+/// through the completed paired cut when the seat names transfers. No session
+/// or chain exclusion is held while bounded history pages are read.
+async fn observe_completed_seat(
+    ctx: &HandlerContext,
+    state: Arc<AppState>,
+    presentation_id: String,
+    thread_id: String,
+    chain_root_id: String,
+) -> Result<Value> {
+    let ui = get_ui_state(&state).expect("UiState not set");
+    let session = browser_session(ctx, &state)?;
+    let frontier = read_seat_frontier(
+        state.clone(),
+        &session,
+        &presentation_id,
+        &thread_id,
+        Some(&chain_root_id),
+    )
+    .await?;
+    let SeatFrontier {
+        verified,
+        anchor,
+        cut,
+        membership,
+    } = frontier;
+    use ryeos_client_base::ui::{
+        UiBindingAttachmentCoordinate, UiObservedPresentationProducer,
+        UiPresentationProducerObservation,
+    };
+    let producer = match verified.control.clone() {
+        None => UiObservedPresentationProducer::Unclaimed,
+        Some(control) => {
+            if !canonical_digest(&control.producer_incarnation) {
+                return Err(
+                    HandlerError::Internal("invalid retained producer incarnation".into()).into(),
+                );
+            }
+            let producer_incarnation = control.producer_incarnation;
+            match control.state {
+                ProducerState::Active => UiObservedPresentationProducer::Active {
+                    producer_incarnation,
+                },
+                ProducerState::Relinquished => UiObservedPresentationProducer::Relinquished {
+                    producer_incarnation,
+                },
+                ProducerState::Closed => UiObservedPresentationProducer::Closed {
+                    producer_incarnation,
+                },
+            }
         }
-        for detail in running {
-            state.threads.finalize_thread(&ThreadFinalizeParams {
-                thread_id: detail.thread_id.clone(),
-                status: "completed".to_string(),
-                outcome_code: None,
-                result: None,
-                error: None,
-                metadata: None,
-                artifacts: Vec::new(),
-                final_cost: None,
-                summary_json: None,
-            })?;
-            state.state_store.remove_seat_lease(&detail.thread_id)?;
-        }
+    };
+    let root = membership.root_coordinate.clone();
+    let observation = UiPresentationProducerObservation {
+        presentation_id: presentation_id.clone(),
+        thread_id: thread_id.clone(),
+        chain_root_id: chain_root_id.clone(),
+        root_binding: UiBindingAttachmentCoordinate {
+            binding_attachment_id: root.binding_attachment_id,
+            binding_generation: root.binding_generation,
+            binding_digest: root.binding_digest,
+        },
+        control_predecessor: verified.control_predecessor.clone(),
+        producer,
+        revision: verified.replay.revision,
+    };
+    let _transition = ui
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let current_session = browser_session(ctx, &state)?;
+    if current_session.session_id != session.session_id {
+        return Err(HandlerError::Conflict("producer observation session changed".into()).into());
     }
-    Ok(())
+    let (_, current) = require_presentation_seat_for_read(
+        &state,
+        &current_session,
+        &presentation_id,
+        Some(&thread_id),
+        Some(&chain_root_id),
+    )?;
+    if current != membership {
+        return Err(
+            HandlerError::Conflict("producer observation membership changed".into()).into(),
+        );
+    }
+    let (anchors, retired) = match &cut {
+        Some(cut) => cut
+            .publication_cut(&state, &current_session)
+            .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+        None => (vec![anchor], Vec::new()),
+    };
+    let expected = current_session
+        .presentations
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(ui
+        .browser_sessions
+        .with_exact_presentation_read_snapshot(
+            &session.session_id,
+            &expected,
+            state.node_policy.generation_digest(),
+            |live| {
+                if cut
+                    .as_ref()
+                    .is_some_and(|cut| !cut.publication_memberships_match(live))
+                {
+                    return Ok(None);
+                }
+                paired_read::with_publication_cut(&state, &anchors, &retired, || {
+                    serde_json::to_value(observation).map_err(anyhow::Error::from)
+                })
+            },
+        )
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))??
+        .ok_or_else(|| HandlerError::Conflict("producer observation signed cut advanced".into()))?)
 }
 
 pub async fn handle_open(
@@ -365,135 +1449,714 @@ pub async fn handle_open(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let ui_state = get_ui_state(&state).expect("UiState not set");
-    let _transition = ui_state
+    let req: OpenRequest = serde_json::from_value(params)
+        .map_err(|error| HandlerError::BadRequest(format!("invalid seat open: {error}")))?;
+    if let OpenRequest::Observe {
+        presentation_id,
+        thread_id,
+        chain_root_id,
+    } = &req
+    {
+        return observe_completed_seat(
+            &ctx,
+            state,
+            presentation_id.clone(),
+            thread_id.clone(),
+            chain_root_id.clone(),
+        )
+        .await;
+    }
+    let claim_history = if let OpenRequest::Claim {
+        presentation_id,
+        thread_id,
+        ..
+    } = &req
+    {
+        let session = browser_session(&ctx, &state)?;
+        Some(
+            read_completed_seat_history(state.clone(), &session, presentation_id, thread_id)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let ui = get_ui_state(&state).expect("UiState not set");
+    let _transition = ui
         .lock_seat_transition()
         .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
-    let req: OpenRequest = serde_json::from_value(params)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    let coordinate = req.coordinate();
-    let attachment = ui_state
-        .browser_sessions
-        .resolve_attachment(&session.session_id, &coordinate)
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-    if attachment
-        .compiled_binding
-        .binding
-        .node_policy_generation_digest
-        != state.node_policy.generation_digest()
-    {
-        return Err(HandlerError::Structured {
-            code: "ui_binding_stale".into(),
-            status: 409,
-            body: json!({
-                "code": "ui_binding_stale",
-                "error": "the node policy generation changed after attachment admission",
-                "retryable": false,
-            }),
+    match req {
+        OpenRequest::Observe { .. } => {
+            unreachable!("Observe is dispatched before transition exclusion")
         }
-        .into());
+        OpenRequest::Prepare {
+            creation_request_id,
+            binding_attachment_id,
+            binding_generation,
+            binding_digest,
+        } => {
+            let _timing = crate::phase_timing::PhaseTimer::start("seat_open_prepare", "total");
+            let root = BindingAttachmentCoordinate {
+                binding_attachment_id,
+                binding_generation,
+                binding_digest,
+            };
+            let policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()?;
+            let limits = crate::browser_session::PresentationLimits::from_policy(policy)
+                .map_err(|error| HandlerError::Internal(error.to_string()))?;
+            let attachment = ui
+                .browser_sessions
+                .resolve_attachment(&session.session_id, &root)
+                .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+            let seeds = initial_surface_seeds(&attachment.presentation.definition)?;
+            let mut membership =
+                match ui
+                    .browser_sessions
+                    .prepared_presentation(
+                        &session.session_id,
+                        &creation_request_id,
+                        &root,
+                        state.node_policy.generation_digest(),
+                    )
+                    .map_err(|error| HandlerError::Conflict(error.to_string()))?
+                {
+                    Some(membership) => {
+                        let _timing = crate::phase_timing::PhaseTimer::start(
+                            "seat_open_prepare",
+                            "revalidate_and_admit",
+                        );
+                        state
+                            .engine
+                            .with_checked_bundle_generation(|generation| -> Result<_> {
+                                initialization::revalidate_current_admission(
+                                    generation,
+                                    &state,
+                                    &session.session_id,
+                                    &membership,
+                                )?;
+                                ui.browser_sessions.prepare_presentation_with_initial_surfaces(
+                        &session.session_id, &creation_request_id, &root, Vec::new(),
+                        &limits,
+                        state.node_policy.generation_digest(),
+                        super::ui_launch_mint::binding_request_bounds(&state)?,
+                        |candidate, descriptors| {
+                            initialization::preflight(&state, candidate)?;
+                            super::ui_session_current::preflight_initial_publication(
+                                &state, &session, candidate, descriptors,
+                            )
+                        },
+                    ).map_err(|error| HandlerError::Conflict(error.to_string()).into())
+                            })?
+                    }
+                    None => {
+                        // Seeds come only from the admitted Config. Each Surface
+                        // compiles its own signed closure/capabilities under the
+                        // retained caller and the SAME pinned project authority.
+                        let compile_context = HandlerContext::new(
+                            session.principal_id.clone(),
+                            session.granted_caps.clone(),
+                            true,
+                        );
+                        let mut candidates = Vec::with_capacity(seeds.len());
+                        for seed in seeds {
+                            let request = super::ui_launch_mint::Request {
+                                ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION
+                                    .into(),
+                                root_ref: seed.surface.clone(),
+                                project_path: attachment
+                                    .compiled_binding
+                                    .binding
+                                    .project_root
+                                    .clone(),
+                                user_principal_id: None,
+                                scopes: None,
+                            };
+                            let (compiled_binding, presentation) = {
+                                let _timing = crate::phase_timing::PhaseTimer::start(
+                                    "seat_open_prepare",
+                                    "binding_compile",
+                                );
+                                super::ui_launch_mint::compile_session_binding(
+                                    &request,
+                                    &compile_context,
+                                    &state,
+                                    attachment.project_authority.as_deref(),
+                                    SeatClass::of_session(session.user_principal_id.as_deref()),
+                                )?
+                            };
+                            candidates.push(crate::browser_session::InitialSurfaceCandidate {
+                                seed,
+                                candidate: crate::browser_session::BindingAttachmentCandidate {
+                                    registered_project_id: attachment.registered_project_id.clone(),
+                                    compiled_binding: Arc::new(compiled_binding),
+                                    presentation,
+                                    project_authority: attachment.project_authority.clone(),
+                                },
+                            });
+                        }
+                        let resolution = attachment
+                            .project_authority
+                            .as_ref()
+                            .map(|authority| authority.descriptor_path())
+                            .transpose()?;
+                        let _timing = crate::phase_timing::PhaseTimer::start(
+                            "seat_open_prepare",
+                            "revalidate_and_admit",
+                        );
+                        state
+                            .engine
+                            .with_checked_bundle_generation(|generation| -> Result<_> {
+                                let current = generation.request_engine_generation_identity();
+                                if current
+                                    != attachment
+                                        .compiled_binding
+                                        .binding
+                                        .request_engine_generation_identity
+                                    || candidates.iter().any(|candidate| {
+                                        current
+                                            != candidate
+                                                .candidate
+                                                .compiled_binding
+                                                .binding
+                                                .request_engine_generation_identity
+                                    })
+                                {
+                                    return Err(HandlerError::Conflict(
+                                    "UI engine generation changed during initial Surface admission"
+                                        .into(),
+                                )
+                                .into());
+                                }
+                                super::ui_launch_mint::revalidate_binding_authority(
+                                    generation,
+                                    attachment.compiled_binding.as_ref(),
+                                    resolution.as_deref(),
+                                    attachment.project_authority.as_deref(),
+                                )?;
+                                for candidate in &candidates {
+                                    super::ui_launch_mint::revalidate_binding_authority(
+                                        generation,
+                                        candidate.candidate.compiled_binding.as_ref(),
+                                        resolution.as_deref(),
+                                        attachment.project_authority.as_deref(),
+                                    )?;
+                                }
+                                // Publishing the membership is the commit of this
+                                // admission: verify the installed bundles once more
+                                // after every closure was re-resolved, so a membership
+                                // is never published from bundles that have changed.
+                                generation.verify_before_commit()?;
+                                // The store checks root/policy/principal/project identity,
+                                // every capacity and counter before committing ANY seed.
+                                ui.browser_sessions
+                                .prepare_presentation_with_initial_surfaces(
+                                    &session.session_id,
+                                    &creation_request_id,
+                                    &root,
+                                    candidates,
+                                    &limits,
+                                    state.node_policy.generation_digest(),
+                                    super::ui_launch_mint::binding_request_bounds(&state)?,
+                                    |candidate, descriptors| {
+                                        initialization::preflight(&state, candidate)?;
+                                        super::ui_session_current::preflight_initial_publication(
+                                            &state, &session, candidate, descriptors,
+                                        )
+                                    },
+                                )
+                                .map_err(|error| HandlerError::Conflict(error.to_string()).into())
+                            })?
+                    }
+                };
+            membership = {
+                let _timing = crate::phase_timing::PhaseTimer::start(
+                    "seat_open_prepare",
+                    "materialize_unclaimed",
+                );
+                initialization::materialize_unclaimed(&state, &session, membership)?
+            };
+            Ok(
+                json!({"presentation_id":membership.presentation_id,"thread_id":membership.thread_id,"chain_root_id":membership.chain_root_id,"root_binding":root}),
+            )
+        }
+        OpenRequest::Claim {
+            schema,
+            presentation_id,
+            thread_id,
+            chain_root_id,
+            operation_id,
+            predecessor,
+            intent_nonce,
+            claim,
+        } => {
+            let request = UiSeatControlRequest::Claim {
+                schema,
+                operation_id: operation_id.clone(),
+                presentation_id: presentation_id.clone(),
+                thread_id: thread_id.clone(),
+                chain_root_id: chain_root_id.clone(),
+                predecessor: predecessor.clone(),
+                intent_nonce,
+                claim: claim.clone(),
+            };
+            request
+                .validate()
+                .map_err(|error| HandlerError::BadRequest(error.into()))?;
+            let history = claim_history
+                .as_ref()
+                .expect("claim history was read before transition");
+            let admission =
+                history.authorize_history(&state, &session, &presentation_id, &thread_id)?;
+            let (detail, _) = require_presentation_seat_for_read(
+                &state,
+                &session,
+                &presentation_id,
+                Some(&thread_id),
+                Some(&chain_root_id),
+            )?;
+            if detail.thread_id != thread_id || detail.chain_root_id != chain_root_id {
+                return Err(HandlerError::Conflict("claim seat coordinate changed".into()).into());
+            }
+            initialization::require(&state, &session, &presentation_id)?;
+            if let Some(retained) = retained_control(&state, &detail.thread_id, &operation_id)? {
+                if retained.request != request {
+                    return Err(HandlerError::Conflict(
+                        "claim operation reused with different content".into(),
+                    )
+                    .into());
+                }
+                // Repair a delivery failure after the durable claim but before
+                // lease publication, without reviving a displaced producer.
+                if detail.status != "running"
+                    || !history.control().is_some_and(|current| {
+                        current.operation_id == retained.operation_id
+                            && current.producer_incarnation == retained.producer_incarnation
+                            && current.state == ProducerState::Active
+                    })
+                {
+                    return Err(HandlerError::Conflict(
+                        "retained claim no longer owns the current active producer".into(),
+                    )
+                    .into());
+                }
+                if !state
+                    .state_store
+                    .touch_seat_lease_if_mixed_cut(&admission.seat(), &admission.cut())?
+                {
+                    return Err(HandlerError::Conflict("claim lease cut changed".into()).into());
+                }
+                return Ok(producer_response(&presentation_id, &detail, &retained));
+            }
+            // A new claim, unlike the replay above of one that already
+            // committed, requires the seat's retained admission to still
+            // hold: prepare may have answered an error after publishing the
+            // membership and writing the initialization record, and a bundle
+            // or Config change since then must not let such a seat be claimed.
+            // The replay is deliberately exempt, so a client whose claim
+            // committed can still learn its producer after a later change.
+            // Cost: a first claim re-resolves every initial closure, as
+            // prepare does. With the compose cache warm that is cheap; cold,
+            // after a daemon restart, it is about prepare's cold cost (about
+            // 1.8 s) on top of the claim, within the route's 10 s limit.
+            initialization::require_current_admission(&state, &session, &presentation_id)?;
+            if detail.status != "running" {
+                return Err(
+                    HandlerError::Conflict("presentation seat is not running".into()).into(),
+                );
+            }
+            let (current_predecessor, previous, anchor) =
+                authenticated_history::control_predecessor(
+                    &state,
+                    &detail.chain_root_id,
+                    &detail.thread_id,
+                )?;
+            if predecessor != current_predecessor {
+                return Err(
+                    HandlerError::Conflict("claim control predecessor changed".into()).into(),
+                );
+            }
+            if current_predecessor != history.control_predecessor()
+                || serde_json::to_value(&previous)? != serde_json::to_value(history.control())?
+                || anchor != admission.action.anchor
+            {
+                return Err(HandlerError::Conflict(
+                    "claim signed control differs from completed history".into(),
+                )
+                .into());
+            }
+            let previous_incarnation = match (&claim, &previous) {
+                (ProducerClaim::Fresh, None) => None,
+                (ProducerClaim::Resume { expected_producer_incarnation }, Some(previous))
+                    if previous.state == ProducerState::Relinquished && &previous.producer_incarnation == expected_producer_incarnation => Some(expected_producer_incarnation.clone()),
+                (ProducerClaim::Takeover { expected_producer_incarnation }, Some(previous))
+                    if previous.state != ProducerState::Closed && &previous.producer_incarnation == expected_producer_incarnation => Some(expected_producer_incarnation.clone()),
+                _ => return Err(HandlerError::Conflict("live presentation requires explicit predecessor-fenced takeover or relinquished resume".into()).into()),
+            };
+            let control = SeatProducer {
+                schema_version: SEAT_PRODUCER_SCHEMA.into(),
+                request,
+                operation_id,
+                claim: Some(claim),
+                predecessor: previous_incarnation,
+                producer_incarnation: lillux::sha256_hex(&rand::random::<[u8; 32]>()),
+                state: ProducerState::Active,
+                next_engine_seq: history.next_engine_seq(),
+            };
+            append_control(
+                &state,
+                &session,
+                &detail,
+                &control,
+                &anchor,
+                &admission.anchors,
+                &admission.retired,
+            )?;
+            Ok(producer_response(&presentation_id, &detail, &control))
+        }
     }
-    let owner = seat_owner(&session);
-    let surface_ref = attachment.surface_ref.clone();
-    let client_ref = format!(
-        "client:ryeos/ui-session/{}/{}:{}",
-        attachment.binding_attachment_id,
-        attachment.binding_generation,
-        attachment.compiled_binding.binding_digest,
-    );
+}
 
-    let existing = state
-        .state_store
-        .list_threads_filtered(100, Some(&owner))
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
-        .into_iter()
-        .filter(|thread| {
-            thread.kind == SEAT_KIND && thread.status == "running" && thread.item_ref == surface_ref
+/// One seat's completed signed history at one exact anchor. When the seat
+/// names transfers, `cut` is the completed paired cut its composition was
+/// folded against and every publication that depends on this history must
+/// condition on.
+pub(crate) struct SeatFrontier {
+    pub verified: composition::VerifiedHistory,
+    pub anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    pub cut: Option<Arc<paired_read::FixedTransferCut>>,
+    pub membership: crate::browser_session::PresentationMembership,
+}
+
+/// Replay one live root at `anchor` against its completed paired cut.
+pub(crate) async fn replay_root_with_cut(
+    state: &Arc<AppState>,
+    presentation_id: &str,
+    anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    cut: Arc<paired_read::FixedTransferCut>,
+) -> Result<FixedAnchorReplay> {
+    let mut replay = FixedAnchorReplay::begin_at_anchor(state, presentation_id, anchor, Some(cut))?;
+    loop {
+        let task_state = state.clone();
+        let (returned, step) = tokio::task::spawn_blocking(move || {
+            let step = replay.next_step(&task_state);
+            (replay, step)
         })
-        .filter_map(|thread| {
-            let detail = require_owned_seat(&state, &thread.thread_id, &owner).ok()?;
-            (detail.executor_ref == client_ref).then_some((thread, detail))
-        })
-        .max_by(|(a, _), (b, _)| a.updated_at.cmp(&b.updated_at));
-    if let Some((thread, detail)) = existing {
-        let _admission = ui_state
-            .browser_sessions
-            .admit_attachment_dispatch(&session.session_id, &coordinate)
-            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-        let (producer_incarnation, next_engine_seq) = issue_producer(&state, &detail, &owner)?;
-        return Ok(json!({
-            "thread_id": thread.thread_id,
-            "chain_root_id": thread.chain_root_id,
-            "reattached": true,
-            "producer_incarnation": producer_incarnation,
-            "next_engine_seq": next_engine_seq.to_string(),
-        }));
+        .await
+        .map_err(|error| HandlerError::Internal(format!("paired proof reader failed: {error}")))?;
+        replay = returned;
+        match step? {
+            FixedAnchorReplayStep::Batch { .. } => {}
+            FixedAnchorReplayStep::Complete { .. } => return Ok(replay),
+            FixedAnchorReplayStep::ReproofRequired => {
+                return Err(HandlerError::Conflict(
+                    "cold paired replay asked for a reproof".into(),
+                )
+                .into());
+            }
+        }
     }
+}
 
-    let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
-    let project_root = match project_access.as_ref() {
-        Some(access) => access.path().to_path_buf(),
-        None => state.config.app_root.clone(),
+/// Freeze a seat's history without holding the transition lock across
+/// bounded history work. The ordinary checkpoint remains the transfer-free
+/// fast path; a seat whose history names transfers is folded only through its
+/// completed paired cut, never through a one-seat fold that cannot apply the
+/// phases.
+pub(crate) async fn read_seat_frontier(
+    state: Arc<AppState>,
+    session: &BrowserSession,
+    presentation_id: &str,
+    thread_id: &str,
+    chain_root_id: Option<&str>,
+) -> Result<SeatFrontier> {
+    let (detail, membership) = {
+        let ui = get_ui_state(&state).expect("UiState not set");
+        let _transition = ui
+            .lock_seat_transition()
+            .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+        require_presentation_seat_for_read(
+            &state,
+            session,
+            presentation_id,
+            Some(thread_id),
+            chain_root_id,
+        )?
     };
-    let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
-        &state.engine,
-        state
-            .node_history_policy()
-            .map_err(|error| HandlerError::Internal(error.to_string()))?,
-        &surface_ref,
-        &project_root,
-        &owner,
-        session.granted_caps.clone(),
-        state.threads.site_id(),
-        state.threads.site_id(),
-        SEAT_KIND.to_string(),
+    let (root_id, seat_thread_id) = (detail.chain_root_id.clone(), detail.thread_id.clone());
+    let task_state = state.clone();
+    let initialization = membership.initialization.clone();
+    let ordinary = tokio::task::spawn_blocking(move || {
+        composition::verified_frontier(&task_state, &detail, &initialization)
+    })
+    .await
+    .map_err(|error| HandlerError::Internal(format!("seat proof reader failed: {error}")))?;
+    let ordinary_error = match ordinary {
+        Ok((verified, anchor)) if !verified.transfer_testimony_seen => {
+            return Ok(SeatFrontier {
+                verified,
+                anchor,
+                cut: None,
+                membership,
+            });
+        }
+        Ok(_) => None,
+        Err(error) => Some(error),
+    };
+    let anchor = state
+        .state_store
+        .capture_thread_event_read_anchor(&root_id, &seat_thread_id)?
+        .ok_or_else(|| {
+            HandlerError::Conflict("seat history requires a signed initialization".into())
+        })?;
+    if let Some(error) = ordinary_error {
+        // A fold that failed for a seat that names no transfer is a genuine
+        // failure; only a transfer-bearing seat can be read another way.
+        let discovery_state = state.clone();
+        let discovery_anchor = anchor.clone();
+        let named = tokio::task::spawn_blocking(move || {
+            crate::transfer_store::discovery::discover_seat_transfer_identities(
+                &discovery_state.state_store,
+                discovery_anchor.chain_root_id(),
+                &discovery_anchor,
+            )
+        })
+        .await
+        .map_err(|error| HandlerError::Internal(format!("transfer discovery failed: {error}")))??;
+        if named.is_empty() {
+            return Err(error);
+        }
+    }
+    let cut = paired_read::read_live_root_cut(state.clone(), session, &membership, anchor.clone())
+        .await?;
+    let replay = replay_root_with_cut(&state, presentation_id, anchor.clone(), cut.clone()).await?;
+    let verified = replay.completed_history(&membership.initialization)?;
+    Ok(SeatFrontier {
+        verified,
+        anchor,
+        cut: Some(cut),
+        membership,
+    })
+}
+
+/// Completed same-store history, not a grant or an executable dispatch token.
+pub(crate) struct CompletedSeatIngressRead {
+    _state_owner: Arc<AppState>,
+    state_identity: usize,
+    session_id: String,
+    verified: composition::VerifiedHistory,
+    anchor: ryeos_state::AuthoritativeThreadEventReadAnchor,
+    cut: Option<Arc<paired_read::FixedTransferCut>>,
+    membership: crate::browser_session::PresentationMembership,
+}
+
+pub(crate) struct CompletedSeatIngressAdmission {
+    pub action: UiSeatActionAdmission,
+    pub anchors: Vec<ryeos_state::AuthoritativeThreadEventReadAnchor>,
+    pub retired: Vec<ryeos_state::RetiredChainDependency>,
+}
+
+impl CompletedSeatIngressAdmission {
+    pub(crate) fn seat(&self) -> ExactSeat<'_> {
+        ExactSeat {
+            root_id: self.action.anchor.chain_root_id(),
+            owner: &self.action.owner,
+            item_ref: &self.action.item_ref,
+            executor_ref: &self.action.executor_ref,
+        }
+    }
+
+    pub(crate) fn cut(&self) -> SeatCut<'_> {
+        SeatCut {
+            expected: &self.action.anchor,
+            anchors: &self.anchors,
+            retired: &self.retired,
+        }
+    }
+}
+
+pub(crate) async fn read_completed_seat_ingress(
+    state: Arc<AppState>,
+    session: &BrowserSession,
+    producer: &ryeos_client_base::ui::UiPresentationProducer,
+) -> Result<CompletedSeatIngressRead> {
+    read_completed_seat_history(
+        state,
+        session,
+        &producer.presentation_id,
+        &producer.thread_id,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .await
+}
 
-    // Linearize the durable seat creation after all descriptor-rooted
-    // preparation. A concurrent revocation either wins here or happens after
-    // this operation has crossed admission.
-    let _admission = ui_state
-        .browser_sessions
-        .admit_attachment_dispatch(&session.session_id, &coordinate)
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+pub(crate) async fn read_completed_seat_history(
+    state: Arc<AppState>,
+    session: &BrowserSession,
+    presentation_id: &str,
+    thread_id: &str,
+) -> Result<CompletedSeatIngressRead> {
+    let state_identity = Arc::as_ptr(&state) as usize;
+    let state_owner = state.clone();
+    let SeatFrontier {
+        verified,
+        anchor,
+        cut,
+        membership,
+    } = read_seat_frontier(state, session, presentation_id, thread_id, None).await?;
+    Ok(CompletedSeatIngressRead {
+        _state_owner: state_owner,
+        state_identity,
+        session_id: session.session_id.clone(),
+        verified,
+        anchor,
+        cut,
+        membership,
+    })
+}
 
-    let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let site_id = state.threads.site_id().to_string();
-    let detail = state.threads.create_non_execution_root_thread(
-        &ThreadCreateParams {
-            thread_id: thread_id.clone(),
-            chain_root_id: thread_id.clone(),
-            kind: SEAT_KIND.to_string(),
-            item_ref: surface_ref.clone(),
-            executor_ref: client_ref.clone(),
-            launch_mode: "wait".to_string(),
-            current_site_id: site_id.clone(),
-            origin_site_id: site_id,
-            upstream_thread_id: None,
-            requested_by: Some(owner.clone()),
-            project_root: root_admission
-                .project_root()
-                .map(std::path::Path::to_path_buf),
-            project_authority: root_admission.project_authority().clone(),
-            base_project_snapshot_hash: None,
-            usage_subject: None,
-            usage_subject_asserted_by: None,
-            captured_history_policy: None,
-        },
-        &root_admission,
-    )?;
-    state.threads.mark_running(&thread_id)?;
-    let (producer_incarnation, next_engine_seq) = issue_producer(&state, &detail, &owner)?;
+impl CompletedSeatIngressRead {
+    /// Caller holds the transition lock. Actual publication must additionally
+    /// hold every returned anchor through the existing atomic action owner.
+    pub(crate) fn authorize(
+        &self,
+        state: &AppState,
+        session: &BrowserSession,
+        producer: &ryeos_client_base::ui::UiPresentationProducer,
+    ) -> Result<CompletedSeatIngressAdmission> {
+        let admission = self.authorize_history(
+            state,
+            session,
+            &producer.presentation_id,
+            &producer.thread_id,
+        )?;
+        if !canonical_digest(&producer.producer_incarnation)
+            || !self.verified.control.as_ref().is_some_and(|control| {
+                control.state == ProducerState::Active
+                    && control.producer_incarnation == producer.producer_incarnation
+            })
+        {
+            return Err(HandlerError::Conflict(
+                "ingress producer is not current and active".into(),
+            )
+            .into());
+        }
+        Ok(admission)
+    }
 
-    Ok(json!({
-        "thread_id": detail.thread_id,
-        "chain_root_id": detail.chain_root_id,
-        "reattached": false,
-        "producer_incarnation": producer_incarnation,
-        "next_engine_seq": next_engine_seq.to_string(),
-    }))
+    /// Exact target/cut only: selecting or replacing a producer remains the
+    /// control writer's responsibility. This is not active action authority.
+    pub(crate) fn authorize_history(
+        &self,
+        state: &AppState,
+        session: &BrowserSession,
+        presentation_id: &str,
+        thread_id: &str,
+    ) -> Result<CompletedSeatIngressAdmission> {
+        if state as *const AppState as usize != self.state_identity
+            || session.session_id != self.session_id
+            || presentation_id != self.membership.presentation_id
+            || thread_id != self.anchor.thread_id()
+        {
+            return Err(HandlerError::Conflict(
+                "ingress proof differs from exact session/seat".into(),
+            )
+            .into());
+        }
+        let (detail, membership) = require_presentation_seat_for_read(
+            state,
+            session,
+            presentation_id,
+            Some(thread_id),
+            Some(self.anchor.chain_root_id()),
+        )?;
+        if membership != self.membership
+            || detail.status != "running"
+            || detail.chain_root_id != detail.thread_id
+        {
+            return Err(
+                HandlerError::Conflict("ingress producer or membership changed".into()).into(),
+            );
+        }
+        let (anchors, retired) = match &self.cut {
+            Some(cut) => cut
+                .publication_cut(state, session)
+                .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+            None => (vec![self.anchor.clone()], Vec::new()),
+        };
+        if !anchors.contains(&self.anchor) {
+            return Err(HandlerError::Conflict("ingress cut omitted its root".into()).into());
+        }
+        Ok(CompletedSeatIngressAdmission {
+            action: UiSeatActionAdmission {
+                anchor: self.anchor.clone(),
+                owner: seat_owner(session),
+                item_ref: detail.item_ref,
+                executor_ref: detail.executor_ref,
+            },
+            anchors,
+            retired,
+        })
+    }
+
+    pub(crate) fn next_mount_id(&self) -> u64 {
+        self.verified.replay.next_mount_id
+    }
+    pub(crate) fn composition_replay(
+        &self,
+    ) -> &ryeos_client_base::ui::composition_replay::UiCompositionReplay {
+        &self.verified.replay
+    }
+    pub(crate) fn next_engine_seq(&self) -> u64 {
+        self.verified.next_engine_seq
+    }
+    pub(crate) fn control(&self) -> Option<SeatProducer> {
+        self.verified.control.clone()
+    }
+    pub(crate) fn control_predecessor(
+        &self,
+    ) -> ryeos_ui_presentation_contract::seat_control::UiSeatControlPredecessor {
+        self.verified.control_predecessor.clone()
+    }
+
+    pub(crate) fn require_prepared(
+        &self,
+        state: &AppState,
+        session: &BrowserSession,
+        producer: &ryeos_client_base::ui::UiPresentationProducer,
+        operation_id: &str,
+        request: &ryeos_client_base::ui::UiBindingRequest,
+    ) -> Result<ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation> {
+        self.authorize(state, session, producer)?;
+        if !canonical_operation_id(operation_id) {
+            return Err(
+                HandlerError::BadRequest("invalid presentation operation UUID".into()).into(),
+            );
+        }
+        let operation = self
+            .verified
+            .replay
+            .pending
+            .get(operation_id)
+            .cloned()
+            .ok_or_else(|| {
+                HandlerError::Conflict(
+                    "presentation operation has no authenticated pending preparation".into(),
+                )
+            })?;
+        if operation.operation_id != operation_id
+            || operation
+                .admission()
+                .is_none_or(|admission| admission.request != *request)
+            || operation.producer.presentation_id != producer.presentation_id
+            || operation.producer.thread_id != producer.thread_id
+        {
+            return Err(HandlerError::Conflict(
+                "invocation differs from retained presentation operation".into(),
+            )
+            .into());
+        }
+        validate_prepared_operation(state, session, &operation)?;
+        Ok(operation)
+    }
 }
 
 pub async fn handle_append(
@@ -502,11 +2165,7 @@ pub async fn handle_append(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let ui_state = get_ui_state(&state).expect("UiState not set");
-    let _transition = ui_state
-        .lock_seat_transition()
-        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
-    let owner = seat_owner(&session);
     let req: AppendRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
     if req.events.is_empty() {
@@ -560,6 +2219,13 @@ pub async fn handle_append(
             ))
             .into());
         }
+        // The namespace is not permission to append an arbitrary contract.
+        // Initialization is server-owned; producer events use the same closed
+        // schema that both adapters replay, with no silently dropped payloads.
+        serde_json::from_value::<ryeos_client_base::ui::SeatEventKind>(json!({
+            "event_type": event.event_type, "payload": event.payload,
+        }))
+        .map_err(|error| HandlerError::BadRequest(format!("invalid typed seat event: {error}")))?;
         let expected_seq = req.first_engine_seq + offset as u64;
         if event.engine_seq != expected_seq {
             return Err(HandlerError::BadRequest(format!(
@@ -580,9 +2246,52 @@ pub async fn handle_append(
         .into());
     }
 
-    let detail = require_owned_seat(&state, &req.thread_id, &owner)?;
+    let preflight = read_seat_frontier(
+        state.clone(),
+        &session,
+        &req.presentation_id,
+        &req.thread_id,
+        None,
+    )
+    .await;
+    let captured_session_id = session.session_id.clone();
+    let _transition = ui_state
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+    let session = browser_session(&ctx, &state)?;
+    if session.session_id != captured_session_id {
+        return Err(
+            HandlerError::Conflict("append session changed during proof read".into()).into(),
+        );
+    }
+    let owner = seat_owner(&session);
+    let (detail, membership) = require_presentation_seat_for_read(
+        &state,
+        &session,
+        &req.presentation_id,
+        Some(&req.thread_id),
+        None,
+    )?;
+    let expected_operation_id = ryeos_client_base::ui::admission_operation::UiSeatAppendIdentity {
+        presentation_id: req.presentation_id.clone(),
+        chain_root_id: detail.chain_root_id.clone(),
+        thread_id: req.thread_id.clone(),
+        producer_incarnation: req.producer_incarnation.clone(),
+        first_engine_seq: req.first_engine_seq,
+        last_engine_seq: req.last_engine_seq,
+        event_count: req.event_count as u64,
+        payload_digest: req.payload_digest.clone(),
+    }
+    .derive_identity()
+    .map_err(|error| HandlerError::BadRequest(error.into()))?;
+    if req.operation_id != expected_operation_id {
+        return Err(HandlerError::BadRequest(
+            "seat append operation ID differs from its exact batch commitment".into(),
+        )
+        .into());
+    }
     let receipt = SeatAppendReceipt {
-        schema_version: "ryeos.ui.seat.append-receipt.v1".to_string(),
+        schema_version: SEAT_APPEND_RECEIPT_SCHEMA.to_string(),
         producer_incarnation: req.producer_incarnation.clone(),
         operation_id: req.operation_id.clone(),
         first_engine_seq: req.first_engine_seq,
@@ -590,52 +2299,222 @@ pub async fn handle_append(
         event_count: req.event_count,
         payload_digest: req.payload_digest.clone(),
     };
-    let retained_receipts = state
-        .state_store
-        .thread_events_by_type_operation_id(
-            &detail.thread_id,
-            SEAT_APPEND_RECEIPT_EVENT,
-            &req.operation_id,
-        )
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
-    if retained_receipts.len() > 1 {
-        return Err(HandlerError::Internal(
-            "seat append operation has multiple retained receipts".into(),
-        )
-        .into());
-    }
-    if let Some(retained_event) = retained_receipts.into_iter().next() {
-        let chain_seq = retained_event.chain_seq;
-        let retained: SeatAppendReceipt = decode_control(retained_event, "seat append receipt")?;
+    // Ordinary writes stay on the checkpointed composition path. A complete
+    // authenticated receipt scan is reserved for a proven older interval or as
+    // recovery when later malformed/incomplete history prevents reconstruction.
+    // Returning that evidence does not renew a lease, select a writer, or admit
+    // another mutation.
+    let exact_retry = || -> Result<Option<Value>> {
+        let Some((retained, chain_seq, receipt_thread_seq, receipt_event_hash, events)) =
+            authenticated_history::receipt_and_interval(
+                &state,
+                &req.presentation_id,
+                &detail.chain_root_id,
+                &detail.thread_id,
+                &req.operation_id,
+            )?
+        else {
+            return Ok(None);
+        };
         if retained != receipt {
             return Err(HandlerError::BadRequest(
                 "operation_id was already used for a different seat append".into(),
             )
             .into());
         }
-        return Ok(append_acknowledgement(&retained, chain_seq));
+        Ok(Some(append_acknowledgement(
+            &retained,
+            chain_seq,
+            receipt_thread_seq,
+            &receipt_event_hash,
+            &events,
+            "authoritative",
+        )))
+    };
+    let SeatFrontier {
+        verified,
+        anchor: append_anchor,
+        cut: append_cut,
+        membership: captured_membership,
+    } = match preflight {
+        Ok(frontier) => frontier,
+        Err(reconstruction_error) => {
+            return exact_retry()?.ok_or(reconstruction_error);
+        }
+    };
+    let authenticated_frontier = verified.next_engine_seq;
+    if req.first_engine_seq > authenticated_frontier {
+        return Err(HandlerError::BadRequest(format!(
+            "seat append sequence gap: expected {authenticated_frontier}, got {}",
+            req.first_engine_seq
+        ))
+        .into());
     }
+    if req.first_engine_seq < authenticated_frontier {
+        return exact_retry()?.ok_or_else(|| {
+            HandlerError::Conflict(
+                "historical seat append interval has no matching authenticated receipt".into(),
+            )
+            .into()
+        });
+    }
+
+    if captured_membership != membership {
+        return Err(
+            HandlerError::Conflict("append membership changed during proof read".into()).into(),
+        );
+    }
+    let (append_anchors, append_retired) = match &append_cut {
+        Some(cut) => cut
+            .publication_cut(&state, &session)
+            .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+        None => (vec![append_anchor.clone()], Vec::new()),
+    };
 
     // A retained receipt is the authoritative outcome of an operation and
     // remains replayable even if a later open rotated producer authority.
     // Only a genuinely new write must prove that it owns the current producer.
-    let producer_event = state
-        .state_store
-        .latest_thread_event_by_type(&detail.thread_id, SEAT_PRODUCER_EVENT)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
-        .ok_or_else(|| HandlerError::Internal("seat has no producer incarnation".into()))?;
-    let producer: SeatProducer = decode_control(producer_event, "seat producer")?;
-    if producer.schema_version != "ryeos.ui.seat.producer.v1" {
-        return Err(HandlerError::Internal(
-            "retained seat producer has an unsupported schema".into(),
-        )
-        .into());
+    state.engine.with_checked_bundle_generation(|generation| -> Result<Value> {
+    let producer = require_writer(&detail, &req.producer_incarnation, verified.control.as_ref())?;
+
+    let mut prepared_ids = std::collections::BTreeSet::new();
+    let mut prepared_batch = std::collections::BTreeMap::new();
+    let mut preceding_closures = std::collections::BTreeSet::new();
+    for event in &req.events {
+        if event.event_type == ryeos_client_base::ui::seat::SURFACE_CLOSED_EVENT {
+            let closure: ryeos_client_base::ui::seat::UiSurfaceClosure =
+                serde_json::from_value(event.payload.clone()).map_err(|error| {
+                    HandlerError::BadRequest(format!("invalid Surface closure: {error}"))
+                })?;
+            closure
+                .validate()
+                .map_err(|error| HandlerError::BadRequest(error.into()))?;
+            if !closure_matches_live_surface(
+                &closure,
+                &req.presentation_id,
+                membership.surfaces.get(&closure.surface_instance_id),
+            ) || !preceding_closures.insert(closure.surface_instance_id.clone())
+            {
+                return Err(HandlerError::Conflict(
+                    "Surface closure does not name one exact live membership".into(),
+                )
+                .into());
+            }
+            continue;
+        }
+        if event.event_type != PRESENTATION_PREPARED_EVENT {
+            continue;
+        }
+        let operation: ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation =
+            serde_json::from_value(event.payload.clone()).map_err(|error| {
+                HandlerError::BadRequest(format!(
+                    "invalid prepared presentation operation: {error}"
+                ))
+            })?;
+        reject_closed_origin(&operation, &preceding_closures)?;
+        if operation.producer.presentation_id != req.presentation_id
+            || operation.producer.thread_id != req.thread_id
+            || operation.producer.producer_incarnation != req.producer_incarnation
+            || operation.prepared_engine_seq != event.engine_seq
+            || operation.validate_identity().is_err()
+            || !prepared_ids.insert(operation.operation_id.clone())
+        {
+            return Err(HandlerError::Conflict(
+                "prepared operation writer or unique identity does not match append".into(),
+            )
+            .into());
+        }
+        if operation.admission().is_some() {
+            validate_prepared_operation(&state, &session, &operation)?;
+        }
+        prepared_batch.insert(operation.operation_id.clone(), operation);
     }
-    if producer.producer_incarnation != req.producer_incarnation {
-        return Err(HandlerError::BadRequest(
-            "stale seat producer incarnation; reopen the seat before appending".into(),
-        )
-        .into());
+    let current = ryeos_client_base::ui::UiPresentationProducer {
+        presentation_id: req.presentation_id.clone(),
+        thread_id: req.thread_id.clone(),
+        producer_incarnation: req.producer_incarnation.clone(),
+    };
+    let mut completed_ids = std::collections::BTreeSet::new();
+    let mut preceding_preparations = std::collections::BTreeSet::new();
+    preceding_closures.clear();
+    for event in &req.events {
+        if event.event_type == ryeos_client_base::ui::seat::SURFACE_CLOSED_EVENT
+            && let Some(id) = event
+                .payload
+                .get("surface_instance_id")
+                .and_then(Value::as_str)
+        {
+            preceding_closures.insert(id.to_owned());
+        }
+        if event.event_type == PRESENTATION_PREPARED_EVENT
+            && let Some(id) = event.payload.get("operation_id").and_then(Value::as_str)
+        {
+            preceding_preparations.insert(id.to_owned());
+        }
+        if event.event_type != PRESENTATION_COMPLETED_EVENT {
+            continue;
+        }
+        let completed: ryeos_client_base::ui::admission_operation::UiCompletedPresentationOperation =
+            serde_json::from_value(event.payload.clone()).map_err(|error|
+                HandlerError::BadRequest(format!("invalid presentation completion: {error}")))?;
+        if !canonical_operation_id(&completed.operation_id)
+            || !completed_ids.insert(completed.operation_id.clone())
+            || verified.replay.settled.contains(&completed.operation_id)
+        {
+            return Err(HandlerError::Conflict(
+                "completion has no unique canonical operation".into(),
+            )
+            .into());
+        }
+        let prepared = match prepared_batch.get(&completed.operation_id) {
+            Some(prepared) if preceding_preparations.contains(&completed.operation_id) => {
+                prepared.clone()
+            }
+            Some(_) => {
+                return Err(HandlerError::Conflict(
+                    "completion precedes its prepared operation".into(),
+                )
+                .into());
+            }
+            None => {
+                let prepared = verified
+                    .replay
+                    .pending
+                    .get(&completed.operation_id)
+                    .cloned()
+                    .ok_or_else(|| HandlerError::Conflict(
+                        "completion has no authenticated pending preparation".into(),
+                    ))?;
+                if prepared.admission().is_some() {
+                    validate_prepared_operation(&state, &session, &prepared)?;
+                }
+                prepared
+            }
+        };
+        if prepared.operation_id != completed.operation_id
+            || prepared.producer.presentation_id != req.presentation_id
+            || prepared.producer.thread_id != req.thread_id
+        {
+            return Err(HandlerError::Forbidden(
+                "completion preparation belongs to another presentation".into(),
+            )
+            .into());
+        }
+        reject_closed_origin(&prepared, &preceding_closures)?;
+        if completed
+            .result
+            .pointer("/ui_transition/surface/surface_instance_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| preceding_closures.contains(id))
+        {
+            return Err(HandlerError::Conflict(
+                "completion follows closure of its target Surface".into(),
+            )
+            .into());
+        }
+        if prepared.admission().is_some() {
+            validate_completed_operation(&state, &session, &current, &completed, &prepared)?;
+        }
     }
 
     if detail.status != "running" {
@@ -646,40 +2525,38 @@ pub async fn handle_append(
         .into());
     }
 
-    let expected_first = match latest_receipt(&state, &detail.thread_id)? {
-        Some((latest, _)) if latest.producer_incarnation == producer.producer_incarnation => latest
-            .last_engine_seq
-            .checked_add(1)
-            .ok_or_else(|| HandlerError::BadRequest("seat engine sequence is exhausted".into()))?,
-        Some(_) | None => producer.next_engine_seq,
-    };
-    if req.first_engine_seq != expected_first {
-        return Err(HandlerError::BadRequest(format!(
-            "seat append sequence gap or overlap: expected {expected_first}, got {}",
-            req.first_engine_seq
-        ))
+    if producer.next_engine_seq > authenticated_frontier {
+        return Err(HandlerError::Conflict(
+            "seat producer frontier exceeds authenticated history".into(),
+        )
         .into());
     }
 
-    // Renew before appending so presence either defeats the expiry claim or
-    // observes that the reaper already owns the transition.
-    state.state_store.touch_seat_lease(
-        &detail.thread_id,
-        &owner,
-        &detail.item_ref,
-        &detail.executor_ref,
+    let prospective = composition::validate_prospective_append(
+        generation,&state,&session,&membership,&detail,&req,&verified,
     )?;
 
     let mut records: Vec<NewEventRecord> = req
         .events
         .into_iter()
-        .map(|event| NewEventRecord {
-            event_type: event.event_type,
-            storage_class: "indexed".to_string(),
-            payload: json!({
+        .map(|event| {
+            let mut payload = json!({
                 "seq": event.engine_seq,
                 "payload": event.payload,
-            }),
+            });
+            if event.event_type == PRESENTATION_PREPARED_EVENT
+                || event.event_type == PRESENTATION_COMPLETED_EVENT
+            {
+                payload["operation_id"] = payload["payload"]["operation_id"].clone();
+            }
+            if event.event_type == ryeos_client_base::ui::seat::SURFACE_CLOSED_EVENT {
+                payload["operation_id"] = payload["payload"]["surface_instance_id"].clone();
+            }
+            NewEventRecord {
+                event_type: event.event_type,
+                storage_class: "indexed".to_string(),
+                payload,
+            }
         })
         .collect();
     records.push(NewEventRecord {
@@ -688,70 +2565,356 @@ pub async fn handle_append(
         payload: serde_json::to_value(&receipt)
             .map_err(|error| HandlerError::Internal(error.to_string()))?,
     });
-    let persisted = state
-        .threads
-        .append_thread_events(&detail.chain_root_id, &detail.thread_id, &records)?
-        .ok_or_else(|| {
-            HandlerError::BadRequest(
-                "seat session is no longer running; only running seats accept events".into(),
+    let persisted = match state.state_store.append_seat_events_and_renew_if_mixed_cut(
+        &ExactSeat {
+            root_id: &detail.chain_root_id,
+            owner: &owner,
+            item_ref: &detail.item_ref,
+            executor_ref: &detail.executor_ref,
+        },
+        &records,
+        &SeatCut {
+            expected: &append_anchor,
+            anchors: &append_anchors,
+            retired: &append_retired,
+        },
+    )? {
+        CutAppendResult::Committed(records) => records,
+        CutAppendResult::Conflict => {
+            return Err(HandlerError::Conflict(
+                "seat history advanced during conditional append; reconcile before retry".into(),
             )
-        })?;
-    if persisted.len() != receipt.event_count + 1 {
-        return Err(HandlerError::Internal(
-            "seat append returned an invalid acknowledgement".into(),
-        )
-        .into());
-    }
-    let receipt_chain_seq = persisted
-        .last()
-        .map(|record| record.chain_seq)
-        .ok_or_else(|| HandlerError::Internal("seat append returned no records".into()))?;
+            .into());
+        }
+        CutAppendResult::NotRunning => {
+            return Err(HandlerError::Conflict(
+                "seat is no longer running at the conditional append fence".into(),
+            )
+            .into());
+        }
+    };
+    // The append owner has already committed and reconciled these records.
+    // Do not replace that result with a second read of rebuildable projection.
+    let (receipt_chain_seq, acknowledged) = append_ack::from_committed_append(
+        &detail.chain_root_id,
+        &detail.thread_id,
+        &receipt,
+        &persisted,
+    )?;
+    let committed_receipt = persisted.last().expect("validated append includes receipt");
+    let receipt_hash = committed_receipt
+        .event_hash
+        .as_deref()
+        .expect("validated receipt has canonical hash");
 
-    Ok(append_acknowledgement(&receipt, receipt_chain_seq))
+    // CAS already committed. Rebuildable session repair cannot change that
+    // outcome into a refused append; current admission still fails closed on
+    // stale membership until authenticated reconciliation repairs it.
+    if let Err(error) = ui_state.browser_sessions.reconcile_presentation_mount_frontier(
+        &session.session_id,&membership.presentation_id,&membership.root_coordinate,
+        state.node_policy.generation_digest(),prospective.next_mount_id,
+    ) {
+        tracing::warn!(%error, presentation_id = %membership.presentation_id,
+            "seat append committed; mount frontier reconciliation deferred");
+    }
+    if let Err(error) = reconcile_surface_closures(&state, &session, &membership, &detail) {
+        tracing::warn!(%error, presentation_id = %membership.presentation_id,
+            "seat append committed; Surface closure reconciliation deferred");
+    }
+    Ok(append_acknowledgement(
+        &receipt,
+        receipt_chain_seq,
+        committed_receipt.thread_seq,
+        receipt_hash,
+        acknowledged,
+        "authoritative",
+    ))
+    })
 }
 
-pub async fn handle_replay(
+fn reject_closed_origin(
+    operation: &ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation,
+    preceding_closures: &std::collections::BTreeSet<String>,
+) -> Result<(), HandlerError> {
+    if let Some(freeze) = operation.move_freeze() {
+        use ryeos_client_base::ids::UiViewMountOwner;
+        let is_closed = |owner: UiViewMountOwner| {
+            matches!(owner,
+            UiViewMountOwner::Surface { surface_instance_id, .. }
+                if preceding_closures.contains(surface_instance_id.as_str()))
+        };
+        // Empty exported sets still have an exact Surface owner; inspecting
+        // mounted Views alone would miss their lifetime boundary.
+        let closed_set = freeze
+            .export
+            .sets()
+            .is_some_and(|sets| sets.iter().any(|set| is_closed(set.source_owner.clone())));
+        let closed_mount = freeze
+            .export
+            .mounts()
+            .iter()
+            .any(|mount| mount.source_instance.mount_owner().is_some_and(&is_closed));
+        return if closed_set || closed_mount {
+            Err(HandlerError::Conflict(
+                "MOVE freeze follows closure of a source Surface".into(),
+            ))
+        } else {
+            // This checks closure ordering only. Exact freeze identity,
+            // inventory and source state remain validated by the replay owner.
+            Ok(())
+        };
+    }
+    if let Some(composition) = operation.composition() {
+        return if composition
+            .owner
+            .surface_instance_id()
+            .is_some_and(|id| preceding_closures.contains(id.as_str()))
+        {
+            Err(HandlerError::Conflict(
+                "composition operation follows closure of its owner Surface".into(),
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    let admission = operation
+        .admission()
+        .ok_or_else(|| HandlerError::BadRequest("unsupported preparation body".into()))?;
+    if let Some(ryeos_client_base::ids::UiViewMountOwner::Surface {
+        surface_instance_id,
+        ..
+    }) = admission.invocation_origin.mount_owner()
+        && preceding_closures.contains(surface_instance_id.as_str())
+    {
+        return Err(HandlerError::Conflict(
+            "presentation operation follows closure of its origin Surface".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn closure_matches_live_surface(
+    closure: &ryeos_client_base::ui::seat::UiSurfaceClosure,
+    presentation_id: &str,
+    surface: Option<&crate::browser_session::SurfaceMembership>,
+) -> bool {
+    closure.validate().is_ok()
+        && closure.presentation_id == presentation_id
+        && surface.is_some_and(|surface| {
+            !surface.closed
+                && surface.surface_instance_id == closure.surface_instance_id
+                && surface.coordinate.binding_attachment_id == closure.binding.binding_attachment_id
+                && surface.coordinate.binding_generation == closure.binding.binding_generation
+                && surface.coordinate.binding_digest == closure.binding.binding_digest
+        })
+}
+
+/// The retained `ui.seat.replay` route now serves only exact append-receipt
+/// reconciliation. Cold history has one fixed-anchor provisional stream owner.
+pub async fn handle_receipt_lookup(
     params: Value,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let ui_state = get_ui_state(&state).expect("UiState not set");
-    let _transition = ui_state
+    let ui = get_ui_state(&state).expect("UiState not set");
+    let req: ReceiptLookupRequest = serde_json::from_value(params).map_err(|error| {
+        HandlerError::BadRequest(format!("invalid seat receipt lookup: {error}"))
+    })?;
+    let (detail, receipt_anchor) = {
+        let _transition = ui
+            .lock_seat_transition()
+            .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
+        let session = browser_session(&ctx, &state)?;
+        let detail = require_presentation_seat_for_read(
+            &state,
+            &session,
+            &req.presentation_id,
+            None,
+            Some(&req.chain_root_id),
+        )?
+        .0;
+        let anchor = state
+            .state_store
+            .capture_thread_event_read_anchor(&detail.chain_root_id, &detail.thread_id)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                HandlerError::Conflict("seat receipt history has no signed anchor".into())
+            })?;
+        (detail, anchor)
+    };
+    // This may walk a long immutable signed prefix. No global UI transition
+    // lock is held, and no candidate is disclosed until the exact session and
+    // seat membership are revalidated below.
+    let response = read_receipt_result(&state, &req, &detail, &receipt_anchor)?;
+    let _transition = ui
         .lock_seat_transition()
         .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
-    let owner = seat_owner(&session);
-    let req: ReplayRequest = serde_json::from_value(params)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    let detail = require_owned_seat(&state, &req.chain_root_id, &owner)?;
-    if detail.status != "running" {
-        state.state_store.remove_seat_lease(&detail.thread_id)?;
-        return Err(HandlerError::BadRequest("seat session is not running".into()).into());
-    }
-    state.state_store.touch_seat_lease(
-        &detail.thread_id,
-        &owner,
-        &detail.item_ref,
-        &detail.executor_ref,
+    let (current, _) = require_presentation_seat_for_read(
+        &state,
+        &session,
+        &req.presentation_id,
+        Some(&detail.thread_id),
+        Some(&detail.chain_root_id),
     )?;
-    let result = state
-        .events
-        .replay(&ryeos_app::event_store_service::EventReplayParams {
-            thread_id: None,
-            chain_root_id: Some(detail.chain_root_id),
-            after_chain_seq: req.after_chain_seq,
-            limit: req.limit,
-        })?;
-    let events: Vec<_> = result
-        .events
-        .into_iter()
-        .filter(|event| event.event_type.starts_with(SEAT_EVENT_PREFIX))
-        .collect();
+    if current.item_ref != detail.item_ref
+        || current.executor_ref != detail.executor_ref
+        || current.requested_by != detail.requested_by
+    {
+        return Err(HandlerError::Forbidden(
+            "presentation seat association changed during history read".into(),
+        )
+        .into());
+    }
+    if response["receipt_status"] == "not_found" {
+        let current_anchor = state
+            .state_store
+            .capture_thread_event_read_anchor(&detail.chain_root_id, &detail.thread_id)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?
+            .ok_or_else(|| HandlerError::Conflict("seat receipt history disappeared".into()))?;
+        if current_anchor.tip() != receipt_anchor.tip() {
+            return Err(HandlerError::Conflict(
+                "seat receipt history advanced during negative lookup; retry exact request".into(),
+            )
+            .into());
+        }
+    }
+    Ok(response)
+}
 
-    Ok(json!({
-        "events": events,
-        "next_cursor": result.next_cursor.map(|cursor| cursor.to_string()),
-    }))
+fn read_receipt_result(
+    state: &AppState,
+    req: &ReceiptLookupRequest,
+    detail: &ryeos_app::state_store::ThreadDetail,
+    receipt_anchor: &ryeos_state::AuthoritativeThreadEventReadAnchor,
+) -> Result<Value> {
+    let lookup = &req.receipt;
+    if lookup.thread_id != detail.thread_id
+        || !canonical_operation_id(&lookup.operation_id)
+        || !canonical_digest(&lookup.producer_incarnation)
+        || !canonical_digest(&lookup.payload_digest)
+        || lookup.event_count == 0
+        || lookup.event_count > MAX_SEAT_APPEND_EVENTS
+        || lookup
+            .first_engine_seq
+            .checked_add(lookup.event_count as u64 - 1)
+            != Some(lookup.last_engine_seq)
+    {
+        return Err(HandlerError::BadRequest("receipt lookup coordinate is invalid".into()).into());
+    }
+    if let Some((receipt, chain_seq, receipt_thread_seq, receipt_event_hash, events)) =
+        authenticated_history::receipt_and_interval_at_anchor(
+            state,
+            &req.presentation_id,
+            &detail.chain_root_id,
+            &detail.thread_id,
+            &lookup.operation_id,
+            receipt_anchor,
+        )?
+    {
+        if receipt.schema_version != SEAT_APPEND_RECEIPT_SCHEMA
+            || receipt.producer_incarnation != lookup.producer_incarnation
+            || receipt.first_engine_seq != lookup.first_engine_seq
+            || receipt.last_engine_seq != lookup.last_engine_seq
+            || receipt.event_count != lookup.event_count
+            || receipt.payload_digest != lookup.payload_digest
+        {
+            return Err(HandlerError::Conflict(
+                "receipt lookup content contradicts retained operation".into(),
+            )
+            .into());
+        }
+        return Ok(json!({
+            "receipt_status":"found",
+            "receipt":append_acknowledgement(&receipt,chain_seq,receipt_thread_seq,&receipt_event_hash,&events,"authoritative")
+        }));
+    }
+    Ok(json!({"receipt_status":"not_found","receipt":null}))
+}
+
+async fn defer_closed_seat_settlement(
+    state: Arc<AppState>,
+    session_id: &str,
+    presentation_id: &str,
+    detail: &ryeos_app::state_store::ThreadDetail,
+    closed: &SeatProducer,
+) {
+    if detail.status == "running" {
+        // The old pre-append cut is never reused. Rebuild complete history at
+        // the post-Closed tip without holding the UI transition lock, then
+        // claim only if that exact signed tip and every dependency still hold.
+        // A later suffix safely defers to ordinary expiry maintenance.
+        let attempt = async {
+            let ui = get_ui_state(&state).ok_or_else(|| anyhow::anyhow!("UiState not set"))?;
+            let session = ui
+                .browser_sessions
+                .get_session(session_id)
+                .ok_or_else(|| anyhow::anyhow!("closed seat session expired"))?;
+            let read = read_completed_seat_history(
+                state.clone(),
+                &session,
+                presentation_id,
+                &detail.thread_id,
+            )
+            .await?;
+            let _transition = ui
+                .lock_seat_transition()
+                .map_err(|_| anyhow::anyhow!("seat transition lock poisoned"))?;
+            let session = ui
+                .browser_sessions
+                .get_session(session_id)
+                .ok_or_else(|| anyhow::anyhow!("closed seat session expired"))?;
+            let admission =
+                read.authorize_history(&state, &session, presentation_id, &detail.thread_id)?;
+            let observed = read
+                .control()
+                .ok_or_else(|| anyhow::anyhow!("closed control absent"))?;
+            if serde_json::to_value(&observed)? != serde_json::to_value(closed)? {
+                anyhow::bail!("completed closed control changed before lease claim");
+            }
+            let closed_value = serde_json::to_value(&observed)?;
+            state.state_store.claim_closed_seat_lease_if_tip(
+                &admission.seat(),
+                &admission.cut(),
+                |tip| Ok(tip.event_type == SEAT_PRODUCER_EVENT && tip.payload == closed_value),
+            )
+        }
+        .await;
+        match attempt {
+            Ok(true) => tracing::debug!(thread_id = %detail.thread_id,
+                "closed seat handed to lifecycle settlement"),
+            Ok(false) => tracing::debug!(thread_id = %detail.thread_id,
+                "closed seat prompt claim deferred after signed cut change"),
+            Err(error) => tracing::warn!(thread_id = %detail.thread_id, %error,
+                "closed seat prompt settlement deferred"),
+        }
+        return;
+    }
+    if let Err(error) = state
+        .state_store
+        .remove_terminal_seat_lease_if_proved(&detail.thread_id)
+    {
+        // Cleanup cannot turn an exact retained control acknowledgement into
+        // a reported refusal. The terminal owner can retry this repair.
+        tracing::warn!(thread_id = %detail.thread_id, %error, "closed seat terminal lease cleanup deferred");
+    }
+}
+
+fn validate_exact_control_readback(
+    retained: &SeatProducer,
+    request: &UiSeatControlRequest,
+    requested_state: ProducerState,
+    incarnation: &str,
+) -> Result<(), HandlerError> {
+    if &retained.request != request
+        || retained.state != requested_state
+        || retained.producer_incarnation != incarnation
+    {
+        return Err(HandlerError::Conflict(
+            "transition operation reused with different content".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn handle_close(
@@ -759,38 +2922,152 @@ pub async fn handle_close(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let ui_state = get_ui_state(&state).expect("UiState not set");
-    let _transition = ui_state
+    let ui = get_ui_state(&state).expect("UiState not set");
+    let req: CloseRequest = serde_json::from_value(params)
+        .map_err(|error| HandlerError::BadRequest(format!("invalid seat close: {error}")))?;
+    let initial_session = browser_session(&ctx, &state)?;
+    let history = read_completed_seat_history(
+        state.clone(),
+        &initial_session,
+        &req.presentation_id,
+        &req.thread_id,
+    )
+    .await;
+    let _transition = ui
         .lock_seat_transition()
         .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
-    let owner = seat_owner(&session);
-    let req: CloseRequest = serde_json::from_value(params)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    let detail = require_owned_seat(&state, &req.thread_id, &owner)?;
-    if detail.status != "running" {
-        state.state_store.remove_seat_lease(&detail.thread_id)?;
-        return Ok(json!({ "thread_id": detail.thread_id, "status": detail.status }));
+    let request = match req.action {
+        CloseAction::Close => UiSeatControlRequest::Close {
+            schema: req.schema,
+            operation_id: req.operation_id.clone(),
+            presentation_id: req.presentation_id.clone(),
+            thread_id: req.thread_id.clone(),
+            chain_root_id: req.chain_root_id.clone(),
+            predecessor: req.predecessor.clone(),
+            intent_nonce: req.intent_nonce.clone(),
+            producer_incarnation: req.producer_incarnation.clone(),
+        },
+        CloseAction::Relinquish => UiSeatControlRequest::Relinquish {
+            schema: req.schema,
+            operation_id: req.operation_id.clone(),
+            presentation_id: req.presentation_id.clone(),
+            thread_id: req.thread_id.clone(),
+            chain_root_id: req.chain_root_id.clone(),
+            predecessor: req.predecessor.clone(),
+            intent_nonce: req.intent_nonce.clone(),
+            producer_incarnation: req.producer_incarnation.clone(),
+        },
+    };
+    request
+        .validate()
+        .map_err(|error| HandlerError::BadRequest(error.into()))?;
+    let (detail, _) = require_presentation_seat_for_read(
+        &state,
+        &session,
+        &req.presentation_id,
+        Some(&req.thread_id),
+        None,
+    )?;
+    if detail.chain_root_id != req.chain_root_id {
+        return Err(HandlerError::Conflict("transition seat coordinate changed".into()).into());
     }
-    let finalized = state.threads.finalize_thread(&ThreadFinalizeParams {
-        thread_id: req.thread_id,
-        status: "completed".to_string(),
-        outcome_code: None,
-        result: None,
-        error: None,
-        metadata: None,
-        artifacts: Vec::new(),
-        final_cost: None,
-        summary_json: None,
-    })?;
-    state.state_store.remove_seat_lease(&finalized.thread_id)?;
-    Ok(json!({ "thread_id": finalized.thread_id, "status": finalized.status }))
+    let requested_state = match req.action {
+        CloseAction::Close => ProducerState::Closed,
+        CloseAction::Relinquish => ProducerState::Relinquished,
+    };
+    if let Some(retained) = retained_control(&state, &detail.thread_id, &req.operation_id)? {
+        validate_exact_control_readback(
+            &retained,
+            &request,
+            requested_state,
+            &req.producer_incarnation,
+        )?;
+        let response = producer_response(&req.presentation_id, &detail, &retained);
+        if retained.state == ProducerState::Closed {
+            let session_id = session.session_id.clone();
+            drop(_transition);
+            defer_closed_seat_settlement(
+                state.clone(),
+                &session_id,
+                &req.presentation_id,
+                &detail,
+                &retained,
+            )
+            .await;
+        }
+        return Ok(response);
+    }
+    // An exact signed control outcome is readback, not permission to append.
+    // Terminal markers (or a newer incompatible proof scope) may correctly
+    // prevent a fresh mutation proof without erasing that original outcome.
+    let history = history?;
+    let admission =
+        history.authorize_history(&state, &session, &req.presentation_id, &req.thread_id)?;
+    let (current_predecessor, _, anchor) = authenticated_history::control_predecessor(
+        &state,
+        &detail.chain_root_id,
+        &detail.thread_id,
+    )?;
+    if current_predecessor != req.predecessor {
+        return Err(HandlerError::Conflict("transition control predecessor changed".into()).into());
+    }
+    if current_predecessor != history.control_predecessor() || anchor != admission.action.anchor {
+        return Err(HandlerError::Conflict(
+            "transition signed control differs from completed history".into(),
+        )
+        .into());
+    }
+    let current = history
+        .control()
+        .filter(|control| {
+            control.state == ProducerState::Active
+                && control.producer_incarnation == req.producer_incarnation
+        })
+        .ok_or_else(|| {
+            HandlerError::Conflict("presentation producer is not current and active".into())
+        })?;
+    let transition = SeatProducer {
+        schema_version: SEAT_PRODUCER_SCHEMA.into(),
+        request,
+        operation_id: req.operation_id,
+        claim: None,
+        predecessor: Some(current.producer_incarnation.clone()),
+        producer_incarnation: current.producer_incarnation,
+        state: requested_state,
+        next_engine_seq: history.next_engine_seq(),
+    };
+    append_control(
+        &state,
+        &session,
+        &detail,
+        &transition,
+        &anchor,
+        &admission.anchors,
+        &admission.retired,
+    )?;
+    let response = producer_response(&req.presentation_id, &detail, &transition);
+    if transition.state == ProducerState::Closed {
+        let session_id = session.session_id.clone();
+        drop(_transition);
+        defer_closed_seat_settlement(
+            state.clone(),
+            &session_id,
+            &req.presentation_id,
+            &detail,
+            &transition,
+        )
+        .await;
+    }
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TouchRequest {
+    presentation_id: String,
     thread_id: String,
+    producer_incarnation: String,
 }
 
 pub async fn handle_touch(
@@ -798,26 +3075,41 @@ pub async fn handle_touch(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let ui_state = get_ui_state(&state).expect("UiState not set");
-    let _transition = ui_state
+    let ui = get_ui_state(&state).expect("UiState not set");
+    let req: TouchRequest = serde_json::from_value(params)
+        .map_err(|error| HandlerError::BadRequest(format!("invalid seat touch: {error}")))?;
+    let initial_session = browser_session(&ctx, &state)?;
+    let history = read_completed_seat_history(
+        state.clone(),
+        &initial_session,
+        &req.presentation_id,
+        &req.thread_id,
+    )
+    .await?;
+    let _transition = ui
         .lock_seat_transition()
         .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
-    let owner = seat_owner(&session);
-    let req: TouchRequest = serde_json::from_value(params)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    let detail = require_owned_seat(&state, &req.thread_id, &owner)?;
-    if detail.status != "running" {
-        state.state_store.remove_seat_lease(&detail.thread_id)?;
-        return Err(HandlerError::BadRequest("seat session is not running".into()).into());
+    let admission =
+        history.authorize_history(&state, &session, &req.presentation_id, &req.thread_id)?;
+    if !canonical_digest(&req.producer_incarnation)
+        || !history.control().is_some_and(|control| {
+            control.state == ProducerState::Active
+                && control.producer_incarnation == req.producer_incarnation
+        })
+    {
+        return Err(HandlerError::Conflict(
+            "presentation producer is not current and active".into(),
+        )
+        .into());
     }
-    state.state_store.touch_seat_lease(
-        &detail.thread_id,
-        &owner,
-        &detail.item_ref,
-        &detail.executor_ref,
-    )?;
-    Ok(json!({ "thread_id": detail.thread_id, "touched": true }))
+    if !state
+        .state_store
+        .touch_seat_lease_if_mixed_cut(&admission.seat(), &admission.cut())?
+    {
+        return Err(HandlerError::Conflict("seat lease cut changed".into()).into());
+    }
+    Ok(json!({"presentation_id":req.presentation_id,"thread_id":req.thread_id,"touched":true}))
 }
 
 pub static OPEN_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -836,12 +3128,22 @@ pub static APPEND_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, ctx, state| Box::pin(handle_append(params, ctx, state)),
 };
 
+/// Transfer testimony has its own authenticated paired publication owner.
+/// Ordinary append must never become an alternative transfer writer.
+pub static TRANSFER_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/seat/transfer",
+    endpoint: "ui.seat.transfer",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(transfer_ingress::handle_transfer(params, ctx, state)),
+};
+
 pub static REPLAY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/seat/replay",
     endpoint: "ui.seat.replay",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
-    handler: |params, ctx, state| Box::pin(handle_replay(params, ctx, state)),
+    handler: |params, ctx, state| Box::pin(handle_receipt_lookup(params, ctx, state)),
 };
 
 pub static CLOSE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -863,6 +3165,78 @@ pub static TOUCH_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod digest_tests {
     use super::*;
+
+    #[test]
+    fn surface_closure_requires_exact_live_membership_not_sibling_binding() {
+        let presentation_id = "11111111-1111-4111-8111-111111111111";
+        let mut closure = ryeos_client_base::ui::seat::UiSurfaceClosure {
+            presentation_id: presentation_id.into(),
+            surface_instance_id: "22222222-2222-4222-8222-222222222222".into(),
+            binding: ryeos_client_base::ui::UiBindingAttachmentCoordinate {
+                binding_attachment_id: "binding".into(),
+                binding_generation: 1,
+                binding_digest: "digest".into(),
+            },
+        };
+        let mut surface = crate::browser_session::SurfaceMembership {
+            surface_instance_id: closure.surface_instance_id.clone(),
+            creation_request_id: "33333333-3333-4333-8333-333333333333".into(),
+            ordinal: 1,
+            title: "Surface".into(),
+            coordinate: BindingAttachmentCoordinate {
+                binding_attachment_id: "binding".into(),
+                binding_generation: 1,
+                binding_digest: "digest".into(),
+            },
+            initial_seed: None,
+            closed: false,
+            particular_resume: None,
+            saved_resume: None,
+            tab_openings: std::collections::BTreeMap::new(),
+            mount_manifest:
+                ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest::allocate(
+                    ryeos_client_base::ids::PresentationId::try_new(presentation_id).unwrap(),
+                    ryeos_client_base::ids::SurfaceInstanceId::try_new(
+                        &closure.surface_instance_id,
+                    )
+                    .unwrap(),
+                    1,
+                    Vec::new(),
+                    None,
+                )
+                .unwrap(),
+        };
+        assert!(closure_matches_live_surface(
+            &closure,
+            presentation_id,
+            Some(&surface)
+        ));
+        closure.binding.binding_generation = 2;
+        assert!(!closure_matches_live_surface(
+            &closure,
+            presentation_id,
+            Some(&surface)
+        ));
+        closure.binding.binding_generation = 1;
+        surface.surface_instance_id = "44444444-4444-4444-8444-444444444444".into();
+        assert!(
+            !closure_matches_live_surface(&closure, presentation_id, Some(&surface)),
+            "same attachment does not close sibling mount"
+        );
+        surface.surface_instance_id = closure.surface_instance_id.clone();
+        surface.closed = true;
+        assert!(!closure_matches_live_surface(
+            &closure,
+            presentation_id,
+            Some(&surface)
+        ));
+        surface.closed = false;
+        assert!(!closure_matches_live_surface(
+            &closure,
+            "55555555-5555-4555-8555-555555555555",
+            Some(&surface)
+        ));
+    }
 
     fn event_batch(payload: Value) -> Value {
         json!([{
@@ -909,5 +3283,80 @@ mod digest_tests {
         for (value, expected) in vectors {
             assert_eq!(seat_payload_digest(&value).unwrap(), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod predecessor_shape_tests {
+    use super::*;
+
+    #[test]
+    fn open_without_an_action_is_refused() {
+        serde_json::from_value::<OpenRequest>(json!({
+            "binding_attachment_id": "attachment",
+            "binding_generation": 1,
+            "binding_digest": "a".repeat(64),
+        }))
+        .expect_err("the attachment-triple open shape is gone");
+    }
+
+    #[test]
+    fn append_without_a_presentation_is_refused() {
+        serde_json::from_value::<AppendRequest>(json!({
+            "thread_id": "T-seat",
+            "producer_incarnation": "a".repeat(64),
+            "operation_id": "00000000-0000-4000-8000-000000000001",
+            "first_engine_seq": 0,
+            "last_engine_seq": 0,
+            "event_count": 1,
+            "payload_digest": "b".repeat(64),
+            "events": [],
+        }))
+        .expect_err("an append names its presentation");
+    }
+
+    #[test]
+    fn close_without_a_control_intent_is_refused() {
+        serde_json::from_value::<CloseRequest>(json!({"thread_id": "T-seat"}))
+            .expect_err("close carries a fenced control intent");
+    }
+
+    #[test]
+    fn seat_kind_is_the_signed_policy_value_not_a_literal() {
+        let (_directory, _store_owner, state) = crate::test_support::build_test_state();
+        let policy = state
+            .node_policy
+            .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
+            .unwrap();
+        assert_eq!(seat_kind(&state).unwrap(), policy.seat.kind);
+    }
+
+    /// The seat profile a node admits seats under comes from the signed
+    /// surface kind, not from the daemon: a registry built from the shipped
+    /// kinds alone fences the policy's seat kind.
+    #[test]
+    fn the_signed_surface_kind_declares_the_fenced_seat_profile() {
+        use ryeos_engine::test_support::{core_bundle_root, live_trust_store, workspace_root};
+        let roots = [
+            core_bundle_root().join(".ai/node/engine/kinds"),
+            workspace_root().join("bundles/ryeos-ui/.ai/node/engine/kinds"),
+        ];
+        let kinds =
+            ryeos_engine::kind_registry::KindRegistry::load_base(&roots, &live_trust_store())
+                .expect("load the shipped kinds");
+        let profiles = ryeos_app::kind_profiles::KindProfileRegistry::build(Some(&kinds));
+        let (_directory, _store_owner, state) = crate::test_support::build_test_state();
+        let policy = state
+            .node_policy
+            .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
+            .unwrap();
+        let profile = profiles
+            .get(&policy.seat.kind)
+            .expect("the seat kind has a profile");
+        assert!(!profile.root_executable);
+        assert!(profile.retirement_fence);
+        policy
+            .require_fenced_seat_kind(profiles.fenced_chain_kinds().unwrap())
+            .expect("the node policy's seat kind is fenced");
     }
 }

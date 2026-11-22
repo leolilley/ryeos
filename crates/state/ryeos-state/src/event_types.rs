@@ -6,14 +6,109 @@
 //! these constants AND lets the projection match against them, so neither side
 //! spells a literal and a wire-string change happens in exactly one place.
 
-pub const THREAD_CREATED: &str = "thread_created";
-pub const THREAD_STARTED: &str = "thread_started";
-pub const THREAD_COMPLETED: &str = "thread_completed";
-pub const THREAD_FAILED: &str = "thread_failed";
-pub const THREAD_CANCELLED: &str = "thread_cancelled";
-pub const THREAD_KILLED: &str = "thread_killed";
-pub const THREAD_TIMED_OUT: &str = "thread_timed_out";
-pub const THREAD_CONTINUED: &str = "thread_continued";
+/// Defines each wire-string constant and `ALL`, the list of every one of them,
+/// from a single declaration so a constant cannot exist without being listed.
+macro_rules! event_types {
+    ($($(#[$meta:meta])* $name:ident = $value:literal;)*) => {
+        $($(#[$meta])* pub const $name: &str = $value;)*
+
+        /// Every event type registered here, in declaration order.
+        pub const ALL: &[&str] = &[$($name),*];
+    };
+}
+
+event_types! {
+    THREAD_CREATED = "thread_created";
+    THREAD_STARTED = "thread_started";
+    THREAD_COMPLETED = "thread_completed";
+    THREAD_FAILED = "thread_failed";
+    THREAD_CANCELLED = "thread_cancelled";
+    THREAD_KILLED = "thread_killed";
+    THREAD_TIMED_OUT = "thread_timed_out";
+    THREAD_CONTINUED = "thread_continued";
+
+    EDGE_RECORDED = "edge_recorded";
+    CHILD_THREAD_SPAWNED = "child_thread_spawned";
+    /// Written to a following parent when a followed child settles: the child,
+    /// its follow, status, closed `outcome_kind`, a bounded result summary and
+    /// cost. One per followed child, keyed by the child thread id.
+    CHILD_THREAD_SETTLED = "child_thread_settled";
+    /// Written to a worker placement admitted to continue a completed
+    /// predecessor's upstream conversation: the predecessor placement and the
+    /// upstream session id the successor was admitted with. One per successor.
+    WORKER_CONTINUATION_ADMITTED = "worker_continuation_admitted";
+    CONTINUATION_REQUESTED = "continuation_requested";
+    CONTINUATION_ACCEPTED = "continuation_accepted";
+    COMMAND_SUBMITTED = "command_submitted";
+    COMMAND_CLAIMED = "command_claimed";
+    COMMAND_COMPLETED = "command_completed";
+
+    STREAM_OPENED = "stream_opened";
+    TOKEN_DELTA = "token_delta";
+    STREAM_SNAPSHOT = "stream_snapshot";
+    STREAM_CLOSED = "stream_closed";
+    /// Daemon projection of a validated subprocess frame. Multiple bounded pieces
+    /// of one frame are committed atomically; this is observation, not exit authority.
+    SUBPROCESS_OUTPUT_OBSERVED = "subprocess_output_observed";
+    OBSERVATION = "observation";
+    /// Daemon-authored durable result of a hook declared as `observation`.
+    HOOK_OBSERVATION_RECORDED = "hook_observation_recorded";
+    /// Daemon-authored classified failure for an observation hook.
+    HOOK_FAILED = "hook_failed";
+    /// Daemon-authored, source-scoped project observation with a stable identity.
+    PROJECT_OBSERVATION_RECORDED = "project_observation_recorded";
+    PROVIDER_CALL_OBSERVATION_RECORDED = "provider_call_observation_recorded";
+
+    ARTIFACT_PUBLISHED = "artifact_published";
+    AS_LAUNCHED_RESOLUTION = "as_launched_resolution";
+    AS_LAUNCHED_REF_BINDINGS = "as_launched_ref_bindings";
+    RUNTIME_LAUNCH_FACTS = "runtime_launch_facts";
+    LAUNCH_AUGMENTATION_CACHE_HIT = "launch_augmentation_cache_hit";
+    /// Daemon-authored, once per launch attempt: the kind of root the process's
+    /// inputs were laid out in (`live`, `sparse_private`, `pinned`, ...). Names no path.
+    PROCESS_INPUT_ROOT_SELECTED = "process_input_root_selected";
+    /// Daemon-authored, once in the birth batch of an operator rebind
+    /// successor: the source thread, each replaced ref binding (`from`, `to`)
+    /// and the launch's runtime facts before and after.
+    LAUNCH_BINDING_REBOUND = "launch_binding_rebound";
+    THREAD_FACET_SET = "thread_facet_set";
+
+    COGNITION_IN = "cognition_in";
+    COGNITION_OUT = "cognition_out";
+    COGNITION_REASONING = "cognition_reasoning";
+    COGNITION_FRAME = "cognition_frame";
+    COGNITION_COMPACTION = "cognition_compaction";
+
+    TOOL_CALL_START = "tool_call_start";
+    TOOL_CALL_RESULT = "tool_call_result";
+
+    GRAPH_STARTED = "graph_started";
+    GRAPH_COMPLETED = "graph_completed";
+    GRAPH_STEP_STARTED = "graph_step_started";
+    GRAPH_STEP_COMPLETED = "graph_step_completed";
+    GRAPH_BRANCH_TAKEN = "graph_branch_taken";
+    GRAPH_FOREACH_STARTED = "graph_foreach_started";
+    GRAPH_FOREACH_ITERATION = "graph_foreach_iteration";
+    GRAPH_FOLLOW_SUSPENDED = "graph_follow_suspended";
+    GRAPH_NODE_RETRY = "graph_node_retry";
+
+    PROVIDER_RETRY = "provider_retry";
+    PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1 = "provider_attempt_budget_transition_v1";
+    RESOURCE_BUDGET_TRANSITION_V1 = "resource_budget_transition_v1";
+    RESOURCE_PRECONTACT_BUDGET_TRANSITION_V1 = "resource_precontact_budget_transition_v1";
+    COST_UNTRACKED = "cost_untracked";
+    THREAD_USAGE = "thread_usage";
+    /// Daemon-authored on the subject's chain when the operator acknowledges an
+    /// attention item: the item id, kind and the acknowledging principal. The
+    /// item stays hidden until it has activity newer than this event.
+    ATTENTION_ACKNOWLEDGED = "attention_acknowledged";
+
+    /// Generic domain-event channel: one engine event carrying a namespaced
+    /// `kind` plus a free `payload`, emitted by the runtime on behalf of a
+    /// tool/directive result. Content declares the kinds and styles them via
+    /// view-yaml `projections.event_kinds`; the engine stays domain-agnostic.
+    MILESTONE = "milestone";
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadOutcomeKind {
@@ -53,66 +148,14 @@ pub fn outcome_code_is_failure(code: &str) -> bool {
     )
 }
 
-pub const EDGE_RECORDED: &str = "edge_recorded";
-pub const CHILD_THREAD_SPAWNED: &str = "child_thread_spawned";
-pub const CONTINUATION_REQUESTED: &str = "continuation_requested";
-pub const CONTINUATION_ACCEPTED: &str = "continuation_accepted";
-pub const COMMAND_SUBMITTED: &str = "command_submitted";
-pub const COMMAND_CLAIMED: &str = "command_claimed";
-pub const COMMAND_COMPLETED: &str = "command_completed";
+#[cfg(test)]
+mod tests {
+    use super::ALL;
+    use std::collections::BTreeSet;
 
-pub const STREAM_OPENED: &str = "stream_opened";
-pub const TOKEN_DELTA: &str = "token_delta";
-pub const STREAM_SNAPSHOT: &str = "stream_snapshot";
-pub const STREAM_CLOSED: &str = "stream_closed";
-/// Daemon projection of a validated subprocess frame. Multiple bounded pieces
-/// of one frame are committed atomically; this is observation, not exit authority.
-pub const SUBPROCESS_OUTPUT_OBSERVED: &str = "subprocess_output_observed";
-pub const OBSERVATION: &str = "observation";
-/// Daemon-authored durable result of a hook declared as `observation`.
-pub const HOOK_OBSERVATION_RECORDED: &str = "hook_observation_recorded";
-/// Daemon-authored classified failure for an observation hook.
-pub const HOOK_FAILED: &str = "hook_failed";
-/// Daemon-authored, source-scoped project observation with a stable identity.
-pub const PROJECT_OBSERVATION_RECORDED: &str = "project_observation_recorded";
-pub const PROVIDER_CALL_OBSERVATION_RECORDED: &str = "provider_call_observation_recorded";
-
-pub const ARTIFACT_PUBLISHED: &str = "artifact_published";
-pub const AS_LAUNCHED_RESOLUTION: &str = "as_launched_resolution";
-pub const AS_LAUNCHED_REF_BINDINGS: &str = "as_launched_ref_bindings";
-pub const RUNTIME_LAUNCH_FACTS: &str = "runtime_launch_facts";
-pub const LAUNCH_AUGMENTATION_CACHE_HIT: &str = "launch_augmentation_cache_hit";
-pub const THREAD_FACET_SET: &str = "thread_facet_set";
-pub const THREAD_RECONCILED: &str = "thread_reconciled";
-pub const ORPHAN_PROCESS_KILLED: &str = "orphan_process_killed";
-
-pub const SYSTEM_PROMPT: &str = "system_prompt";
-pub const CONTEXT_INJECTED: &str = "context_injected";
-pub const COGNITION_IN: &str = "cognition_in";
-pub const COGNITION_OUT: &str = "cognition_out";
-pub const COGNITION_REASONING: &str = "cognition_reasoning";
-
-pub const TOOL_CALL_START: &str = "tool_call_start";
-pub const TOOL_CALL_RESULT: &str = "tool_call_result";
-
-pub const GRAPH_STARTED: &str = "graph_started";
-pub const GRAPH_COMPLETED: &str = "graph_completed";
-pub const GRAPH_STEP_STARTED: &str = "graph_step_started";
-pub const GRAPH_STEP_COMPLETED: &str = "graph_step_completed";
-pub const GRAPH_BRANCH_TAKEN: &str = "graph_branch_taken";
-pub const GRAPH_FOREACH_STARTED: &str = "graph_foreach_started";
-pub const GRAPH_FOREACH_ITERATION: &str = "graph_foreach_iteration";
-pub const GRAPH_FOLLOW_SUSPENDED: &str = "graph_follow_suspended";
-pub const GRAPH_NODE_RETRY: &str = "graph_node_retry";
-
-pub const PROVIDER_RETRY: &str = "provider_retry";
-pub const PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1: &str = "provider_attempt_budget_transition_v1";
-pub const RESOURCE_BUDGET_TRANSITION_V1: &str = "resource_budget_transition_v1";
-pub const COST_UNTRACKED: &str = "cost_untracked";
-pub const THREAD_USAGE: &str = "thread_usage";
-
-/// Generic domain-event channel: one engine event carrying a namespaced
-/// `kind` plus a free `payload`, emitted by the runtime on behalf of a
-/// tool/directive result. Content declares the kinds and styles them via
-/// view-yaml `projections.event_kinds`; the engine stays domain-agnostic.
-pub const MILESTONE: &str = "milestone";
+    #[test]
+    fn all_has_no_duplicates() {
+        let unique: BTreeSet<&str> = ALL.iter().copied().collect();
+        assert_eq!(unique.len(), ALL.len(), "duplicate wire string in ALL");
+    }
+}

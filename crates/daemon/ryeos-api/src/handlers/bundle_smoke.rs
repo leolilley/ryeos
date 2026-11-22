@@ -96,7 +96,7 @@ pub async fn handle(
     let manifest: BundleManifestSource = serde_yaml::from_str(&raw)
         .map_err(|e| HandlerError::BadRequest(format!("parse {}: {e}", manifest_path.display())))?;
     validate_smoke_decls(&manifest.smoke)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid smoke declaration: {e}")))?;
+        .map_err(|e| HandlerError::BadRequest(format!("invalid smoke declaration: {e:#}")))?;
 
     if manifest.smoke.is_empty() {
         return Ok(json!({
@@ -116,13 +116,11 @@ pub async fn handle(
         .iter()
         .map(|record| record.path.clone())
         .collect();
-    let operator_config_root =
-        ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).config();
     let preflight_warnings =
         match ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
             &source,
             &dependency_roots,
-            &operator_config_root,
+            &state.config.app_root,
             std::sync::Arc::clone(&state.isolation),
         ) {
             Ok(report) => report
@@ -220,6 +218,7 @@ async fn run_entry(
     let site_id = state.threads.site_id().to_string();
     let origin_site_id = ctx.execution_origin(&site_id);
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),
@@ -251,6 +250,7 @@ async fn run_entry(
         match ryeos_app::execution_policy::resolve_standard_local_live_authority(
             source,
             ctx.scopes.clone(),
+            &ctx.fingerprint,
             &state.isolation,
         ) {
             Ok(authority) => authority,
@@ -288,6 +288,7 @@ async fn run_entry(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        initial_facets: Default::default(),
         root_admission: None,
         root_dispatch_evidence: None,
         parent_execution_context: None,

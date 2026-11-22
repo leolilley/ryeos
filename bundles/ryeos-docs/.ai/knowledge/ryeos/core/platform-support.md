@@ -1,0 +1,80 @@
+<!-- ryeos:signed:2026-11-21T04:49:36Z:fec65aa55c751725565bef2d6d0b82b0cf3b798d62a6586bb3334adf49ad673a:uKy6H1ktE79BTCTZ6WV3F9i6fP+MY7Eakhfl9LdDBT7kqY3t5l/jY5VfeRI9zgcH8hDNRX0hGgOPtSRrJijlAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+---
+category: ryeos/core
+tags: [platform, linux, containers, compatibility, portability, support]
+version: "1.2.0"
+description: >
+  Supported RyeOS host, architecture, packaging, container, isolation, and
+  filesystem boundaries.
+---
+
+# Platform Support
+
+RyeOS uses *portable verified execution* to describe signed execution data:
+items, bundles, threads, CAS objects, and authorization can move between
+compatible nodes without borrowing ambient trust from the destination. It does
+not mean every distribution currently runs on every operating system or CPU.
+
+## Supported production runtime
+
+| Platform | Package/image support | Node execution support | Notes |
+|---|---|---|---|
+| Linux 6.9+, x86-64, glibc | Supported | Supported | Current bundle binaries target `x86_64-unknown-linux-gnu`. Core supplies the exact self-contained native isolation adapter; node policy decides whether to select it. |
+| Linux 6.9+ x86-64 container (`linux/amd64`) | Supported | Supported | The host kernel supplies the node's pidfd contract. Disabled isolation needs no extra capability; enforced mode needs the documented namespace, seccomp, and AppArmor profile. Published images are single-platform. |
+| Linux AArch64 | Not yet distributed | Not yet supported as a complete node distribution | Host-triple vocabulary exists, but official bundles do not ship AArch64 binaries. |
+| Linux musl | Not yet distributed | Not yet supported as a complete node distribution | Official bundle binaries currently target glibc. |
+| macOS and other Unix systems | Not distributed | Not supported | Some libraries have Unix fallbacks, but the complete distribution depends on Linux-target payloads and Linux-only activation/durability guarantees. The current enforced isolation bundle is Linux-only. |
+| Windows | Not distributed | Not supported | Process isolation and several filesystem guarantees do not have a production backend. |
+
+The supported Linux node requires kernel 6.9 or newer, including
+`PIDFD_SIGNAL_PROCESS_GROUP` (Linux 6.9) and `SO_PEERPIDFD` (Linux 6.5). Node
+startup probes both and refuses to start with the typed error
+`kernel_feature_missing`, naming the feature (`so_peerpidfd` or
+`pidfd_signal_process_group`) and its kernel floor, when either is unavailable;
+there is no reusable numeric-PID signal fallback. It also requires atomic bundle replacement through
+`renameat2(RENAME_EXCHANGE)`. When isolation policy is `mode: enforce`, the
+selected registered bundle must provide a trusted adapter and artifacts for the
+host triple. RyeOS does not ship one by default. The host must permit every
+kernel operation required by the selected backend's declared capabilities.
+Executable captures are sealed memfds. The node probes `memfd_create(MFD_EXEC)`
+once and requests the flag when the kernel accepts it (Linux 6.3 and newer).
+Where the kernel does not know the flag (older kernels, gVisor), a memfd is
+executable by construction, so it is created without the flag; the node reports
+this as `exec:sealed_memfd` with basis `memfd_exec_flag=unsupported_executable_by_default`
+(`memfd_exec_flag=supported` otherwise). The choice always comes from that
+probe, never from retrying a failed create. The probe also creates one memfd
+without the flag. Under `vm.memfd_noexec=2` the kernel (`mm/memfd.c`,
+`check_sysctl_memfd_noexec`) refuses a memfd without `MFD_NOEXEC_SEAL` with
+`EACCES` (Linux 6.3 refuses a flagless memfd with `EINVAL` but passes
+`MFD_EXEC`). Either way no executable memfd can exist, and the node reports
+`exec:sealed_memfd` as missing (`memfd_exec_forbidden`) and refuses executable
+captures with that code.
+Setuid, setgid, and file-capability executables are refused before RyeOS copies
+the verified bytes into an immutable private capture. See [Execution
+Isolation](node/execution-isolation.md).
+
+## Compatibility boundaries
+
+- Native bundle executables require matching payloads under
+  `.ai/bin/<target-triple>/`.
+- Portable descriptors, CAS, signatures, and protocols do not emulate a
+  missing native runtime.
+- A missing selected isolation backend is permitted only while node policy is disabled;
+  enforce mode fails closed.
+- Release workflows currently publish `linux/amd64` images and
+  `x86_64-unknown-linux-gnu` bundle payloads.
+- Compiling a source checkout on another platform does not make that platform
+  a supported node. Security and durability primitives fail closed where they
+  guard execution or bundle activation.
+
+Production support is declared only when the full path exists: signed bundle
+artifacts, durable installation, release packaging, CI coverage, and a tested
+enforced-isolation profile where that capability is claimed.
+
+Isolation backends must not expose implementation-specific flags through node
+policy or map unlike host primitives to one broad claim. RyeOS matches typed isolation requirements
+against node-owned backend capabilities and reports exactly which boundary was
+realized. Until a platform has a
+packaged adapter, backend integration tests, and the rest of the node's
+durability requirements, it remains unsupported rather than silently falling
+back to direct execution.

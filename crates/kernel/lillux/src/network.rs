@@ -12,7 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use hickory_resolver::config::{ResolveHosts, ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::{Hosts, Resolver};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::runtime::{Builder, Runtime};
@@ -62,7 +62,7 @@ impl NetworkContext {
                 "network configuration exceeds its bound",
             ));
         }
-        // Hickory 0.25's resolv-conf parser otherwise derives an absent domain
+        // Hickory's resolv-conf parser otherwise derives an absent domain
         // from gethostname (or /proc/sys/kernel/hostname in static builds).
         // Seed only the parse buffer with the DNS root; later authored domain
         // and search directives retain their normal precedence. Connections
@@ -148,10 +148,11 @@ impl NetworkContext {
             } else {
                 let mut resolver = Resolver::builder_with_config(
                     self.config.clone(),
-                    TokioConnectionProvider::default(),
+                    TokioRuntimeProvider::default(),
                 )
                 .with_options(self.options.clone())
-                .build();
+                .build()
+                .map_err(|_| io::Error::other("network name resolution failed"))?;
                 resolver.set_hosts(self.hosts.clone());
                 let absolute_host = format!("{}.", host.trim_end_matches('.'));
                 let lookup = resolver
@@ -183,7 +184,9 @@ impl NetworkContext {
             deadline: request_deadline,
             setup_deadline: Some(deadline),
             idle_timeout,
+            idle_override: None,
             cancellation,
+            operation: None,
         })
     }
 }
@@ -222,7 +225,9 @@ pub struct NetworkStream {
     deadline: MonotonicDeadline,
     setup_deadline: Option<MonotonicDeadline>,
     idle_timeout: crate::time::Duration,
+    idle_override: Option<crate::time::Duration>,
     cancellation: NetworkCancellation,
+    operation: Option<MonotonicDeadline>,
 }
 
 impl NetworkStream {
@@ -246,12 +251,34 @@ impl NetworkStream {
     }
 
     fn io_deadline(&self) -> MonotonicDeadline {
-        self.effective_deadline()
-            .min(MonotonicDeadline::after(self.idle_timeout))
+        let bounded = self.effective_deadline().min(MonotonicDeadline::after(
+            self.idle_override.unwrap_or(self.idle_timeout),
+        ));
+        match self.operation {
+            Some(operation) => bounded.min(operation),
+            None => bounded,
+        }
+    }
+
+    /// Replace the per-I/O idle bound with `wait` for every following I/O, until
+    /// it is replaced or cleared with `None`. This is for the wait between the
+    /// end of a request and the first response byte, which is peer processing
+    /// time rather than line silence. The stream's own deadline still ends
+    /// every I/O, so this can never extend it.
+    pub fn override_idle_timeout(&mut self, wait: Option<crate::time::Duration>) {
+        self.idle_override = wait;
     }
 
     pub fn narrow_deadline(&mut self, deadline: MonotonicDeadline) {
         self.deadline = self.deadline.min(deadline);
+    }
+
+    /// Bound every following I/O by `operation` as well, until it is replaced
+    /// or cleared. This is for one exchange on a long-lived stream: it never
+    /// extends the stream's own deadline, which still ends every I/O, and
+    /// clearing it restores exactly the stream's own bounds.
+    pub fn bound_operation(&mut self, operation: Option<MonotonicDeadline>) {
+        self.operation = operation;
     }
 }
 
@@ -331,16 +358,17 @@ impl Drop for NetworkStream {
 mod tests {
     use super::*;
     use crate::time::Duration;
-    use hickory_resolver::config::NameServerConfig;
-    use hickory_resolver::proto::xfer::Protocol;
+    use hickory_resolver::config::{ConnectionConfig, NameServerConfig};
     use std::net::{TcpListener, UdpSocket};
     use std::time::Instant;
 
     fn context(dns: SocketAddr) -> NetworkContext {
+        let mut udp = ConnectionConfig::udp();
+        udp.port = dns.port();
         let config = ResolverConfig::from_parts(
             None,
             vec![],
-            vec![NameServerConfig::new(dns, Protocol::Udp)],
+            vec![NameServerConfig::new(dns.ip(), true, vec![udp])],
         );
         let mut options = ResolverOpts::default();
         options.use_hosts_file = ResolveHosts::Never;
@@ -370,7 +398,7 @@ mod tests {
                 .config
                 .name_servers()
                 .iter()
-                .all(|server| server.socket_addr.ip() == "192.0.2.53".parse::<IpAddr>().unwrap())
+                .all(|server| server.ip == "192.0.2.53".parse::<IpAddr>().unwrap())
         );
         assert!(!context.config.name_servers().is_empty());
         assert_eq!(context.options.use_hosts_file, ResolveHosts::Never);
@@ -381,8 +409,9 @@ mod tests {
         let lookup = context.hosts.lookup_static_host(&query).unwrap();
         assert_eq!(
             lookup
+                .answers()
                 .iter()
-                .filter_map(|record| record.ip_addr())
+                .filter_map(|record| record.data.ip_addr())
                 .collect::<Vec<_>>(),
             vec!["192.0.2.42".parse::<IpAddr>().unwrap()]
         );
@@ -700,6 +729,105 @@ mod tests {
         );
         settled.send(()).unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn an_idle_override_widens_one_wait_but_the_absolute_deadline_still_wins() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+            peer.write_all(b"y").unwrap();
+            // Then silent until the client gives up and releases its socket.
+            let _ = peer.read(&mut [0; 1]);
+        });
+        let deadline = MonotonicDeadline::after(Duration::from_millis(2_000));
+        let mut stream = context("127.0.0.1:53".parse().unwrap())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_millis(100),
+                NetworkCancellation::default(),
+            )
+            .unwrap();
+        stream.complete_setup().unwrap();
+        stream.override_idle_timeout(Some(Duration::from_secs(30)));
+        let mut byte = [0; 1];
+        assert_eq!(stream.read(&mut byte).unwrap(), 1);
+        // The widened bound is capped by the absolute deadline, not 30 s.
+        let start = Instant::now();
+        assert_eq!(
+            stream.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+        drop(stream);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_operation_bound_ends_one_read_early_and_clearing_it_restores_the_stream_bounds() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            // Silent until the client gives up and releases its socket.
+            assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        });
+        let deadline = MonotonicDeadline::after(Duration::from_secs(30));
+        let mut stream = context("127.0.0.1:53".parse().unwrap())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_secs(30),
+                NetworkCancellation::default(),
+            )
+            .unwrap();
+        stream.complete_setup().unwrap();
+        stream.bound_operation(Some(MonotonicDeadline::after(Duration::from_millis(100))));
+        let start = Instant::now();
+        assert_eq!(
+            stream.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the operation bound did not end the read before the idle bound"
+        );
+
+        // A fresh stream with the bound cleared reads under its own bounds.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let second = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            peer.write_all(b"y").unwrap();
+            let _ = peer.read(&mut [0; 1]);
+        });
+        let mut stream = context("127.0.0.1:53".parse().unwrap())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_secs(30),
+                NetworkCancellation::default(),
+            )
+            .unwrap();
+        stream.complete_setup().unwrap();
+        stream.bound_operation(Some(MonotonicDeadline::after(Duration::from_millis(50))));
+        stream.bound_operation(None);
+        let mut byte = [0; 1];
+        assert_eq!(stream.read(&mut byte).unwrap(), 1);
+        assert_eq!(&byte, b"y");
+        drop(stream);
+        server.join().unwrap();
+        second.join().unwrap();
     }
 
     #[test]

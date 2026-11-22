@@ -79,7 +79,7 @@ fn reach_target_handoff_crash_boundary(
 fn authenticated_remote_node_site(ctx: &HandlerContext) -> Result<&str, HandlerError> {
     if !ctx.verified
         || ctx.authorized_key_class
-            != Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode)
+            != Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode)
     {
         return Err(HandlerError::Forbidden(
             "authenticated source-node authority required".into(),
@@ -140,7 +140,7 @@ pub async fn preflight(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let owner = req.owner_principal.clone();
     if req.target_site_id != state.threads.site_id() {
         return Err(HandlerError::Forbidden(
@@ -148,7 +148,7 @@ pub async fn preflight(
         ));
     }
 
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     require_authenticated_source_node(
@@ -156,7 +156,7 @@ pub async fn preflight(
         &req.source_site_id,
         &source_remote.remote.principal_id,
     )?;
-    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
     let mut preflight_roots = vec![req.source_chain_head_hash.clone()];
     if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
         preflight_roots.push(hash.clone());
@@ -172,6 +172,9 @@ pub async fn preflight(
     .map_err(internal)?;
     let closure = source_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: req.preflight_id.clone(),
+            },
             &preflight_roots,
             closure_options,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
@@ -181,7 +184,7 @@ pub async fn preflight(
             crate::remote::client::map_remote_call_error(error, "fetch source preflight closure")
         })?;
     import::require_local_large_object_dependencies(&state, &closure.closure.large_object_hashes)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
         let value = closure
             .entries
@@ -190,7 +193,7 @@ pub async fn preflight(
             .and_then(|entry| entry.value.clone())
             .ok_or_else(|| internal("source closure omitted its follow delivery reservation"))?;
         let attestation = ryeos_state::objects::Attestation::from_value(&value)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         if ryeos_state::objects::canonical_value_digest(&value).map_err(internal)? != *hash {
             return Err(HandlerError::BadRequest(
                 "follow delivery reservation changed digest".into(),
@@ -200,10 +203,10 @@ pub async fn preflight(
             ryeos_app::federated_follow::RemoteFollowReservationEvidence::from_attestation(
                 &attestation,
             )
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         let (parent_key, parent_signer) = if reservation.parent_site_id == state.threads.site_id() {
             validate_returned_follow_reservation(&state, &reservation, &owner)
-                .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
             (
                 *state.identity.verifying_key(),
                 state.identity.fingerprint().to_owned(),
@@ -226,7 +229,7 @@ pub async fn preflight(
         };
         attestation
             .verify_with_key(&parent_key)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         if reservation.owner_principal != owner
             || reservation.parent_node_signer_fingerprint != parent_signer
             || reservation.child_chain_root_id != req.chain_root_id
@@ -248,7 +251,7 @@ pub async fn preflight(
         source_remote.config_key.clone(),
         &req,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let job_id = target_preflight_job_id(&req.preflight_id);
     let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
     let (_, job) = state
@@ -405,14 +408,14 @@ pub async fn prepare(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let target_site_id = state.threads.site_id();
     if req.target_site_id != target_site_id {
         return Err(HandlerError::BadRequest(
             "placement request targets another site".into(),
         ));
     }
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     require_authenticated_source_node(
@@ -445,7 +448,7 @@ pub async fn prepare(
     preflight_response
         .preflight_attestation
         .verify_with_key(state.identity.verifying_key())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let preflight_evidence = WorkerPlacementPreflightEvidence::from_attestation(
         &preflight_response.preflight_attestation,
     )
@@ -459,7 +462,7 @@ pub async fn prepare(
         &preflight_evidence.origin_site_id,
         &preflight_capsule,
     )
-    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     if current_operator != preflight_evidence.target_operator_authority {
         return Err(HandlerError::Forbidden(
             "target operator grant changed after preflight".into(),
@@ -471,7 +474,7 @@ pub async fn prepare(
         &preflight_evidence.chain_root_id,
         &preflight_evidence.source_chain_head_hash,
     )
-    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     if current_anchor != preflight_evidence.target_chain_owner_anchor_hash {
         return Err(HandlerError::Forbidden(
             "target chain owner anchor changed after preflight".into(),
@@ -522,13 +525,12 @@ pub async fn prepare(
         .state_store
         .with_state_db(|db| db.get_sync_job(&job_id))
         .map_err(internal)?
+        && let Some(response) = classify_existing_target_prepare(&state, &req, &existing)?
     {
-        if let Some(response) = classify_existing_target_prepare(&state, &req, &existing)? {
-            return Ok(response);
-        }
+        return Ok(response);
     }
 
-    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
     let mut roots = vec![
         req.source_chain_head_hash.clone(),
         req.transfer_manifest_hash.clone(),
@@ -539,6 +541,9 @@ pub async fn prepare(
     }
     let closure = source_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: req.operation_id.clone(),
+            },
             &roots,
             NodeAdmittedObjectsClosureRequestOptions::for_node(
                 &state,
@@ -556,7 +561,7 @@ pub async fn prepare(
             crate::remote::client::map_remote_call_error(error, "fetch source placement closure")
         })?;
     import::require_local_large_object_dependencies(&state, &closure.closure.large_object_hashes)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let payload = import::closure_response_to_export_payload(
         &req.chain_root_id,
         &req.source_chain_head_hash,
@@ -576,7 +581,7 @@ pub async fn prepare(
     validate_transfer_request(&transfer, &req, &owner)
         .map_err(|error| HandlerError::BadRequest(format!("transfer manifest: {error:#}")))?;
     let target_project_path = canonical_target_project_path(&req.target_project_path)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let operation = WorkerSessionHandoffJobOperation::new(
         WorkerHandoffJobRole::Target,
         req.operation_id.clone(),
@@ -603,7 +608,7 @@ pub async fn prepare(
         req.target_credential_profile_id.clone(),
         req.follow_delivery_reservation_attestation_hash.clone(),
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let (_, existing_job) = state
         .state_store
         .stage_sync_payload_and_create_job(
@@ -708,7 +713,7 @@ fn classify_existing_target_prepare(
         WorkerSessionHandoffJobOperation::from_value(job.operation.clone()).map_err(internal)?;
     operation
         .validate_target_prepare_request(request)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if matches!(
         job.state,
         ryeos_state::SyncJobState::Completed
@@ -811,7 +816,7 @@ pub async fn adopt(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let job_id = target_job_id(&req.operation_id);
     let mut job = state
         .state_store
@@ -832,8 +837,7 @@ pub async fn adopt(
                 .ok_or_else(|| {
                     HandlerError::BadRequest("target placement authority does not exist".into())
                 })?;
-            let remotes =
-                config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+            let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
             let source_remote = config::resolve_remote_by_site_id(&remotes, &source_site_id)
                 .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
             require_authenticated_source_node(
@@ -848,8 +852,8 @@ pub async fn adopt(
     }
     let job = job.expect("target placement job presence checked");
     let operation = WorkerSessionHandoffJobOperation::from_value(job.operation)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &operation.source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     require_authenticated_source_node(
@@ -963,10 +967,10 @@ pub async fn abort(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let source_operation = req.operation.clone();
     let authenticated_source_site = authenticated_remote_node_site(&ctx)?.to_owned();
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &authenticated_source_site)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     require_authenticated_source_node(
@@ -983,7 +987,7 @@ pub async fn abort(
     }
     let operation = source_operation
         .target_projection(source_remote.config_key.clone())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let job_id = target_job_id(&operation.operation_id);
     let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
     let existing_fence = state
@@ -1055,9 +1059,9 @@ pub async fn abort(
             },
             &req.abort_chain_head_hash,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let retained_operation = WorkerSessionHandoffJobOperation::from_value(job.operation.clone())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if retained_operation != operation {
         return Err(HandlerError::Forbidden(
             "target placement job differs from authenticated abort coordinates".into(),
@@ -1098,13 +1102,16 @@ pub async fn abort(
     )
     .map_err(internal)?;
 
-    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
     let mut source_roots = vec![req.abort_chain_head_hash.clone()];
     if target_was_absent {
         source_roots.push(source_operation.preflight_attestation_hash.clone());
     }
     let closure = source_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: source_operation.operation_id.clone(),
+            },
             &source_roots,
             NodeAdmittedObjectsClosureRequestOptions::for_node(
                 &state,
@@ -1122,7 +1129,7 @@ pub async fn abort(
             crate::remote::client::map_remote_call_error(error, "fetch source handoff-abort chain")
         })?;
     import::require_local_large_object_dependencies(&state, &closure.closure.large_object_hashes)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let payload = import::closure_response_to_export_payload(
         &operation.chain_root_id,
         &req.abort_chain_head_hash,
@@ -1168,7 +1175,7 @@ pub async fn abort(
         &retained_operation,
         &req.abort_chain_head_hash,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     drop(guard);
     if target_was_absent {
         validate_abort_operation_against_target_preflight_attestation(&state, &source_operation)?;
@@ -1380,12 +1387,12 @@ fn validate_abort_operation_against_target_preflight_attestation(
             HandlerError::BadRequest("source retained no exact target preflight attestation".into())
         })?;
     let attestation = ryeos_state::objects::Attestation::from_value(&value)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     attestation
         .verify_with_key(state.identity.verifying_key())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let evidence = WorkerPlacementPreflightEvidence::from_attestation(&attestation)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     drop(guard);
     if operation.role != WorkerHandoffJobRole::Source
         || evidence.preflight_id != operation.preflight_id
@@ -1484,7 +1491,7 @@ async fn adopt_authorized(
     qualification_measurements: &mut TargetAdoptionQualificationMeasurements,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
     let job_id = target_job_id(&req.operation_id);
     let _operation_guard = target_handoff_operation_lock(&job_id).lock_owned().await;
@@ -1494,7 +1501,7 @@ async fn adopt_authorized(
         .map_err(internal)?
         .ok_or_else(|| HandlerError::BadRequest("target placement job does not exist".into()))?;
     let operation = WorkerSessionHandoffJobOperation::from_value(job.operation.clone())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if operation.role != WorkerHandoffJobRole::Target
         || operation.operation_id != req.operation_id
         || operation.owner_principal != owner
@@ -1625,7 +1632,7 @@ async fn adopt_authorized(
         ));
     }
     let source_committed_phase = target_adoption_source_commit_phase(prepared_progress.phase)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if source_committed_phase == WorkerHandoffPhase::ProcessAttached {
         #[cfg(any(test, feature = "handoff-test-support"))]
         let worker_attach_started = lillux::time::MonotonicTimer::start();
@@ -1635,12 +1642,12 @@ async fn adopt_authorized(
             &prepared_progress,
             &req,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         let placement =
             load_runnable_committed_local_placement(&state, &req.placement_attestation_hash)
-                .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         validate_target_placement_for_adoption(&placement, &req, &operation)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         validate_runnable_target_handoff_accounting(&state, &placement).map_err(internal)?;
         let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
             &placement.credential_reservation.profile_id,
@@ -1686,9 +1693,9 @@ async fn adopt_authorized(
         return serde_json::to_value(result).map_err(internal);
     }
     let mut adoption_attempt = TargetAdoptionAttempt::begin(state.clone(), &job_id, &operation)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let source_key = source_remote
@@ -1725,10 +1732,10 @@ async fn adopt_authorized(
             )
             .map_err(internal)?;
         import::require_local_large_object_dependencies(&state, &large_object_requirements)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         let transfer_policy = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
             .map_err(internal)?;
         if u64::try_from(payload.total_bytes).map_err(internal)?
             > transfer_policy
@@ -1741,9 +1748,12 @@ async fn adopt_authorized(
         }
         payload
     } else {
-        let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+        let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
         let closure = source_client
             .objects_closure_get_with_total_timeout(
+                &crate::objects_read_scope::ReadRoot::Placement {
+                    placement_id: req.operation_id.clone(),
+                },
                 std::slice::from_ref(&req.target_chain_head_hash),
                 NodeAdmittedObjectsClosureRequestOptions::for_node(
                     &state,
@@ -1764,7 +1774,7 @@ async fn adopt_authorized(
             &state,
             &closure.closure.large_object_hashes,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         import::closure_response_to_export_payload(
             &req.chain_root_id,
             &req.target_chain_head_hash,
@@ -1819,13 +1829,13 @@ async fn adopt_authorized(
     .map_err(internal)?;
 
     let placement = load_local_placement(&state, &req.placement_attestation_hash)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     validate_target_placement_for_adoption(&placement, &req, &operation)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let writer = load_attestation(&state, &req.writer_grant_hash).map_err(internal)?;
     writer
         .verify_with_key(&source_key)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let observed_evidence =
         ryeos_state::objects::ChainWriterTransitionEvidence::from_attestation(&writer)
             .map_err(internal)?;
@@ -2036,7 +2046,7 @@ async fn adopt_authorized(
         &placement.origin_site_id,
         &target_capsule,
     )
-    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     if current_operator_authority != placement.target_operator_authority {
         return Err(HandlerError::Forbidden(
             "target operator grant changed before private state installation".into(),
@@ -2076,7 +2086,7 @@ async fn adopt_authorized(
         predecessor.as_ref(),
         &operands.portable_tree,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     #[cfg(any(test, feature = "handoff-test-support"))]
     reach_target_handoff_crash_boundary(
         &state,
@@ -2231,7 +2241,7 @@ pub async fn recover_durable_target_handoffs(state: &AppState) -> Result<usize> 
                 Ok(operation) if operation.role == WorkerHandoffJobRole::Target => operation,
                 Ok(_) => continue,
                 Err(error) => {
-                    tracing::error!(job_id = %job.job_id, error = %error, "invalid target worker handoff job retained for operator inspection");
+                    tracing::error!(job_id = %job.job_id, error = %format!("{error:#}"), "invalid target worker handoff job retained for operator inspection");
                     continue;
                 }
             };
@@ -2447,10 +2457,9 @@ pub async fn reconcile_observed_target_handoff_attachments_before_detachment(
                 if let Some(session) = state
                     .state_store
                     .dedicated_session(&operation.successor_placement_thread_id)?
+                    && (session.worker_instance_id.is_some() || session.worker_boot_epoch.is_some())
                 {
-                    if session.worker_instance_id.is_some() || session.worker_boot_epoch.is_some() {
-                        bail!("target handoff attached a worker without durable progress");
-                    }
+                    bail!("target handoff attached a worker without durable progress");
                 }
                 continue;
             };
@@ -2922,7 +2931,6 @@ fn settle_pre_attachment_target_terminal(
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_pre_attachment_target_completion(
     state: &AppState,
     job: &ryeos_state::SyncJobRecord,
@@ -3284,6 +3292,19 @@ fn current_target_operator_authority(
     if let Some(parent_caps) = capsule.parent_delegation_caps.as_ref() {
         admitted.require_covers(parent_caps)?;
     }
+    // The target rebind keeps the source's operator-vault exposure, and the
+    // target then delivers from its own operator vault. That is the target
+    // operator's authority: the owner's current target grant must hold the
+    // capability itself, whatever the source admitted.
+    if capsule
+        .project_authority
+        .environment()
+        .exposes_operator_vault()
+    {
+        admitted
+            .require_covers(&[ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY.to_owned()])
+            .map_err(|_| ryeos_app::execution_policy::OperatorVaultCapabilityRequired)?;
+    }
     Ok(admitted)
 }
 
@@ -3293,7 +3314,9 @@ fn returning_local_operator_anchor(
     chain_root_id: &str,
     source_chain_head_hash: &str,
 ) -> Result<Option<String>> {
-    if admitted.principal_class != ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient {
+    if admitted.principal_class
+        != ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
+    {
         return Ok(None);
     }
     state
@@ -3470,7 +3493,6 @@ async fn complete_if_target_worker_attached(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn complete_if_target_worker_attached_under_profile_lock(
     state: &AppState,
     job_id: &str,
@@ -4164,7 +4186,7 @@ async fn prepare_after_staging(
     drop(guard);
     let transfer_policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?;
     let admission_limits = ryeos_state::object_closure::ObjectClosureLimits {
         max_objects: transfer_policy.max_objects,
         max_blobs: transfer_policy.max_blobs,
@@ -4669,7 +4691,10 @@ fn load_source_launch_capsule(
     expected_hash: &str,
 ) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
     let value = cas
-        .get_object(expected_hash)?
+        .get_object_bounded(
+            expected_hash,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
         .context("source admitted launch capsule is absent")?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)?;
     if capsule.content_hash()? != expected_hash {
@@ -4687,9 +4712,19 @@ fn source_project_path_from_payload(
         .iter()
         .find(|entry| !entry.is_blob && entry.hash == manifest.source_launch_capsule_hash)
         .context("transfer payload omits source launch capsule")?;
+    if entry.data.len() > ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES {
+        bail!("transferred launch capsule exceeds its raw byte ceiling");
+    }
+    if lillux::sha256_hex(&entry.data) != manifest.source_launch_capsule_hash {
+        bail!("transfer launch capsule content address changed");
+    }
     let value: Value = serde_json::from_slice(&entry.data)?;
-    if lillux::sha256_hex(&entry.data) != manifest.source_launch_capsule_hash
-        || lillux::canonical_json(&value)?.as_bytes() != entry.data
+    if lillux::canonical_json_bounded(
+        &value,
+        ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+    )?
+    .as_slice()
+        != entry.data
     {
         bail!("transfer launch capsule content identity changed");
     }
@@ -4726,7 +4761,10 @@ fn credential_contract_from_capsule(
         .values()
     {
         let value = cas
-            .get_object(capsule_hash)?
+            .get_object_bounded(
+                capsule_hash,
+                ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+            )?
             .context("source persistent-session capsule is absent")?;
         let capsule =
             ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -4755,7 +4793,10 @@ fn persistent_programs(
         .iter()
         .map(|(name, hash)| {
             let value = cas
-                .get_object(hash)?
+                .get_object_bounded(
+                    hash,
+                    ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+                )?
                 .with_context(|| format!("target persistent session {name:?} is absent"))?;
             let capsule =
                 ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -4953,7 +4994,6 @@ fn begin_target_handoff_attempt(
     Ok(attempt_id)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_target_handoff_attempt(
     state: &AppState,
     job_id: &str,
@@ -5052,7 +5092,7 @@ mod authority_tests {
     use super::*;
 
     fn context(
-        class: ryeos_app::identity::AuthorizedKeyPrincipalClass,
+        class: ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass,
         fingerprint: &str,
         site_id: Option<&str>,
     ) -> HandlerContext {
@@ -5068,7 +5108,7 @@ mod authority_tests {
     #[test]
     fn placement_transport_requires_the_exact_configured_remote_node() {
         let admitted = context(
-            ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             "fp:source-node",
             Some("site:source"),
         );
@@ -5076,17 +5116,17 @@ mod authority_tests {
 
         for rejected in [
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 "fp:operator",
                 Some("site:source"),
             ),
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
                 "fp:other-node",
                 Some("site:source"),
             ),
             context(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
                 "fp:source-node",
                 Some("site:other"),
             ),
@@ -5207,7 +5247,9 @@ mod authority_tests {
                 target_start_time_ticks: 101,
                 group_leader_pid: 41,
                 group_leader_start_time_ticks: 101,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 resource_selections: Vec::new(),
+                resource_settlement_authority: None,
                 resource_operations: Vec::new(),
                 resource_allocation_limit: None,
                 resource_occupancy_start: None,
@@ -5236,6 +5278,8 @@ mod authority_tests {
             lock_owner: Some("worker-unproved".to_owned()),
             created_at_ms: 1,
             updated_at_ms: 2,
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
+            slot_value_digests: None,
         };
         let expected_session_capsules =
             BTreeMap::from([("worker".to_owned(), capsule_hash.clone())]);

@@ -22,13 +22,23 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::item_resolution::RegisteredBundleRoot;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-use ryeos_engine::trust::TrustStore;
 
 fn isolation_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
     let fixtures = root.join(".ai/test-fixtures");
     fs::create_dir_all(&fixtures).unwrap();
-    fs::write(fixtures.join("isolation-policy.yaml"), "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
+    // A disabled (non-enforcing) policy in the current schema, narrowed to
+    // the verified code and project roots these tests exercise.
+    let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+    policy.filesystem.readable = vec!["{verified_code}".to_string()];
+    policy.filesystem.writable = vec!["{project}".to_string()];
+    policy.network.mode = ryeos_engine::isolation::IsolationNetworkMode::Isolated;
+    policy.limits.open_files = Some(128);
+    fs::write(
+        fixtures.join("isolation-policy.yaml"),
+        serde_yaml::to_string(&policy).unwrap(),
+    )
+    .unwrap();
     root
 }
 
@@ -39,10 +49,6 @@ fn isolation_context() -> (PathBuf, Arc<ryeos_engine::isolation::IsolationRuntim
             .expect("load disabled isolation fixture"),
     );
     (app_root, isolation)
-}
-
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 fn workspace_root() -> PathBuf {
@@ -64,9 +70,10 @@ fn synth_project_with_hello() -> PathBuf {
 
     // Tool kind schema's .py format declares `after_shebang: true` for
     // its signature envelope — meaning the signature line lives AFTER
-    // the shebang. We don't sign at all here (Unsigned trust class is
-    // accepted by the engine for items the chain doesn't gate on), so
-    // the shebang is the very first line.
+    // the shebang. This test calls the engine's build_plan/execute_plan
+    // directly, below the daemon's launch trust gate, so the tool is left
+    // unsigned; through the daemon an unsigned tool is refused before it
+    // runs.
     //
     // The ryeos-tool header below matches the kind schema's `metadata.rules`:
     //   executor_id → routes to the python script runtime, which itself
@@ -98,10 +105,15 @@ fn synth_project_with_bundle_local_imports() -> PathBuf {
         std::process::id(),
         nanos
     ));
-    let bundle_root = project_dir.join(".ai").join("tools").join("example");
+    // A tool's source closure is its own directory, `lib/` included, so the
+    // helpers it imports live beside it.
+    let bundle_root = project_dir
+        .join(".ai")
+        .join("tools")
+        .join("example")
+        .join("system");
     fs::create_dir_all(bundle_root.join("lib")).unwrap();
     fs::create_dir_all(bundle_root.join("campaign")).unwrap();
-    fs::create_dir_all(bundle_root.join("system")).unwrap();
     fs::write(
         project_dir.join("json.py"),
         "raise RuntimeError('project-root json.py should not be importable')\n",
@@ -132,7 +144,7 @@ from campaign._lifecycle import suffix
 
 print(json.dumps({"message": message(), "suffix": suffix()}))
 "#;
-    fs::write(bundle_root.join("system").join("health.py"), body).unwrap();
+    fs::write(bundle_root.join("health.py"), body).unwrap();
     project_dir
 }
 
@@ -146,9 +158,12 @@ fn synth_project_with_function_bundle_local_imports() -> PathBuf {
         std::process::id(),
         nanos
     ));
-    let bundle_root = project_dir.join(".ai").join("tools").join("example");
+    let bundle_root = project_dir
+        .join(".ai")
+        .join("tools")
+        .join("example")
+        .join("function");
     fs::create_dir_all(bundle_root.join("lib")).unwrap();
-    fs::create_dir_all(bundle_root.join("function")).unwrap();
     fs::write(
         project_dir.join("json.py"),
         "raise RuntimeError('project-root json.py should not be importable')\n",
@@ -173,13 +188,12 @@ from lib.util import message
 def execute(params, project_path):
     return {"message": message(), "project_path_seen": bool(project_path)}
 "#;
-    fs::write(bundle_root.join("function").join("health.py"), body).unwrap();
+    fs::write(bundle_root.join("health.py"), body).unwrap();
     project_dir
 }
 
 fn build_engine_against_bundle() -> Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
@@ -201,6 +215,7 @@ fn build_engine_against_bundle() -> Engine {
         .with_node_trust_store(trust_store)
         .with_composers(composers)
         .with_registered_bundle_roots(vec![RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }])
@@ -213,6 +228,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
     let project_dir = synth_project_with_hello();
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
@@ -254,6 +270,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
             &plan_ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -275,6 +292,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -290,11 +308,12 @@ fn daemon_executes_python_hello_world_end_to_end() {
             },
         ),
         isolation_state_root: None,
+        isolation_bundle_state_home: None,
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
@@ -320,6 +339,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine
@@ -355,6 +375,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
     let project_dir = synth_project_with_bundle_local_imports();
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
@@ -391,6 +412,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
             &plan_ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -414,6 +436,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -429,11 +452,12 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
             },
         ),
         isolation_state_root: None,
+        isolation_bundle_state_home: None,
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
@@ -459,6 +483,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine
@@ -484,6 +509,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
     let project_dir = synth_project_with_function_bundle_local_imports();
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
@@ -520,6 +546,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
             &plan_ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan walks executor chain to subprocess terminal");
 
@@ -543,6 +570,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -558,11 +586,12 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
             },
         ),
         isolation_state_root: None,
+        isolation_bundle_state_home: None,
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
@@ -588,6 +617,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine
@@ -623,6 +653,7 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
     let project_dir = synth_project_with_hello();
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
@@ -650,6 +681,7 @@ fn engine_pipeline_emits_resolve_verify_build_plan_span_tree() {
                 &plan_ctx.execution_hints,
                 None,
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                None,
             )
             .expect("build_plan");
     });

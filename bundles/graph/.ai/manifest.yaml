@@ -1,0 +1,12 @@
+# ryeos:signed:2026-10-18T03:41:40Z:46c34e9af2a78efa7ea6b4efc3d34e7f4586b5830561412209a58b695cf44b62:5zPxsVYP3s7HIUal7Xrz/xKQbUsIQlpKJ3Ns509919UbkLpZ84adX9v1aLAaByB6JAKdLwTYqmowUh9tog7rBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: graph
+version: 0.5.0
+description: Graph kind, graph runtime, and graph validation and launch handlers
+provides_kinds:
+- graph
+requires_kinds:
+- handler
+- node
+- parser
+- runtime
+uses_kinds: []

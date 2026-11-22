@@ -1,0 +1,190 @@
+[
+  {
+    "name": "matching chain+thread returns eventType and the inner record as payload",
+    "input": {
+      "frame": {
+        "event_type": "cognition_out",
+        "payload": {
+          "chain_root_id": "chain-a",
+          "thread_id": "thread-a",
+          "event_type": "cognition_out",
+          "payload": {
+            "delta": "old"
+          }
+        }
+      },
+      "chain_root_id": "chain-a",
+      "thread_id": "thread-a"
+    },
+    "expected": {
+      "eventType": "cognition_out",
+      "payload": {
+        "chain_root_id": "chain-a",
+        "thread_id": "thread-a",
+        "event_type": "cognition_out",
+        "payload": {
+          "delta": "old"
+        }
+      }
+    },
+    "provenance": "test-verbatim"
+  },
+  {
+    "name": "other thread of same chain",
+    "input": {
+      "frame": {
+        "event_type": "cognition_out",
+        "payload": {
+          "chain_root_id": "chain-a",
+          "thread_id": "thread-a",
+          "event_type": "cognition_out",
+          "payload": {
+            "delta": "old"
+          }
+        }
+      },
+      "chain_root_id": "chain-a",
+      "thread_id": "thread-b"
+    },
+    "expected": null,
+    "provenance": "test-verbatim"
+  },
+  {
+    "name": "other chain",
+    "input": {
+      "frame": {
+        "event_type": "cognition_out",
+        "payload": {
+          "chain_root_id": "chain-a",
+          "thread_id": "thread-a",
+          "event_type": "cognition_out",
+          "payload": {
+            "delta": "old"
+          }
+        }
+      },
+      "chain_root_id": "chain-b",
+      "thread_id": "thread-a"
+    },
+    "expected": null,
+    "provenance": "test-verbatim"
+  },
+  {
+    "name": "frame without payload",
+    "input": {
+      "frame": {
+        "event_type": "cognition_out"
+      },
+      "chain_root_id": "chain-a",
+      "thread_id": "thread-a"
+    },
+    "expected": null,
+    "provenance": "test-verbatim"
+  },
+  {
+    "name": "envelope event_type differs from inner record event_type",
+    "input": {
+      "frame": {
+        "event_type": "token_delta",
+        "payload": {
+          "chain_root_id": "chain-a",
+          "thread_id": "thread-a",
+          "event_type": "cognition_out",
+          "payload": {
+            "delta": "old"
+          }
+        }
+      },
+      "chain_root_id": "chain-a",
+      "thread_id": "thread-a"
+    },
+    "expected": null,
+    "provenance": "test-verbatim"
+  },
+  {
+    "name": "null chain id",
+    "input": {
+      "frame": {
+        "event_type": "cognition_out",
+        "payload": {
+          "chain_root_id": "chain-a",
+          "thread_id": "thread-a",
+          "event_type": "cognition_out",
+          "payload": {
+            "delta": "old"
+          }
+        }
+      },
+      "chain_root_id": null,
+      "thread_id": "thread-a"
+    },
+    "expected": null,
+    "provenance": "derived (computed by running the TS function)"
+  },
+  {
+    "name": "empty thread id",
+    "input": {
+      "frame": {
+        "event_type": "cognition_out",
+        "payload": {
+          "chain_root_id": "chain-a",
+          "thread_id": "thread-a",
+          "event_type": "cognition_out",
+          "payload": {
+            "delta": "old"
+          }
+        }
+      },
+      "chain_root_id": "chain-a",
+      "thread_id": ""
+    },
+    "expected": null,
+    "provenance": "derived (computed by running the TS function)"
+  },
+  {
+    "name": "frame null",
+    "input": {
+      "frame": null,
+      "chain_root_id": "chain-a",
+      "thread_id": "thread-a"
+    },
+    "expected": null,
+    "provenance": "derived (computed by running the TS function)"
+  },
+  {
+    "name": "frame array",
+    "input": {
+      "frame": [],
+      "chain_root_id": "chain-a",
+      "thread_id": "thread-a"
+    },
+    "expected": null,
+    "provenance": "derived (computed by running the TS function)"
+  },
+  {
+    "name": "payload array",
+    "input": {
+      "frame": {
+        "event_type": "cognition_out",
+        "payload": []
+      },
+      "chain_root_id": "chain-a",
+      "thread_id": "thread-a"
+    },
+    "expected": null,
+    "provenance": "derived (computed by running the TS function)"
+  },
+  {
+    "name": "event_type not a string",
+    "input": {
+      "frame": {
+        "event_type": 1,
+        "payload": {}
+      },
+      "chain_root_id": "chain-a",
+      "thread_id": "thread-a"
+    },
+    "expected": null,
+    "provenance": "derived (computed by running the TS function)"
+  }
+]

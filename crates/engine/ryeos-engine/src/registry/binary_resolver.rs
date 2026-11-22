@@ -45,13 +45,214 @@ pub struct ResolvedBinary {
     /// Raw SHA-256 of the exact verified executable bytes.
     pub content_hash: String,
     pub manifest_hash: String,
+    pub item_source_hash: String,
     pub signer_fingerprint: String,
+    pub target_triple: String,
 }
 
 #[derive(Debug)]
 pub struct CapturedExecutable {
     pub identity: ResolvedBinary,
+    /// Exact signed executor source, retained alongside the admitted native
+    /// bytes so a later cleanup-only generation can be verified historically.
+    pub source_proof: BundlePayloadSourceProof,
     pub handle: lillux::InheritedDescriptorAuthority,
+}
+
+/// Actual signed executable capture under the TrustStore supplied to the
+/// capture operation. Private fields preserve the successful verification and
+/// same sealed descriptor; caller-authored capture metadata cannot create it.
+///
+/// These are content-verification facts only. This does not establish node
+/// admission, a registered generation, native execution or settlement. A
+/// protected consumer must independently bind its actual node trust, selected
+/// backend and the same descriptor to its original held/running launch.
+#[derive(Debug)]
+pub struct VerifiedCapturedExecutable {
+    captured: CapturedExecutable,
+}
+
+impl VerifiedCapturedExecutable {
+    /// Borrow the actual retained capture without transferring or replacing
+    /// its descriptor or source facts. The ordinary metadata remains metadata;
+    /// this borrow grants no node, process, driver or financial authority.
+    pub fn captured(&self) -> &CapturedExecutable {
+        &self.captured
+    }
+}
+
+/// Signed bundle bytes selected for a guest target. The captured descriptor is
+/// sealed as non-executable data; selecting a guest payload never makes it a
+/// locally dispatchable command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundlePayloadIdentity {
+    pub content_hash: String,
+    pub manifest_hash: String,
+    pub item_source_hash: String,
+    pub signer_fingerprint: String,
+    pub target_triple: String,
+}
+
+#[derive(Debug)]
+pub struct CapturedBundlePayload {
+    pub identity: BundlePayloadIdentity,
+    pub source_proof: BundlePayloadSourceProof,
+    handle: lillux::InheritedDescriptorAuthority,
+    pub bytes: u64,
+}
+
+/// Exact already-verified source documents for one selected guest payload.
+/// The canonical objects are retained as values here so their CAS byte form
+/// can be produced by the durable publisher without reopening installed paths.
+#[derive(Debug)]
+pub struct BundlePayloadSourceProof {
+    pub selected_item_ref: String,
+    pub signed_manifest_ref: Vec<u8>,
+    pub manifest_object: serde_json::Value,
+    pub item_source_object: serde_json::Value,
+    pub signed_sidecar: Vec<u8>,
+}
+
+/// Verify an exact historically signed executor selection without consulting
+/// the current installed Bundle or granting that old signer fresh authority.
+/// The caller must separately hash/size-check the retained payload CAS blob
+/// and prove this proof belongs to the signed Bundle declaration it uses.
+pub fn verify_retained_bundle_payload_proof(
+    proof: &BundlePayloadSourceProof,
+    identity: &BundlePayloadIdentity,
+    expected_mode: u32,
+    verifier: &VerifyingKey,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        lillux::crypto::fingerprint(verifier) == identity.signer_fingerprint,
+        "retained executor verifier differs from signed source identity"
+    );
+    anyhow::ensure!(
+        proof
+            .selected_item_ref
+            .starts_with(&format!("bin/{}/", identity.target_triple))
+            && proof.signed_manifest_ref.len() as u64
+                <= crate::executor_resolution::MAX_EXECUTOR_MANIFEST_REF_BYTES
+            && proof.signed_sidecar.len() <= MAX_EXECUTOR_ITEM_SOURCE_SIDECAR_BYTES,
+        "retained executor proof target or byte bound differs"
+    );
+    let signed_ref = std::str::from_utf8(&proof.signed_manifest_ref)?;
+    let verified_ref = crate::executor_resolution::verify_signed_executor_manifest_ref(
+        signed_ref,
+        |fingerprint| (fingerprint == identity.signer_fingerprint).then_some(*verifier),
+        TrustClass::TrustedBundle,
+    )?;
+    anyhow::ensure!(
+        verified_ref.signer_fingerprint == identity.signer_fingerprint
+            && verified_ref.manifest_hash == identity.manifest_hash,
+        "retained signed executor ref differs from manifest identity"
+    );
+    let manifest_bytes = lillux::canonical_json_bounded(
+        &proof.manifest_object,
+        usize::try_from(MAX_EXECUTOR_MANIFEST_OBJECT_BYTES)?,
+    )?;
+    anyhow::ensure!(
+        manifest_bytes.len() as u64 <= MAX_EXECUTOR_MANIFEST_OBJECT_BYTES
+            && lillux::sha256_hex(&manifest_bytes) == identity.manifest_hash,
+        "retained executor manifest object differs from signed ref"
+    );
+    let manifest = crate::executor_resolution::verify_executor_manifest_object(
+        &proof.manifest_object,
+        &identity.manifest_hash,
+    )?;
+    anyhow::ensure!(
+        manifest.get(&proof.selected_item_ref) == Some(&identity.item_source_hash),
+        "retained executor manifest does not select ItemSource"
+    );
+    let item_bytes = lillux::canonical_json_bounded(
+        &proof.item_source_object,
+        usize::try_from(MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES)?,
+    )?;
+    anyhow::ensure!(
+        item_bytes.len() as u64 <= MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES
+            && lillux::sha256_hex(&item_bytes) == identity.item_source_hash,
+        "retained executor ItemSource differs from selected object"
+    );
+    let (content_hash, mode) = crate::executor_resolution::verify_executor_item_source(
+        &proof.item_source_object,
+        &identity.item_source_hash,
+        &proof.selected_item_ref,
+    )?;
+    anyhow::ensure!(
+        content_hash == identity.content_hash && mode == expected_mode,
+        "retained executor ItemSource differs from executable payload contract"
+    );
+    let bin_name = proof
+        .selected_item_ref
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("retained executor ref has no binary name"))?;
+    let sidecar_signer = verify_item_source_sidecar_bytes(
+        bin_name,
+        Path::new("retained executor CAS"),
+        &proof.selected_item_ref,
+        &proof.item_source_object,
+        &proof.signed_sidecar,
+        &|fingerprint| (fingerprint == identity.signer_fingerprint).then_some(*verifier),
+    )?;
+    anyhow::ensure!(
+        sidecar_signer == identity.signer_fingerprint,
+        "retained executor sidecar signer differs from Bundle"
+    );
+    Ok(())
+}
+
+/// Revalidate the retained Bundle member-source signatures at a rooted direct
+/// recovery consumer. This verifies the executor-manifest ref and ItemSource
+/// sidecar against the current authorized key; it does not authenticate the
+/// separately retained Bundle-selection identity.
+pub fn verify_retained_bundle_executor_member_proof(
+    proof: &ryeos_state::objects::BundleExecutorMemberSourceProofV1,
+    manifest_hash: &str,
+    signer_fingerprint: &str,
+    content_hash: &str,
+    verifier: &VerifyingKey,
+) -> anyhow::Result<()> {
+    proof.validate(manifest_hash, signer_fingerprint, content_hash)?;
+    let identity = BundlePayloadIdentity {
+        content_hash: content_hash.to_owned(),
+        manifest_hash: manifest_hash.to_owned(),
+        item_source_hash: proof.item_source_hash.clone(),
+        signer_fingerprint: signer_fingerprint.to_owned(),
+        target_triple: proof.target_triple.clone(),
+    };
+    let source = BundlePayloadSourceProof {
+        selected_item_ref: proof.selected_item_ref.clone(),
+        signed_manifest_ref: proof.signed_executor_manifest_ref.clone(),
+        manifest_object: proof.executor_manifest_object.clone(),
+        item_source_object: proof.item_source_object.clone(),
+        signed_sidecar: proof.signed_item_source_sidecar.clone(),
+    };
+    verify_retained_bundle_payload_proof(&source, &identity, proof.expected_mode, verifier)
+}
+
+struct VerifiedBundleBinary {
+    identity: ResolvedBinary,
+    source_proof: BundlePayloadSourceProof,
+    expected_mode: u32,
+}
+
+const MAX_EXECUTOR_MANIFEST_OBJECT_BYTES: u64 = 1024 * 1024;
+const MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES: u64 = 64 * 1024;
+const MAX_EXECUTOR_ITEM_SOURCE_SIDECAR_BYTES: usize = 1024 * 1024;
+
+fn load_executor_cas_object_bounded(
+    cas: &lillux::CasStore,
+    hash: &str,
+    maximum_bytes: u64,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    cas.get_object_bounded(hash, maximum_bytes)
+}
+
+impl CapturedBundlePayload {
+    pub fn authority(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.handle
+    }
 }
 
 /// Signed identity of one bundle's complete native-executor authorization
@@ -65,7 +266,28 @@ pub struct BundleExecutorManifestIdentity {
 
 struct VerifiedBundleExecutorSet {
     identity: Option<BundleExecutorManifestIdentity>,
-    item_refs: HashSet<String>,
+    /// Signed executor item ref to the hash of its ItemSource object, which
+    /// commits the content blob hash, mode and item ref.
+    item_sources: HashMap<String, String>,
+    /// Signed executor item ref to the verified content hash of its
+    /// installed executable bytes.
+    content_hashes: std::collections::BTreeMap<String, String>,
+}
+
+/// Capture exact signed executable bytes and retain a private witness of this
+/// actual successful capture operation under the supplied trust store.
+///
+/// An arbitrary supplied store cannot confer node admission. Only a separately
+/// guarded consumer can associate these facts with its independently admitted
+/// node generation/backend and the same actual selected launch. This function
+/// accepts no caller-built CapturedExecutable or provenance DTO.
+pub fn capture_verified_bundle_binary_ref(
+    binary_ref: &str,
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<VerifiedCapturedExecutable, EngineError> {
+    let captured = capture_bundle_binary_ref(binary_ref, bundle_root, node_trust_store)?;
+    Ok(VerifiedCapturedExecutable { captured })
 }
 
 /// Resolve, verify, open without following symlinks, and re-hash an installed
@@ -76,8 +298,9 @@ pub fn capture_bundle_binary_ref(
     bundle_root: &Path,
     node_trust_store: &TrustStore,
 ) -> Result<CapturedExecutable, EngineError> {
-    let identity = resolve_bundle_binary_ref(
+    let verified = resolve_bundle_binary_ref_for_target(
         binary_ref,
+        env!("RYEOS_ENGINE_HOST_TRIPLE"),
         bundle_root,
         |fingerprint| {
             node_trust_store
@@ -85,7 +308,13 @@ pub fn capture_bundle_binary_ref(
                 .map(|signer| signer.verifying_key)
         },
         TrustClass::TrustedBundle,
+        None,
     )?;
+    let VerifiedBundleBinary {
+        identity,
+        source_proof,
+        expected_mode: _,
+    } = verified;
 
     #[cfg(unix)]
     let handle = {
@@ -128,7 +357,89 @@ pub fn capture_bundle_binary_ref(
                 identity.absolute_path.display()
             ))
         })?;
-    Ok(CapturedExecutable { identity, handle })
+    Ok(CapturedExecutable {
+        identity,
+        source_proof,
+        handle,
+    })
+}
+
+/// Capture one signed executable *as data* for an explicitly selected guest
+/// target. The bound includes the sealed copy and prevents an installed bundle
+/// from forcing an unbounded daemon allocation during preparation.
+pub fn capture_bundle_payload_for_target(
+    binary_ref: &str,
+    target_triple: &str,
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+    maximum_bytes: u64,
+) -> Result<CapturedBundlePayload, EngineError> {
+    if maximum_bytes == 0 || maximum_bytes > 64 * 1024 * 1024 {
+        return Err(EngineError::Internal(
+            "guest bundle payload bound is outside the supported range".into(),
+        ));
+    }
+    let verified = resolve_bundle_binary_ref_for_target(
+        binary_ref,
+        target_triple,
+        bundle_root,
+        |fingerprint| {
+            node_trust_store
+                .get(fingerprint)
+                .map(|signer| signer.verifying_key)
+        },
+        TrustClass::TrustedBundle,
+        Some(maximum_bytes),
+    )?;
+    let identity = verified.identity;
+    let bin_dir = identity.absolute_path.parent().ok_or_else(|| {
+        EngineError::Internal("verified guest payload has no parent directory".into())
+    })?;
+    let name = identity
+        .absolute_path
+        .file_name()
+        .ok_or_else(|| EngineError::Internal("verified guest payload has no file name".into()))?;
+    let parent = lillux::PinnedDirectory::open(bin_dir)
+        .map_err(|error| EngineError::Internal(format!("pin guest payload directory: {error:#}")))?
+        .ok_or_else(|| EngineError::BinNotFound {
+            bin: binary_ref.to_owned(),
+            searched: bin_dir.display().to_string(),
+        })?;
+    let file = parent
+        .open_pinned_regular(name, false)
+        .map_err(|error| EngineError::Internal(format!("pin guest payload: {error:#}")))?
+        .ok_or_else(|| EngineError::BinNotFound {
+            bin: binary_ref.to_owned(),
+            searched: identity.absolute_path.display().to_string(),
+        })?;
+    let observation = file
+        .observation()
+        .map_err(|error| EngineError::Internal(format!("observe guest payload: {error:#}")))?;
+    let bytes = file
+        .read_stable_bounded(&observation, maximum_bytes)
+        .map_err(|error| EngineError::Internal(format!("read guest payload: {error:#}")))?;
+    let observed = lillux::sha256_hex(&bytes);
+    if observed != identity.content_hash {
+        return Err(EngineError::BinHashMismatch {
+            bin: binary_ref.to_owned(),
+            declared: identity.content_hash,
+            computed: observed,
+        });
+    }
+    let handle = lillux::sealed_memfd(c"ryeos-bundle-guest-payload", &bytes)
+        .map_err(|error| EngineError::Internal(format!("seal guest payload: {error}")))?;
+    Ok(CapturedBundlePayload {
+        identity: BundlePayloadIdentity {
+            content_hash: identity.content_hash,
+            manifest_hash: identity.manifest_hash,
+            item_source_hash: identity.item_source_hash,
+            signer_fingerprint: identity.signer_fingerprint,
+            target_triple: identity.target_triple,
+        },
+        source_proof: verified.source_proof,
+        handle,
+        bytes: bytes.len() as u64,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -212,6 +523,121 @@ pub fn resolve_runtime_binary_command_ref(
     trust_store: &TrustStore,
     root_trust_class: TrustClass,
 ) -> Result<ResolvedBinary, EngineError> {
+    resolve_runtime_binary_command_ref_verified(
+        binary_ref,
+        wrapper_source_root,
+        wrapper_source_space,
+        wrapper_source_path,
+        roots,
+        trust_store,
+        root_trust_class,
+    )
+    .map(|(verified, _, _)| verified.identity)
+}
+
+/// Resolve a runtime command and retain the exact authenticated source
+/// documents and request origin for the mandatory admitted BundleExecutor
+/// proof. The selection is copied from the authenticated runtime-definition
+/// owner supplied by plan construction.
+pub fn resolve_runtime_binary_command_ref_with_selection(
+    binary_ref: &str,
+    wrapper_source_root: &crate::contracts::ItemSourceRoot,
+    wrapper_source_space: ItemSpace,
+    wrapper_source_path: &Path,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    root_trust_class: TrustClass,
+    selection: &crate::contracts::PlanRuntimeBinarySelection,
+) -> Result<
+    (
+        ResolvedBinary,
+        ryeos_state::objects::BundleExecutorMemberSourceProofV1,
+    ),
+    EngineError,
+> {
+    let (verified, origin, selected_bundle) = resolve_runtime_binary_command_ref_verified(
+        binary_ref,
+        wrapper_source_root,
+        wrapper_source_space,
+        wrapper_source_path,
+        roots,
+        trust_store,
+        root_trust_class,
+    )?;
+    let identity = verified.identity;
+    let proof = ryeos_state::objects::BundleExecutorMemberSourceProofV1 {
+        requested_binary_ref: binary_ref.to_owned(),
+        request_origin: origin,
+        selected_bundle,
+        runtime_selection: ryeos_state::objects::RetainedRuntimeBinarySelectionV1 {
+            definition_owner: retained_runtime_definition_owner(&selection.definition_owner),
+            definition_owner_chain_index: selection.definition_owner_chain_index,
+            authored_command: selection.authored_command.clone(),
+            expanded_command: selection.expanded_command.clone(),
+        },
+        selected_item_ref: verified.source_proof.selected_item_ref,
+        target_triple: identity.target_triple.clone(),
+        item_source_hash: identity.item_source_hash.clone(),
+        expected_mode: verified.expected_mode,
+        signed_executor_manifest_ref: verified.source_proof.signed_manifest_ref,
+        executor_manifest_object: verified.source_proof.manifest_object,
+        item_source_object: verified.source_proof.item_source_object,
+        signed_item_source_sidecar: verified.source_proof.signed_sidecar,
+    };
+    proof
+        .validate(
+            &identity.manifest_hash,
+            &identity.signer_fingerprint,
+            &identity.content_hash,
+        )
+        .map_err(|error| EngineError::BinManifestInvalid {
+            bin: binary_ref.to_owned(),
+            reason: format!("{error:#}"),
+        })?;
+    Ok((identity, proof))
+}
+
+fn retained_runtime_definition_owner(
+    owner: &crate::contracts::PlanTrustAuthority,
+) -> ryeos_state::objects::RetainedRuntimeDefinitionOwnerV1 {
+    use ryeos_state::objects::{RetainedItemSpaceV1 as Space, RetainedTrustClassV1 as Trust};
+    ryeos_state::objects::RetainedRuntimeDefinitionOwnerV1 {
+        requested_id: owner.requested_id.clone(),
+        canonical_ref: owner.canonical_ref.clone(),
+        source_space: match owner.source_space {
+            ItemSpace::Project => Space::Project,
+            ItemSpace::Bundle => Space::Bundle,
+            ItemSpace::Node => Space::Node,
+        },
+        trust_class: match owner.trust_class {
+            TrustClass::TrustedBundle => Trust::TrustedBundle,
+            TrustClass::TrustedProject => Trust::TrustedProject,
+            TrustClass::TrustedNode => Trust::TrustedNode,
+            TrustClass::UntrustedProject => Trust::UntrustedProject,
+            TrustClass::Unsigned => Trust::Unsigned,
+        },
+        signer_fingerprint: owner.signer_fingerprint.clone(),
+        content_hash: owner.content_hash.clone(),
+        raw_content_digest: owner.raw_content_digest.clone(),
+    }
+}
+
+fn resolve_runtime_binary_command_ref_verified(
+    binary_ref: &str,
+    wrapper_source_root: &crate::contracts::ItemSourceRoot,
+    wrapper_source_space: ItemSpace,
+    wrapper_source_path: &Path,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    root_trust_class: TrustClass,
+) -> Result<
+    (
+        VerifiedBundleBinary,
+        ryeos_state::objects::BundleExecutorRequestOriginV1,
+        ryeos_state::objects::SelectedBundleIdentityV1,
+    ),
+    EngineError,
+> {
     let Some(rest) = binary_ref.strip_prefix("bin:") else {
         return Err(EngineError::InvalidBinPrefix {
             raw: binary_ref.to_string(),
@@ -238,12 +664,34 @@ pub fn resolve_runtime_binary_command_ref(
                     detail: "wrapper source has no registered content root".to_owned(),
                 }
             })?;
-            resolve_bundle_binary_ref(
+            let crate::contracts::ItemSourceRoot::Bundle { name: wrapper_name } = wrapper_source_root else {
+                return Err(EngineError::InvalidBinPrefix {
+                    raw: binary_ref.to_owned(),
+                    detail: "unqualified binary refs require typed wrapper Bundle provenance".to_owned(),
+                });
+            };
+            let wrapper_manifest = crate::plan_builder::verify_bundle_source_manifest_identity(
+                bundle_root, wrapper_name, trust_store,
+            )?;
+            let verified = resolve_bundle_binary_ref_for_target(
                 binary_ref,
+                env!("RYEOS_ENGINE_HOST_TRIPLE"),
                 bundle_root,
                 |fp| trust_store.get(fp).map(|signer| signer.verifying_key),
                 root_trust_class,
-            )
+                None,
+            )?;
+            Ok((
+                verified,
+                ryeos_state::objects::BundleExecutorRequestOriginV1::WrapperBundle {
+                    wrapper_bundle_name: wrapper_name.clone(),
+                },
+                ryeos_state::objects::SelectedBundleIdentityV1 {
+                    name: wrapper_manifest.name,
+                    body_digest: wrapper_manifest.body_digest,
+                    signer_fingerprint: wrapper_manifest.signer_fingerprint,
+                },
+            ))
         }
         1 => {
             let (target_bundle, bin_name) = rest.split_once('/').expect("one slash checked above");
@@ -284,12 +732,25 @@ pub fn resolve_runtime_binary_command_ref(
 
             ensure_qualified_binary_dependency(&source_manifest, &target_manifest)?;
 
-            resolve_bundle_binary_ref(
+            let verified = resolve_bundle_binary_ref_for_target(
                 &format!("bin:{bin_name}"),
+                env!("RYEOS_ENGINE_HOST_TRIPLE"),
                 &target_root,
                 |fp| trust_store.get(fp).map(|signer| signer.verifying_key),
                 root_trust_class,
-            )
+                None,
+            )?;
+            Ok((
+                verified,
+                ryeos_state::objects::BundleExecutorRequestOriginV1::QualifiedBundleAlias {
+                    bundle_alias: target_bundle.to_owned(),
+                },
+                ryeos_state::objects::SelectedBundleIdentityV1 {
+                    name: target_manifest.name,
+                    body_digest: target_manifest.body_digest,
+                    signer_fingerprint: target_manifest.signer_fingerprint,
+                },
+            ))
         }
         _ => Err(EngineError::InvalidBinPrefix {
             raw: binary_ref.to_string(),
@@ -319,7 +780,31 @@ pub fn resolve_bundle_binary_ref(
     trusted_verifying_key: impl Fn(&str) -> Option<VerifyingKey>,
     root_trust_class: TrustClass,
 ) -> Result<ResolvedBinary, EngineError> {
-    let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+    resolve_bundle_binary_ref_for_target(
+        binary_ref,
+        env!("RYEOS_ENGINE_HOST_TRIPLE"),
+        bundle_root,
+        trusted_verifying_key,
+        root_trust_class,
+        None,
+    )
+    .map(|verified| verified.identity)
+}
+
+fn resolve_bundle_binary_ref_for_target(
+    binary_ref: &str,
+    triple: &str,
+    bundle_root: &Path,
+    trusted_verifying_key: impl Fn(&str) -> Option<VerifyingKey>,
+    root_trust_class: TrustClass,
+    maximum_bytes: Option<u64>,
+) -> Result<VerifiedBundleBinary, EngineError> {
+    if !is_safe_executor_path_segment(triple) {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: binary_ref.to_owned(),
+            detail: "guest target triple is not a safe executor segment".into(),
+        });
+    }
 
     // Determine the binary name and item_ref based on ref shape.
     let (bin_name, item_ref, bin_path) = if let Some(name) = binary_ref.strip_prefix("bin:") {
@@ -441,6 +926,11 @@ pub fn resolve_bundle_binary_ref(
             bin: bin_name.clone(),
         });
     }
+    if maximum_bytes.is_some_and(|limit| metadata.len() > limit) {
+        return Err(EngineError::Internal(format!(
+            "guest bundle payload `{bin_name}` exceeds its admitted byte ceiling"
+        )));
+    }
 
     let manifest_ref_path = bundle_root
         .join(crate::AI_DIR)
@@ -479,14 +969,16 @@ pub fn resolve_bundle_binary_ref(
     let objects_dir = bundle_root.join(crate::AI_DIR).join("objects");
     let cas = lillux::cas::CasStore::new(objects_dir);
 
-    let manifest_value = cas
-        .get_object(&manifest_hash)
-        .map_err(|e| {
-            EngineError::Internal(format!("CAS read error for manifest {manifest_hash}: {e}"))
-        })?
-        .ok_or_else(|| EngineError::BinManifestMissing {
-            bundle_root: bundle_root.display().to_string(),
-        })?;
+    let manifest_value =
+        load_executor_cas_object_bounded(&cas, &manifest_hash, MAX_EXECUTOR_MANIFEST_OBJECT_BYTES)
+            .map_err(|e| {
+                EngineError::Internal(format!(
+                    "CAS read error for manifest {manifest_hash}: {e:#}"
+                ))
+            })?
+            .ok_or_else(|| EngineError::BinManifestMissing {
+                bundle_root: bundle_root.display().to_string(),
+            })?;
 
     let item_source_hashes = crate::executor_resolution::verify_executor_manifest_object(
         &manifest_value,
@@ -505,20 +997,23 @@ pub fn resolve_bundle_binary_ref(
                 triple: triple.to_string(),
             })?;
 
-    let item_source = cas
-        .get_object(item_source_hash)
-        .map_err(|e| {
-            EngineError::Internal(format!(
-                "CAS read error for item_source {item_source_hash}: {e}"
-            ))
-        })?
-        .ok_or_else(|| {
-            EngineError::Internal(format!(
-                "item_source {item_source_hash} for {item_ref} not found in CAS"
-            ))
-        })?;
+    let item_source = load_executor_cas_object_bounded(
+        &cas,
+        item_source_hash,
+        MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES,
+    )
+    .map_err(|e| {
+        EngineError::Internal(format!(
+            "CAS read error for item_source {item_source_hash}: {e:#}"
+        ))
+    })?
+    .ok_or_else(|| {
+        EngineError::Internal(format!(
+            "item_source {item_source_hash} for {item_ref} not found in CAS"
+        ))
+    })?;
 
-    let signed_sidecar_fingerprint = verify_item_source_sidecar(
+    let (signed_sidecar_fingerprint, signed_sidecar) = verify_item_source_sidecar(
         &bin_name,
         &bin_path,
         &item_ref,
@@ -537,16 +1032,18 @@ pub fn resolve_bundle_binary_ref(
     })?;
     verify_installed_mode(&bin_name, &bin_path, signed_mode)?;
 
-    let blob_bytes = cas
-        .get_blob(&content_blob_hash)
-        .map_err(|error| EngineError::BinManifestInvalid {
-            bin: bin_name.clone(),
-            reason: format!("read content blob {content_blob_hash}: {error}"),
-        })?
-        .ok_or_else(|| EngineError::BinManifestInvalid {
-            bin: bin_name.clone(),
-            reason: format!("content blob {content_blob_hash} is missing from bundle CAS"),
-        })?;
+    let blob_bytes = match maximum_bytes {
+        Some(limit) => cas.get_blob_bounded(&content_blob_hash, limit),
+        None => cas.get_blob(&content_blob_hash),
+    }
+    .map_err(|error| EngineError::BinManifestInvalid {
+        bin: bin_name.clone(),
+        reason: format!("read content blob {content_blob_hash}: {error:#}"),
+    })?
+    .ok_or_else(|| EngineError::BinManifestInvalid {
+        bin: bin_name.clone(),
+        reason: format!("content blob {content_blob_hash} is missing from bundle CAS"),
+    })?;
     let computed_blob_hash = lillux::sha256_hex(&blob_bytes);
     if computed_blob_hash != content_blob_hash {
         return Err(EngineError::BinHashMismatch {
@@ -556,8 +1053,15 @@ pub fn resolve_bundle_binary_ref(
         });
     }
 
-    let bin_bytes = std::fs::read(&bin_path).map_err(|e| {
-        EngineError::Internal(format!("failed to read binary {}: {e}", bin_path.display()))
+    let bin_bytes = match maximum_bytes {
+        Some(limit) => lillux::secure_fs::read_regular_file_bounded_no_follow(&bin_path, limit),
+        None => std::fs::read(&bin_path).map_err(anyhow::Error::from),
+    }
+    .map_err(|e| {
+        EngineError::Internal(format!(
+            "failed to read binary {}: {e:#}",
+            bin_path.display()
+        ))
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&bin_bytes);
@@ -588,11 +1092,23 @@ pub fn resolve_bundle_binary_ref(
         });
     }
 
-    Ok(ResolvedBinary {
-        absolute_path: bin_path,
-        content_hash: computed_hash,
-        manifest_hash,
-        signer_fingerprint,
+    Ok(VerifiedBundleBinary {
+        identity: ResolvedBinary {
+            absolute_path: bin_path,
+            content_hash: computed_hash,
+            manifest_hash,
+            item_source_hash: item_source_hash.clone(),
+            signer_fingerprint,
+            target_triple: triple.to_owned(),
+        },
+        source_proof: BundlePayloadSourceProof {
+            selected_item_ref: item_ref,
+            signed_manifest_ref: signed_manifest_ref.into_bytes(),
+            manifest_object: manifest_value,
+            item_source_object: item_source,
+            signed_sidecar,
+        },
+        expected_mode: signed_mode,
     })
 }
 
@@ -694,38 +1210,66 @@ pub fn verify_bundle_executor_manifest_ref_identity(
     }))
 }
 
-/// Verify every admitted bundle's executable set and require one owner for
-/// each native-executor identity.
+/// Content identity of every signed executable one bundle ships, for every
+/// target triple, keyed by executor item ref (`bin/<triple>/<name>`). The
+/// bundle passes the same complete verification as
+/// [`verify_bundle_executor_manifest`] first. Reads only: nothing is copied,
+/// sealed or executed.
+pub fn verified_bundle_payload_hashes(
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<std::collections::BTreeMap<String, String>, EngineError> {
+    verify_bundle_executor_manifest_items(bundle_root, node_trust_store)
+        .map(|verified| verified.content_hashes)
+}
+
+/// The executor item ref a bundle's `bin:<name>` resolves to on this host.
+pub fn host_executor_item_ref(name: &str) -> String {
+    format!("bin/{}/{name}", env!("RYEOS_ENGINE_HOST_TRIPLE"))
+}
+
+/// Verify every admitted bundle's executable set and require each
+/// native-executor identity to resolve to exactly one signed executable.
 ///
 /// Native executor references are globally addressed as
 /// `native:<bare-name>` at launch time, with the target triple supplied by the
-/// node. Consequently, two bundles may not both publish the same
-/// `bin/<target-triple>/<bare-name>` identity. Checking every target triple at
+/// node, so bundle-root order must never choose between two different
+/// executables published as the same `bin/<target-triple>/<bare-name>`
+/// identity. Two bundles may nevertheless carry that identity when every copy
+/// has the same signed ItemSource (same content, mode and item ref): there is
+/// nothing to choose between, so the first owner is kept. Copies whose signed
+/// ItemSources differ in any way are refused. Checking every target triple at
 /// admission time keeps a bundle set portable: a collision cannot remain
 /// dormant merely because the current node has a different host triple.
 pub fn verify_bundle_executor_manifests(
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
 ) -> Result<(), EngineError> {
-    let mut owners: HashMap<String, &Path> = HashMap::new();
+    let mut owners: HashMap<String, (&Path, String)> = HashMap::new();
 
     for bundle_root in bundle_roots {
-        let mut item_refs: Vec<String> =
+        let mut item_sources: Vec<(String, String)> =
             verify_bundle_executor_manifest_items(bundle_root, node_trust_store)?
-                .item_refs
+                .item_sources
                 .into_iter()
                 .collect();
-        item_refs.sort_unstable();
-        for item_ref in item_refs {
-            if let Some(first_root) = owners.insert(item_ref.clone(), bundle_root.as_path()) {
-                return Err(EngineError::BinManifestInvalid {
-                    bin: item_ref.clone(),
-                    reason: format!(
-                        "native executor identity `{item_ref}` is published by both {} and {}; each target-triple/name identity must have exactly one admitted bundle owner",
-                        first_root.display(),
-                        bundle_root.display(),
-                    ),
-                });
+        item_sources.sort_unstable();
+        for (item_ref, item_source_hash) in item_sources {
+            match owners.get(&item_ref) {
+                None => {
+                    owners.insert(item_ref, (bundle_root.as_path(), item_source_hash));
+                }
+                Some((_, first_hash)) if *first_hash == item_source_hash => {}
+                Some((first_root, _)) => {
+                    return Err(EngineError::BinManifestInvalid {
+                        bin: item_ref.clone(),
+                        reason: format!(
+                            "native executor identity `{item_ref}` is published by both {} and {} with differing signed item sources; each target-triple/name identity must resolve to exactly one signed executable",
+                            first_root.display(),
+                            bundle_root.display(),
+                        ),
+                    });
+                }
             }
         }
     }
@@ -782,7 +1326,8 @@ fn verify_bundle_executor_manifest_items(
     if bin_root_metadata.is_none() && !manifest_ref_exists {
         return Ok(VerifiedBundleExecutorSet {
             identity: None,
-            item_refs: HashSet::new(),
+            item_sources: HashMap::new(),
+            content_hashes: std::collections::BTreeMap::new(),
         });
     }
     if !manifest_ref_exists {
@@ -818,26 +1363,29 @@ fn verify_bundle_executor_manifest_items(
     }
 
     let cas = lillux::cas::CasStore::new(ai_dir.join("objects"));
-    let manifest_value = cas
-        .get_object(&verified_manifest_ref.manifest_hash)
-        .map_err(|error| {
-            bundle_executor_error(
-                bundle_root,
-                format!(
-                    "read executor manifest object {}: {error}",
-                    verified_manifest_ref.manifest_hash
-                ),
-            )
-        })?
-        .ok_or_else(|| {
-            bundle_executor_error(
-                bundle_root,
-                format!(
-                    "executor manifest object {} is missing from bundle CAS",
-                    verified_manifest_ref.manifest_hash
-                ),
-            )
-        })?;
+    let manifest_value = load_executor_cas_object_bounded(
+        &cas,
+        &verified_manifest_ref.manifest_hash,
+        MAX_EXECUTOR_MANIFEST_OBJECT_BYTES,
+    )
+    .map_err(|error| {
+        bundle_executor_error(
+            bundle_root,
+            format!(
+                "read executor manifest object {}: {error:#}",
+                verified_manifest_ref.manifest_hash
+            ),
+        )
+    })?
+    .ok_or_else(|| {
+        bundle_executor_error(
+            bundle_root,
+            format!(
+                "executor manifest object {} is missing from bundle CAS",
+                verified_manifest_ref.manifest_hash
+            ),
+        )
+    })?;
     let item_source_hashes = crate::executor_resolution::verify_executor_manifest_object(
         &manifest_value,
         &verified_manifest_ref.manifest_hash,
@@ -847,6 +1395,7 @@ fn verify_bundle_executor_manifest_items(
     let expected_item_refs: HashSet<String> = item_source_hashes.keys().cloned().collect();
     let mut ordered_item_refs: Vec<&String> = item_source_hashes.keys().collect();
     ordered_item_refs.sort_unstable();
+    let mut content_hashes = std::collections::BTreeMap::new();
     for item_ref in ordered_item_refs {
         let (triple, bin_name) = parse_executor_item_ref(item_ref).map_err(|detail| {
             bundle_executor_error(
@@ -858,21 +1407,24 @@ fn verify_bundle_executor_manifest_items(
         require_regular_artifact(bundle_root, &bin_path, "installed executable")?;
 
         let item_source_hash = &item_source_hashes[item_ref];
-        let item_source = cas
-            .get_object(item_source_hash)
-            .map_err(|error| {
-                bundle_executor_error(
-                    bundle_root,
-                    format!("read ItemSource {item_source_hash} for {item_ref}: {error}"),
-                )
-            })?
-            .ok_or_else(|| {
-                bundle_executor_error(
-                    bundle_root,
-                    format!("ItemSource {item_source_hash} for {item_ref} is missing from CAS"),
-                )
-            })?;
-        let sidecar_signer = verify_item_source_sidecar(
+        let item_source = load_executor_cas_object_bounded(
+            &cas,
+            item_source_hash,
+            MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES,
+        )
+        .map_err(|error| {
+            bundle_executor_error(
+                bundle_root,
+                format!("read ItemSource {item_source_hash} for {item_ref}: {error:#}"),
+            )
+        })?
+        .ok_or_else(|| {
+            bundle_executor_error(
+                bundle_root,
+                format!("ItemSource {item_source_hash} for {item_ref} is missing from CAS"),
+            )
+        })?;
+        let (sidecar_signer, _) = verify_item_source_sidecar(
             bin_name,
             &bin_path,
             item_ref,
@@ -906,7 +1458,7 @@ fn verify_bundle_executor_manifest_items(
             .map_err(|error| {
                 bundle_executor_error(
                     bundle_root,
-                    format!("read content blob {blob_hash} for {item_ref}: {error}"),
+                    format!("read content blob {blob_hash} for {item_ref}: {error:#}"),
                 )
             })?
             .ok_or_else(|| {
@@ -938,6 +1490,7 @@ fn verify_bundle_executor_manifest_items(
                 computed: installed_hash,
             });
         }
+        content_hashes.insert(item_ref.clone(), blob_hash);
     }
 
     let mut installed_item_refs = HashSet::new();
@@ -1023,7 +1576,11 @@ fn verify_bundle_executor_manifest_items(
             manifest_hash: verified_manifest_ref.manifest_hash,
             signer_fingerprint: verified_manifest_ref.signer_fingerprint,
         }),
-        item_refs: expected_item_refs,
+        item_sources: item_source_hashes
+            .iter()
+            .map(|(item_ref, hash)| (item_ref.clone(), hash.clone()))
+            .collect(),
+        content_hashes,
     })
 }
 
@@ -1043,7 +1600,7 @@ fn read_executor_manifest_ref(path: &Path, bundle_root: &Path) -> Result<String,
         bundle_executor_error(
             bundle_root,
             format!(
-                "read bounded executor manifest ref {}: {error}",
+                "read bounded executor manifest ref {}: {error:#}",
                 path.display()
             ),
         )
@@ -1335,7 +1892,7 @@ fn verify_item_source_sidecar(
     expected_item_ref: &str,
     item_source: &serde_json::Value,
     trusted_verifying_key: &impl Fn(&str) -> Option<VerifyingKey>,
-) -> Result<String, EngineError> {
+) -> Result<(String, Vec<u8>), EngineError> {
     let sidecar_path = bin_path.with_file_name(format!("{bin_name}.item_source.json"));
     let sidecar_metadata =
         std::fs::symlink_metadata(&sidecar_path).map_err(|e| EngineError::BinSidecarInvalid {
@@ -1348,10 +1905,37 @@ fn verify_item_source_sidecar(
             reason: format!("{} must be a regular file", sidecar_path.display()),
         });
     }
-    let signed =
-        std::fs::read_to_string(&sidecar_path).map_err(|e| EngineError::BinSidecarInvalid {
+    let signed_bytes = lillux::read_regular_file_bounded_no_follow(&sidecar_path, 1024 * 1024)
+        .map_err(|error| EngineError::BinSidecarInvalid {
             bin: bin_name.to_string(),
-            reason: format!("read {}: {e}", sidecar_path.display()),
+            reason: format!("read {}: {error:#}", sidecar_path.display()),
+        })?;
+    let fingerprint = verify_item_source_sidecar_bytes(
+        bin_name,
+        &sidecar_path,
+        expected_item_ref,
+        item_source,
+        &signed_bytes,
+        trusted_verifying_key,
+    )?;
+    Ok((fingerprint, signed_bytes))
+}
+
+/// The single strict sidecar parser for live installed bytes and retained CAS
+/// bytes. A historical caller supplies an already-attested verifier closure;
+/// this function never elevates that key to a current trusted publisher.
+fn verify_item_source_sidecar_bytes(
+    bin_name: &str,
+    sidecar_path: &Path,
+    expected_item_ref: &str,
+    item_source: &serde_json::Value,
+    signed_bytes: &[u8],
+    trusted_verifying_key: &impl Fn(&str) -> Option<VerifyingKey>,
+) -> Result<String, EngineError> {
+    let signed =
+        std::str::from_utf8(signed_bytes).map_err(|error| EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("{} is not UTF-8: {error}", sidecar_path.display()),
         })?;
 
     let (signature_line, body) =
@@ -1553,16 +2137,41 @@ mod tests {
         bin_name: &str,
         triple: &str,
     ) -> (String, SigningKey) {
+        write_resolver_fixture_for_triple_with_mode(bundle_root, bin_name, triple, 0o755)
+    }
+
+    fn write_resolver_fixture_for_triple_with_mode(
+        bundle_root: &Path,
+        bin_name: &str,
+        triple: &str,
+        signed_mode: u32,
+    ) -> (String, SigningKey) {
+        write_resolver_fixture_with_bytes(
+            bundle_root,
+            bin_name,
+            triple,
+            signed_mode,
+            b"placeholder-binary\n",
+        )
+    }
+
+    fn write_resolver_fixture_with_bytes(
+        bundle_root: &Path,
+        bin_name: &str,
+        triple: &str,
+        signed_mode: u32,
+        bin_bytes: &[u8],
+    ) -> (String, SigningKey) {
         let ai = bundle_root.join(crate::AI_DIR);
         let bin_dir = ai.join("bin").join(triple);
         std::fs::create_dir_all(&bin_dir).unwrap();
         let bin_path = bin_dir.join(bin_name);
-        let bin_bytes = b"placeholder-binary\n";
         std::fs::write(&bin_path, bin_bytes).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(signed_mode))
+                .unwrap();
         }
 
         let cas = lillux::cas::CasStore::new(ai.join("objects"));
@@ -1576,7 +2185,7 @@ mod tests {
             "content_blob_hash": content_blob_hash,
             "integrity": format!("sha256:{content_blob_hash}"),
             "signature_info": null,
-            "mode": 0o755,
+            "mode": signed_mode,
         });
         let item_source_hash = cas.store_object(&item_source).unwrap();
         let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
@@ -1658,9 +2267,55 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
         let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
-        let captured =
+        let mut captured =
             capture_bundle_binary_ref("bin:demo", &bundle, &trust_store_for(&fingerprint, &key))
                 .expect("signed executable should be captured");
+        assert!(!captured.source_proof.selected_item_ref.is_empty());
+        assert!(!captured.source_proof.signed_manifest_ref.is_empty());
+        assert!(!captured.source_proof.signed_sidecar.is_empty());
+        assert_eq!(captured.identity.signer_fingerprint, fingerprint);
+        let retained_identity = BundlePayloadIdentity {
+            content_hash: captured.identity.content_hash.clone(),
+            manifest_hash: captured.identity.manifest_hash.clone(),
+            item_source_hash: captured.identity.item_source_hash.clone(),
+            signer_fingerprint: fingerprint.clone(),
+            target_triple: captured.identity.target_triple.clone(),
+        };
+        verify_retained_bundle_payload_proof(
+            &captured.source_proof,
+            &retained_identity,
+            0o755,
+            &key.verifying_key(),
+        )
+        .unwrap();
+
+        let saved_manifest = captured.source_proof.manifest_object.clone();
+        captured.source_proof.manifest_object["oversize"] =
+            serde_json::Value::String("x".repeat(MAX_EXECUTOR_MANIFEST_OBJECT_BYTES as usize));
+        assert!(
+            verify_retained_bundle_payload_proof(
+                &captured.source_proof,
+                &retained_identity,
+                0o755,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
+        captured.source_proof.manifest_object = saved_manifest;
+
+        let saved_sidecar = captured.source_proof.signed_sidecar.clone();
+        captured.source_proof.signed_sidecar =
+            vec![b'x'; MAX_EXECUTOR_ITEM_SOURCE_SIDECAR_BYTES + 1];
+        assert!(
+            verify_retained_bundle_payload_proof(
+                &captured.source_proof,
+                &retained_identity,
+                0o755,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
+        captured.source_proof.signed_sidecar = saved_sidecar;
 
         std::fs::write(&captured.identity.absolute_path, b"mutated-after-capture\n").unwrap();
         let retained = &captured.handle;
@@ -1679,6 +2334,281 @@ mod tests {
             libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
         assert_eq!(seals & required, required);
         assert_ne!(retained.file_identity().unwrap().mode() & 0o111, 0);
+        captured.source_proof.signed_sidecar.push(b'!');
+        assert!(
+            verify_retained_bundle_payload_proof(
+                &captured.source_proof,
+                &retained_identity,
+                0o755,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_member_proof_revalidates_signatures_with_current_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+        let captured =
+            capture_bundle_binary_ref("bin:demo", &bundle, &trust_store_for(&fingerprint, &key))
+                .expect("signed Bundle executor should be captured");
+        let source = captured.source_proof;
+        let proof = ryeos_state::objects::BundleExecutorMemberSourceProofV1 {
+            requested_binary_ref: "bin:demo".to_owned(),
+            request_origin: ryeos_state::objects::BundleExecutorRequestOriginV1::WrapperBundle {
+                wrapper_bundle_name: "fixture".to_owned(),
+            },
+            selected_bundle: ryeos_state::objects::SelectedBundleIdentityV1 {
+                name: "fixture".to_owned(),
+                body_digest: "a".repeat(64),
+                signer_fingerprint: fingerprint.clone(),
+            },
+            runtime_selection: ryeos_state::objects::RetainedRuntimeBinarySelectionV1 {
+                definition_owner: ryeos_state::objects::RetainedRuntimeDefinitionOwnerV1 {
+                    requested_id: "runtime:fixture".to_owned(),
+                    canonical_ref: "runtime:fixture".to_owned(),
+                    source_space: ryeos_state::objects::RetainedItemSpaceV1::Bundle,
+                    trust_class: ryeos_state::objects::RetainedTrustClassV1::TrustedBundle,
+                    signer_fingerprint: Some(fingerprint.clone()),
+                    content_hash: "b".repeat(64),
+                    raw_content_digest: "c".repeat(64),
+                },
+                definition_owner_chain_index: 1,
+                authored_command: "bin:demo".to_owned(),
+                expanded_command: "bin:demo".to_owned(),
+            },
+            selected_item_ref: source.selected_item_ref,
+            target_triple: captured.identity.target_triple.clone(),
+            item_source_hash: captured.identity.item_source_hash.clone(),
+            expected_mode: 0o755,
+            signed_executor_manifest_ref: source.signed_manifest_ref,
+            executor_manifest_object: source.manifest_object,
+            item_source_object: source.item_source_object,
+            signed_item_source_sidecar: source.signed_sidecar,
+        };
+
+        verify_retained_bundle_executor_member_proof(
+            &proof,
+            &captured.identity.manifest_hash,
+            &fingerprint,
+            &captured.identity.content_hash,
+            &key.verifying_key(),
+        )
+        .expect("retained signatures verify under the current authorized key");
+
+        let mut substituted_signature = proof;
+        let mut sidecar =
+            String::from_utf8(substituted_signature.signed_item_source_sidecar).unwrap();
+        let header_end = sidecar.find('\n').unwrap();
+        let signer_separator = sidecar[..header_end].rfind(':').unwrap();
+        let signature_separator = sidecar[..signer_separator].rfind(':').unwrap();
+        let signature_start = signature_separator + 1;
+        let replacement = if sidecar.as_bytes()[signature_start] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
+        sidecar.replace_range(
+            signature_start..signature_start + 1,
+            &(replacement as char).to_string(),
+        );
+        substituted_signature.signed_item_source_sidecar = sidecar.into_bytes();
+        assert!(
+            verify_retained_bundle_executor_member_proof(
+                &substituted_signature,
+                &captured.identity.manifest_hash,
+                &fingerprint,
+                &captured.identity.content_hash,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_executor_proof_preserves_nondefault_signed_executable_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture_for_triple_with_mode(
+            &bundle,
+            "demo",
+            env!("RYEOS_ENGINE_HOST_TRIPLE"),
+            0o750,
+        );
+        let captured =
+            capture_bundle_binary_ref("bin:demo", &bundle, &trust_store_for(&fingerprint, &key))
+                .unwrap();
+        let identity = BundlePayloadIdentity {
+            content_hash: captured.identity.content_hash,
+            manifest_hash: captured.identity.manifest_hash,
+            item_source_hash: captured.identity.item_source_hash,
+            signer_fingerprint: fingerprint,
+            target_triple: captured.identity.target_triple,
+        };
+        verify_retained_bundle_payload_proof(
+            &captured.source_proof,
+            &identity,
+            0o750,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        assert!(
+            verify_retained_bundle_payload_proof(
+                &captured.source_proof,
+                &identity,
+                0o755,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn signed_foreign_guest_payload_is_captured_as_nonexecutable_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let host = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        let guest = if host == "aarch64-unknown-linux-musl" {
+            "x86_64-unknown-linux-musl"
+        } else {
+            "aarch64-unknown-linux-musl"
+        };
+        let (fingerprint, key) = write_resolver_fixture_for_triple(&bundle, "owner", guest);
+        let trust = trust_store_for(&fingerprint, &key);
+        assert!(
+            resolve_bundle_binary_ref(
+                &format!("bin/{guest}/owner"),
+                &bundle,
+                trusted_key_for(&fingerprint, &key),
+                TrustClass::TrustedBundle
+            )
+            .is_err()
+        );
+
+        let payload = capture_bundle_payload_for_target("bin:owner", guest, &bundle, &trust, 1024)
+            .expect("signed guest target must be readable as data");
+        assert_eq!(payload.identity.target_triple, guest);
+        assert!(lillux::valid_hash(&payload.identity.item_source_hash));
+        assert_eq!(
+            payload.source_proof.selected_item_ref,
+            format!("bin/{guest}/owner")
+        );
+        assert_eq!(
+            lillux::sha256_hex(
+                lillux::canonical_json(&payload.source_proof.manifest_object)
+                    .unwrap()
+                    .as_bytes()
+            ),
+            payload.identity.manifest_hash
+        );
+        assert_eq!(
+            lillux::sha256_hex(
+                lillux::canonical_json(&payload.source_proof.item_source_object)
+                    .unwrap()
+                    .as_bytes()
+            ),
+            payload.identity.item_source_hash
+        );
+        assert!(
+            payload
+                .source_proof
+                .signed_manifest_ref
+                .starts_with(b"# ryeos:signed:")
+        );
+        assert!(
+            payload
+                .source_proof
+                .signed_sidecar
+                .starts_with(b"# ryeos:signed:")
+        );
+        let captured_ref = payload.source_proof.signed_manifest_ref.clone();
+        let captured_sidecar = payload.source_proof.signed_sidecar.clone();
+        std::fs::write(
+            bundle.join(crate::AI_DIR).join("refs/bundles/manifest"),
+            b"changed-after-capture",
+        )
+        .unwrap();
+        std::fs::write(
+            bundle
+                .join(crate::AI_DIR)
+                .join("bin")
+                .join(guest)
+                .join("owner.item_source.json"),
+            b"changed-after-capture",
+        )
+        .unwrap();
+        assert_eq!(payload.source_proof.signed_manifest_ref, captured_ref);
+        assert_eq!(payload.source_proof.signed_sidecar, captured_sidecar);
+        assert_eq!(payload.bytes, b"placeholder-binary\n".len() as u64);
+        assert!(payload.authority().require_owned_executable().is_err());
+        assert_eq!(
+            payload
+                .authority()
+                .read_regular_file_stable_bounded(1024)
+                .unwrap()
+                .0,
+            b"placeholder-binary\n"
+        );
+        assert!(capture_bundle_payload_for_target("bin:owner", guest, &bundle, &trust, 1).is_err());
+        let installed = bundle
+            .join(crate::AI_DIR)
+            .join("bin")
+            .join(guest)
+            .join("owner");
+        std::fs::write(&installed, b"mutated bundle bytes\n").unwrap();
+        assert_eq!(
+            payload
+                .authority()
+                .read_regular_file_stable_bounded(1024)
+                .unwrap()
+                .0,
+            b"placeholder-binary\n"
+        );
+        assert!(
+            capture_bundle_payload_for_target("bin:owner", guest, &bundle, &trust, 1024,).is_err()
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_oversized_signed_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+        let sidecar = bundle
+            .join(crate::AI_DIR)
+            .join("bin")
+            .join(env!("RYEOS_ENGINE_HOST_TRIPLE"))
+            .join("demo.item_source.json");
+        std::fs::write(sidecar, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        assert!(
+            resolve_bundle_binary_ref(
+                "bin:demo",
+                &bundle,
+                trusted_key_for(&fingerprint, &key),
+                TrustClass::TrustedBundle,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn executor_cas_object_read_refuses_oversize_before_decode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(tmp.path().join("objects"));
+        let value = serde_json::json!({"large": "x".repeat(4096)});
+        let hash = cas.store_object(&value).unwrap();
+        assert!(load_executor_cas_object_bounded(&cas, &hash, 1024).is_err());
+        assert_eq!(
+            load_executor_cas_object_bounded(&cas, &hash, 8192)
+                .unwrap()
+                .unwrap(),
+            value
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1804,7 +2734,13 @@ mod tests {
         let collision_triple = "future-vendor-platform-abi";
         let (fingerprint, key) =
             write_resolver_fixture_for_triple(&first, "shared-executor", collision_triple);
-        write_resolver_fixture_for_triple(&second, "shared-executor", collision_triple);
+        write_resolver_fixture_with_bytes(
+            &second,
+            "shared-executor",
+            collision_triple,
+            0o755,
+            b"different-binary\n",
+        );
 
         let error = verify_bundle_executor_manifests(
             &[first.clone(), second.clone()],
@@ -1813,6 +2749,43 @@ mod tests {
         .expect_err("two owners of one target-triple/name identity must be refused");
         let message = error.to_string();
         assert!(message.contains(&format!("bin/{collision_triple}/shared-executor")));
+        assert!(message.contains(&first.display().to_string()));
+        assert!(message.contains(&second.display().to_string()));
+    }
+
+    #[test]
+    fn admitted_bundle_set_accepts_byte_identical_shared_executor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let triple = "future-vendor-platform-abi";
+        let (fingerprint, key) =
+            write_resolver_fixture_for_triple(&first, "shared-executor", triple);
+        write_resolver_fixture_for_triple(&second, "shared-executor", triple);
+
+        verify_bundle_executor_manifests(&[first, second], &trust_store_for(&fingerprint, &key))
+            .expect("copies with an identical signed item source have nothing to select between");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_bundle_set_rejects_shared_executor_with_differing_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let triple = "future-vendor-platform-abi";
+        let (fingerprint, key) =
+            write_resolver_fixture_for_triple_with_mode(&first, "shared-executor", triple, 0o755);
+        write_resolver_fixture_for_triple_with_mode(&second, "shared-executor", triple, 0o750);
+
+        let error = verify_bundle_executor_manifests(
+            &[first.clone(), second.clone()],
+            &trust_store_for(&fingerprint, &key),
+        )
+        .expect_err("copies differing in signed mode must be refused");
+        let message = error.to_string();
+        assert!(message.contains(&format!("bin/{triple}/shared-executor")));
+        assert!(message.contains("differing signed item sources"));
         assert!(message.contains(&first.display().to_string()));
         assert!(message.contains(&second.display().to_string()));
     }
@@ -1968,6 +2941,8 @@ mod tests {
 
     fn roots_for(bundle_roots: &[&Path]) -> ResolutionRoots {
         ResolutionRoots {
+            logical_project_root: None,
+            owned_namespaces: Vec::new(),
             ordered: bundle_roots
                 .iter()
                 .map(|root| {

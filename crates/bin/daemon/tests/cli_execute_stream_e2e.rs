@@ -9,12 +9,12 @@
 //!   - a failing run exits non-zero;
 //!   - `--json` prints only the buffered JSON result (no live markers).
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -84,50 +84,24 @@ Say hello.
     Ok(())
 }
 
-fn plant_execute_stream_route(
-    state_path: &Path,
-    signer: &lillux::crypto::SigningKey,
-) -> anyhow::Result<()> {
-    let dir = state_path.join(".ai/node/routes");
-    std::fs::create_dir_all(&dir)?;
-    let body = r#"id: execute/stream
-path: /execute/stream
-methods:
-  - POST
-auth: ryeos_signed
-limits:
-  body_bytes_max: 10485760
-  timeout_ms: 0
-  concurrent_max: 32
-request:
-  body: json
-response:
-  mode: event_stream
-  source: dispatch_launch
-  source_config:
-    keep_alive_secs: 15
-"#;
-    let signed = lillux::signature::sign_content(body, signer, "#", None);
-    std::fs::write(dir.join("execute-stream.yaml"), signed)?;
-    Ok(())
-}
-
 /// Boot a daemon with the mock provider (given canned responses) + the project
 /// directive. Returns the harness and the project path to pass via `-p`.
-async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
+/// The mock and project come first so they outlive the harness's teardown.
+async fn boot(responses: Vec<MockResponse>) -> (Box<dyn std::any::Any>, DaemonHarness, String) {
     let mock = MockProvider::start(responses).await;
     let mock_url = mock.base_url.clone();
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-cli-model-config",
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
-            plant_execute_stream_route(state_path, &fixture.publisher)?;
+            // Core ships the signed `/execute/stream` route; a second node
+            // route with the same id is refused at startup.
             write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
             Ok(())
         };
@@ -146,9 +120,7 @@ async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
     plant_directive(project.path(), &fixture.publisher).expect("plant directive");
     let project_path = project.path().to_str().unwrap().to_string();
 
-    std::mem::forget(project);
-    std::mem::forget(mock);
-    (h, project_path)
+    (Box::new((project, mock)), h, project_path)
 }
 
 fn run_cli(h: &DaemonHarness, args: &[&str]) -> std::process::Output {
@@ -163,7 +135,7 @@ fn run_cli(h: &DaemonHarness, args: &[&str]) -> std::process::Output {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_execute_stream_success_exits_zero_and_prints_result() {
-    let (h, project) = boot(vec![
+    let (_keep, h, project) = boot(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
     ])
@@ -204,7 +176,7 @@ async fn cli_execute_stream_success_exits_zero_and_prints_result() {
 async fn cli_execute_stream_failure_exits_nonzero() {
     // Empty mock queue → provider returns 500 on the first call → the run fails
     // → thread_failed → the CLI must exit non-zero.
-    let (h, project) = boot(vec![]).await;
+    let (_keep, h, project) = boot(vec![]).await;
 
     let out = run_cli(
         &h,
@@ -228,7 +200,7 @@ async fn cli_execute_stream_failure_exits_nonzero() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_execute_json_flag_prints_buffered_json() {
-    let (h, project) = boot(vec![
+    let (_keep, h, project) = boot(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
     ])

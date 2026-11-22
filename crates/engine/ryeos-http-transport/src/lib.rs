@@ -13,7 +13,9 @@ use lillux::network::NetworkContext;
 use lillux::time::{Duration, MonotonicDeadline};
 use std::io;
 
-pub use http1::{Header, HttpRequest, HttpResponse, RequestBodySource, ResponseBody};
+pub use http1::{
+    Header, HttpRequest, HttpResponse, RequestBodySource, ResponseBody, TlsStream, open_tls_stream,
+};
 pub use sse::{SseEvent, SseLimits, SseReader};
 
 /// Whether the HTTP mutator may have reached the remote peer.
@@ -31,6 +33,7 @@ pub struct HttpError {
     contact: ContactState,
     kind: io::ErrorKind,
     message: &'static str,
+    response_refused: bool,
 }
 
 impl HttpError {
@@ -39,6 +42,7 @@ impl HttpError {
             contact: ContactState::NoRequestSent,
             kind,
             message,
+            response_refused: false,
         }
     }
 
@@ -47,6 +51,20 @@ impl HttpError {
             contact: ContactState::RequestMayHaveBeenSent,
             kind,
             message,
+            response_refused: false,
+        }
+    }
+
+    /// A response was received and this transport refused it: its status,
+    /// framing, header or body bounds, or its parse. The request was sent, so
+    /// the peer's commit stays unknown, but repeating the same exchange
+    /// against the same peer cannot cure the refusal.
+    pub(crate) fn refused(message: &'static str) -> Self {
+        Self {
+            contact: ContactState::RequestMayHaveBeenSent,
+            kind: io::ErrorKind::InvalidData,
+            message,
+            response_refused: true,
         }
     }
 
@@ -59,6 +77,13 @@ impl HttpError {
     pub fn kind(&self) -> io::ErrorKind {
         self.kind
     }
+
+    /// Whether a received response was refused by this transport. Every
+    /// other failure, including request-side and TLS-record failures that
+    /// share the `InvalidData` kind, reports false.
+    pub fn response_refused(&self) -> bool {
+        self.response_refused
+    }
 }
 
 impl std::fmt::Display for HttpError {
@@ -69,6 +94,37 @@ impl std::fmt::Display for HttpError {
 
 impl std::error::Error for HttpError {}
 
+/// The error payload a [`ResponseBody`] read carries when this transport
+/// refuses the received body: its framing or a decoded, wire or framing
+/// bound. Detect it with [`is_response_refusal`]; any other read failure,
+/// including a TLS-record failure of kind `InvalidData`, is not a refusal.
+#[derive(Debug)]
+pub struct ResponseRefusal {
+    message: &'static str,
+}
+
+impl ResponseRefusal {
+    pub(crate) fn io(message: &'static str) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, Self { message })
+    }
+}
+
+impl std::fmt::Display for ResponseRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+
+impl std::error::Error for ResponseRefusal {}
+
+/// Whether a response body read failed because this transport refused the
+/// received body rather than because the stream failed.
+pub fn is_response_refusal(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<ResponseRefusal>())
+}
+
 /// Immutable operation deadlines and the per-I/O idle bound.
 #[derive(Clone, Copy, Debug)]
 pub struct Deadlines {
@@ -76,12 +132,18 @@ pub struct Deadlines {
     pub setup_timeout: Duration,
     /// Maximum silence for one underlying network I/O operation.
     pub idle_timeout: Duration,
+    /// Maximum wait from the end of request transmission to the first response
+    /// byte. It is peer processing time, not line silence, and applies to
+    /// nothing else: once a response byte arrives, reads return to the idle
+    /// bound. It never extends the absolute deadline.
+    pub response_wait: Duration,
     /// Absolute request deadline. Progress never extends it.
     pub absolute: MonotonicDeadline,
 }
 
 impl Deadlines {
-    /// Construct a deadline policy from Lillux clock authorities.
+    /// Construct a deadline policy from Lillux clock authorities. The response
+    /// wait equals the idle bound.
     pub fn new(
         setup_timeout: Duration,
         idle_timeout: Duration,
@@ -90,8 +152,20 @@ impl Deadlines {
         Self {
             setup_timeout,
             idle_timeout,
+            response_wait: idle_timeout,
             absolute,
         }
+    }
+
+    /// The same policy with a longer wait for the first response byte after
+    /// the request is fully transmitted. A zero wait is refused when the
+    /// request is validated.
+    pub fn with_response_wait(mut self, response_wait: Duration) -> Self {
+        // The wait for the first response byte is never narrower than the idle
+        // bound every later read gets, so a small value cannot make a request
+        // stricter before the response than during it.
+        self.response_wait = response_wait.max(self.idle_timeout);
+        self
     }
 }
 

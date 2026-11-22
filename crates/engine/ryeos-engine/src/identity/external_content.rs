@@ -203,6 +203,12 @@ pub struct ExternalContentDeclaration {
     pub exclude: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_hint: Option<String>,
+    /// Signed selection for producing finite qualification evidence. This
+    /// does not itself qualify content or impose readiness on ordinary pins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_allowance: Option<
+        ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
+    >,
     pub mount_root: ExternalContentMountRoot,
     pub mount: String,
 }
@@ -228,6 +234,15 @@ impl ExternalContentDeclaration {
         allow_missing_pinned_digest: bool,
     ) -> anyhow::Result<()> {
         validate_declaration_id(&self.id)?;
+        if let Some(allowance) = &self.qualification_allowance {
+            allowance.validate()?;
+            if self.mode != ExternalContentMode::Pinned
+                || self.locator.is_some()
+                || self.bundle_binary.is_some()
+            {
+                anyhow::bail!("qualification allowance requires exact locator-free pinned content");
+            }
+        }
         validate_relative_path("external content mount target", &self.mount)?;
         if let Some(binary_ref) = &self.bundle_binary {
             if self.locator.is_some() {
@@ -293,10 +308,10 @@ impl ExternalContentDeclaration {
         for exclusion in &self.exclude {
             validate_exclude_pattern(exclusion)?;
         }
-        if let Some(hint) = &self.metadata_hint {
-            if hint.is_empty() || hint.len() > 255 || hint.chars().any(char::is_control) {
-                anyhow::bail!("external content metadata hint is not canonical");
-            }
+        if let Some(hint) = &self.metadata_hint
+            && (hint.is_empty() || hint.len() > 255 || hint.chars().any(char::is_control))
+        {
+            anyhow::bail!("external content metadata hint is not canonical");
         }
         Ok(())
     }
@@ -503,6 +518,7 @@ pub fn effective_external_content_declarations(
             digest: Some(selection.manifest_hash.clone()),
             exclude: Vec::new(),
             metadata_hint: None,
+            qualification_allowance: None,
             mount_root: slot.mount_root,
             mount: slot.mount,
         });
@@ -798,7 +814,7 @@ fn validate_relative_path(label: &str, value: &str) -> anyhow::Result<()> {
         anyhow::bail!("{label} exceeds {MAX_ENTRY_PATH_BYTES} bytes");
     }
     ryeos_state::objects::validate_canonical_project_relative_path(value)
-        .map_err(|error| anyhow::anyhow!("{label}: {error}"))
+        .map_err(|error| anyhow::anyhow!("{label}: {error:#}"))
 }
 
 pub(crate) fn validate_declaration_id(id: &str) -> anyhow::Result<()> {
@@ -843,6 +859,42 @@ fn path_contains(parent: &str, child: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qualification_allowance_requires_exact_pinned_source() {
+        let value = serde_json::json!({
+            "id": "runtime", "kind": "tree", "mode": "pinned",
+            "digest": "a".repeat(64), "mount_root": "execution_runtime", "mount": "runtime",
+            "qualification_allowance": {
+                "activation_ref": "config:fixture/activation",
+                "policy_ref": "config:fixture/policy",
+                "required_claims": ["settled"]
+            }
+        });
+        let declaration: super::ExternalContentDeclaration =
+            serde_json::from_value(value.clone()).unwrap();
+        declaration
+            .validate(super::DeclaringAuthority::Bundle("fixture"))
+            .unwrap();
+        let mut located = value.clone();
+        located["locator"] = serde_json::json!({"root": "bundle:fixture", "path": "runtime"});
+        let declaration: super::ExternalContentDeclaration =
+            serde_json::from_value(located).unwrap();
+        assert!(
+            declaration
+                .validate(super::DeclaringAuthority::Bundle("fixture"))
+                .is_err()
+        );
+        let mut unbounded = value;
+        unbounded["qualification_allowance"]["required_claims"] = serde_json::json!([]);
+        let declaration: super::ExternalContentDeclaration =
+            serde_json::from_value(unbounded).unwrap();
+        assert!(
+            declaration
+                .validate(super::DeclaringAuthority::Bundle("fixture"))
+                .is_err()
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -960,7 +1012,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "schema":ryeos_state::external_content::products::composition::RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA,
             "declaration_id":"runtime", "relationship_name":"runtime_to_worker",
-            "relationship_ref":"config:fixture/recipe", "relationship_raw_content_digest":"d".repeat(64),
+            "relationship_ref":"config:fixture/recipe", "relationship_raw_content_digest":"d".repeat(64), "relationship_project_dependent":false,
             "relationship":{
                 "name":"runtime_to_worker",
                 "producer":{"canonical_ref":"graph:fixture/build","recipe_binding":"product_recipe","product_name":"runtime","parameters":{}},
@@ -970,7 +1022,7 @@ mod tests {
             },
             "witness_hash":"e".repeat(64),
             "witness_source":{"kind":"local_capture"},
-            "qualification":null,
+            "qualification":null, "remote_testimony":null,
             "witness_coordinate":{"owner_principal":format!("fp:{}","f".repeat(64)),"chain_root_id":"T-root","thread_id":"T-terminal","recipe_binding":"product_recipe","product_name":"runtime"},
             "producer":{"canonical_ref":"graph:fixture/build","effective_definition_digest":"1".repeat(64),"exact_program_hash":"2".repeat(64),"producer_project_snapshot_hash":"3".repeat(64),"launch_authority_digest":"4".repeat(64),"admitted_parameters_digest":ryeos_state::objects::canonical_value_digest(&serde_json::json!({})).unwrap()},
             "owner_principal":format!("fp:{}","f".repeat(64)),

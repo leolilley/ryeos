@@ -1,14 +1,21 @@
-<!-- ryeos:signed:2026-09-29T00:19:35Z:ecd22eaf8ab8927bfe9ad74fa5afce215d5c20ffa328d3adc94fb564c2314c67:DOG5AAveRXJkXCsF4C3wm0/Z+YZLr6eUuAdDdO4ZFvxFcNqSbJVq0ylWFQHsEOVxrTNO39uxDHxBjq+COrRXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T10:07:11Z:f256c625ae2c6dc3cfd20d91e7a17f4639cd58c3d624d16f52430b381802ce1a:W/p3Q1kgowNFKiaNOk+hehUawaNResx3fkqDVgNz8wt9/iUO/eyRO9leN1nbJRmtIgsDQzm4ZQBO11O6ZndMDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: data-driven-runtime-verification
 title: Data-Driven Runtime Verification
 description: Future separation of declarative verification policy, reusable evidence transport, and runtime-specific protocol interpreters
 entry_type: design
-version: "0.2.0"
+version: "0.2.1"
 ```
 
 # Data-Driven Runtime Verification
+
+Within the [platform direction](platform-direction-and-delivery.md), a focused
+semantic verifier may use any supported admitted runtime, including Python.
+The second-scenario gate below concerns extracting shared verification semantics;
+it does not gate interpreted authoring or use of an existing qualification Tool
+contract. Launch, settlement and other independently owned evidence remain
+mandatory wherever the selected claim requires them.
 
 RyeOS already has a generic product qualification framework. Pinned GNU Python
 qualification uses that framework with specialized signed Tool content; it does
@@ -215,5 +222,5 @@ A future implementation should demonstrate:
 - [Data-driven scope profiles](data-driven-scope-profiles.md) describes a
   related RyeOS pattern: declarative policy expands only into explicit,
   validated authority.
-- [Attachment before execution](../../../../bundles/standard/.ai/knowledge/ryeos/core/execution/attachment-before-execution.md)
+- [Attachment before execution](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/execution/attachment-before-execution.md)
   defines the daemon's durable launch-ownership boundary.

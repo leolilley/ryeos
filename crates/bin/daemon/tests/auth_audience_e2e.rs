@@ -6,13 +6,13 @@
 //! test will prove the fix: signing with the daemon's principal_id
 //! succeeds.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use common::DaemonHarness;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by};
+use common::fast_fixture::{register_workflow_bundles, write_authorized_key_signed_by};
 use lillux::crypto::{Signer as _, SigningKey};
 
 /// Build ryeos-signed auth headers with a specific audience.
@@ -68,15 +68,14 @@ async fn rejects_request_signed_with_caller_audience_when_daemon_identity_differ
 
     let (harness, fixture) = DaemonHarness::start_fast_with(
         |state_path, _user_space, fixture| {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             // Authorize the client key (signed by the node key, as required).
             write_authorized_key_signed_by(state_path, &client_key, &fixture.node)?;
             Ok(())
         },
-        |cmd| {
-            // Enable auth enforcement.
-            cmd.arg("--require-auth");
-        },
+        // `/execute` declares `ryeos_signed` route auth, so the daemon
+        // enforces signed-request verification without a launch flag.
+        |_cmd| {},
     )
     .await
     .expect("daemon should start");
@@ -143,13 +142,13 @@ async fn accepts_request_signed_with_daemon_audience() {
 
     let (harness, fixture) = DaemonHarness::start_fast_with(
         |state_path, _user_space, fixture| {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             write_authorized_key_signed_by(state_path, &client_key, &fixture.node)?;
             Ok(())
         },
-        |cmd| {
-            cmd.arg("--require-auth");
-        },
+        // `/execute` declares `ryeos_signed` route auth, so the daemon
+        // enforces signed-request verification without a launch flag.
+        |_cmd| {},
     )
     .await
     .expect("daemon should start");

@@ -16,11 +16,8 @@ use serde_json::Value;
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-
-use crate::state::get_ui_state;
 
 // ── Response view-model ─────────────────────────────────────────────
 
@@ -119,7 +116,7 @@ pub struct ProjectInfo {
 #[serde(deny_unknown_fields)]
 pub struct RemoteSummary {
     pub name: String,
-    pub url: String,
+    pub url: Option<String>,
     pub principal_id: String,
 }
 
@@ -146,33 +143,23 @@ pub struct GcSummary {
 
 // ── Handler ────────────────────────────────────────────────────────
 
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
-
 pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let attachment = crate::seat_auth::compiled_ui_attachment().ok_or_else(|| {
-        HandlerError::Forbidden("compiled UI attachment required for ryeos-ui dimension".into())
-    })?;
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    // The projection names the browser session it was read for. This is a
+    // verified service, so its handler context carries the durable principal,
+    // not the session cookie; the session and its attachment come from the
+    // authority the UI dispatch retained for this call.
+    let (session, attachment) = crate::seat_auth::require_compiled_ui_session(&ctx, &state)?;
 
     let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
-    let project_path = project_access
-        .as_ref()
-        .map(|access| access.path().to_path_buf());
     let project_identity = crate::seat_auth::attachment_project_query_identity(&attachment)?;
 
+    let schedules = load_schedule_summary(&state).await;
     let projection = build_dimension_projection(
         &state,
+        schedules,
         &session,
         &attachment,
-        project_path.as_ref(),
+        project_access.as_ref(),
         project_identity.as_ref(),
     )?;
 
@@ -181,9 +168,10 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
 
 fn build_dimension_projection(
     state: &AppState,
+    schedules: (usize, usize),
     session: &crate::browser_session::BrowserSession,
     attachment: &crate::browser_session::AdmittedBindingAttachment,
-    project_path: Option<&PathBuf>,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     project_identity: Option<&PathBuf>,
 ) -> Result<RyeOsDimensionProjection> {
     // ── Identity ──
@@ -206,7 +194,9 @@ fn build_dimension_projection(
     });
 
     // ── Spaces (from resolution roots) ──
-    let roots = state.engine.resolution_roots(project_path.cloned());
+    let roots = state
+        .engine
+        .resolution_roots(project_access.map(|access| access.path().to_path_buf()));
     let spaces: Vec<SpaceSummary> = roots
         .ordered
         .iter()
@@ -280,13 +270,13 @@ fn build_dimension_projection(
     });
 
     // ── Remotes (configured only, no probes) ──
-    let remotes = load_remotes(state, project_path);
+    let remotes = load_remotes(state);
 
     // ── Threads ──
     let active_threads = state.state_store.active_thread_count().unwrap_or(0);
 
     // ── Schedules ──
-    let (total_schedules, enabled_schedules) = load_schedule_summary(state);
+    let (total_schedules, enabled_schedules) = schedules;
 
     // ── GC ──
     let gc = load_gc_summary(state);
@@ -296,7 +286,7 @@ fn build_dimension_projection(
         generated_at: lillux::time::iso8601_now(),
         session: SessionInfo {
             session_id: session.session_id.clone(),
-            surface_ref: attachment.surface_ref.clone(),
+            surface_ref: attachment.root_ref.clone(),
             user_principal_id: session.user_principal_id.clone(),
             binding_digest: attachment.compiled_binding.binding_digest.clone(),
             posture: attachment.compiled_binding.posture,
@@ -327,17 +317,8 @@ fn build_dimension_projection(
 // ── Data-loading helpers ────────────────────────────────────────────
 
 /// Load configured remotes without probing. Returns empty on error.
-fn load_remotes(state: &AppState, project_path: Option<&PathBuf>) -> Vec<RemoteSummary> {
-    // Import remote config loading from ryeos-api's remote module.
-    // We can't directly depend on ryeos-api's remote module from ryeos-ui,
-    // so we load remotes using the layered config function exposed via
-    // the AppState's app_root.
-    let project = project_path.map(|p| p.as_path());
-    let app_root = &state.config.app_root;
-
-    // Try to load remotes — the config module is in ryeos-api which we
-    // depend on transitively. Use the public config loading function.
-    match ryeos_api::remote::config::load_remotes_layered(app_root, project) {
+fn load_remotes(state: &AppState) -> Vec<RemoteSummary> {
+    match ryeos_api::remote::config::load_remotes(&state.config.app_root) {
         Ok(remotes_map) => {
             let mut entries: Vec<RemoteSummary> = remotes_map
                 .values()
@@ -355,8 +336,26 @@ fn load_remotes(state: &AppState, project_path: Option<&PathBuf>) -> Vec<RemoteS
 }
 
 /// Load schedule summary counts. Returns (total, enabled).
-fn load_schedule_summary(state: &AppState) -> (usize, usize) {
-    match state.scheduler_db.list_specs_filtered(false, None, None) {
+#[cfg(not(feature = "scheduling"))]
+async fn load_schedule_summary(_state: &AppState) -> (usize, usize) {
+    (0, 0)
+}
+
+#[cfg(feature = "scheduling")]
+async fn load_schedule_summary(state: &AppState) -> (usize, usize) {
+    let Some(scheduler) = state
+        .extensions
+        .get::<ryeos_scheduler_service::SchedulerService>()
+    else {
+        return (0, 0);
+    };
+    let Ok(_read_guard) = scheduler.acquire_read().await else {
+        return (0, 0);
+    };
+    match scheduler
+        .scheduler_db()
+        .list_specs_filtered(false, None, None)
+    {
         Ok(specs) => {
             let total = specs.len();
             let enabled = specs.iter().filter(|s| s.enabled).count();

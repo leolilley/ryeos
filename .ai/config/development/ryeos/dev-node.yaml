@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-12T23:59:42Z:f447d518a3eaaf3b5fec5b36be54ebb11b3f02792022274018c4952d88af832a:BypB/gCFMlLL34sE3P8Guvj+pxB+JLYdu3CSkDKWEfGFWl7phudcByDZkKxXwbKFQ1ZTwarOadfmYNy2+b44CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+{
+  "category": "development/ryeos",
+  "name": "dev-node",
+  "version": "1.0.0",
+  "schema": "ryeos.development.dev-node.v1",
+  "description": "Where a developer's node and its worktree build live, read by the featured-build-check, bundle-set-init-smoke and dev-node-drift-check host tools. Defaults follow install-local-direct.sh; a site copy passed with --config-file names its own bin dir and app root. Values expand ${NAME} and ${NAME:-default} from WORKTREE and the environment.",
+  "installed_bin_dir": "/usr/bin",
+  "host_binaries": ["ryeosd", "ryeos"],
+  "app_root": "${RYEOS_APP_ROOT:-${HOME}/.local/share/ryeos}",
+  "target_dir": "${CARGO_TARGET_DIR:-${WORKTREE}/target}",
+  "build_profile": "release",
+  "bundle_target_triple": "x86_64-unknown-linux-gnu",
+  "node_profile": "development",
+  "host_class": "local",
+  "trust_file": "${WORKTREE}/.dev-keys/PUBLISHER_DEV_TRUST.toml",
+  "scratch_root": "${TMPDIR:-/tmp}",
+  "init_timeout_seconds": 600,
+  "ready_timeout_seconds": 120,
+  "source_paths": ["crates", "Cargo.toml", "Cargo.lock"],
+  "drift_ignore": [".ai/objects/*", ".ai/refs/*"]
+}

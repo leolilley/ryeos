@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-19T18:30:49Z:495ae515b0345c1fe508f879dcca7d03cb34e43bf3ee0c63309da31ea8fbe34a:OjuVLVGFwO0Sc2F9ucylT+zUdTsqUhJFbc8FzmTpP7oOahsG5gveLN3a0wfG0ibax6SZGDwte/6Cwdhdi4jzBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: presentation-launcher
+title: Launch
+version: "1.0.0"
+description: Opening a view runs nothing. It shows what you are already allowed to see.
+widget: rows
+# The find line's right note.
+body:
+  supplement:
+    frame_detail: "views this project can open"
+local_projection: launcher
+input:
+  id: filter
+  placeholder: Find a view
+  local_filter: true

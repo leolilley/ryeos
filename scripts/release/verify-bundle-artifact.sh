@@ -157,7 +157,7 @@ while IFS= read -r bundle; do
         ryeos_term_fail "$bundle publisher metadata missing"
         exit 2
     }
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_release_archive_bundle_names)
 
 ryeos_validate_node_init_root "$stage/.ai/node/init" || {
     ryeos_term_fail "source-root node init namespace is not closed"

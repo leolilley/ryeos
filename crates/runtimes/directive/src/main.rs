@@ -9,16 +9,22 @@ mod budget;
 mod continuation;
 mod directive;
 mod dispatcher;
+mod estimate;
 #[cfg(test)]
 mod expression_inventory_tests;
 mod harness;
+mod image_sniff;
+mod launch_records;
+mod loop_guards;
 mod provider_adapter;
 mod provider_transport_timing;
 mod result_guard;
 mod resume;
+mod run_clock;
 mod runner;
 mod spend_verifier;
 mod startup_timing;
+mod tool_images;
 
 use ryeos_directive_definition::{PROVIDER_SNAPSHOT_KEY, ResolvedProviderSnapshot};
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
@@ -86,7 +92,8 @@ fn compile_stimulus(
 /// Render the stimulus that opens a run, then append inputs the authored
 /// template did not reference directly.
 ///
-/// Callers invoke this only on fresh launches and operator follow-ups. A
+/// Callers invoke this only on fresh launches. An operator follow-up injects
+/// the operator's input instead (see [`operator_follow_up_stimulus`]), and a
 /// suppressed machine continuation must not call it: its unused prompt is
 /// deliberately neither compiled nor rendered.
 fn render_stimulus(
@@ -96,6 +103,21 @@ fn render_stimulus(
 ) -> Result<String> {
     let evaluation_limits = ryeos_runtime::EvaluationLimits::default();
     render_stimulus_with_limits(prompt_template, inputs, scheduled_fire, &evaluation_limits)
+}
+
+/// The stimulus of an operator follow-up is the operator's input, carried by
+/// `threads.input` as `{"input": <text>}`. The directive's opening template was
+/// authored against its launch inputs and is already in the folded chain:
+/// rendering it again against the follow-up inputs would repeat the opening
+/// turn, and would refuse every template that names a launch input.
+fn operator_follow_up_stimulus(inputs: &serde_json::Value) -> Result<String> {
+    if let Some(fields) = inputs.as_object()
+        && fields.len() == 1
+        && let Some(serde_json::Value::String(input)) = fields.get("input")
+    {
+        return Ok(input.clone());
+    }
+    anyhow::bail!("operator follow-up inputs must be exactly {{\"input\": <string>}}")
 }
 
 fn render_stimulus_with_limits(
@@ -230,11 +252,9 @@ fn run_directive() -> Result<RuntimeResult> {
 }
 
 async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult> {
-    if envelope.schema_version()
-        != ryeos_engine::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION
-    {
-        anyhow::bail!("unsupported managed launch envelope schema");
-    }
+    envelope
+        .validate_wire()
+        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
     let observed_effective_digest = envelope.resolution().effective_definition_digest()?;
     if &observed_effective_digest != envelope.effective_definition_digest() {
         anyhow::bail!(
@@ -243,8 +263,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             observed_effective_digest
         );
     }
-    let project_root = envelope.roots.project_root.clone();
-    let bundle_roots = envelope.roots.bundle_roots.clone();
 
     // The runtime no longer parses the directive body or walks extends.
     // The daemon-side extends-chain composer (handler:ryeos/core/extends-chain)
@@ -254,7 +272,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     let verified_loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
         envelope.roots.project_root.clone(),
         envelope.roots.bundle_roots.clone(),
-        &envelope.roots.node_trusted_keys_dir,
+        &envelope.roots.trusted_signers,
     )?;
 
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
@@ -302,10 +320,6 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     }
 
     let bootstrap_output = bootstrap::bootstrap(
-        &bootstrap::BootstrapRoots {
-            project_root: &project_root,
-            bundle_roots: &bundle_roots,
-        },
         &envelope.resolution().composed,
         &envelope.policy.hard_limits,
         &verified_loader,
@@ -455,8 +469,8 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         );
     }
 
-    // The opening stimulus is rendered only where it is actually injected (fresh
-    // launch, or operator follow-up). A MACHINE continuation suppresses it
+    // The opening stimulus is rendered only on a fresh launch; an operator
+    // follow-up injects the operator's input instead. A MACHINE continuation suppresses it
     // entirely and never renders — a changed/broken prompt template must not be
     // able to abort a cut-off task that asks for nothing new.
     // A daemon native-resume respawns this exact thread. Its original launch
@@ -468,66 +482,183 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     } else {
         envelope.request.previous_thread_id.clone()
     };
-    let mut runner_inst = if let Some(ref resume_id) = resume_id {
-        let carry_turns = bootstrap_output
-            .config
-            .continuation_runtime
-            .resolve_carry_turns(bootstrap_output.config.continuation.declared_carry_turns());
-        let resume_mode = if same_thread_resume {
-            resume::ResumeMode::NativeSameThread
-        } else {
-            resume::ResumeMode::Continuation
-        };
-        let mut resume_state =
-            resume::load_resume_state(&callback, resume_id, carry_turns, resume_mode).await?;
 
-        if !same_thread_resume {
-            if let Err(e) = callback
+    // The frame this launch gives the model: system text, tool inventory,
+    // request options and provider configuration. A fresh launch records it;
+    // a resume records it only when it differs from the frame on the chain.
+    let launch_inventory = runner::launch_inventory(
+        &bootstrap_output.config.tools,
+        harness.effective_caps(),
+        bootstrap_output.config.outputs.as_deref(),
+        harness.run_clock().is_some(),
+    );
+    let mut launch_frame = launch_records::build_frame(
+        1,
+        &launch_records::FrameSource {
+            system_prompt: bootstrap_output.config.system_prompt.as_deref(),
+            inventory: &launch_inventory,
+            model: &model_name,
+            reasoning: reasoning.as_ref(),
+            sampling: sampling.as_ref(),
+            max_output_tokens: execution.max_provider_output_tokens_per_turn,
+            provider_config_hash: &config_hash,
+        },
+    )?;
+    drop(launch_inventory);
+    let launch_key = format!("launch:{}", envelope.thread_id);
+
+    // What a recovery rebuilds. A thread that lost its process before it
+    // wrote any launch record has nothing to rebuild and launches fresh.
+    let resume_state = match &resume_id {
+        Some(resume_id) => {
+            let carry_turns = bootstrap_output
+                .config
+                .continuation_runtime
+                .resolve_carry_turns(bootstrap_output.config.continuation.declared_carry_turns());
+            let resume_mode = if same_thread_resume {
+                resume::ResumeMode::NativeSameThread
+            } else {
+                resume::ResumeMode::Continuation
+            };
+            let carry = resume::CarryPolicy {
+                carry_turns,
+                start_tokens: bootstrap_output
+                    .config
+                    .continuation_runtime
+                    .successor_start_tokens,
+                ceiling_tokens: (context_window as f64
+                    * bootstrap_output
+                        .config
+                        .continuation_runtime
+                        .context_threshold_ratio) as u64,
+            };
+            let loaded = match resume::load_resume_state(
+                &callback,
+                resume_id,
+                carry,
+                resume_mode,
+                provider
+                    .image_input
+                    .as_ref()
+                    .and_then(|image_input| image_input.accepts.as_ref()),
+            )
+            .await
+            {
+                Ok(loaded) => loaded,
+                // A conversation the provider would reject is a typed refusal
+                // settled on the thread, not a process error the daemon can
+                // only report as an exit without finalization.
+                Err(error) => {
+                    if let Some(refusal) = error.downcast_ref::<resume::ResumeFoldError>() {
+                        return runner::refuse_launch(
+                            &callback,
+                            &envelope.thread_id,
+                            &refusal.to_string(),
+                            budget.cost(),
+                        )
+                        .await;
+                    }
+                    return Err(error);
+                }
+            };
+            (!(same_thread_resume && loaded.has_no_launch_records())).then_some(loaded)
+        }
+        None => None,
+    };
+
+    let mut runner_inst = if let Some(mut resume_state) = resume_state {
+        let resume_id = resume_id
+            .as_deref()
+            .expect("a resume has a thread to resume");
+        // A provider entry may refuse a mid-conversation change of the system
+        // text, the tool inventory or the reasoning policy. That is decided
+        // before the thread is continued or anything is recorded, so a refused
+        // launch leaves the chain exactly as it was.
+        if let Some(recorded) = &resume_state.frame
+            && let Some(refusal) = runner::refuse_frame_change(
+                &callback,
+                &envelope.thread_id,
+                &provider,
+                recorded,
+                &launch_frame.payload,
+                budget.cost(),
+            )
+            .await
+        {
+            return refusal;
+        }
+        if !same_thread_resume
+            && let Err(e) = callback
                 .append_runtime_event(
                     RuntimeEventType::ThreadContinued,
                     json!({"previous_thread_id": resume_id}),
                 )
                 .await
-            {
-                tracing::warn!(
-                    thread_id = %envelope.thread_id,
-                    error = %e,
-                    "callback append_event(thread_continued) failed"
-                );
-            }
+        {
+            tracing::warn!(
+                thread_id = %envelope.thread_id,
+                error = %e,
+                "callback append_event(thread_continued) failed"
+            );
         }
 
-        // Operator follow-up: emit the new stimulus as a `cognition_in` AFTER
-        // folding the chain (so the replay does not double-count it), then seed
-        // it as the live provider message this run answers. `role` here is the
+        // The frame in force: the one the chain recorded, unless this launch
+        // gives the model something different, which is recorded as the next
+        // frame. A change a provider entry refuses was ruled out above.
+        let frame_to_record = match &resume_state.frame {
+            Some(recorded) if recorded.same_as(&launch_frame.payload) => None,
+            Some(recorded) => {
+                launch_frame.payload.frame_seq = recorded.frame_seq + 1;
+                Some(launch_frame.clone())
+            }
+            None => Some(launch_frame.clone()),
+        };
+        let system_prompt = match &frame_to_record {
+            Some(frame) => frame.payload.system_text(),
+            None => resume_state
+                .frame
+                .as_ref()
+                .and_then(|recorded| recorded.system_text()),
+        };
+
+        // Operator follow-up: record the new stimulus as a `cognition_in`
+        // AFTER folding the chain (so the replay does not double-count it),
+        // in one batch with the frame when there is one, then seed it as the
+        // live provider message this run answers. `role` here is the
         // provider-wire mapping, not a substrate concept.
         //
         // A MACHINE continuation (limit cut-off) suppresses this: it folds the
         // chain and resumes the cut-off task with nothing new asked — `inputs`
         // are the source's originals, already present in the folded chain, so
         // re-injecting them would double the opening stimulus.
+        let mut inputs = Vec::new();
         if !same_thread_resume && !envelope.request.suppress_stimulus {
-            let rendered_prompt = render_stimulus(
-                &bootstrap_output.config.user_prompt,
-                &envelope.request.inputs,
-                envelope.request.scheduled_fire.as_ref(),
-            )?;
-            callback.emit_stimulus(&rendered_prompt).await?;
-            resume_state.messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(rendered_prompt)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
+            let rendered_prompt = operator_follow_up_stimulus(&envelope.request.inputs)?;
+            inputs.push(launch_records::operator_follow_up_input(
+                rendered_prompt.as_str(),
+            ));
         }
+        if frame_to_record.is_some() || !inputs.is_empty() {
+            let key = match (&frame_to_record, inputs.is_empty()) {
+                (Some(frame), true) => {
+                    format!("frame:{}:{}", envelope.thread_id, frame.payload.frame_seq)
+                }
+                _ => launch_key.clone(),
+            };
+            callback
+                .emit_launch_records(frame_to_record.as_ref(), &inputs, &key)
+                .await?;
+        }
+        resume_state
+            .messages
+            .extend(launch_records::messages_of(&inputs));
 
         runner::Runner::from_resume(
             resume_state,
             runner::RunnerConfig {
                 messages: vec![], // overridden by from_resume with resume.messages
                 tools: bootstrap_output.config.tools,
-                system_prompt: bootstrap_output.config.system_prompt,
+                system_prompt,
                 harness,
                 budget,
                 callback,
@@ -558,60 +689,24 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             },
         )?
     } else {
-        // Fresh launch: render and emit the opening stimulus as a `cognition_in`
-        // so a later turn can fold it from the chain.
+        // Fresh launch: render the opening stimulus and record the launch as
+        // one batch (frame, context, stimulus, context) so a later turn can
+        // fold it from the chain and the record reads in the order the model
+        // was given it.
         let rendered_prompt = render_stimulus(
             &bootstrap_output.config.user_prompt,
             &envelope.request.inputs,
             envelope.request.scheduled_fire.as_ref(),
         )?;
-        callback.emit_stimulus(&rendered_prompt).await?;
-
-        let mut messages = Vec::new();
-
-        // Context before: injected before user prompt
-        if let Some(ref before) = bootstrap_output.config.context_before {
-            messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(before)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            messages.push(directive::ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Understood. I will use this context.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
-
-        messages.push(directive::ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!(rendered_prompt)),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        });
-
-        // Context after: injected after user prompt
-        if let Some(ref after) = bootstrap_output.config.context_after {
-            messages.push(directive::ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!(after)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-            messages.push(directive::ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Noted. I will apply this guidance.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
+        let inputs = launch_records::launch_inputs(
+            bootstrap_output.config.context_before.as_deref(),
+            &rendered_prompt,
+            bootstrap_output.config.context_after.as_deref(),
+        );
+        callback
+            .emit_launch_records(Some(&launch_frame), &inputs, &launch_key)
+            .await?;
+        let messages = launch_records::messages_of(&inputs);
 
         runner::Runner::new(runner::RunnerConfig {
             messages,
@@ -651,8 +746,24 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
 
 #[cfg(test)]
 mod tests {
-    use super::{render_stimulus, render_stimulus_with_limits};
+    use super::{operator_follow_up_stimulus, render_stimulus, render_stimulus_with_limits};
     use serde_json::json;
+
+    #[test]
+    fn operator_follow_up_stimulus_is_the_operator_input_not_the_opening_template() {
+        assert_eq!(
+            operator_follow_up_stimulus(&json!({"input": "continue"})).expect("follow-up input"),
+            "continue"
+        );
+        for refused in [
+            json!({}),
+            json!({"input": 3}),
+            json!({"input": "x", "name": "World"}),
+            json!("continue"),
+        ] {
+            assert!(operator_follow_up_stimulus(&refused).is_err(), "{refused}");
+        }
+    }
 
     #[test]
     fn rendered_stimulus_appends_only_unreferenced_inputs() {

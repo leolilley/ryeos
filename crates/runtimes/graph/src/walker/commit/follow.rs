@@ -1,6 +1,7 @@
 use super::*;
 use crate::walker::checkpointing::FollowCheckpointChildren;
 use crate::walker::continued_terminal_completion;
+use ryeos_runtime::graph_result::{GraphResult, GraphRunStatus};
 
 impl Walker {
     pub(super) async fn commit_follow_suspend(
@@ -127,7 +128,7 @@ impl Walker {
                 CommitResult::Terminate(Box::new(continued_result))
             }
             Err(e) => {
-                let msg = format!("follow handoff failed: {e}");
+                let msg = format!("follow handoff failed: {e:#}");
                 self.commit_terminal(CommitTerminalInput {
                     graph_run_id,
                     steps: step,
@@ -248,7 +249,7 @@ impl Walker {
                 CommitResult::Terminate(Box::new(continued_result))
             }
             Err(e) => {
-                let msg = format!("follow cohort handoff failed: {e}");
+                let msg = format!("follow cohort handoff failed: {e:#}");
                 self.commit_terminal(CommitTerminalInput {
                     graph_run_id,
                     steps: step,

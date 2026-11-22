@@ -1,7 +1,8 @@
-# ryeos:signed:2026-09-14T10:03:09Z:2626adc1d55346eed2339eca99240e0e695b33ec86dfeeb390fc378c4163dd58:bdskZPZGS8C3Mr1VnfUb46ZFBlXhUJq62+5XxK5cOKzauiqW9Us2OxsJhVAu6+8MTdVoQsZ1zwUlqNEc9noqBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:e7482660789e603ec317ad399485b0cf42025a56f71171bd395389d2e2abcc2a:sWmI2CsrBDysTMlXqboYhj1ML3lrti8iKzLnIC1GsCJHeAlYkkirb3If08voXxwpC8a1zlWTuPXQSge5gLpIBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: schedules-list
+title: My schedules
 version: "1.0.0"
-description: Registered schedules and their state
+description: Schedules owned by the authenticated caller across projects; an empty list does not mean the node has no schedules
 
 widget: table
 sources:
@@ -15,6 +16,7 @@ projections:
       field: schedule_id
     - label: item
       field: item_ref
+      role: ref
     - label: expression
       field: expression
     - label: enabled
@@ -25,8 +27,7 @@ projections:
       "true": good
       "false": warn
     default: neutral
-selection:
-  activate: pause
+# Selecting a row is read-only. Pause/resume remain explicit affordances.
 affordances:
   - id: pause
     label: Pause

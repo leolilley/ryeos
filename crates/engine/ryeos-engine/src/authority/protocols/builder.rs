@@ -73,6 +73,15 @@ pub struct BuildRequest<'a> {
     /// Project root for env/secret expansion contexts.
     pub project_path: &'a Path,
 
+    /// Directory this launch may write its own state into; see
+    /// `EnvInjectionSource::RuntimeStateRoot`.
+    pub runtime_state_root: &'a Path,
+
+    /// The launch's bundle state namespace as the workload must see it; see
+    /// `EnvInjectionSource::BundleStateHome`. `None` when the launch opened no
+    /// state home, in which case that injection sets no variable.
+    pub bundle_state_home: Option<&'a Path>,
+
     /// Opaque namespace for durable state owned by the admitted logical
     /// project. Absent for projectless execution.
     pub project_state_scope: Option<&'a str>,
@@ -197,6 +206,23 @@ pub fn build_subprocess_spec(
             EnvInjectionSource::ProjectStateScope => {
                 request.project_state_scope.unwrap_or_default().to_string()
             }
+            EnvInjectionSource::RuntimeStateRoot => request
+                .runtime_state_root
+                .to_str()
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "runtime state root",
+                })?
+                .to_owned(),
+            EnvInjectionSource::BundleStateHome => match request.bundle_state_home {
+                Some(path) => path
+                    .to_str()
+                    .ok_or(BuildError::NonUtf8Path {
+                        path_kind: "bundle state home",
+                    })?
+                    .to_owned(),
+                // A launch that opened no state home sets no variable.
+                None => continue,
+            },
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request
                 .cas_root
@@ -338,14 +364,17 @@ mod tests {
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
-            callback_channel: CallbackChannel::Http,
-            requires_qualification_purpose: false,
+            callback_channel: CallbackChannel::RuntimeSocket,
+            qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         }
     }
 
@@ -372,14 +401,17 @@ mod tests {
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::None,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         }
     }
 
@@ -413,6 +445,8 @@ mod tests {
             args,
             cwd: Path::new("/project"),
             project_path: Path::new("/project"),
+            bundle_state_home: None,
+            runtime_state_root: Path::new("/project"),
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
@@ -437,11 +471,7 @@ mod tests {
             schema_version: crate::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION,
             invocation_id: "inv-test".to_string(),
             thread_id: "T-test-thread".to_string(),
-            roots: EnvelopeRoots {
-                project_root: PathBuf::from("/project"),
-                bundle_roots: vec![],
-                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
-            },
+            roots: EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![]),
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
                 previous_thread_id: None,
@@ -528,6 +558,42 @@ mod tests {
     }
 
     #[test]
+    fn bundle_state_home_injection_is_absent_without_a_state_home() {
+        let mut desc = tool_descriptor();
+        desc.env_injections.push(EnvInjection {
+            name: "RYEOSD_BUNDLE_STATE_HOME".to_string(),
+            source: EnvInjectionSource::BundleStateHome,
+        });
+        let (item_ref, cb, args, _envelope) = make_test_fixtures();
+        let mut req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);
+
+        // A launch that opened no state home sets no variable and is not
+        // refused.
+        let spec = build_subprocess_spec(&desc, &req).unwrap();
+        assert!(
+            spec.env
+                .iter()
+                .all(|(key, _)| key != "RYEOSD_BUNDLE_STATE_HOME"),
+            "no state home, no variable"
+        );
+        assert!(spec.env.iter().any(|(key, _)| key == "RYE_PROJECT_PATH"));
+
+        // A launch that opened one names exactly that directory.
+        req.bundle_state_home = Some(Path::new("/run/ryeos/bundle-state"));
+        let spec = build_subprocess_spec(&desc, &req).unwrap();
+        let env_map: BTreeMap<String, String> = spec.env.into_iter().collect();
+        assert_eq!(
+            env_map["RYEOSD_BUNDLE_STATE_HOME"],
+            "/run/ryeos/bundle-state"
+        );
+
+        // The name is still validated when there is nothing to inject.
+        req.bundle_state_home = None;
+        desc.env_injections.last_mut().unwrap().name = "PATH".to_string();
+        assert!(build_subprocess_spec(&desc, &req).is_err());
+    }
+
+    #[test]
     fn reserved_env_name_fails_loud() {
         let mut desc = tool_descriptor();
         desc.env_injections[0].name = "PATH".to_string(); // reserved!
@@ -561,7 +627,7 @@ mod tests {
         assert_eq!(env_map["RYEOSD_THREAD_ID"], "T-test-thread");
 
         // Assert callback_channel and stdout_shape propagated.
-        assert_eq!(spec.callback_channel, CallbackChannel::Http);
+        assert_eq!(spec.callback_channel, CallbackChannel::RuntimeSocket);
         assert_eq!(spec.stdout_shape, StdoutShape::RuntimeResult);
 
         // Assert stdin parses back as the launch envelope.

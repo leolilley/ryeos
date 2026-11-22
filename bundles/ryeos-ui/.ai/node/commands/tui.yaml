@@ -1,12 +1,12 @@
-# ryeos:signed:2026-09-15T01:39:00Z:3eed62ba2fb2b7fa0647e072ce7b84bc9c4aefcee8681d1149090245395620a6:rs7rDcY1FGp3jsCndxKuI7LrRDHSf44Rg3R7yb05NF4pmaFaO0VRI6B2Q8+Z4L0KtXYzQ4lSAJ+FleIyYCiwAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:39Z:902b1cf044b549f471772a9e45941e27126c361639ef1c98e78005566926b553:Dt2xpexTpdEaonzQHBrRnivWlR+UU4qYMJ3qXJk04D5EAeI7ct4H3wwgO+Ivt/hl/RSYPLgVQH0UpwXlg7G5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - tui
-description: Open the observation-only terminal RyeOS UI
+description: Open the authored shared terminal RyeOS presentation
 forms:
 - slots:
-  - field: surface
+  - field: presentation
 defaults:
-  surface: surface:ryeos/ui/assistant-observe
+  presentation: config:ryeos/ui/terminal-presentation
 project:
   resolution: optional
   bind_parameter: project

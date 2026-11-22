@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 pub const EXECUTION_POLICY_SCHEMA_VERSION: u32 = 2;
 pub const LIVE_PROJECT_READ_CAPABILITY: &str = "ryeos.read.project.live";
 pub const LIVE_PROJECT_WRITE_CAPABILITY: &str = "ryeos.write.project.live";
+/// Fixed capability required to admit any execution environment that reads
+/// the node operator's vault: a project overlay with
+/// `include_operator_vault: true`, or the `operator` vault namespace.
+pub const OPERATOR_VAULT_CAPABILITY: &str = "ryeos.use.vault.operator";
+/// The only vault namespace installed on a node.
+pub const OPERATOR_VAULT_NAMESPACE: &str = "operator";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +70,28 @@ pub enum ExecutionEnvironmentPolicy {
         grant_id: String,
         name_policy: ExecutionEnvironmentNamePolicy,
     },
+    /// Values the executing node took from its own environment at startup,
+    /// restricted to the names its signed node policy declares. The required
+    /// names stay in the item's `required_secrets`.
+    ProviderEnvironment {
+        name_policy: ExecutionEnvironmentNamePolicy,
+    },
+}
+
+impl ExecutionEnvironmentPolicy {
+    /// Whether admitting this environment would let the execution read the
+    /// node operator's vault. Such a policy requires
+    /// [`OPERATOR_VAULT_CAPABILITY`] from the principal it acts for.
+    pub fn exposes_operator_vault(&self) -> bool {
+        match self {
+            Self::ProjectOverlay {
+                include_operator_vault,
+                ..
+            } => *include_operator_vault,
+            Self::Vault { namespace, .. } => namespace == OPERATOR_VAULT_NAMESPACE,
+            Self::None | Self::Delegated { .. } | Self::ProviderEnvironment { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +107,131 @@ impl LiveAccess {
             Self::ReadOnly => LIVE_PROJECT_READ_CAPABILITY,
             Self::ReadWrite => LIVE_PROJECT_WRITE_CAPABILITY,
         }
+    }
+}
+
+/// Whether a project-backed request asked for the live project or accepted
+/// the daemon's choice of root. `Default` lets the daemon pick the root a tool
+/// shape gets (the live project for an `@subprocess` tool without
+/// `source_scope`, a sparse private admitted-input root for a sourced
+/// runtime). `Live` is an explicit demand for the live project: a launch whose
+/// resolved root is not live is refused with
+/// `live_project_unavailable_to_sourced_runtime`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveIntent {
+    #[default]
+    Default,
+    Live,
+}
+
+impl From<LiveIntent> for ryeos_state::objects::LiveProjectIntent {
+    fn from(intent: LiveIntent) -> Self {
+        match intent {
+            LiveIntent::Default => Self::Default,
+            LiveIntent::Live => Self::Live,
+        }
+    }
+}
+
+impl LiveIntent {
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+}
+
+/// Which root a process's inputs are laid out in. Chosen by the executor once
+/// the tool's retained bindings and the project authority are known; the
+/// explicit live-intent guard reads it, on the daemon and offline CLI paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessInputRootSelection {
+    Existing,
+    SparsePrivate,
+    PinnedReadOnlyPrivate,
+    CandidateIntegrationPrivate,
+}
+
+/// The root kind a launch attempt's process inputs were laid out in, as
+/// recorded by the `process_input_root_selected` thread event. Names the kind
+/// only, never a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessInputRootKind {
+    /// The live project itself.
+    Live,
+    /// A private admitted-input root holding only the verified source.
+    SparsePrivate,
+    /// A pinned (read-only or copy-on-write) project generation.
+    Pinned,
+    /// A private root for candidate integration.
+    CandidateIntegration,
+    /// No project root (projectless launch).
+    Projectless,
+}
+
+/// Payload of the `process_input_root_selected` event. Strict: one field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessInputRootSelectedPayload {
+    pub root: ProcessInputRootKind,
+}
+
+/// Whether an execution's derived facts retain filesystem bindings (a source
+/// closure or external-content realizations). Such a tool never runs from the
+/// live project: it gets a private admitted-input root.
+pub fn derived_has_filesystem_bindings(
+    derived: &std::collections::HashMap<String, serde_json::Value>,
+) -> anyhow::Result<bool> {
+    let has_source = derived.contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY);
+    // Runtime-root realizations are not project fold-back exclusions, but
+    // still require exact filesystem binding before this process can launch.
+    let has_external = derived
+        .get(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+        .map(ryeos_state::objects::ExternalContentRealizationSet::from_value)
+        .transpose()?
+        .is_some_and(|realizations| !realizations.is_empty());
+    Ok(has_source || has_external)
+}
+
+/// Stable refusal code: a live project authority was explicitly demanded for
+/// a tool whose retained filesystem bindings force a private admitted-input
+/// root.
+pub const LIVE_PROJECT_UNAVAILABLE_CODE: &str = "live_project_unavailable_to_sourced_runtime";
+
+/// Typed refusal for a launch whose explicit live project demand could never
+/// reach the process.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct LiveProjectUnavailableToSourcedRuntime {
+    pub message: String,
+}
+
+/// The guard fires wherever the request explicitly demanded the live project
+/// and the resolved root is not the existing (live) root.
+pub fn live_project_refusal_applies(root: ProcessInputRootSelection, demands_live: bool) -> bool {
+    demands_live && root != ProcessInputRootSelection::Existing
+}
+
+pub fn live_project_unavailable_error(
+    tool: &str,
+    runtime: &str,
+    has_source: bool,
+    access: &str,
+) -> LiveProjectUnavailableToSourcedRuntime {
+    let reason = if has_source {
+        "the runtime declares source_scope, so the tool runs from a private admitted-input root holding only its verified source"
+    } else {
+        "the tool retains external content, so it runs from a private admitted-input root"
+    };
+    LiveProjectUnavailableToSourcedRuntime {
+        message: format!(
+            "{LIVE_PROJECT_UNAVAILABLE_CODE}: `{tool}` (runtime `{runtime}`) was launched with \
+             an explicit live project demand ({access}), but {reason}; the live project is never mounted \
+             and project writes would be silently discarded. Use an `@subprocess` tool without \
+             source_scope for live project access, or run with `--pin-project` / a pinned project \
+             policy for a copy-on-write generation, or return structured results instead of writing \
+             to the project."
+        ),
     }
 }
 
@@ -139,6 +292,9 @@ pub enum ProjectExecutionPolicy {
     LiveDirect {
         access: LiveAccess,
         child_policy: ChildProjectPolicy,
+        /// Absent means `default`. Written only when explicit.
+        #[serde(default, skip_serializing_if = "LiveIntent::is_default")]
+        intent: LiveIntent,
     },
     Pinned {
         source: PinnedSource,
@@ -193,8 +349,22 @@ impl ExecutionPolicy {
             project: ProjectExecutionPolicy::LiveDirect {
                 access: LiveAccess::ReadWrite,
                 child_policy: ChildProjectPolicy::Inherit,
+                intent: LiveIntent::Default,
             },
         }
+    }
+
+    /// Demand the live project explicitly: a launch whose resolved root is
+    /// not live is refused rather than run against a private copy.
+    pub fn demand_live_project(mut self) -> anyhow::Result<Self> {
+        match &mut self.project {
+            ProjectExecutionPolicy::LiveDirect { intent, .. } => *intent = LiveIntent::Live,
+            ProjectExecutionPolicy::Pinned { .. } | ProjectExecutionPolicy::Projectless => {
+                anyhow::bail!("a live project demand requires a live-direct project policy")
+            }
+        }
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn local_pinned_capture(response: ExecutionResponse) -> Self {
@@ -408,7 +578,7 @@ fn validate_environment_policy(
             name_policy,
         } => {
             validate_identity("vault namespace", namespace)?;
-            if namespace != "operator" {
+            if namespace != OPERATOR_VAULT_NAMESPACE {
                 anyhow::bail!(
                     "vault namespace {namespace:?} is not installed on this node; only `operator` is available"
                 );
@@ -426,6 +596,9 @@ fn validate_environment_policy(
             anyhow::bail!(
                 "delegated environment provider {provider:?} is not installed on this node"
             )
+        }
+        ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy } => {
+            validate_environment_name_policy(name_policy, &validate_names)
         }
     }
 }
@@ -476,6 +649,70 @@ mod tests {
     }
 
     #[test]
+    fn operator_vault_exposure_is_exactly_the_overlay_flag_or_operator_namespace() {
+        let declared = || ExecutionEnvironmentNamePolicy::DeclaredRequired;
+        assert!(
+            ExecutionPolicy::local_live(ExecutionResponse::Wait)
+                .environment
+                .exposes_operator_vault()
+        );
+        assert!(
+            !ExecutionPolicy::local_live(ExecutionResponse::Wait)
+                .exclude_operator_vault()
+                .environment
+                .exposes_operator_vault()
+        );
+        assert!(
+            ExecutionEnvironmentPolicy::Vault {
+                namespace: OPERATOR_VAULT_NAMESPACE.to_owned(),
+                name_policy: declared(),
+            }
+            .exposes_operator_vault()
+        );
+        for environment in [
+            ExecutionEnvironmentPolicy::None,
+            ExecutionEnvironmentPolicy::ProviderEnvironment {
+                name_policy: declared(),
+            },
+            ExecutionEnvironmentPolicy::Delegated {
+                provider: "provider".to_owned(),
+                grant_id: "grant".to_owned(),
+                name_policy: declared(),
+            },
+        ] {
+            assert!(!environment.exposes_operator_vault(), "{environment:?}");
+        }
+        assert!(
+            !ExecutionPolicy::projectless(ExecutionResponse::Wait)
+                .environment
+                .exposes_operator_vault()
+        );
+    }
+
+    #[test]
+    fn provider_environment_policy_is_project_independent_and_canonical() {
+        let mut policy = ExecutionPolicy::local_pinned_current_head(ExecutionResponse::Accepted);
+        policy.environment = ExecutionEnvironmentPolicy::ProviderEnvironment {
+            name_policy: ExecutionEnvironmentNamePolicy::Exact {
+                names: vec!["OPENAI_API_KEY".to_owned()],
+            },
+        };
+        policy.validate().unwrap();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert_eq!(value["environment"]["kind"], "provider_environment");
+        assert_eq!(
+            serde_json::from_value::<ExecutionPolicy>(value).unwrap(),
+            policy
+        );
+        policy.environment = ExecutionEnvironmentPolicy::ProviderEnvironment {
+            name_policy: ExecutionEnvironmentNamePolicy::Exact {
+                names: vec!["Z_KEY".to_owned(), "A_KEY".to_owned()],
+            },
+        };
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
     fn policy_rejects_unknown_fields_and_uppercase_hashes() {
         let mut value = serde_json::to_value(ExecutionPolicy::local_pinned_current_head(
             ExecutionResponse::Accepted,
@@ -495,5 +732,30 @@ mod tests {
             ..ExecutionPolicy::projectless(ExecutionResponse::Accepted)
         };
         assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn process_input_root_payload_is_a_strict_closed_kind_with_no_path() {
+        let payload = ProcessInputRootSelectedPayload {
+            root: ProcessInputRootKind::SparsePrivate,
+        };
+        let value = serde_json::to_value(payload).unwrap();
+        assert_eq!(value, serde_json::json!({"root": "sparse_private"}));
+        assert_eq!(
+            serde_json::from_value::<ProcessInputRootSelectedPayload>(value).unwrap(),
+            payload
+        );
+        assert!(
+            serde_json::from_value::<ProcessInputRootSelectedPayload>(
+                serde_json::json!({"root": "live", "path": "/home/x"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProcessInputRootSelectedPayload>(
+                serde_json::json!({"root": "elsewhere"})
+            )
+            .is_err()
+        );
     }
 }

@@ -11,6 +11,7 @@ ryeos-engine = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
+ryeos-state = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -18,5 +19,10 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
+ryeos-state = { workspace = true, features = ["test-support"] }
+ryeos-handler-protocol = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
+
+[lints]
+workspace = true

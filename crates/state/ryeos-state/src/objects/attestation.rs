@@ -62,22 +62,40 @@ impl Attestation {
         }
     }
 
+    /// Name the issuer and clear the signature: the exact unsigned statement
+    /// the issuer's key is asked to sign. A signer that holds the key elsewhere
+    /// signs [`Self::signing_bytes`] of this value and returns the signature
+    /// through [`Self::with_signature`].
+    pub fn for_issuer(mut self, fingerprint: &str) -> anyhow::Result<Self> {
+        self.issuer = issuer_from_fingerprint(fingerprint)?;
+        self.signature.clear();
+        self.validate_unsigned_fields()?;
+        Ok(self)
+    }
+
+    /// The canonical bytes an issuer signs for this attestation.
+    pub fn signing_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let unsigned = self.without_signature();
+        let canonical = lillux::canonical_json(&unsigned)
+            .context("failed to canonicalize unsigned attestation")?;
+        Ok(canonical.into_bytes())
+    }
+
+    /// Attach a signature made elsewhere over [`Self::signing_bytes`].
+    pub fn with_signature(mut self, signature: &[u8]) -> anyhow::Result<Self> {
+        self.signature = base64::engine::general_purpose::STANDARD.encode(signature);
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Sign this attestation with the supplied signer.
     ///
     /// The issuer is always set from the signing key fingerprint as
     /// `fp:<fingerprint>` immediately before signing.
-    pub fn sign(mut self, signer: &dyn Signer) -> anyhow::Result<Self> {
-        self.issuer = issuer_from_fingerprint(signer.fingerprint())?;
-        self.signature.clear();
-        self.validate_unsigned_fields()?;
-
-        let unsigned = self.without_signature();
-        let canonical = lillux::canonical_json(&unsigned)
-            .context("failed to canonicalize unsigned attestation")?;
-        let sig_bytes = signer.sign(canonical.as_bytes());
-        self.signature = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
-        self.validate()?;
-        Ok(self)
+    pub fn sign(self, signer: &dyn Signer) -> anyhow::Result<Self> {
+        let prepared = self.for_issuer(signer.fingerprint())?;
+        let signature = signer.sign(&prepared.signing_bytes()?);
+        prepared.with_signature(&signature)
     }
 
     /// Validate this attestation's structure, including the presence and

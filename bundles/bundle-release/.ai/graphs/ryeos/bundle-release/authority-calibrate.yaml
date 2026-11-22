@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-23T12:15:50Z:aac492a038a6cd83272e437025c22b3ff885f66ffb0806e03ef5c2c29f502465:cnvO3sNvFw1IejcCHfuvL/ZhGnEHVP7KuGbgHTF32+mq4HMG4oRwomNj+ttPh41gV0yDRr9Qo0QfhIoJul84CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-version: "1.0.1"
+# ryeos:signed:2026-09-30T00:54:19Z:a6c5624b70a6aa2f900db56084a556e4c95adc3c9488441fbd212fbf1fa27af9:wXVCB73STuL05WsWsTPd0UTRKEn3Gpfiq0PYe2MdfnzmVPqhjpZ3ikWrD/Yl+WU6EU7oHV4sZwdKXsXvVfxjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.1.0"
 category: ryeos/bundle-release
 description: Run the bounded pre-policy authority calibration against one verified RyeOS ProjectSnapshot without contacting a catalog or publisher.
 effects: live
@@ -18,6 +18,7 @@ requires:
       - ryeos.execute.config.bundle-release/signed-capture-products
       - ryeos.execute.config.bundle-release/substrate-build-products
       - ryeos.execute.service.bundle-release/authority-calibrate
+      - ryeos.execute.service.external-content/launch-product-qualification
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify

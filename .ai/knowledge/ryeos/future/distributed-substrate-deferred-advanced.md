@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-09-01T00:15:48Z:2edfbe049458a379e00cc796125d1ffc80c541b701746eeff26f502db156acb4:Z68m/4pTQrhlW3I7NZ9ki8JHX30IWvwOn3WagcBm/SKqndwO/mYjXPthOujGzLbwt2OwS16ePfsyXgtZ8RPgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:0ff9b0ce643118661928533cf5adcc0257d73ab3637d0f278ba8477f103f8f8d:DcTZC3Qw+8I7LAp27DunP6h1bAdcfXUT8dN4m6aVyRC30xSoGcRV0sVw+Kw2W8DvS4mAK2IophAuD3hG4xKrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
 title: Distributed Substrate and Hosted-Cluster Storage
 entry_type: implementation_guide
-version: "0.5.1"
+version: "0.5.2"
 author: amp
 created_at: 2026-05-30T00:00:00Z
 description: Current distributed-substrate baseline and the measured path from explicit cross-site placement through hosted-cluster storage, automatic placement, and broader federation.
@@ -19,6 +19,12 @@ tags:
 ```
 
 # Distributed Substrate and Hosted-Cluster Storage
+
+Project-wide priorities belong to [Platform direction and delivery](platform-direction-and-delivery.md).
+References below to the substrate growth roadmap concern execution-branch
+dependencies. This document's recovery, placement and federation triggers remain
+independent; broader distribution is not required for the first useful local
+application authoring path.
 
 ## Purpose
 
@@ -39,7 +45,7 @@ It transports and re-admits those objects and consequences; it does not replace
 them with a looser distributed identity.
 
 This document defines dependencies and triggers inside the distributed and
-hosted-storage branch. It does not override the global pull-forward order in the
+hosted-storage branch. It does not override the execution-branch dependencies in the
 substrate growth roadmap. In particular, a mechanism described here does not
 become the next RyeOS implementation merely because its prerequisites exist.
 
@@ -652,7 +658,7 @@ lost, delayed, duplicated, and reordered notifications.
 
 ## Intra-branch dependencies and triggers
 
-This section is subordinate to the global sequence in
+This section follows the execution-branch dependencies in
 `knowledge:ryeos/future/substrate-growth-roadmap`. It answers what must precede
 what *after that roadmap activates a consumer in this branch*.
 

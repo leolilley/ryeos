@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::ensure;
 
 mod external_projection;
 #[cfg(test)]
@@ -7,7 +8,10 @@ pub(crate) use external_projection::{
     CompiledExternalDirectProgram, compile_external_direct_program,
     validate_retained_external_direct_program,
 };
-pub use external_projection::{capsule_requires_external_direct, external_direct_environment};
+pub use external_projection::{
+    PreparedExternalDirectProjectFile, capsule_requires_external_direct,
+    external_direct_environment, prepare_external_direct_project_file,
+};
 
 fn persistent_session_spawn_error(error: ryeos_engine::error::EngineError) -> anyhow::Error {
     // Lillux's held-launch owner can prove group cleanup before reporting a
@@ -263,8 +267,30 @@ pub struct SpawnedItemAwaitingAttachment {
     spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
 }
 
+/// Typed release failure that keeps the engine's cleanup testimony.
+#[derive(Debug, thiserror::Error)]
+pub enum ItemReleaseError {
+    /// Refused before Lillux release; the held process was dropped without
+    /// abort proof, so its cleanup is unproved.
+    #[error("resource occupancy release contract is incomplete")]
+    IncompleteOccupancyContract,
+    #[error("release item after durable attachment")]
+    Release(#[source] ryeos_engine::error::EngineError),
+}
+
+impl ItemReleaseError {
+    /// True only when Lillux proved child/wrapper and scope cleanup.
+    pub fn cleanup_is_settled(&self) -> bool {
+        matches!(
+            self,
+            Self::Release(ryeos_engine::error::EngineError::AttachmentReleaseFailed { source })
+                if source.cleanup_is_settled()
+        )
+    }
+}
+
 impl SpawnedItemAwaitingAttachment {
-    pub fn release_after_attachment(self) -> Result<RunningItem> {
+    pub fn release_after_attachment(self) -> std::result::Result<RunningItem, ItemReleaseError> {
         let running = match (
             self.process_identity.resource_occupancy_limit.clone(),
             self.process_identity.resource_cleanup_allowance_ms,
@@ -276,10 +302,9 @@ impl SpawnedItemAwaitingAttachment {
                 )
             }
             (None, None) => self.spawned.release_after_attachment(),
-            _ => return Err(anyhow!("resource occupancy release contract is incomplete")),
+            _ => return Err(ItemReleaseError::IncompleteOccupancyContract),
         }
-        .map_err(anyhow::Error::new)
-        .context("release item after durable attachment")?;
+        .map_err(ItemReleaseError::Release)?;
         Ok(RunningItem {
             process_identity: self.process_identity,
             launch_metadata: self.launch_metadata,
@@ -449,6 +474,36 @@ pub struct PreparedItemPlan {
     root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity,
     admitted_command: Option<ryeos_engine::isolation::IsolationAdmittedCommand>,
     realization_command: Option<PreparedRealizationCommand>,
+    resource_policy: PersistentSessionResourcePolicy,
+    persistent_session_capsule_hash: Option<String>,
+    /// Set by closure admission when a captured plan's callback authority was
+    /// admitted through the captured-compatible protocol class.
+    captured_callback_class: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistentSessionResourcePolicy {
+    Ordinary,
+    QualificationNoResources,
+}
+
+/// The Q process journal has no resource or financial owner. Check the signed
+/// target itself as well as the node's current selection, so even a changed
+/// selector or an unexpected financial ceiling fails before process contact.
+fn require_qualification_no_resources(
+    target: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    selected: &crate::execution_resources::SelectedExecutionResources,
+) -> Result<()> {
+    ensure!(
+        target.is_none_or(|target| target.resources.is_empty())
+            && selected.selections().is_empty()
+            && selected.devices().is_none()
+            && selected.accounting_authorities().is_empty()
+            && selected.max_concurrent_exclusive_allocations().is_none()
+            && selected.cleanup_allowance_ms().is_none(),
+        "qualification-only Worker cannot select execution resources or financial operations"
+    );
+    Ok(())
 }
 
 /// Portable coordinate for an executable member of one admitted realization.
@@ -614,11 +669,13 @@ impl PreparedItemPlan {
             .as_ref()
             .ok_or_else(|| anyhow!("external direct endpoint has not been sealed"))?;
         let spec = external_projection::ordinary_direct_subprocess(&self.plan)?;
+        let required_features = external_projection::required_direct_feature_claims(&self.plan)?;
         crate::external_placement::preflight_external_direct_endpoint(
             state,
             &self.plan.endpoint_requirement,
             endpoint,
             spec.timeout_secs,
+            &required_features,
         )?;
         Ok(())
     }
@@ -755,7 +812,6 @@ impl PreparedItemPlan {
     /// Guard-aware form for callers that already hold one CAS mutation guard
     /// across a larger admission proof. This preserves the same realization
     /// and executable-member checks without recursively acquiring authority.
-    #[allow(clippy::too_many_arguments)]
     pub fn bind_realization_command_guarded(
         &mut self,
         authority: &ryeos_state::PinnedStateAuthority,
@@ -1017,7 +1073,6 @@ impl PreparedItemPlan {
     /// runnable plan or executable authority. It shares the exact member proof
     /// and canonical logical-path/artifact assembly with execution, but local
     /// spawn prerequisites do not apply to consumption of retained testimony.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn into_current_artifact_identity_guarded(
         mut self,
         authority: &ryeos_state::PinnedStateAuthority,
@@ -1124,6 +1179,57 @@ impl PreparedItemPlan {
         Ok(())
     }
 
+    /// Bound this plan's process timeout by its caller's hard stop. Only ever
+    /// shortens: a timeout the tool already declares stays when it is the
+    /// shorter, and a tool with none gains the bound. Returns whether the
+    /// bound is now the effective limit, so a timeout kill can be recorded as
+    /// a cut at the deadline rather than the tool's own timeout.
+    pub fn bound_timeout_at_deadline(
+        &mut self,
+        end_at_ms: Option<i64>,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let timeout =
+            crate::run_deadline::clamp_tool_timeout(self.timeout_secs, end_at_ms, now_ms)?;
+        let (secs, cut) = match timeout {
+            crate::run_deadline::ToolTimeout::Own(secs) => (secs, false),
+            crate::run_deadline::ToolTimeout::CutAtDeadline(secs) => (secs, true),
+        };
+        let spec = first_subprocess_spec_mut(&mut self.plan)?;
+        spec.timeout_secs = secs;
+        self.timeout_secs = secs;
+        Ok(cut)
+    }
+
+    /// Add the per-realization descriptor delivery document after the
+    /// realization set, root and delivery are bound. It names the files the
+    /// trusted consumer receives as inherited descriptors instead of finding
+    /// them in the runtime view, so it is meaningful only beside a bound set.
+    pub fn bind_persistent_session_external_descriptors(
+        &mut self,
+        descriptors: &str,
+    ) -> Result<()> {
+        let spec = first_subprocess_spec_mut(&mut self.plan)?;
+        if !spec.env.contains_key("RYEOS_EXTERNAL_REALIZATIONS") {
+            bail!("persistent-session external descriptors require a bound realization set");
+        }
+        if spec
+            .env
+            .insert(
+                ryeos_state::objects::EXTERNAL_REALIZATION_DESCRIPTORS_ENV.to_owned(),
+                descriptors.to_owned(),
+            )
+            .is_some()
+        {
+            bail!("persistent-session plan attempts to override external descriptors");
+        }
+        spec.env_sources.insert(
+            ryeos_state::objects::EXTERNAL_REALIZATION_DESCRIPTORS_ENV.to_owned(),
+            RuntimeEnvSource::EnginePlan,
+        );
+        Ok(())
+    }
+
     /// Add the operational realization-set binding after recovering the
     /// admitted plan. The session channel is carried separately as typed
     /// isolation authority and never written into the authored subprocess
@@ -1207,6 +1313,9 @@ impl PreparedItemPlan {
             .transpose()?;
         let mut bound_entries = 0usize;
         for argument in &mut spec.args {
+            if matches!(argument, PlanArgument::AdmittedExecutionProjectFile { .. }) {
+                bail!("local execution cannot redeem candidate project file authority");
+            }
             if matches!(argument, PlanArgument::AdmittedSourceMember { .. }) {
                 bail!(
                     "persistent-session source member arguments are not supported by its source-entry contract"
@@ -1245,6 +1354,8 @@ impl PreparedItemPlan {
             }
             let limit = if name == ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV {
                 ryeos_state::objects::MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES
+            } else if name == ryeos_engine::route_fixed_params::ROUTE_FIXED_PARAMS_ENV {
+                ryeos_engine::route_fixed_params::MAX_ROUTE_FIXED_PARAMS_BYTES
             } else {
                 4096
             };
@@ -1272,11 +1383,15 @@ impl PreparedItemPlan {
         resolved: &ResolvedExecutionRequest,
         protocol: &ryeos_engine::protocols::VerifiedProtocol,
     ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
-        let canonical_plan = lillux::canonical_json(&admitted_execution_plan_value_for_command(
+        let plan_value = admitted_execution_plan_value_for_command(
             &self.plan,
             self.realization_command.is_some(),
-        )?)?;
-        let execution_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
+        )?;
+        let canonical_plan = lillux::canonical_json_bounded(
+            &plan_value,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+        )?;
+        let execution_plan_hash = lillux::sha256_hex(&canonical_plan);
         let plan_runtime = self
             .plan
             .runtime_identity
@@ -1323,6 +1438,7 @@ impl PreparedItemPlan {
                         executor_manifest_signer_fingerprint: executor_bundle
                             .signer_fingerprint
                             .clone(),
+                        member_source_proof: executor_bundle.member_source_proof.clone(),
                     },
                     Some(ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent {
                         code,
@@ -1393,18 +1509,19 @@ impl PreparedItemPlan {
             if !isolation.is_enforced() {
                 bail!("captured execution requires enforced isolation before admission");
             }
-            if protocol.descriptor.callback_channel
+            let callback_authority = protocol.descriptor.callback_channel
                 != ryeos_engine::protocol_vocabulary::CallbackChannel::None
                 || protocol.descriptor.env_injections.iter().any(|injection| {
                     matches!(
-                    injection.source,
-                    ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
-                        | ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackToken
-                        | ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
-                )
-                })
-            {
-                bail!("captured execution cannot receive daemon callback or thread-auth authority");
+                        injection.source,
+                        ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
+                            | ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackToken
+                            | ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
+                    )
+                });
+            if callback_authority {
+                admit_captured_compatible_callback(&protocol.descriptor)?;
+                self.captured_callback_class = true;
             }
         }
         if !external
@@ -1498,6 +1615,13 @@ impl PreparedItemPlan {
             );
         }
         let execution_path = admitted_direct_command_path(&original)?;
+        let host_origin = match self.admitted_command.as_ref() {
+            Some(ryeos_engine::isolation::IsolationAdmittedCommand::DescriptorBound(command)) => {
+                command.host_origin().map(Path::to_path_buf)
+            }
+            Some(_) => None,
+            None => Some(original.source_path.clone()),
+        };
         let stored_hash = if self.admitted_command.is_some() {
             let expected_path = admitted_direct_command_path(&original)?;
             if original.source_path != expected_path {
@@ -1539,6 +1663,7 @@ impl PreparedItemPlan {
             self.admitted_command = Some(
                 isolation
                     .bind_admitted_verified_command(cached_identity.clone(), blob)?
+                    .with_host_origin(host_origin.clone())
                     .into(),
             );
         }
@@ -1563,6 +1688,7 @@ impl PreparedItemPlan {
                 command: ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash: stored_hash,
                     execution_path,
+                    host_origin,
                 },
                 admitted_project_root: admitted_project_root.map(Path::to_path_buf),
             },
@@ -1620,13 +1746,15 @@ impl PreparedItemPlan {
         isolation: &ryeos_engine::isolation::IsolationRuntime,
         effective_workspace: &Path,
     ) -> Result<Self> {
-        Self::recover_from_direct_parts(
+        let mut prepared = Self::recover_from_direct_parts(
             &capsule.execution_closure,
             &capsule.artifact_identity,
             cas,
             isolation,
             Some(effective_workspace),
-        )
+        )?;
+        prepared.persistent_session_capsule_hash = Some(capsule.content_hash()?);
+        Ok(prepared)
     }
 
     fn recover_from_direct_parts(
@@ -1682,6 +1810,7 @@ impl PreparedItemPlan {
             ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
                 executable_blob_hash,
                 execution_path,
+                host_origin,
             } => {
                 let (blob, _) = cas
                     .open_blob(executable_blob_hash)?
@@ -1692,6 +1821,7 @@ impl PreparedItemPlan {
                 };
                 let admitted = isolation
                     .bind_admitted_verified_command(cached_identity.clone(), blob)?
+                    .with_host_origin(host_origin.clone())
                     .into();
                 spec.cmd = execution_path.display().to_string();
                 match spec
@@ -1738,6 +1868,9 @@ impl PreparedItemPlan {
             root_subject_source_identity: root_subject_source_identity.clone(),
             admitted_command,
             realization_command,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         })
     }
 
@@ -1772,6 +1905,7 @@ impl PreparedItemPlan {
         >,
         inherited_fds: Vec<lillux::InheritedDescriptorAuthority>,
         target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
+        target_sealed_payloads: Vec<ryeos_engine::isolation::IsolationTargetSealedPayloadAuthority>,
         lifecycle: &ryeos_state::objects::PersistentSessionLifecycleContract,
         workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
         network_authority: ryeos_engine::protocols::descriptor::PersistentSessionNetworkAuthority,
@@ -1783,6 +1917,7 @@ impl PreparedItemPlan {
         resource_owner_coordinate: &str,
         process_scope_allocation: Option<&lillux::ProcessScopeAllocation>,
         process_scope: Option<lillux::ProcessScope>,
+        original_funded_owner: Option<&crate::persistent_session::PersistentSessionPooledStart>,
     ) -> Result<SpawnedPersistentSessionAwaitingAttachment> {
         if session_identity.is_empty() || session_identity.len() > 128 {
             bail!("persistent-session process identity is not canonical");
@@ -1804,12 +1939,16 @@ impl PreparedItemPlan {
                 ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
             }
         };
-        if state_root.is_some()
-            && !matches!(
-                workspace_authority,
-                PersistentSessionWorkspaceAuthority::RuntimeWorkspace
-            )
-        {
+        if !persistent_session_state_root_admitted(
+            state_root.is_some(),
+            workspace_authority,
+            // Only the qualification local Worker: a dedicated, resource-free
+            // exclusive session whose state root is its private credential
+            // home and whose descendants its own retained containment holds.
+            process_scope.is_some()
+                && self.resource_policy
+                    == PersistentSessionResourcePolicy::QualificationNoResources,
+        ) {
             bail!("persistent-session state root requires runtime-workspace authority");
         }
         let filesystem_authority_ceiling = self.plan.filesystem_authority_ceiling;
@@ -1824,30 +1963,75 @@ impl PreparedItemPlan {
         let selected_resources = state
             .execution_resources
             .select(self.plan.target_requirement.as_ref())?;
+        if self.resource_policy == PersistentSessionResourcePolicy::QualificationNoResources {
+            // Repeat the preflight against the selected generation immediately
+            // before any scope/resource reservation or held child creation.
+            require_qualification_no_resources(
+                self.plan.target_requirement.as_ref(),
+                &selected_resources,
+            )?;
+        }
+        let mut original_window = None;
         let mut prepared_scope = None;
-        let resource_reservation = match (process_scope.as_ref(), process_scope_allocation) {
-            (Some(scope), Some(allocation)) => {
-                crate::execution_resources::reserve_bound_process_resource_scope(
-                    state,
-                    &selected_resources,
-                    resource_owner_kind,
-                    resource_owner_coordinate,
-                    allocation,
-                    scope.recovery(),
-                )?
+        let resource_reservation = if let Some(original) = original_funded_owner {
+            if process_scope.is_some()
+                || process_scope_allocation.is_some()
+                || self.resource_policy == PersistentSessionResourcePolicy::QualificationNoResources
+            {
+                bail!(
+                    "original trusted contact cannot acquire local scope or qualification resource policy"
+                );
             }
-            (None, None) => {
-                prepared_scope = crate::execution_resources::prepare_process_resource_scope(
-                    state,
-                    &selected_resources,
-                    resource_owner_kind,
-                    resource_owner_coordinate,
-                )?;
-                prepared_scope
-                    .as_ref()
-                    .map(|prepared| prepared.reservation().clone())
+            selected_resources
+                .devices()
+                .context("original trusted contact lacks selected device descriptors")?;
+            let (window, intent) = original.take_original_funded_contact(
+                state,
+                &selected_resources,
+                self.persistent_session_capsule_hash
+                    .as_deref()
+                    .context("original funded contact lacks owned persistent capsule plan")?,
+                resource_owner_kind,
+                resource_owner_coordinate,
+            )?;
+            original_window = Some(window);
+            Some(intent)
+        } else {
+            match (process_scope.as_ref(), process_scope_allocation) {
+                (Some(scope), Some(allocation)) => {
+                    crate::execution_resources::reserve_bound_process_resource_scope(
+                        state,
+                        &selected_resources,
+                        resource_owner_kind,
+                        resource_owner_coordinate,
+                        allocation,
+                        scope.recovery(),
+                    )?
+                }
+                (Some(scope), None) if scope.is_pid_namespace_init() => {
+                    // Containment by the retained PID-namespace init has no
+                    // cgroup to carry scope-wide limits or occupancy, so it
+                    // cannot own execution resources.
+                    if !selected_resources.selections().is_empty() {
+                        bail!(
+                            "PID-namespace containment cannot own execution resources; a cgroup scope is required"
+                        );
+                    }
+                    None
+                }
+                (None, None) => {
+                    prepared_scope = crate::execution_resources::prepare_process_resource_scope(
+                        state,
+                        &selected_resources,
+                        resource_owner_kind,
+                        resource_owner_coordinate,
+                    )?;
+                    prepared_scope
+                        .as_ref()
+                        .map(|prepared| prepared.reservation().clone())
+                }
+                _ => bail!("persistent-session process scope authority is incomplete"),
             }
-            _ => bail!("persistent-session process scope authority is incomplete"),
         };
         let context = EngineContext {
             app_root: state.config.app_root.clone(),
@@ -1859,25 +2043,28 @@ impl PreparedItemPlan {
             isolation_network_authority_ceiling: network_authority_ceiling,
             isolation_live_access_authority: None,
             isolation_state_root: state_root.map(Path::to_path_buf),
+            isolation_bundle_state_home: None,
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
+            isolation_captured_callback_socket: false,
             // A persistent session executes its captured command and exact
             // external realizations. Mutable bundle roots and node trust state
             // are neither inputs nor ambient read authority for that worker.
             isolation_bundle_roots: Vec::new(),
-            isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
             isolation_verified_command: self.admitted_command,
             isolation_external_read_only_mounts: external_mounts,
             isolation_writable_runtime_view_mounts: writable_runtime_view_mounts,
             isolation_target_channels: target_channels,
+            isolation_target_sealed_payloads: target_sealed_payloads,
             isolation_workspace: Some(workspace.to_path_buf()),
             subprocess_limits: Some(lillux::SubprocessLimits {
                 max_open_files: None,
                 max_address_space_bytes: Some(lifecycle.max_address_space_bytes),
                 max_cpu_seconds: Some(lifecycle.max_cpu_seconds),
                 max_processes: Some(lifecycle.real_uid_process_limit),
+                deny_process_creation: false,
                 max_stdout_bytes: None,
                 max_stderr_bytes: None,
             }),
@@ -1897,6 +2084,7 @@ impl PreparedItemPlan {
             ),
             project_context: ProjectContext::None,
             launch_mode: LaunchMode::Wait,
+            secret_env: None,
         };
         let effective_scope = match process_scope {
             Some(scope) => Some(scope),
@@ -1905,25 +2093,43 @@ impl PreparedItemPlan {
                 .map(crate::execution_resources::PreparedProcessResourceScope::take_scope)
                 .transpose()?,
         };
-        let spawned_result = match effective_scope {
-            Some(scope) => state.engine.spawn_plan_in_scope_with_resources(
-                &context,
-                &self.plan,
-                scope,
-                selected_resources.selections(),
-                selected_resources.devices().map(Arc::as_ref),
-            ),
-            None => state.engine.spawn_plan_with_resources(
+        let spawned_result = if let Some(window) = original_window {
+            state.engine.spawn_plan_with_original_namespace_occupancy(
                 &context,
                 &self.plan,
                 selected_resources.selections(),
-                selected_resources.devices().map(Arc::as_ref),
-            ),
+                selected_resources
+                    .devices()
+                    .map(Arc::as_ref)
+                    .context("original trusted contact lacks selected device descriptors")?,
+                window,
+            )
+        } else {
+            match effective_scope {
+                Some(scope) => state.engine.spawn_plan_in_scope_with_resources(
+                    &context,
+                    &self.plan,
+                    scope,
+                    selected_resources.selections(),
+                    selected_resources.devices().map(Arc::as_ref),
+                ),
+                None => state.engine.spawn_plan_with_resources(
+                    &context,
+                    &self.plan,
+                    selected_resources.selections(),
+                    selected_resources.devices().map(Arc::as_ref),
+                ),
+            }
         };
         let spawned = match spawned_result {
             Ok(spawned) => spawned,
             Err(error) => {
                 let error = persistent_session_spawn_error(error);
+                if original_funded_owner.is_some() {
+                    return Err(
+                        error.context(crate::persistent_session::PersistentSessionCleanupUnproved)
+                    );
+                }
                 if let Some(reservation) = resource_reservation.as_ref() {
                     return Err(
                         match crate::execution_resources::cleanup_process_resource_reservation(
@@ -1940,71 +2146,89 @@ impl PreparedItemPlan {
                 return Err(error);
             }
         };
-        let identity_result = spawned
-            .exact_process_identity()
-            .map_err(anyhow::Error::from)
-            .and_then(|identity| {
-                crate::process::execution_process_identity_from_lillux(
-                    identity,
-                    spawned.scope_recovery().cloned(),
-                )
-            })
-            .context("capture held persistent-session identity through Lillux");
-        let process_identity = match identity_result {
-            Ok(mut identity) => {
-                identity.process_scope = spawned.scope_recovery().cloned();
-                let financial =
-                    match crate::execution_resources::reserve_process_resource_operations(
-                        state,
-                        &selected_resources,
-                        accounting_scope,
-                        session_identity,
-                        session_identity,
-                        funding_owner,
-                        &identity,
-                    ) {
-                        Ok(financial) => financial,
-                        Err(error) => {
-                            let cleanup = abort_spawned_with_resource_reservation(
-                                state,
-                                resource_reservation.as_ref(),
-                                spawned,
-                            )
-                            .err();
-                            return Err(match cleanup {
-                            Some(cleanup) => error.context(format!(
-                                "persistent-session resource reservation cleanup failed: {cleanup}"
-                            )).context(crate::persistent_session::PersistentSessionCleanupUnproved),
-                            None => error,
-                        });
-                        }
-                    };
-                if let Err(error) = identity.bind_execution_resources(
-                    selected_resources.selections().to_vec(),
-                    financial.bindings().to_vec(),
-                    selected_resources.max_concurrent_exclusive_allocations(),
-                    financial.occupancy_start(),
-                    financial.occupancy_limit(),
-                    financial.cleanup_allowance_ms(),
-                ) {
-                    let financial_cleanup =
-                        crate::execution_resources::abandon_prepared_process_resource_operations(
-                            state,
-                            financial.bindings(),
-                        );
+        let process_identity = if let Some(original) = original_funded_owner {
+            match original.attach_original_funded_held(&spawned) {
+                Ok(identity) => identity,
+                Err(error) => {
                     let cleanup = abort_spawned_with_resource_reservation(
                         state,
                         resource_reservation.as_ref(),
                         spawned,
                     )
                     .err();
-                    let error = match financial_cleanup {
+                    return Err(error
+                        .context(format!(
+                            "original funded held attachment remains quarantined: {cleanup:?}"
+                        ))
+                        .context(crate::persistent_session::PersistentSessionCleanupUnproved));
+                }
+            }
+        } else {
+            let identity_result = spawned
+                .exact_process_identity()
+                .map_err(anyhow::Error::from)
+                .and_then(|identity| {
+                    crate::process::execution_process_identity_from_lillux(
+                        identity,
+                        spawned.scope_recovery().cloned(),
+                    )
+                })
+                .context("capture held persistent-session identity through Lillux");
+            match identity_result {
+                Ok(mut identity) => {
+                    identity.process_scope = spawned.scope_recovery().cloned();
+                    let financial =
+                        match crate::execution_resources::reserve_process_resource_operations(
+                            state,
+                            &selected_resources,
+                            accounting_scope,
+                            session_identity,
+                            session_identity,
+                            funding_owner,
+                            &identity,
+                        ) {
+                            Ok(financial) => financial,
+                            Err(error) => {
+                                let cleanup = abort_spawned_with_resource_reservation(
+                                    state,
+                                    resource_reservation.as_ref(),
+                                    spawned,
+                                )
+                                .err();
+                                return Err(match cleanup {
+                            Some(cleanup) => error.context(format!(
+                                "persistent-session resource reservation cleanup failed: {cleanup}"
+                            )).context(crate::persistent_session::PersistentSessionCleanupUnproved),
+                            None => error,
+                        });
+                            }
+                        };
+                    if let Err(error) = identity.bind_execution_resources(
+                        selected_resources.selections().to_vec(),
+                        financial.bindings().to_vec(),
+                        selected_resources.max_concurrent_exclusive_allocations(),
+                        financial.occupancy_start(),
+                        financial.occupancy_limit(),
+                        financial.cleanup_allowance_ms(),
+                    ) {
+                        let financial_cleanup =
+                        crate::execution_resources::abandon_prepared_process_resource_operations(
+                            state,
+                            financial.bindings(),
+                        );
+                        let cleanup = abort_spawned_with_resource_reservation(
+                            state,
+                            resource_reservation.as_ref(),
+                            spawned,
+                        )
+                        .err();
+                        let error = match financial_cleanup {
                         Ok(()) => error,
                         Err(financial_cleanup) => error.context(format!(
                             "persistent-session resource binding reservation cleanup failed: {financial_cleanup:#}"
                         )),
                     };
-                    return Err(match cleanup {
+                        return Err(match cleanup {
                         Some(cleanup) => error
                             .context(format!(
                                 "held persistent-session resource binding cleanup failed: {cleanup}"
@@ -2012,28 +2236,33 @@ impl PreparedItemPlan {
                             .context(crate::persistent_session::PersistentSessionCleanupUnproved),
                         None => error,
                     });
-                }
-                identity
-            }
-            Err(error) => {
-                let cleanup = abort_spawned_with_resource_reservation(
-                    state,
-                    resource_reservation.as_ref(),
-                    spawned,
-                )
-                .err();
-                return Err(match cleanup {
-                    Some(cleanup) => {
-                        // Failure before identity capture is still process
-                        // contact. Preserve the existing pool cleanup marker
-                        // so an exclusive owner cannot clear its durable
-                        // credential/workspace fence as an uncontacted start.
-                        error
-                            .context(format!("held persistent-session cleanup failed: {cleanup}"))
-                            .context(crate::persistent_session::PersistentSessionCleanupUnproved)
                     }
-                    None => error,
-                });
+                    identity
+                }
+                Err(error) => {
+                    let cleanup = abort_spawned_with_resource_reservation(
+                        state,
+                        resource_reservation.as_ref(),
+                        spawned,
+                    )
+                    .err();
+                    return Err(match cleanup {
+                        Some(cleanup) => {
+                            // Failure before identity capture is still process
+                            // contact. Preserve the existing pool cleanup marker
+                            // so an exclusive owner cannot clear its durable
+                            // credential/workspace fence as an uncontacted start.
+                            error
+                                .context(format!(
+                                    "held persistent-session cleanup failed: {cleanup}"
+                                ))
+                                .context(
+                                    crate::persistent_session::PersistentSessionCleanupUnproved,
+                                )
+                        }
+                        None => error,
+                    });
+                }
             }
         };
         Ok(SpawnedPersistentSessionAwaitingAttachment {
@@ -2043,6 +2272,224 @@ impl PreparedItemPlan {
             spawned,
         })
     }
+}
+
+/// A state root is session-private authority: one daemon-owned child beneath
+/// the node state directory, pinned by descriptor and mounted alone (the
+/// isolation compiler refuses the node state directory itself, anything
+/// outside it and any sibling, drops every broader overlapping writable policy
+/// mount, and under captured execution refuses all ambient authority beside
+/// it). It belongs to a runtime workspace, or to the qualification local
+/// Worker: a dedicated, resource-free session whose descendants its own
+/// retained containment holds, over captured scratch. A cgroup-scoped
+/// ordinary scratch session is NOT admitted here: its scope exists for
+/// resource limits, and nothing else binds a private state root to it.
+fn persistent_session_state_root_admitted(
+    has_state_root: bool,
+    workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
+    qualification_worker_containment: bool,
+) -> bool {
+    use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority::{
+        EphemeralScratch, RuntimeWorkspace,
+    };
+    !has_state_root
+        || matches!(workspace_authority, RuntimeWorkspace)
+        || (matches!(workspace_authority, EphemeralScratch) && qualification_worker_containment)
+}
+
+#[cfg(test)]
+mod state_root_authority_tests {
+    use super::persistent_session_state_root_admitted as admitted;
+    use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority::{
+        EphemeralScratch, RuntimeWorkspace,
+    };
+
+    #[test]
+    fn state_root_follows_a_runtime_workspace_or_the_qualification_worker() {
+        // (has root, authority, contained) -> admitted
+        for (root, authority, contained, expected) in [
+            (false, EphemeralScratch, false, true),
+            (true, RuntimeWorkspace, false, true),
+            (true, RuntimeWorkspace, true, true),
+            (true, EphemeralScratch, true, true),
+            (true, EphemeralScratch, false, false),
+        ] {
+            assert_eq!(
+                admitted(root, authority, contained),
+                expected,
+                "root={root} {authority:?} contained={contained}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod process_containment_settlement_mapping_tests {
+    use super::ProcessContainmentRequirement as Requirement;
+    use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+
+    fn policy_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if name != "node_modules" && name != "target" && name != ".git" {
+                    policy_files(&path, found);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "yaml") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Every shipped signed qualification policy, whatever minimum it names,
+    /// runs on an enforced node under at least qualified containment, so a
+    /// newly added policy cannot slip past the enforced floor.
+    #[test]
+    fn every_shipped_policy_minimum_is_raised_to_containment_under_enforcement() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bundles");
+        let mut files = Vec::new();
+        policy_files(&root, &mut files);
+        let mut checked = 0;
+        let mut trusted_floor = 0;
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !text.contains("minimum_verifier_process_settlement:") {
+                continue;
+            }
+            let doc: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+            let Some(minimum) = doc
+                .get("product_qualification_policy")
+                .and_then(|policy| policy.get("minimum_verifier_process_settlement"))
+            else {
+                continue;
+            };
+            let minimum: Settlement = serde_yaml::from_value(minimum.clone()).unwrap();
+            let required = Requirement::for_settlement(minimum);
+            assert!(
+                required.with_enforced_floor(true).strength()
+                    >= Requirement::AnyQualifiedContainment.strength(),
+                "{}",
+                path.display()
+            );
+            assert_eq!(required.with_enforced_floor(false), required);
+            checked += 1;
+            trusted_floor += usize::from(minimum == Settlement::TrustedProcessGroupAbsent);
+        }
+        assert!(
+            checked >= 10 && trusted_floor >= 10,
+            "{checked} {trusted_floor}"
+        );
+    }
+
+    #[test]
+    fn a_settlement_maps_to_its_containment_and_the_stricter_requirement_stands() {
+        assert_eq!(
+            Requirement::for_settlement(Settlement::TrustedProcessGroupAbsent),
+            Requirement::None
+        );
+        assert_eq!(
+            Requirement::for_settlement(Settlement::ContainmentEmpty),
+            Requirement::AnyQualifiedContainment
+        );
+        assert_eq!(
+            Requirement::for_settlement(Settlement::ScopeEmpty),
+            Requirement::CgroupScope
+        );
+        assert_eq!(
+            Requirement::None.at_least(Requirement::AnyQualifiedContainment),
+            Requirement::AnyQualifiedContainment
+        );
+        assert_eq!(
+            Requirement::CgroupScope.at_least(Requirement::AnyQualifiedContainment),
+            Requirement::CgroupScope
+        );
+        assert_eq!(
+            Requirement::AnyQualifiedContainment.at_least(Requirement::None),
+            Requirement::AnyQualifiedContainment
+        );
+    }
+}
+
+/// Whether the session protocol a node selected for a qualification-only local
+/// Worker agrees with what the node physically is. The selection reads the
+/// node's reported guarantees; this check reads its isolation posture, and the
+/// two must tell the same story: disabled isolation runs a trusted process
+/// group over a runtime workspace, enforced isolation runs descendant
+/// containment over captured scratch. The selected protocol's holding carries
+/// both facts. Each launch repeats its own further checks.
+pub fn qualification_worker_selection_admits_posture(
+    descriptor: &ryeos_engine::protocols::ProtocolDescriptor,
+    enforced: bool,
+) -> Result<()> {
+    use ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::{
+        CapturedExecution, NodePolicy,
+    };
+    use ryeos_engine::protocols::descriptor::PersistentSessionProcessMode;
+    use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::{
+        ContainmentEmpty, TrustedProcessGroupAbsent,
+    };
+    let session = ryeos_engine::protocols::validate_persistent_session_protocol(descriptor)
+        .map_err(anyhow::Error::msg)?;
+    ensure!(
+        session.process_mode == PersistentSessionProcessMode::ExclusiveSession
+            && session.channel
+                == ryeos_engine::protocols::PersistentSessionChannel::InheritedUnixSocket,
+        "qualification-only local Worker requires an exclusive session over the inherited socket"
+    );
+    let holding = descriptor.holding.as_ref().ok_or_else(|| {
+        anyhow!(
+            "qualification-only local Worker requires a session protocol that declares its holding"
+        )
+    })?;
+    let (authority, settlement, posture) = if enforced {
+        (CapturedExecution, ContainmentEmpty, "enforced isolation")
+    } else {
+        (NodePolicy, TrustedProcessGroupAbsent, "disabled isolation")
+    };
+    ensure!(
+        holding.filesystem_authority == authority && holding.root_settlement == settlement,
+        "the selected qualification Worker protocol declares a holding ({:?}, {:?}) that disagrees with this node's physical posture; {posture} requires ({authority:?}, {settlement:?}): trusted process group over a runtime workspace when isolation is disabled, descendant containment over captured scratch when enforced",
+        holding.filesystem_authority,
+        holding.root_settlement
+    );
+    Ok(())
+}
+
+/// A captured-execution tool may hold callback and thread-auth credentials
+/// only on a protocol that declares the captured-compatible class and whose
+/// declared surface digest equals the closed surface the daemon issues for
+/// the protocol's qualification authority. Ordinary tool callbacks, and a
+/// declaration naming any other surface, stay refused.
+pub(crate) fn admit_captured_compatible_callback(
+    descriptor: &ryeos_engine::protocols::ProtocolDescriptor,
+) -> Result<()> {
+    let refused =
+        || anyhow!("captured execution cannot receive daemon callback or thread-auth authority");
+    let class = descriptor
+        .captured_compatible_callback
+        .as_ref()
+        .ok_or_else(refused)?;
+    // Only the remote-consumer authority is a captured-compatible surface.
+    let authority = descriptor
+        .qualification_callback
+        .filter(|authority| {
+            *authority == ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer
+        })
+        .ok_or_else(refused)?;
+    let issued =
+        crate::callback_token::CallbackRuntimeMethodSurface::for_qualification_authority(authority)
+            .exact_surface_digest()?;
+    if class.surface_digest != issued
+        || descriptor.callback_channel
+            != ryeos_engine::protocol_vocabulary::CallbackChannel::RuntimeSocket
+        || descriptor.capabilities.allows_target_site
+        || descriptor.capabilities.allows_detached
+        || descriptor.session.is_some()
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 fn validate_admitted_direct_executor_binding(
@@ -2222,8 +2669,11 @@ fn decode_retained_direct_plan(
     else {
         bail!("direct recovery found a non-direct admitted artifact identity");
     };
-    let canonical_plan = lillux::canonical_json(execution_plan)?;
-    let observed_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
+    let canonical_plan = lillux::canonical_json_bounded(
+        execution_plan,
+        ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+    )?;
+    let observed_plan_hash = lillux::sha256_hex(&canonical_plan);
     if &observed_plan_hash != execution_plan_hash {
         bail!(
             "admitted direct execution plan hash mismatch: expected {execution_plan_hash}, observed {observed_plan_hash}"
@@ -2295,6 +2745,7 @@ fn decode_retained_direct_plan(
                 content_hash,
                 executor_manifest_hash,
                 executor_manifest_signer_fingerprint,
+                member_source_proof,
             },
             ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor {
                 code,
@@ -2304,6 +2755,7 @@ fn decode_retained_direct_plan(
             &code.content_hash == content_hash
                 && &executor_bundle.manifest_hash == executor_manifest_hash
                 && &executor_bundle.signer_fingerprint == executor_manifest_signer_fingerprint
+                && &executor_bundle.member_source_proof == member_source_proof
         }
         (
             ryeos_state::objects::DirectExecutableIdentity::CapturedContent { content_hash },
@@ -2592,7 +3044,221 @@ pub fn prepare_bundle_item_plan_for_qualification(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Compile the accepted qualification-only Worker as a local direct plan.
+/// The typed root was joined to retained CAS Worker source and profile at
+/// admission. The Worker, environment and WorkerExecution are re-resolved
+/// from one current signed Bundle generation here; callers supply neither a
+/// raw plan nor an ordinary persistent-session capsule. This has no contact
+/// or resource-allocation authority.
+pub fn prepare_external_qualification_local_worker_plan(
+    state: &crate::state::AppState,
+    root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+) -> Result<PreparedItemPlan> {
+    with_prepared_external_qualification_local_worker_plan(state, root, |plan, _, _, _, _| Ok(plan))
+}
+
+/// Keep one checked signed Bundle generation through local Q material binding.
+/// The caller may redeem only the accepted root's retained CAS source/products
+/// and publish its profile into an already-owned state root in this window.
+pub fn with_prepared_external_qualification_local_worker_plan<T>(
+    state: &crate::state::AppState,
+    root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
+    bind: impl FnOnce(
+        PreparedItemPlan,
+        &ryeos_engine::kind_registry::PersistentSessionDecl,
+        &ryeos_engine::protocols::VerifiedProtocol,
+        &Value,
+        crate::external_qualification_local::QualificationWorkerSelectedHolding,
+    ) -> Result<T>,
+) -> Result<T> {
+    state.engine.with_checked_bundle_generation(|generation| {
+        let resolution = root.current_local_worker_resolution(generation)?;
+        let content = root
+            .purpose()
+            .consumer_content
+            .as_ref()
+            .context("qualification-only root has no accepted Worker content")?;
+        let identity = &content.definitions.worker;
+        let canonical = CanonicalRef::parse(&identity.canonical_ref)?;
+        let execute_cap = ryeos_runtime::authorizer::canonical_cap(
+            &canonical.kind,
+            &canonical.bare_id,
+            "execute",
+        );
+        let site = state.threads.site_id().to_owned();
+        let context = PlanContext {
+            logical_project_root: None,
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: state.identity.fingerprint().to_owned(),
+                scopes: vec![execute_cap],
+            }),
+            project_context: ProjectContext::None,
+            subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+            current_site_id: site.clone(),
+            origin_site_id: site,
+            execution_hints: ExecutionHints::default(),
+            scheduled_fire: None,
+            validate_only: false,
+        };
+        let resolved = generation.resolve(&context, &canonical)?;
+        if resolved.canonical_ref != canonical
+            || resolved.raw_content_digest != identity.raw_content_digest
+            || resolved.source_space != ItemSpace::Bundle
+            || !matches!(&resolved.source_root, ItemSourceRoot::Bundle { .. })
+            || resolved
+                .signature_header
+                .as_ref()
+                .map(|header| header.signer_fingerprint.as_str())
+                != Some(identity.publisher_fingerprint.as_str())
+        {
+            bail!("qualification-only plan subject differs from accepted Worker definition");
+        }
+        let verified = generation.verify(&context, resolved)?;
+        let execution = state
+            .engine
+            .kinds
+            .get("worker")
+            .and_then(|schema| schema.execution.as_ref())
+            .context("qualification-only Worker has no execution schema")?;
+        let declaration = execution
+            .persistent_session
+            .as_ref()
+            .context("qualification-only Worker has no signed session lifecycle")?;
+        match execution
+            .terminator
+            .as_ref()
+            .context("qualification-only Worker has no terminator")?
+        {
+            ryeos_engine::kind_registry::TerminatorDecl::Subprocess { .. } => {}
+            ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
+                bail!("qualification-only Worker has no subprocess session terminator")
+            }
+        }
+        // The node selects the one admissible session protocol its own
+        // guarantees meet, then the selected holding is checked against its
+        // physical posture before anything is planned under it.
+        let selected = ryeos_engine::protocols::select_subprocess_protocol(
+            execution,
+            &resolution.composed.composed,
+            &state.engine.protocols,
+            state.isolation.as_ref(),
+        )?
+        .context("qualification-only Worker has no subprocess session terminator")?;
+        let signed_protocol = selected.protocol;
+        let selected_holding = {
+            let holding = selected.holding.context(
+                "qualification-only Worker's selected protocol declares no holding",
+            )?;
+            let authority = serde_json::to_value(holding.filesystem_authority)?;
+            crate::external_qualification_local::QualificationWorkerSelectedHolding::new(
+                &signed_protocol.canonical_ref,
+                authority
+                    .as_str()
+                    .context("selected holding filesystem authority is not a name")?,
+            )?
+        };
+        let session = ryeos_engine::protocols::validate_persistent_session_protocol(
+            &signed_protocol.descriptor,
+        )
+        .map_err(anyhow::Error::msg)?;
+        qualification_worker_selection_admits_posture(
+            &signed_protocol.descriptor,
+            state.isolation.is_enforced(),
+        )?;
+        if session.readiness_identity_env.is_none()
+            || (!content.process_environment.is_empty()
+                && !session.runtime_env_allowlist.iter().any(|name| {
+                    name == ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV
+                }))
+        {
+            bail!("qualification-only Worker protocol lacks its signed readiness or process environment slot");
+        }
+        let filesystem_ceiling = execution.project_filesystem_authority_ceiling_selected(
+            &resolution.composed.composed,
+            selected.holding,
+        )?;
+        let network_ceiling =
+            execution.project_network_authority_ceiling(&resolution.composed.composed)?;
+        let endpoint = execution.project_endpoint_requirement(&resolution.composed.composed)?;
+        if !matches!(
+            &endpoint,
+            ryeos_engine::contracts::ExecutionEndpointRequirement::Local {}
+        ) {
+            bail!("qualification-only local Worker selects a nonlocal endpoint");
+        }
+        let mut plan = generation.build_plan(
+            &context,
+            &verified,
+            &Value::Object(Default::default()),
+            &context.execution_hints,
+            None,
+            filesystem_ceiling,
+            Some(selected),
+        )?;
+        if plan.root_ref != identity.canonical_ref || plan.item_kind != "worker" {
+            bail!("qualification-only plan changed its accepted Worker subject");
+        }
+        plan.network_authority_ceiling = network_ceiling;
+        plan.filesystem_authority_ceiling = plan
+            .filesystem_authority_ceiling
+            .intersect(filesystem_ceiling);
+        plan.endpoint_requirement = endpoint;
+        plan.validate_endpoint_for_planning()?;
+        let expected_name = match &verified.resolved.source_root {
+            ItemSourceRoot::Bundle { name } => name.as_str(),
+            other => bail!("qualification-only Worker has no Bundle source root: {other:?}"),
+        };
+        let bundle_root = state
+            .engine
+            .registered_bundle_root(expected_name)
+            .context("qualification-only Worker Bundle root is absent")?;
+        let bundle_identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+            bundle_root,
+            expected_name,
+            &state.engine.node_trust_store,
+        )?;
+        let spec = first_subprocess_spec_mut(&mut plan)?;
+        if spec.verified_command.is_none()
+            && ryeos_engine::external_content::parse_realization_command_ref(&spec.cmd)?.is_none()
+        {
+            let captured = state
+                .isolation
+                .capture_verified_command(Path::new(&spec.cmd), None, None)
+                .map_err(|error| {
+                    anyhow!("capture qualification-only Worker executable: {error}")
+                })?;
+            spec.verified_command = Some(
+                ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code: captured },
+            );
+        }
+        let timeout_secs = spec.timeout_secs;
+        let selected_resources = state
+            .execution_resources
+            .select(plan.target_requirement.as_ref())?;
+        require_qualification_no_resources(plan.target_requirement.as_ref(), &selected_resources)?;
+        bind(
+            PreparedItemPlan {
+                plan,
+                timeout_secs,
+                root_subject_source_identity:
+                    ryeos_state::objects::DirectRootSourceIdentity::Bundle {
+                        manifest_hash: bundle_identity.body_digest,
+                        manifest_signer_fingerprint: bundle_identity.signer_fingerprint,
+                    },
+                admitted_command: None,
+                realization_command: None,
+                resource_policy: PersistentSessionResourcePolicy::QualificationNoResources,
+                persistent_session_capsule_hash: None,
+                captured_callback_class: false,
+            },
+            declaration,
+            signed_protocol,
+            &resolution.composed.composed,
+            selected_holding,
+        )
+    })
+}
+
 fn prepare_item_plan_with_logical_context(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
@@ -2609,6 +3275,7 @@ fn prepare_item_plan_with_logical_context(
             engine,
             resolved,
             &verified,
+            isolation,
             sealed_content,
             parent_filesystem_ceiling,
             logical_context,
@@ -2687,6 +3354,9 @@ fn prepare_item_plan_with_logical_context(
             root_subject_source_identity,
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         })
     })
 }
@@ -2706,63 +3376,17 @@ pub fn prepare_captured_item_plan(
     sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
     enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
 ) -> Result<PreparedItemPlan> {
-    engine.with_checked_bundle_generation(|_generation| {
-        if verified.resolved.canonical_ref.to_string() != resolved.item_ref
-            || verified.resolved.raw_content_digest != resolved.root_raw_content_digest
-        {
-            bail!("captured direct-plan subject contradicts its request carrier");
-        }
-        let execution = engine
-            .kinds
-            .get(&verified.resolved.kind)
-            .and_then(|schema| schema.execution.as_ref())
-            .ok_or_else(|| anyhow!("captured dependency has no execution schema"))?;
-        let (filesystem_ceiling, network_ceiling) = captured_plan_isolation_ceilings(
-            execution,
+    engine.with_checked_bundle_generation(|_| {
+        let mut prepared = assemble_captured_item_plan(
+            engine,
+            resolved,
+            verified,
             program,
-            &resolved.item_ref,
-            &resolved.root_raw_content_digest,
+            isolation,
+            sealed_content,
             enclosing_filesystem_ceiling,
         )?;
-        let mut plan = engine.build_plan_from_captured_root(
-            &resolved.plan_context,
-            verified,
-            &program.resolution().root.raw_content,
-            &resolved.parameters,
-            &resolved.plan_context.execution_hints,
-            sealed_content,
-            filesystem_ceiling,
-        )?;
-        plan.network_authority_ceiling = network_ceiling;
-        plan.endpoint_requirement =
-            execution.project_endpoint_requirement(&program.resolution().composed.composed)?;
-        plan.validate_endpoint_for_planning()?;
-        plan.filesystem_authority_ceiling = plan
-            .filesystem_authority_ceiling
-            .intersect(filesystem_ceiling);
-        let expected_name = match &verified.resolved.source_root {
-            ryeos_engine::contracts::ItemSourceRoot::Bundle { name } => name.as_str(),
-            other => bail!(
-                "captured bundle item has no registered typed source-root authority: {other:?}"
-            ),
-        };
-        let root = engine
-            .registered_bundle_root(expected_name)
-            .ok_or_else(|| {
-                anyhow!(
-                    "captured bundle `{expected_name}` is absent from the registered generation"
-                )
-            })?;
-        let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
-            root,
-            expected_name,
-            &engine.node_trust_store,
-        )?;
-        let root_subject_source_identity = ryeos_state::objects::DirectRootSourceIdentity::Bundle {
-            manifest_hash: identity.body_digest,
-            manifest_signer_fingerprint: identity.signer_fingerprint,
-        };
-        let spec = first_subprocess_spec_mut(&mut plan)?;
+        let spec = first_subprocess_spec_mut(&mut prepared.plan)?;
         if spec.verified_command.is_none() {
             let captured = isolation
                 .capture_verified_command(Path::new(&spec.cmd), None, None)
@@ -2771,14 +3395,92 @@ pub fn prepare_captured_item_plan(
                 ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code: captured },
             );
         }
-        let timeout_secs = spec.timeout_secs;
-        Ok(PreparedItemPlan {
-            plan,
-            timeout_secs,
-            root_subject_source_identity,
-            admitted_command: None,
-            realization_command: None,
-        })
+        Ok(prepared)
+    })
+}
+
+fn assemble_captured_item_plan(
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+    verified: &VerifiedItem,
+    program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+    sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
+    enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
+) -> Result<PreparedItemPlan> {
+    if verified.resolved.canonical_ref.to_string() != resolved.item_ref
+        || verified.resolved.raw_content_digest != resolved.root_raw_content_digest
+    {
+        bail!("captured direct-plan subject contradicts its request carrier");
+    }
+    let execution = engine
+        .kinds
+        .get(&verified.resolved.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .ok_or_else(|| anyhow!("captured dependency has no execution schema"))?;
+    // A dependency that lists several admissible protocols runs under the one
+    // this node selects; its holding owns the filesystem ceiling.
+    let selected = ryeos_engine::protocols::select_listed_protocol(
+        execution,
+        &program.resolution().composed.composed,
+        &engine.protocols,
+        isolation,
+    )?;
+    let (filesystem_ceiling, network_ceiling) = captured_plan_isolation_ceilings(
+        execution,
+        program,
+        &resolved.item_ref,
+        &resolved.root_raw_content_digest,
+        selected.and_then(|selected| selected.holding),
+        enclosing_filesystem_ceiling,
+    )?;
+    let mut plan = engine.build_plan_from_captured_root(
+        &resolved.plan_context,
+        verified,
+        &program.resolution().root.raw_content,
+        &resolved.parameters,
+        &resolved.plan_context.execution_hints,
+        sealed_content,
+        filesystem_ceiling,
+        selected,
+    )?;
+    plan.network_authority_ceiling = network_ceiling;
+    plan.endpoint_requirement =
+        execution.project_endpoint_requirement(&program.resolution().composed.composed)?;
+    plan.validate_endpoint_for_planning()?;
+    plan.filesystem_authority_ceiling = plan
+        .filesystem_authority_ceiling
+        .intersect(filesystem_ceiling);
+    let expected_name = match &verified.resolved.source_root {
+        ryeos_engine::contracts::ItemSourceRoot::Bundle { name } => name.as_str(),
+        other => {
+            bail!("captured bundle item has no registered typed source-root authority: {other:?}")
+        }
+    };
+    let root = engine
+        .registered_bundle_root(expected_name)
+        .ok_or_else(|| {
+            anyhow!("captured bundle `{expected_name}` is absent from the registered generation")
+        })?;
+    let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+        root,
+        expected_name,
+        &engine.node_trust_store,
+    )?;
+    let root_subject_source_identity = ryeos_state::objects::DirectRootSourceIdentity::Bundle {
+        manifest_hash: identity.body_digest,
+        manifest_signer_fingerprint: identity.signer_fingerprint,
+    };
+    let timeout_secs = first_subprocess_spec_mut(&mut plan)?.timeout_secs;
+    Ok(PreparedItemPlan {
+        plan,
+        timeout_secs,
+        root_subject_source_identity,
+        admitted_command: None,
+        realization_command: None,
+        resource_policy: PersistentSessionResourcePolicy::Ordinary,
+        persistent_session_capsule_hash: None,
+        captured_callback_class: false,
     })
 }
 
@@ -2787,6 +3489,7 @@ fn captured_plan_isolation_ceilings(
     program: &ryeos_engine::effective_program::FinalizedEffectiveProgram,
     expected_ref: &str,
     expected_raw_digest: &str,
+    selected_holding: Option<&ryeos_engine::protocols::ProtocolHolding>,
     enclosing_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
 ) -> Result<(
     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
@@ -2801,7 +3504,7 @@ fn captured_plan_isolation_ceilings(
     let composed = &resolution.composed.composed;
     Ok((
         execution
-            .project_filesystem_authority_ceiling(composed)?
+            .project_filesystem_authority_ceiling_selected(composed, selected_holding)?
             .intersect(enclosing_filesystem_ceiling),
         execution.project_network_authority_ceiling(composed)?,
     ))
@@ -2830,7 +3533,9 @@ pub struct SpawnItemParams<'a> {
     /// operations retain it as their launch-generation fence.
     pub launch_owner: &'a str,
     pub accounting_scope: Option<&'a ryeos_state::objects::AdmittedAccountingScope>,
-    pub vault_bindings: std::collections::HashMap<String, String>,
+    /// Authorized declared-secret values. The plan spec receives their names
+    /// only; values join the final process request inside the engine.
+    pub secret_env: ryeos_engine::contracts::DeliveredSecretEnv,
     /// Exact signed-protocol environment, with each injection retaining its
     /// typed vocabulary source through final composition.
     pub protocol_env_bindings: Vec<EnvBinding>,
@@ -2841,14 +3546,14 @@ pub struct SpawnItemParams<'a> {
     pub isolation_workspace_view: Option<lillux::InheritedDescriptorAuthority>,
     pub isolation_live_access_authority:
         Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
+    /// The one node-owned bundle state namespace the launch's sealed
+    /// capabilities name, mounted for the spawned process, or `None`.
+    pub bundle_state_home: Option<ryeos_engine::isolation::IsolationBundleStateHome>,
     pub isolation_external_read_only_mounts:
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     /// Protected launch channels derived from the admitted root purpose,
     /// never from tool parameters or a live project path.
     pub isolation_target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
-    /// Exact node trust-store root supplied by daemon configuration. Never
-    /// reconstructed from an application or bundle filesystem layout.
-    pub isolation_node_trusted_keys_dir: std::path::PathBuf,
     /// Optional daemon-owned workspace for projectless admitted mechanics.
     /// Ordinary item launches leave this absent and retain their project
     /// context as the isolation root.
@@ -2876,10 +3581,93 @@ pub struct SpawnItemParams<'a> {
     /// Exact node-selected launch authority. Selection has already crossed
     /// replay/admission; this owner binds it to the held process before release.
     pub selected_resources: crate::execution_resources::SelectedExecutionResources,
-    /// The accepted root's signed product claim requires a naturally empty
-    /// whole-descendant scope. Device selection is not a substitute for this
-    /// requirement, and an unscoped launch must refuse before process contact.
-    pub require_process_scope: bool,
+    /// What whole-descendant containment the accepted root's signed product
+    /// claim demands. Device selection is not a substitute for it, and an
+    /// uncontained launch must refuse before process contact.
+    pub process_containment: ProcessContainmentRequirement,
+}
+
+/// The containment a launch must run under, read from the sealed root's
+/// signed minimum verifier settlement; never a later policy lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessContainmentRequirement {
+    /// Nothing beyond the strict process group.
+    None,
+    /// A cgroup scope specifically (`scope_empty`).
+    CgroupScope,
+    /// Whole-descendant emptiness by whichever mechanism the node qualified
+    /// (`containment_empty`): a cgroup scope or the PID-namespace init.
+    AnyQualifiedContainment,
+}
+
+impl ProcessContainmentRequirement {
+    /// The containment a root settlement demands: `scope_empty` a cgroup
+    /// scope, `containment_empty` any qualified mechanism, and the weaker
+    /// `trusted_process_group_absent` none.
+    pub fn for_settlement(
+        settlement: ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority,
+    ) -> Self {
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        match settlement {
+            Settlement::ScopeEmpty => Self::CgroupScope,
+            Settlement::ContainmentEmpty => Self::AnyQualifiedContainment,
+            Settlement::TrustedProcessGroupAbsent => Self::None,
+        }
+    }
+
+    /// An enforced node never settles a direct verifier by the trusted
+    /// process-group lane, so its requirement is at least any qualified
+    /// containment. A signed policy minimum is a floor, and the shipped
+    /// bundle-release and environment-qualification policies name the lowest
+    /// one (`trusted_process_group_absent`) while running on the enforced
+    /// release-authority node; the node exceeds that floor with its own
+    /// containment and the signed policy is not rewritten. A non-enforced
+    /// node keeps the requirement unchanged.
+    pub fn with_enforced_floor(self, enforced: bool) -> Self {
+        if enforced {
+            self.at_least(Self::AnyQualifiedContainment)
+        } else {
+            self
+        }
+    }
+
+    fn strength(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::AnyQualifiedContainment => 1,
+            Self::CgroupScope => 2,
+        }
+    }
+
+    /// The stricter of two requirements. A cgroup scope also answers a demand
+    /// for any qualified containment.
+    pub fn at_least(self, other: Self) -> Self {
+        if other.strength() > self.strength() {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// The qualified mechanism answering this requirement on this node, or the
+    /// refusal that names the missing guarantee.
+    pub(crate) fn select(
+        self,
+        containment: &ryeos_engine::isolation::DescendantContainmentReadiness,
+    ) -> Result<Option<ryeos_engine::isolation::DescendantContainmentGuarantee>> {
+        use ryeos_engine::isolation::DescendantContainmentGuarantee as Guarantee;
+        match self {
+            Self::None => Ok(None),
+            Self::CgroupScope => Ok(Some(Guarantee::CgroupScope)),
+            Self::AnyQualifiedContainment => match containment.enforced_guarantee() {
+                Some(guarantee) => Ok(Some(guarantee)),
+                None => bail!(
+                    "signed verifier policy demands `containment_empty` but this node reports no qualified descendant containment (cgroup scope: unavailable; PID-namespace init: {}); the trusted process-group lane is a weaker guarantee and is never a substitute",
+                    containment.pid_namespace.detail
+                ),
+            },
+        }
+    }
 }
 
 #[tracing::instrument(
@@ -2910,7 +3698,7 @@ pub fn spawn_item(
         thread_id,
         launch_owner,
         accounting_scope,
-        require_process_scope,
+        process_containment,
     ) = (|| -> Result<_> {
         let SpawnItemParams {
             state,
@@ -2921,7 +3709,7 @@ pub fn spawn_item(
             chain_root_id,
             launch_owner,
             accounting_scope,
-            vault_bindings,
+            secret_env,
             protocol_env_bindings,
             roots,
             isolation,
@@ -2929,9 +3717,9 @@ pub fn spawn_item(
             isolation_immutable_project,
             isolation_workspace_view,
             isolation_live_access_authority,
+            bundle_state_home,
             isolation_external_read_only_mounts,
             isolation_target_channels,
-            isolation_node_trusted_keys_dir,
             isolation_workspace,
             inherited_fds,
             external_realizations_env,
@@ -2942,27 +3730,23 @@ pub fn spawn_item(
             original_snapshot_hash: _,
             state_root,
             selected_resources,
-            require_process_scope,
+            process_containment,
         } = params;
         let app_root = roots
             .app_root
             .as_deref()
             .map(std::path::PathBuf::from)
             .context("spawn roots missing RYEOS_APP_ROOT")?;
-        // vault_bindings: user-provided secret/capability env vars.
+        // secret_env: authorized declared-secret values, delivered by name.
         // protocol_env_bindings: the verified terminator protocol's exact signed
         // env contract. Values are produced from daemon-owned launch facts by the
         // runner, never inherited from the daemon's process environment.
         let mut plan = prepared_plan.plan;
 
         // Compose every subprocess node from allowlisted parent env, daemon roots,
-        // declared secrets, engine-plan bindings, and the verified terminator
+        // declared secret names, engine-plan bindings, and the verified terminator
         // protocol's exact typed injections. No callback key is manufactured here;
         // callback-free protocols therefore stay callback-free through `env_clear`.
-        let secret_map: std::collections::BTreeMap<String, String> = vault_bindings
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
 
         // Allocate native-resume env before final env composition so the
         // builder remains the final authority. Preserve the existing
@@ -3029,13 +3813,18 @@ pub fn spawn_item(
                                     key.to_string_lossy().into_owned(),
                                     value.to_string_lossy().into_owned(),
                                 )
+                            })
+                            // A host-direct launch inherits only the names
+                            // its operator grant lists, read from the
+                            // daemon's own boot environment.
+                            .filter(|(key, _)| {
+                                isolation.host_direct_grant().is_none_or(|grant| {
+                                    grant.host_env.iter().any(|name| name == key)
+                                })
                             }),
                     )?
                     .with_daemon_roots(roots.clone())?
-                    .with_bindings(
-                        EnvSourceKind::DeclaredSecret,
-                        secret_map.iter().map(|(k, v)| (k.clone(), v.clone())),
-                    )?;
+                    .with_declared_secret_names(secret_env.names())?;
 
                 builder = builder.with_typed_bindings([
                     EnvBinding::new(
@@ -3128,19 +3917,24 @@ pub fn spawn_item(
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             isolation_live_access_authority,
             isolation_state_root: state_root.map(std::path::Path::to_path_buf),
+            isolation_bundle_state_home: bundle_state_home,
             isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),
             isolation_checkpoint_authority: allocated_checkpoint_authority,
             isolation_daemon_socket_path: isolation_daemon_socket_path
                 .map(std::path::Path::to_path_buf),
+            isolation_captured_callback_socket: prepared_plan.captured_callback_class,
             isolation_bundle_roots,
-            isolation_node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             isolation_verified_code,
             isolation_verified_command: prepared_plan.admitted_command,
             isolation_external_read_only_mounts,
             isolation_writable_runtime_view_mounts: Vec::new(),
             isolation_target_channels,
+            isolation_target_sealed_payloads: Vec::new(),
             isolation_workspace,
-            subprocess_limits: None,
+            subprocess_limits: plan
+                .subprocess_limits
+                .map(|limits| limits.to_native())
+                .transpose()?,
             inherited_fds,
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
@@ -3156,6 +3950,7 @@ pub fn spawn_item(
             } else {
                 LaunchMode::Wait
             },
+            secret_env: (!secret_env.is_empty()).then(|| Arc::new(secret_env)),
         };
 
         // Derive spawn-time launch metadata from the first DispatchSubprocess
@@ -3187,11 +3982,29 @@ pub fn spawn_item(
             thread_id,
             launch_owner,
             accounting_scope,
-            require_process_scope,
+            process_containment,
         ))
     })()
     .map_err(SpawnItemFailure::before_contact)?;
-    let mut thread_scope = if require_process_scope && selected_resources.selections().is_empty() {
+    // Resource-bearing launches already run in the cgroup scope their
+    // resources need, which satisfies either requirement. Otherwise choose the
+    // mechanism now, before any process contact.
+    let selected_mechanism = if selected_resources.selections().is_empty() {
+        process_containment
+            .select(
+                &state
+                    .isolation
+                    .inspection()
+                    .process_scope_readiness
+                    .descendant_containment,
+            )
+            .map_err(SpawnItemFailure::before_contact)?
+    } else {
+        None
+    };
+    let mut thread_scope = if selected_mechanism
+        == Some(ryeos_engine::isolation::DescendantContainmentGuarantee::CgroupScope)
+    {
         Some(
             crate::execution_resources::prepare_thread_scope_only(state, thread_id, launch_owner)
                 .map_err(SpawnItemFailure::before_contact)?,
@@ -3199,6 +4012,11 @@ pub fn spawn_item(
     } else {
         None
     };
+    // The PID-namespace init is bound by the held launch itself: no cgroup
+    // allocation and no pre-contact reservation exist to journal.
+    let mut namespace_scope = (selected_mechanism
+        == Some(ryeos_engine::isolation::DescendantContainmentGuarantee::PidNamespaceInit))
+    .then(lillux::ProcessScope::pid_namespace_init);
     let mut resource_scope = crate::execution_resources::prepare_process_resource_scope(
         state,
         &selected_resources,
@@ -3206,8 +4024,24 @@ pub fn spawn_item(
         thread_id,
     )
     .map_err(SpawnItemFailure::before_contact)?;
-    let spawned_result = match (resource_scope.as_mut(), thread_scope.as_mut()) {
-        (Some(prepared), None) => engine.spawn_plan_in_scope_with_resources(
+    let spawned_result = match (
+        resource_scope.as_mut(),
+        thread_scope.as_mut(),
+        namespace_scope.take(),
+    ) {
+        (None, None, Some(scope)) => engine.spawn_plan_in_scope_with_resources(
+            &engine_ctx,
+            &plan,
+            scope,
+            selected_resources.selections(),
+            selected_resources.devices().map(Arc::as_ref),
+        ),
+        (_, _, Some(_)) => {
+            return Err(SpawnItemFailure::before_contact(anyhow!(
+                "item launch prepared conflicting process scopes"
+            )));
+        }
+        (Some(prepared), None, None) => engine.spawn_plan_in_scope_with_resources(
             &engine_ctx,
             &plan,
             prepared
@@ -3216,7 +4050,7 @@ pub fn spawn_item(
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (None, Some(prepared)) => engine.spawn_plan_in_scope_with_resources(
+        (None, Some(prepared), None) => engine.spawn_plan_in_scope_with_resources(
             &engine_ctx,
             &plan,
             prepared
@@ -3225,13 +4059,13 @@ pub fn spawn_item(
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (None, None) => engine.spawn_plan_with_resources(
+        (None, None, None) => engine.spawn_plan_with_resources(
             &engine_ctx,
             &plan,
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        (Some(_), Some(_)) => {
+        (Some(_), Some(_), None) => {
             return Err(SpawnItemFailure::before_contact(anyhow!(
                 "item launch prepared conflicting process scopes"
             )));
@@ -3361,8 +4195,176 @@ pub fn spawn_item(
 }
 
 #[cfg(test)]
+mod process_containment_requirement_tests {
+    use super::ProcessContainmentRequirement as Requirement;
+    use ryeos_engine::isolation::{
+        DescendantContainmentGuarantee as Guarantee, DescendantContainmentReadiness,
+        PidNamespaceContainmentQualification as Namespace,
+    };
+
+    fn readiness(cgroup_scope: bool, namespace: bool) -> DescendantContainmentReadiness {
+        DescendantContainmentReadiness {
+            cgroup_scope,
+            pid_namespace: if namespace {
+                Namespace::qualified_by(lillux::process_control::ProofSource::Measured, "probed")
+            } else {
+                Namespace::not_probed("user namespaces refused")
+            },
+            trusted_process_group: true,
+        }
+    }
+
+    #[test]
+    fn each_demand_is_answered_by_the_mechanism_the_node_qualified() {
+        // `scope_empty` is a cgroup demand whatever else the node has.
+        for (cgroup, namespace) in [(true, true), (false, true), (false, false)] {
+            assert_eq!(
+                Requirement::CgroupScope
+                    .select(&readiness(cgroup, namespace))
+                    .unwrap(),
+                Some(Guarantee::CgroupScope)
+            );
+            assert_eq!(
+                Requirement::None
+                    .select(&readiness(cgroup, namespace))
+                    .unwrap(),
+                None
+            );
+        }
+        // `containment_empty` takes either mechanism, scope preferred.
+        let any = Requirement::AnyQualifiedContainment;
+        assert_eq!(
+            any.select(&readiness(true, true)).unwrap(),
+            Some(Guarantee::CgroupScope)
+        );
+        assert_eq!(
+            any.select(&readiness(true, false)).unwrap(),
+            Some(Guarantee::CgroupScope)
+        );
+        assert_eq!(
+            any.select(&readiness(false, true)).unwrap(),
+            Some(Guarantee::PidNamespaceInit)
+        );
+        // With neither it refuses, naming the missing guarantee and why the
+        // always-available trusted lane is not a substitute.
+        let error = any
+            .select(&readiness(false, false))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("containment_empty"), "{error}");
+        assert!(
+            error.contains("no qualified descendant containment"),
+            "{error}"
+        );
+        assert!(error.contains("user namespaces refused"), "{error}");
+        assert!(error.contains("never a substitute"), "{error}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn captured_callback_protocol(
+        digest: &str,
+        class: bool,
+        qualification: &str,
+    ) -> ryeos_engine::protocols::ProtocolDescriptor {
+        let class_yaml = if class {
+            format!("captured_compatible_callback:\n  surface_digest: {digest}\n")
+        } else {
+            String::new()
+        };
+        let qualification_yaml = if qualification.is_empty() {
+            String::new()
+        } else {
+            format!("qualification_callback: {qualification}\n")
+        };
+        serde_yaml::from_str(&format!(
+            "kind: protocol\nname: t\ncategory: ryeos/core\nabi_version: v1\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n  - {{ name: RYEOSD_SOCKET_PATH, source: callback_socket_path }}\n  - {{ name: RYEOSD_CALLBACK_TOKEN, source: callback_token }}\n  - {{ name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }}\ncapabilities:\n  allows_pushed_head: true\n  allows_target_site: false\n  allows_detached: false\nlifecycle:\n  mode: managed\ncallback_channel: runtime_socket\n{qualification_yaml}{class_yaml}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn captured_execution_admits_callback_only_on_the_declared_closed_surface() {
+        use crate::callback_token::CallbackRuntimeMethodSurface as Surface;
+        let remote = Surface::qualification_remote_consumer()
+            .exact_surface_digest()
+            .unwrap();
+        let scoped = Surface::qualification_scoped_producer()
+            .exact_surface_digest()
+            .unwrap();
+        assert_ne!(remote, scoped);
+        // The declared class on the surface the daemon issues is admitted.
+        admit_captured_compatible_callback(&captured_callback_protocol(
+            &remote,
+            true,
+            "remote_consumer",
+        ))
+        .unwrap();
+        // An ordinary tool callback protocol is refused.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(&remote, false, ""))
+                .is_err()
+        );
+        // A class declared without qualification authority is refused.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(&remote, true, ""))
+                .is_err()
+        );
+        // A declared surface that is not the issued one is refused, as is a stale
+        // or arbitrary digest and the other authority's surface.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &scoped,
+                true,
+                "remote_consumer"
+            ))
+            .is_err()
+        );
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &"0".repeat(64),
+                true,
+                "remote_consumer"
+            ))
+            .is_err()
+        );
+        // The scoped-producer authority is never admitted, even with its own digest.
+        assert!(
+            admit_captured_compatible_callback(&captured_callback_protocol(
+                &scoped,
+                true,
+                "scoped_producer"
+            ))
+            .is_err()
+        );
+        // Remote or detached capability reopens refusal.
+        let mut detached = captured_callback_protocol(&remote, true, "remote_consumer");
+        detached.capabilities.allows_detached = true;
+        assert!(admit_captured_compatible_callback(&detached).is_err());
+    }
+
+    #[test]
+    fn shipped_qualification_protocols_declare_the_captured_class_only_where_fitting() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/core/.ai/protocols/ryeos/core");
+        let load = |name: &str| -> ryeos_engine::protocols::ProtocolDescriptor {
+            serde_yaml::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap()
+        };
+        // The remote-consumer protocol names exactly the surface the daemon issues.
+        let consumer = load("qualification_consumer_callback.yaml");
+        assert!(consumer.captured_compatible_callback.is_some());
+        admit_captured_compatible_callback(&consumer).unwrap();
+        // The scoped-producer surface drives a daemon-owned process and stays outside the class.
+        let scoped = load("qualification_scoped_callback.yaml");
+        assert!(scoped.captured_compatible_callback.is_none());
+        assert!(admit_captured_compatible_callback(&scoped).is_err());
+        // Ordinary tool callbacks stay refused.
+        let tool_callback = load("tool_callback.yaml");
+        assert!(admit_captured_compatible_callback(&tool_callback).is_err());
+    }
 
     #[test]
     fn item_spawn_failure_retains_only_boundary_proved_settlement() {
@@ -3441,7 +4443,7 @@ mod tests {
         use ryeos_engine::isolation::IsolationWritableRuntimeViewMountAuthority;
         let root = tempfile::tempdir().unwrap();
         let source = {
-            let _lease = lillux::retain_fork_sensitive_descriptors();
+            let _lease = lillux::try_retain_fork_sensitive_descriptors().unwrap();
             lillux::PinnedDirectory::open(root.path())
                 .unwrap()
                 .unwrap()
@@ -3636,6 +4638,7 @@ mod tests {
                 &program,
                 "fixture:session",
                 &"b".repeat(64),
+                None,
                 NodePolicy,
             )
             .unwrap(),
@@ -3647,7 +4650,7 @@ mod tests {
         ] {
             assert!(
                 captured_plan_isolation_ceilings(
-                    &execution, &program, reference, &digest, NodePolicy,
+                    &execution, &program, reference, &digest, None, NodePolicy,
                 )
                 .unwrap_err()
                 .to_string()
@@ -3661,6 +4664,7 @@ mod tests {
                 &inherited,
                 "fixture:session",
                 &"b".repeat(64),
+                None,
                 CapturedExecution,
             )
             .unwrap(),
@@ -3676,6 +4680,7 @@ mod tests {
                     &finalized_dependency_fixture(malformed),
                     "fixture:session",
                     &"b".repeat(64),
+                    None,
                     NodePolicy,
                 )
                 .is_err()
@@ -3735,7 +4740,7 @@ mod tests {
             "target_requirement": null,
             "endpoint_requirement": {"kind": "local"},
             "external_endpoint_binding": null,
-            "resource_authority_ceiling": "node_policy",
+            "subprocess_limits":null, "resource_authority_ceiling": "node_policy",
             "cache_key": "test",
             "thread_kind": "tool",
             "executor_chain": ["tool:test/run", "tool:test/runtime"],
@@ -3784,28 +4789,27 @@ mod tests {
             root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
             admitted_command: None,
             realization_command: None,
+            resource_policy: PersistentSessionResourcePolicy::Ordinary,
+            persistent_session_capsule_hash: None,
+            captured_callback_class: false,
         }
     }
 
+    /// The Store owner dereferences to the Store; it closes the Store when
+    /// dropped and stays on the opening thread.
     pub(super) fn realization_identity_fixture(
         root: &Path,
-    ) -> (crate::state_store::StateStore, Engine) {
-        let state_dir = root.join(".ai/state");
-        let identity = crate::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+    ) -> (crate::state_store::test_native::TestStateStore, Engine) {
+        let identity =
+            ryeos_node_runtime::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let store = crate::state_store::StateStore::new_with_head_trust(
-            root.to_owned(),
-            state_dir.clone(),
-            state_dir.join("runtime.sqlite3"),
-            signer,
-            crate::write_barrier::WriteBarrier::new(),
-            Arc::new(trust),
-        )
-        .unwrap();
+        let store =
+            crate::state_store::test_native::TestStateStore::open(root, signer, Arc::new(trust))
+                .unwrap();
         // Qualify member verification against the exact current tool contract,
         // independently of the publisher-signing state of a dirty source tree.
         // This is not full live-registry or public-dispatch qualification.
@@ -3937,7 +4941,7 @@ mod tests {
                     &hash,
                     changed["total_bytes"].as_u64().unwrap(),
                 );
-                let error = resolve(&resolution).err().expect("member must be refused");
+                let error = resolve(&resolution).expect_err("member must be refused");
                 assert!(
                     error.to_string().contains(expected),
                     "{kind}/{field}: {error:#}"
@@ -4178,8 +5182,7 @@ mod tests {
                 .unwrap(),
                 limit,
             )
-            .err()
-            .expect("unavailable large-object bytes must not become identity authority");
+            .expect_err("unavailable large-object bytes must not become identity authority");
             assert_eq!(
                 error
                     .to_string()
@@ -4229,6 +5232,51 @@ mod tests {
         assert_eq!(
             spec.env_sources.get("RYEOS_ADMITTED_SOURCE"),
             Some(&RuntimeEnvSource::EnginePlan)
+        );
+    }
+
+    #[test]
+    fn persistent_session_binds_descriptor_delivery_only_beside_a_realization_set() {
+        let root = Path::new("/ryeos/private-runtime-view");
+        let mut prepared = prepared_plan(portable_direct_plan(root));
+        let document = "{\"realizations\":{\"harness\":9},\"schema\":\"ryeos.external_realization_descriptors.v1\"}";
+        assert!(
+            prepared
+                .bind_persistent_session_external_descriptors(document)
+                .is_err()
+        );
+        prepared
+            .bind_persistent_session_spawn_environment(
+                Some("[]"),
+                Some(root),
+                Some(ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        prepared
+            .bind_persistent_session_external_descriptors(document)
+            .unwrap();
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } =
+            &prepared.plan.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        assert_eq!(
+            spec.env
+                .get("RYEOS_EXTERNAL_DESCRIPTORS")
+                .map(String::as_str),
+            Some(document)
+        );
+        assert_eq!(
+            spec.env_sources.get("RYEOS_EXTERNAL_DESCRIPTORS"),
+            Some(&RuntimeEnvSource::EnginePlan)
+        );
+        assert!(
+            prepared
+                .bind_persistent_session_external_descriptors(document)
+                .is_err()
         );
     }
 
@@ -4815,7 +5863,7 @@ execution:
         assert_eq!(
             lillux::sha256_hex(
                 lillux::canonical_json(
-                    &serde_json::to_value(&portable_direct_plan(admitted)).unwrap()
+                    &serde_json::to_value(portable_direct_plan(admitted)).unwrap()
                 )
                 .unwrap()
                 .as_bytes()
@@ -4967,5 +6015,52 @@ execution:
             error.to_string().contains("absolute and normalized"),
             "unexpected error: {error:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod captured_verifier_admission_tests {
+    use super::admit_captured_compatible_callback as admit;
+    use ryeos_engine::protocols::ProtocolDescriptor;
+
+    fn protocol(name: &str) -> ProtocolDescriptor {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/core/.ai/protocols/ryeos/core")
+            .join(name);
+        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_shipped_contained_verifier_protocol_is_admitted_to_captured_execution() {
+        let tool: serde_json::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(ryeos_engine::test_support::workspace_root().join(
+                "bundles/codex/.ai/tools/codex/qualification/consumer-runtime-verifier.yaml",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(tool.get("filesystem_authority").is_none());
+        assert!(tool.get("execution_protocol").is_none());
+        assert_eq!(
+            tool["execution_protocols"],
+            serde_json::json!([
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_trusted",
+            ])
+        );
+        let contained = protocol("qualification_consumer_callback_contained.yaml");
+        assert_eq!(
+            contained
+                .holding
+                .as_ref()
+                .map(|holding| holding.filesystem_authority),
+            Some(ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution)
+        );
+        admit(&contained).unwrap();
+        // The trusted holding runs the verifier under node policy, so it declares no captured-compatible class.
+        assert!(admit(&protocol("qualification_consumer_callback_trusted.yaml")).is_err());
+        // A callback protocol that declares no captured-compatible class stays refused.
+        assert!(admit(&protocol("qualification_scoped_callback.yaml")).is_err());
+        assert!(admit(&protocol("tool_callback.yaml")).is_err());
     }
 }

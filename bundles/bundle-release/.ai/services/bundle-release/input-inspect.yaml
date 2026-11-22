@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-19T04:10:25Z:fe10e71a505fbc85b6d0cf0a64b572c11da0f48029987cf99aa2dd2d70b5b251:PtOrapTbIBEZ+eg4AvA6ZPvcbqjygmXoAa8lYqpppYLV4A7xnKMD3+J48Tzvys4mqDtVzlrjsuiVS1EUu27MCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:66d44e323a2ecf64f7796c2bff98196ed4bf85395f6092ec3b3973ecfb5cec8e:LM2wN5RrkGM0csehxwJQGyxM3uaOtO9OiA9he2JHxlSF0TSxq3uXiKFjmypeI2e6a8Eg/o/fTRFUkMRwAfxkDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: input-inspect
 version: "1.0.0"
 description: Resolve one exact native bundle release input and its owned payloads without mutation.
-endpoint: bundle_release.input_inspect
+endpoint: bundle-release.input-inspect
 ui_read_only: true
 state_access: read_only_existing
 record_thread: false

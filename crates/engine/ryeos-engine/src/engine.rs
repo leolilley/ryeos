@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -30,7 +29,26 @@ pub struct EffectiveItemRequest {
     pub item_ref: CanonicalRef,
     pub expected_kind: Option<String>,
     pub project_root: Option<PathBuf>,
+    /// The logical project of `project_root` (see
+    /// `PlanContext::logical_project_root`); `None` means the root is its
+    /// own logical project when the authority is live.
+    pub logical_project_root: Option<PathBuf>,
     pub subject_resolution_authority: SubjectResolutionAuthority,
+}
+
+impl EffectiveItemRequest {
+    /// The logical project for signer scopes: the stated one, or the project
+    /// root itself when the authority is the live project.
+    pub fn effective_logical_project_root(&self) -> Option<PathBuf> {
+        match (
+            &self.logical_project_root,
+            &self.subject_resolution_authority,
+        ) {
+            (Some(logical), _) => Some(logical.clone()),
+            (None, SubjectResolutionAuthority::LiveFs) => self.project_root.clone(),
+            (None, _) => None,
+        }
+    }
 }
 
 /// Source metadata for an effective item.
@@ -79,6 +97,10 @@ pub struct EffectiveItem {
     pub derived: std::collections::HashMap<String, Value>,
     pub policy_facts: std::collections::HashMap<String, Value>,
     pub diagnostics: Vec<EffectiveItemDiagnostic>,
+    /// True when the winner came from project space and a bundle also ships
+    /// an item under the same ref, so the project copy shadows the bundle's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shadows_bundle_item: bool,
 }
 
 /// Trust, parser dispatch, and the downstream cache fingerprint captured for
@@ -148,6 +170,11 @@ pub struct AdmittedRequestAuthoritySnapshot {
 impl AdmittedRequestAuthoritySnapshot {
     fn snapshot(&self) -> &EffectiveRequestAuthoritySnapshot {
         &self.authority
+    }
+
+    /// The frozen trust view this admitted request authority holds.
+    pub fn trust_store(&self) -> &TrustStore {
+        &self.authority.trust_store
     }
 
     fn request_snapshot(&self) -> &EffectiveRequestSnapshot {
@@ -267,7 +294,7 @@ impl AdmittedRequestAuthoritySnapshot {
             || !self
                 .materialization
                 .owns_path(project_root)
-                .map_err(|error| EngineError::Internal(error.to_string()))?
+                .map_err(|error| EngineError::Internal(format!("{error:#}")))?
         {
             return Err(EngineError::Internal(
                 "admitted request authority was paired with a different materialization"
@@ -290,6 +317,29 @@ fn authority_snapshot_from_request(
     }
 }
 
+/// A project-content authority answers only for the live project its planning
+/// context names: the same root, under mutable live-filesystem authority.
+fn require_live_project_context(ctx: &PlanContext, project_root: &Path) -> Result<(), EngineError> {
+    ctx.subject_resolution_authority
+        .validate_for_project_context(&ctx.project_context)
+        .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
+    if !matches!(
+        ctx.subject_resolution_authority,
+        SubjectResolutionAuthority::LiveFs
+    ) {
+        return Err(EngineError::Internal(
+            "project-content authority requires live project resolution authority".to_string(),
+        ));
+    }
+    if project_root_from_context(ctx) != Some(project_root) {
+        return Err(EngineError::Internal(
+            "project-content authority names a different root from its planning context"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn project_root_from_context(context: &PlanContext) -> Option<&Path> {
     match &context.project_context {
         ProjectContext::LocalPath { path } => Some(path.as_path()),
@@ -303,9 +353,17 @@ fn resolution_error_to_engine(
     error: crate::resolution::ResolutionError,
     requested_root: &CanonicalRef,
 ) -> EngineError {
-    use crate::resolution::ResolutionError;
+    use crate::resolution::{ResolutionError, ResolutionFailureClass};
 
     match error {
+        ResolutionError::StepFailed {
+            class: ResolutionFailureClass::ProcessCreationBusy,
+            reason,
+            ..
+        } => EngineError::ProcessCreationBusy {
+            subject: requested_root.to_string(),
+            detail: reason,
+        },
         ResolutionError::IntegrityFailure { item_ref, reason } => {
             EngineError::EffectiveItemUntrusted {
                 canonical_ref: item_ref,
@@ -315,6 +373,7 @@ fn resolution_error_to_engine(
         ResolutionError::MissingItem { item_ref, .. } => EngineError::EffectiveItemNotFound {
             canonical_ref: item_ref,
         },
+        ResolutionError::ProjectShadowsBundleItem { refusal } => *refusal,
         ResolutionError::ComposedValueContractViolation {
             item_ref, report, ..
         } => EngineError::ComposedValueContractViolation {
@@ -903,15 +962,6 @@ pub struct Engine {
     /// directly-constructed test engines and active for node engines.
     isolation_generation: std::sync::Arc<crate::isolation::IsolationRuntime>,
 
-    /// Base item trust for a project-scoped engine, excluding the project's
-    /// mutable trust directory. This lets every request re-read project trust
-    /// and observe both additions and removals.
-    request_trust_base: Option<TrustStore>,
-
-    /// Distinguishes caller-supplied trust authority even when every supplied
-    /// signer was already present in the persistent trust base.
-    request_trust_overlay_identity: Option<String>,
-
     /// Shared only by clones of this admitted engine generation. Cache keys
     /// also include the effective generation/trust identities.
     parser_overlay_cache: std::sync::Arc<crate::parser_overlay_cache::ParserOverlayCache>,
@@ -929,6 +979,23 @@ pub struct Engine {
 pub struct CheckedEngineGeneration<'a> {
     engine: &'a Engine,
     request_engine_generation_identity: String,
+    /// Token of the enclosing guarded operation. Worker threads started by
+    /// this view's batch methods run under it.
+    verified: &'a crate::isolation::VerifiedGeneration,
+}
+
+/// Signed Bundle item bytes captured only for controller-owned source
+/// retention. These verified envelopes are never placed in a launch envelope
+/// or reconstructed from a diagnostic `source_path`.
+#[derive(Debug, Clone)]
+pub struct CapturedSignedBundleItemSource {
+    pub resolved_ref: String,
+    pub source_root: crate::contracts::ItemSourceRoot,
+    pub signer_fingerprint: String,
+    pub source_content_digest: String,
+    pub raw_content_digest: String,
+    pub signature_envelope: crate::contracts::SignatureEnvelope,
+    pub signed_bytes: Vec<u8>,
 }
 
 fn parallel_map_ordered<T, U>(items: &[T], operation: impl Fn(&T) -> U + Sync) -> Vec<U>
@@ -961,13 +1028,74 @@ where
     })
 }
 
+fn validate_effective_content_bounds(
+    canonical_ref: &str,
+    source: &str,
+    composed: &Value,
+    max_source_bytes: usize,
+    max_composed_bytes: usize,
+) -> Result<(), EngineError> {
+    let refused = |reason: String| EngineError::EffectiveItemCompositionFailed {
+        canonical_ref: canonical_ref.to_owned(),
+        reason,
+    };
+    if max_source_bytes == 0 || max_composed_bytes == 0 {
+        return Err(refused(
+            "effective content byte bounds must be nonzero".into(),
+        ));
+    }
+    if source.len() > max_source_bytes {
+        return Err(refused(format!(
+            "resolved source exceeds {max_source_bytes}-byte content bound"
+        )));
+    }
+    let composed_bytes = serde_json::to_vec(composed)
+        .map_err(|error| refused(format!("measure composed content: {error}")))?;
+    if composed_bytes.len() > max_composed_bytes {
+        return Err(refused(format!(
+            "composed JSON exceeds {max_composed_bytes}-byte content bound"
+        )));
+    }
+    Ok(())
+}
+
 impl CheckedEngineGeneration<'_> {
     /// Exact process-local identity of the immutable admitted engine/bundle
     /// generation held by this guard. Downstream coherent-batch consumers
     /// retain this value; they must not reconstruct it from item payloads or
     /// registered paths.
+    /// The label the node's trust registry records for a signer, when it
+    /// records the signer at all. A display name only: it grants nothing.
+    pub fn signer_label(&self, fingerprint: &str) -> Option<String> {
+        self.engine.signer_label(fingerprint)
+    }
+
+    /// See [`Engine::installed_bundle_config_ids`].
+    pub fn installed_bundle_config_ids(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
+        self.engine.installed_bundle_config_ids(prefix)
+    }
+
+    /// See [`Engine::load_trusted_bundle_config`].
+    pub fn load_trusted_bundle_config(
+        &self,
+        relative_path: &str,
+    ) -> Result<Option<Value>, EngineError> {
+        self.engine.load_trusted_bundle_config(relative_path)
+    }
+
     pub fn request_engine_generation_identity(&self) -> &str {
         &self.request_engine_generation_identity
+    }
+
+    /// Verify every installed bundle now, in addition to the verification
+    /// before and after this guarded operation. An operation that commits an
+    /// effect it cannot undo calls this immediately before the commit, so the
+    /// effect is never committed on a generation last verified before the
+    /// operation's own reads.
+    pub fn verify_before_commit(&self) -> Result<(), EngineError> {
+        self.engine
+            .isolation_generation
+            .ensure_registered_generation_current()
     }
 
     pub fn resolve(
@@ -985,6 +1113,48 @@ impl CheckedEngineGeneration<'_> {
         self.engine.effective_item_current(request)
     }
 
+    /// Resolve once and return the effective item together with the verified
+    /// resolution it was projected from, for inspection that reads the signed
+    /// bytes (such as authorship) without resolving the item a second time.
+    pub fn effective_item_with_resolution(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<(EffectiveItem, crate::resolution::ResolutionOutput), EngineError> {
+        let output = self.engine.effective_resolution_output_current(&request)?;
+        let item = self
+            .engine
+            .effective_item_from_output(request, output.clone())?;
+        Ok((item, output))
+    }
+
+    /// Resolve once under this checked generation, then bound the exact resolved
+    /// root body and composed JSON before a consumer decodes its own schema.
+    /// Diagnostic source paths are never opened to measure content. The bounds
+    /// limit what is decoded after resolution; resolution has already read the
+    /// body.
+    pub fn effective_item_with_content_bounds(
+        &self,
+        request: EffectiveItemRequest,
+        project_content: Option<&dyn crate::project_content::AuthoritativeProjectContent>,
+        max_source_bytes: usize,
+        max_composed_bytes: usize,
+    ) -> Result<EffectiveItem, EngineError> {
+        let output = match project_content {
+            Some(content) => self
+                .engine
+                .effective_resolution_output_under_project_authority_current(&request, content)?,
+            None => self.engine.effective_resolution_output_current(&request)?,
+        };
+        validate_effective_content_bounds(
+            &request.item_ref.to_string(),
+            &output.root.raw_content,
+            &output.composed.composed,
+            max_source_bytes,
+            max_composed_bytes,
+        )?;
+        self.engine.effective_item_from_output(request, output)
+    }
+
     /// Resolve a complete execution definition while this exact installed
     /// Bundle generation remains held. Multi-item authority joins must use
     /// this guard instead of independently resolving each current item.
@@ -993,6 +1163,186 @@ impl CheckedEngineGeneration<'_> {
         request: EffectiveItemRequest,
     ) -> Result<crate::resolution::ResolutionOutput, EngineError> {
         self.engine.effective_resolution_output_current(&request)
+    }
+
+    /// Re-resolve a verified Bundle definition's root, ancestors and
+    /// references under this exact checked generation, then capture each
+    /// whole signed envelope. Every re-resolved authority and byte digest must
+    /// agree with the already-admitted effective resolution. This deliberately
+    /// never opens `ResolvedAncestor::source_path`, which is diagnostic only.
+    pub fn capture_verified_signed_bundle_sources(
+        &self,
+        resolution: &crate::resolution::ResolutionOutput,
+    ) -> Result<Vec<CapturedSignedBundleItemSource>, EngineError> {
+        const MAX_SOURCE_FILES: usize = 64;
+        const MAX_SOURCE_FILE_BYTES: usize = 256 * 1024;
+        const MAX_SOURCE_TOTAL_BYTES: usize = 1024 * 1024;
+
+        let roots = self.engine.resolution_roots(None);
+        let mut captured = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total = 0usize;
+        for ancestor in std::iter::once(&resolution.root)
+            .chain(resolution.ancestors.iter())
+            .chain(resolution.referenced_items.iter())
+        {
+            let crate::contracts::ItemSourceRoot::Bundle { name: bundle_name } =
+                &ancestor.source_root
+            else {
+                return Err(EngineError::Internal(
+                    "materialization source includes a non-Bundle item".into(),
+                ));
+            };
+            if ancestor.source_space != crate::contracts::ItemSpace::Bundle
+                || ancestor.trust_class != crate::resolution::TrustClass::TrustedBundle
+            {
+                return Err(EngineError::Internal(
+                    "materialization source is not trusted Bundle content".into(),
+                ));
+            }
+            let signer = ancestor.signer_fingerprint.as_deref().ok_or_else(|| {
+                EngineError::Internal("materialization source has no verified signer".into())
+            })?;
+            if ancestor.raw_content.len() > MAX_SOURCE_FILE_BYTES {
+                return Err(EngineError::Internal(
+                    "materialization source exceeds its per-item byte bound".into(),
+                ));
+            }
+            let key = (
+                ancestor.resolved_ref.clone(),
+                ancestor.source_content_digest.clone(),
+                bundle_name.clone(),
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            if captured.len() >= MAX_SOURCE_FILES {
+                return Err(EngineError::Internal(
+                    "materialization source exceeds its item-count bound".into(),
+                ));
+            }
+            let canonical = crate::canonical_ref::CanonicalRef::parse(&ancestor.resolved_ref)?;
+            if canonical.to_string() != ancestor.resolved_ref || canonical.suffix.is_some() {
+                return Err(EngineError::Internal(
+                    "materialization source ref is not canonical and unsuffixed".into(),
+                ));
+            }
+            let raw = crate::resolution::context::load_item_raw(
+                &self.engine.kinds,
+                &roots,
+                &self.engine.node_trust_store,
+                &canonical,
+                &ancestor.resolved_ref,
+                crate::resolution::ResolutionStepName::PipelineInit,
+                None,
+            )
+            .map_err(|error| {
+                EngineError::Internal(format!("recapture signed materialization source: {error}"))
+            })?;
+            if raw.source_space != ancestor.source_space
+                || raw.source_root != ancestor.source_root
+                || raw.trust_class != ancestor.trust_class
+                || raw.signer_fingerprint.as_deref() != Some(signer)
+                || raw.source_content_digest != ancestor.source_content_digest
+                || raw.raw_content_digest != ancestor.raw_content_digest
+                || raw.raw_content != ancestor.raw_content
+            {
+                return Err(EngineError::Internal(
+                    "signed materialization source changed under checked generation".into(),
+                ));
+            }
+            let (strict_raw, strict_header) =
+                lillux::signature::strip_canonical_signature_with_envelope(
+                    &raw.content,
+                    &raw.signature_envelope.prefix,
+                    raw.signature_envelope.suffix.as_deref(),
+                    raw.signature_envelope.after_shebang,
+                )
+                .map_err(|error| {
+                    EngineError::Internal(format!(
+                        "materialization source signature envelope is not canonical: {error:#}"
+                    ))
+                })?;
+            if strict_raw != raw.raw_content
+                || strict_header
+                    .as_ref()
+                    .map(|header| header.signer_fingerprint.as_str())
+                    != Some(signer)
+            {
+                return Err(EngineError::Internal(
+                    "materialization source signature differs from checked resolution".into(),
+                ));
+            }
+            let bytes = raw.content.into_bytes();
+            total = total.checked_add(bytes.len()).ok_or_else(|| {
+                EngineError::Internal("materialization source byte count overflow".into())
+            })?;
+            if bytes.len() > MAX_SOURCE_FILE_BYTES || total > MAX_SOURCE_TOTAL_BYTES {
+                return Err(EngineError::Internal(
+                    "materialization signed-source closure exceeds its byte bound".into(),
+                ));
+            }
+            captured.push(CapturedSignedBundleItemSource {
+                resolved_ref: ancestor.resolved_ref.clone(),
+                source_root: ancestor.source_root.clone(),
+                signer_fingerprint: signer.to_owned(),
+                source_content_digest: ancestor.source_content_digest.clone(),
+                raw_content_digest: ancestor.raw_content_digest.clone(),
+                signature_envelope: raw.signature_envelope,
+                signed_bytes: bytes,
+            });
+        }
+        captured.sort_by(|left, right| {
+            left.resolved_ref
+                .cmp(&right.resolved_ref)
+                .then(left.source_content_digest.cmp(&right.source_content_digest))
+                .then_with(|| match (&left.source_root, &right.source_root) {
+                    (
+                        crate::contracts::ItemSourceRoot::Bundle { name: left },
+                        crate::contracts::ItemSourceRoot::Bundle { name: right },
+                    ) => left.cmp(right),
+                    _ => std::cmp::Ordering::Equal,
+                })
+        });
+        Ok(captured)
+    }
+
+    /// Retain the exact signed source manifest of each Bundle that supplied a
+    /// captured recipe item. These manifests are separate from item envelopes
+    /// and must be linked by the eventual durable source evidence.
+    pub fn capture_verified_source_bundle_manifests(
+        &self,
+        sources: &[CapturedSignedBundleItemSource],
+    ) -> Result<Vec<crate::plan_builder::CapturedSignedBundleManifest>, EngineError> {
+        let mut names = std::collections::BTreeSet::new();
+        for source in sources {
+            let crate::contracts::ItemSourceRoot::Bundle { name } = &source.source_root else {
+                return Err(EngineError::Internal(
+                    "materialization source has no registered Bundle root".into(),
+                ));
+            };
+            names.insert(name.clone());
+        }
+        if names.is_empty() || names.len() > 8 {
+            return Err(EngineError::Internal(
+                "materialization Bundle manifest count is invalid".into(),
+            ));
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let root = self.engine.registered_bundle_root(&name).ok_or_else(|| {
+                    EngineError::Internal(format!(
+                        "materialization source Bundle {name:?} has no registered root"
+                    ))
+                })?;
+                crate::plan_builder::capture_signed_bundle_source_manifest(
+                    root,
+                    &name,
+                    &self.engine.node_trust_store,
+                )
+            })
+            .collect()
     }
 
     pub fn effective_item_under_project_authority(
@@ -1053,6 +1403,7 @@ impl CheckedEngineGeneration<'_> {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.engine.build_plan_current(
             ctx,
@@ -1061,6 +1412,7 @@ impl CheckedEngineGeneration<'_> {
             hints,
             sealed_content,
             filesystem_authority_ceiling,
+            selected_protocol,
         )
     }
 
@@ -1072,7 +1424,8 @@ impl CheckedEngineGeneration<'_> {
         item_refs: &[CanonicalRef],
     ) -> Vec<Result<ResolvedItem, EngineError>> {
         parallel_map_ordered(item_refs, |item_ref| {
-            self.engine.resolve_current(ctx, item_ref)
+            self.verified
+                .cover_current_thread(|| self.engine.resolve_current(ctx, item_ref))
         })
     }
 
@@ -1083,7 +1436,8 @@ impl CheckedEngineGeneration<'_> {
         requests: &[EffectiveItemRequest],
     ) -> Vec<Result<EffectiveItem, EngineError>> {
         parallel_map_ordered(requests, |request| {
-            self.engine.effective_item_current(request.clone())
+            self.verified
+                .cover_current_thread(|| self.engine.effective_item_current(request.clone()))
         })
     }
 
@@ -1115,7 +1469,7 @@ fn logical_bundle_compile_subject(
 ) -> Result<(PlanContext, VerifiedItem), EngineError> {
     ctx.subject_resolution_authority
         .validate_for_project_context(&ctx.project_context)
-        .map_err(|error| EngineError::Internal(error.to_string()))?;
+        .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
 
     let caller_ref = &item.resolved.canonical_ref;
     if caller_ref.suffix.is_some()
@@ -1217,8 +1571,6 @@ impl Engine {
             isolation_generation: std::sync::Arc::new(
                 crate::isolation::IsolationRuntime::disabled_for_authoring(),
             ),
-            request_trust_base: None,
-            request_trust_overlay_identity: None,
             parser_overlay_cache: std::sync::Arc::new(
                 crate::parser_overlay_cache::ParserOverlayCache::default(),
             ),
@@ -1247,11 +1599,141 @@ impl Engine {
     /// Return the exact retained content root for a named bundle in this
     /// engine generation. Callers must obtain `name` from typed resolution
     /// provenance; a matching source pathname is not authority.
+    /// Load one config file from installed bundles only and verify it as
+    /// trusted. `relative_path` is the path under a bundle's `config`
+    /// directory. The resolution roots carry no project, so a project file
+    /// of the same path is never a candidate. `Ok(None)` means no installed
+    /// bundle ships the file.
+    pub fn load_trusted_bundle_config(
+        &self,
+        relative_path: &str,
+    ) -> Result<Option<Value>, EngineError> {
+        use crate::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
+
+        let roots = self.resolution_roots(None);
+        let load_context = ConfigLoadContext {
+            roots: &roots,
+            parsers: &self.parser_dispatcher,
+            kinds: &self.kinds,
+            trust_store: &self.trust_store,
+            project_authority: None,
+        };
+        let resolved = crate::config_loading::resolve_config_spec(
+            &ConfigSpec {
+                path: relative_path.to_string(),
+                mode: ResolveMode::FirstMatch,
+            },
+            &load_context,
+        )?;
+        let Some(layer) = resolved.layers.first() else {
+            return Ok(None);
+        };
+        crate::config_loading::load_and_verify_trusted_config_file(&layer.path, &load_context)
+            .map(Some)
+    }
+
+    /// The ids of the Configs that installed bundles ship under `prefix`
+    /// (a bare-id prefix such as `ryeos/core/records/`), sorted. Only
+    /// installed bundles are listed, never a project, and listing verifies
+    /// nothing: a caller loads each id through
+    /// [`Self::load_trusted_bundle_config`], which does.
+    pub fn installed_bundle_config_ids(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
+        let Some(schema) = self.kinds.get("config") else {
+            return Ok(Vec::new());
+        };
+        let roots = self.resolution_roots(None);
+        let mut ids: Vec<String> =
+            crate::item_resolution::try_enumerate_kind_refs(&roots, schema, "config")?
+                .into_iter()
+                .map(|item| item.bare_id)
+                .filter(|id| id.starts_with(prefix))
+                .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// The label the node's trust registry records for a signer, when it
+    /// records the signer at all. A display name only: it grants nothing.
+    pub fn signer_label(&self, fingerprint: &str) -> Option<String> {
+        self.trust_store
+            .signer(fingerprint)
+            .map(|record| record.label.clone())
+            .or_else(|| {
+                self.trust_store
+                    .get(fingerprint)
+                    .and_then(|signer| signer.label.clone())
+            })
+            .filter(|label| !label.is_empty())
+    }
+
     pub fn registered_bundle_root(&self, name: &str) -> Option<&std::path::Path> {
         self.registered_bundle_roots
             .iter()
             .find(|bundle| bundle.name == name)
             .map(|bundle| bundle.canonical_root.as_path())
+    }
+
+    /// The installed bundle that reserves `id` as a bundle identity: the
+    /// bundle named `id`, or one whose declared owned namespaces start at the
+    /// root segment `id`.
+    pub fn installed_bundle_reserving_id(&self, id: &str) -> Option<&str> {
+        self.registered_bundle_roots
+            .iter()
+            .find(|bundle| {
+                bundle.name == id
+                    || bundle
+                        .owned_namespaces
+                        .iter()
+                        .any(|namespace| namespace.split('/').next() == Some(id))
+            })
+            .map(|bundle| bundle.name.as_str())
+    }
+
+    /// Return the name of the registered bundle whose exact canonical content
+    /// root is `canonical_root`. Only an exact registered root matches; a
+    /// path nested inside a bundle, or a directory basename, names nothing.
+    pub fn registered_bundle_name_at(&self, canonical_root: &std::path::Path) -> Option<&str> {
+        let mut matches = self
+            .registered_bundle_roots
+            .iter()
+            .filter(|bundle| bundle.canonical_root == canonical_root);
+        let bundle = matches.next()?;
+        match matches.next() {
+            Some(_) => None,
+            None => Some(bundle.name.as_str()),
+        }
+    }
+
+    /// Derive an engine whose item resolution uses the named registered
+    /// bundle as `selection` describes, leaving every other input of this
+    /// engine unchanged. The derived engine reports its own generation
+    /// identity (the identity covers the ordered registered roots) and starts
+    /// with empty request caches, so nothing resolved under one bundle set is
+    /// served under another.
+    ///
+    /// The derived engine answers "which item does this bundle ship" for one
+    /// ref; it cannot carry a run, whose later resolutions need every
+    /// registered bundle. An attestation that records the restriction, so a
+    /// normal-order engine could admit and later revalidate the restricted
+    /// item, is not implemented.
+    pub fn with_registered_bundle_selection(
+        &self,
+        name: &str,
+        selection: crate::item_resolution::RegisteredBundleSelection,
+    ) -> Result<Self, EngineError> {
+        let registered = crate::item_resolution::select_registered_bundle(
+            &self.registered_bundle_roots,
+            name,
+            selection,
+        )?;
+        let mut derived = self.clone();
+        derived.registered_bundle_roots = registered;
+        derived.parser_overlay_cache =
+            std::sync::Arc::new(crate::parser_overlay_cache::ParserOverlayCache::default());
+        derived.immutable_request_snapshot_cache =
+            Arc::new(Mutex::new(ImmutableRequestSnapshotCache::default()));
+        Ok(derived)
     }
 
     /// Resolve one exact publisher-owned Config from a retained project
@@ -1339,6 +1821,15 @@ impl Engine {
     /// Run a coherent read batch against one verified installed-bundle
     /// generation. Supported bundle mutations are excluded for the duration;
     /// concurrent read batches remain independent.
+    ///
+    /// The generation is verified once before `operation` and once after it,
+    /// and a failed after-verification refuses the result. Guarded engine
+    /// calls and handler subprocess launches that `operation` makes for the
+    /// same generation commit nothing themselves, are covered by those two
+    /// verifications and do not verify again. A guarded call nested inside
+    /// another for the same generation therefore adds none; the outermost
+    /// call keeps both of its own. Launch compilation for workloads and
+    /// process-scope planning and allocation still verify for themselves.
     pub fn with_checked_bundle_generation<T, E>(
         &self,
         operation: impl FnOnce(&CheckedEngineGeneration<'_>) -> Result<T, E>,
@@ -1351,23 +1842,18 @@ impl Engine {
             .begin_registered_generation_operation()
             .map_err(E::from)?;
         self.isolation_generation
-            .ensure_registered_generation_current()
-            .map_err(E::from)?;
-        let generation = CheckedEngineGeneration {
-            engine: self,
-            request_engine_generation_identity: self.request_engine_generation_identity(),
-        };
-        let value = operation(&generation)?;
-        self.isolation_generation
-            .ensure_registered_generation_current()
-            .map_err(E::from)?;
-        Ok(value)
+            .with_verified_generation(|verified| {
+                let generation = CheckedEngineGeneration {
+                    engine: self,
+                    request_engine_generation_identity: self.request_engine_generation_identity(),
+                    verified,
+                };
+                operation(&generation)
+            })
     }
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
         self.trust_store = trust_store;
-        self.request_trust_base = None;
-        self.request_trust_overlay_identity = None;
         self
     }
 
@@ -1376,56 +1862,10 @@ impl Engine {
         self
     }
 
-    /// Derive a project-scoped engine from this already-admitted node
-    /// generation.
-    ///
-    /// Installed schemas, handlers, runtimes, protocols, host bindings, and
-    /// the isolation generation are immutable for a daemon generation and are
-    /// cloned from the admitted engine. Only item trust is rebuilt from the
-    /// pinned project root plus an optional caller-scoped overlay. This avoids
-    /// re-admitting node executors while serving a request and guarantees the
-    /// project engine cannot observe a different installed-bundle generation.
-    pub fn for_project_root(
-        &self,
-        project_root: &Path,
-        trust_overlay: Option<&TrustStore>,
-    ) -> Result<Self, EngineError> {
-        let mut request_trust_base = self.node_trust_store.clone();
-        if let Some(overlay) = trust_overlay {
-            request_trust_base.extend_from(overlay);
-        }
-        let trust_store = request_trust_base
-            .with_project_keys(project_root)?
-            .into_owned();
-        let mut engine = self.clone();
-        engine.trust_store = trust_store;
-        engine.request_trust_base = Some(request_trust_base);
-        engine.request_trust_overlay_identity = trust_overlay.map(TrustStore::fingerprint);
-        Ok(engine)
-    }
-
-    fn effective_trust_store(
-        &self,
-        project_root: Option<&Path>,
-    ) -> Result<Cow<'_, TrustStore>, EngineError> {
-        match project_root {
-            Some(root) => {
-                let base = self
-                    .request_trust_base
-                    .as_ref()
-                    .unwrap_or(&self.trust_store);
-                Ok(base.with_project_keys(root)?)
-            }
-            // A project-derived request Engine's `trust_store` is the merged
-            // project view. A projectless lookup must fall back to its pinned
-            // request base (node trust plus any caller-scoped overlay), never
-            // carry local project keys into Bundle authority.
-            None => Ok(Cow::Borrowed(
-                self.request_trust_base
-                    .as_ref()
-                    .unwrap_or(&self.trust_store),
-            )),
-        }
+    /// Item trust for a request. Trust is node state: it never depends on
+    /// the project, so every request sees the node's signer registry.
+    fn effective_trust_store(&self) -> &TrustStore {
+        &self.trust_store
     }
 
     /// Reconstruct only the current trust-policy view for an already-admitted
@@ -1433,59 +1873,18 @@ impl Engine {
     ///
     /// Recovery consumes sealed parser/kind/runtime semantics and must not
     /// rebuild a complete request snapshot from today's registries. This
-    /// method therefore reloads only operator/project signer authority. For a
-    /// content-addressed project, project keys come from the exact admitted
-    /// materialization rather than its disposable pathname.
+    /// method therefore reloads only the node's signer authority, and still
+    /// validates that the subject resolution authority matches the root.
     pub fn effective_trust_store_for_current_policy(
         &self,
         project_root: Option<&Path>,
         subject_resolution_authority: &SubjectResolutionAuthority,
-        materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
     ) -> Result<TrustStore, EngineError> {
         self.checked_bundle_generation(|| {
             subject_resolution_authority
                 .validate_for_materialized_root(project_root)
-                .map_err(|error| EngineError::Internal(error.to_string()))?;
-            match subject_resolution_authority.operational_generation() {
-                Some(generation) => {
-                    let root = project_root.ok_or_else(|| {
-                        EngineError::Internal(
-                            "content-addressed trust policy has no project root".to_string(),
-                        )
-                    })?;
-                    let materialization = materialization.ok_or_else(|| {
-                        EngineError::Internal(
-                            "content-addressed trust policy has no admitted materialization"
-                                .to_string(),
-                        )
-                    })?;
-                    if materialization.snapshot_hash() != generation
-                        || !materialization
-                            .owns_path(root)
-                            .map_err(|error| EngineError::Internal(error.to_string()))?
-                    {
-                        return Err(EngineError::Internal(
-                            "content-addressed trust policy materialization contradicts its authority"
-                                .to_string(),
-                        ));
-                    }
-                    let trust_base = self
-                        .request_trust_base
-                        .as_ref()
-                        .unwrap_or(&self.trust_store);
-                    trust_base.with_project_keys_from_content(materialization)
-                }
-                None => {
-                    if materialization.is_some() {
-                        return Err(EngineError::Internal(
-                            "non-content-addressed trust policy received a pinned materialization"
-                                .to_string(),
-                        ));
-                    }
-                    self.effective_trust_store(project_root)
-                        .map(Cow::into_owned)
-                }
-            }
+                .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
+            Ok(self.effective_trust_store().snapshot())
         })
     }
 
@@ -1505,6 +1904,25 @@ impl Engine {
         })
     }
 
+    /// Capture the request snapshot of a live project through an exact
+    /// owner-bearing project-content authority: project trust keys and the
+    /// parser overlay are read from `project_content`, never by reopening
+    /// `project_root`.
+    pub fn effective_request_snapshot_under_project_authority(
+        &self,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<EffectiveRequestSnapshot, EngineError> {
+        self.checked_bundle_generation(|| {
+            self.effective_request_snapshot_from_project_content(
+                project_root,
+                project_content,
+                subject_resolution_authority,
+            )
+        })
+    }
+
     /// Reuse the complete immutable request snapshot admitted through the
     /// opaque state proof. Parser descriptors are parsed values and dispatch
     /// through the installed handler registry; they retain no disposable
@@ -1520,7 +1938,7 @@ impl Engine {
             authority
                 .subject_resolution_authority
                 .validate_for_materialized_root(Some(project_root))
-                .map_err(|error| EngineError::Internal(error.to_string()))?;
+                .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
             if authority.request_engine_generation_identity
                 != self.request_engine_generation_identity()
             {
@@ -1546,25 +1964,13 @@ impl Engine {
         &self,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<String, EngineError> {
-        let base = self
-            .request_trust_base
-            .as_ref()
-            .unwrap_or(&self.trust_store)
-            .fingerprint();
+        let base = self.trust_store.fingerprint();
         let authority = serde_json::to_string(subject_resolution_authority).map_err(|error| {
             EngineError::Internal(format!(
                 "serialize admitted request subject authority: {error}"
             ))
         })?;
-        Ok([
-            self.request_engine_generation_identity(),
-            authority,
-            base,
-            self.request_trust_overlay_identity
-                .clone()
-                .unwrap_or_else(|| "-".to_string()),
-        ]
-        .join("\u{1f}"))
+        Ok([self.request_engine_generation_identity(), authority, base].join("\u{1f}"))
     }
 
     /// Admit one immutable request snapshot into the warm authority cache.
@@ -1587,7 +1993,7 @@ impl Engine {
         if materialization.snapshot_hash() != operational_generation
             || !materialization
                 .owns_path(project_root)
-                .map_err(|error| EngineError::Internal(error.to_string()))?
+                .map_err(|error| EngineError::Internal(format!("{error:#}")))?
         {
             return Err(EngineError::Internal(
                 "pinned request authority proof contradicts its snapshot or project root"
@@ -1780,7 +2186,7 @@ impl Engine {
     ) -> Result<EffectiveRequestAuthoritySnapshot, EngineError> {
         subject_resolution_authority
             .validate_for_materialized_root(project_root)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         let snapshot =
             self.effective_request_snapshot_current(project_root, subject_resolution_authority)?;
         Ok(authority_snapshot_from_request(&snapshot))
@@ -1793,8 +2199,8 @@ impl Engine {
     ) -> Result<EffectiveRequestSnapshot, EngineError> {
         subject_resolution_authority
             .validate_for_materialized_root(project_root)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
-        let trust_store = self.effective_trust_store(project_root)?.into_owned();
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
+        let trust_store = self.effective_trust_store().snapshot();
         let parser_dispatcher =
             self.effective_parser_dispatcher_with_trust(project_root, &trust_store)?;
         let registry_fingerprint =
@@ -1822,13 +2228,9 @@ impl Engine {
     ) -> Result<EffectiveRequestSnapshot, EngineError> {
         subject_resolution_authority
             .validate_for_materialized_root(Some(materialization.path()))
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
 
-        let trust_base = self
-            .request_trust_base
-            .as_ref()
-            .unwrap_or(&self.trust_store);
-        let trust_store = trust_base.with_project_keys_from_content(materialization)?;
+        let trust_store = self.trust_store.snapshot();
         let parser_tools = self
             .parser_dispatcher
             .parser_tools
@@ -1856,12 +2258,8 @@ impl Engine {
     ) -> Result<EffectiveRequestSnapshot, EngineError> {
         subject_resolution_authority
             .validate_for_materialized_root(Some(project_root))
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
-        let trust_base = self
-            .request_trust_base
-            .as_ref()
-            .unwrap_or(&self.trust_store);
-        let trust_store = trust_base.with_project_keys_from_content(project_content)?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
+        let trust_store = self.trust_store.snapshot();
         let parser_tools = self
             .parser_dispatcher
             .parser_tools
@@ -1881,20 +2279,9 @@ impl Engine {
     }
 
     fn effective_trust_identity(&self, effective: &TrustStore) -> String {
-        let base = self
-            .request_trust_base
-            .as_ref()
-            .unwrap_or(&self.trust_store);
         let mut identity = Vec::new();
         append_identity_field(&mut identity, effective.fingerprint().as_bytes());
-        append_identity_field(&mut identity, base.fingerprint().as_bytes());
-        match &self.request_trust_overlay_identity {
-            Some(overlay) => {
-                identity.push(1);
-                append_identity_field(&mut identity, overlay.as_bytes());
-            }
-            None => identity.push(0),
-        }
+        append_identity_field(&mut identity, self.trust_store.fingerprint().as_bytes());
         lillux::cas::sha256_hex(&identity)
     }
 
@@ -1959,11 +2346,12 @@ impl Engine {
         authority
             .admits(target)
             .map_err(|error| EngineError::IsolationPolicyRefused {
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             })?;
-        if let Some(target) = target {
-            if target.requests_resources() {
-                self.execution_resource_policy
+        if let Some(target) = target
+            && target.requests_resources()
+        {
+            self.execution_resource_policy
                     .as_ref()
                     .ok_or_else(|| EngineError::IsolationPolicyRefused {
                         reason: "node execution resource authority is disabled for a resource-bearing target"
@@ -1971,9 +2359,8 @@ impl Engine {
                     })?
                     .admit(target)
                     .map_err(|error| EngineError::IsolationPolicyRefused {
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     })?;
-            }
         }
         Ok(())
     }
@@ -1981,7 +2368,7 @@ impl Engine {
     fn admit_plan_resources(&self, plan: ExecutionPlan) -> Result<ExecutionPlan, EngineError> {
         plan.validate_endpoint_for_planning().map_err(|error| {
             EngineError::IsolationPolicyRefused {
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             }
         })?;
         self.admit_execution_target(
@@ -2007,7 +2394,7 @@ impl Engine {
     ) -> Result<ResolvedItem, EngineError> {
         ctx.subject_resolution_authority
             .validate_for_project_context(&ctx.project_context)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         // Materialize project context
         let project_root = match &ctx.project_context {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
@@ -2167,6 +2554,7 @@ impl Engine {
         );
 
         let resolved = ResolvedItem {
+            logical_project_root: ctx.effective_logical_project_root(project_root.as_deref()),
             canonical_ref: item_ref.clone(),
             kind: item_ref.kind.clone(),
             source_path: result.winner_path,
@@ -2232,6 +2620,158 @@ impl Engine {
                 &source,
                 &request_authority,
             )
+        })
+    }
+
+    /// Resolve, verify, and attest one live-project subject through an exact
+    /// owner-bearing project-content authority. Discovery, source bytes,
+    /// project trust and parser overlay all come from `project_content`; the
+    /// planning context must name `project_root` as its live project.
+    pub fn resolve_attested_under_project_authority(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<VerifiedArtifactAttestation, EngineError> {
+        self.checked_bundle_generation(|| {
+            require_live_project_context(ctx, project_root)?;
+            let request_snapshot = self.effective_request_snapshot_from_project_content(
+                project_root,
+                project_content,
+                &ctx.subject_resolution_authority,
+            )?;
+            let (resolved, source) = self.resolve_current_with_request_snapshot_and_source(
+                ctx,
+                item_ref,
+                Some(project_root.to_path_buf()),
+                &request_snapshot,
+                Some(project_content),
+            )?;
+            let request_authority = authority_snapshot_from_request(&request_snapshot);
+            let verified_subject = self.verify_static_cached_with_source_under_authority(
+                ctx,
+                resolved,
+                &source,
+                &request_authority,
+            )?;
+            let subject_digest = self.attested_subject_digest(
+                &verified_subject.resolved,
+                Some(project_root),
+                &ctx.subject_resolution_authority,
+            )?;
+            Ok(VerifiedArtifactAttestation {
+                verified_subject: Arc::new(verified_subject),
+                source_bytes: Arc::from(source.into_bytes()),
+                subject_digest,
+                engine_generation_identity: self.request_engine_generation_identity(),
+                trust_identity: request_authority.effective_trust_identity,
+                request_registry_fingerprint: request_authority.registry_fingerprint,
+                subject_resolution_authority: ctx.subject_resolution_authority.clone(),
+                admitted_content_generation: None,
+                resolution_closure_digest: None,
+            })
+        })
+    }
+
+    /// Run the canonical resolution pipeline for an attested live-project root
+    /// through the same project-content authority that attested it, and bind
+    /// the exact positive/negative closure to that attestation. The root is
+    /// re-resolved through `project_content` first, so a source or precedence
+    /// change since attestation refuses rather than binding stale evidence.
+    pub fn resolve_verified_resolution_closure_under_project_authority(
+        &self,
+        ctx: &PlanContext,
+        root_attestation: &VerifiedArtifactAttestation,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<VerifiedResolutionClosure, EngineError> {
+        self.checked_bundle_generation(|| {
+            require_live_project_context(ctx, project_root)?;
+            let subject_resolution_authority = &ctx.subject_resolution_authority;
+            let request_snapshot = self.effective_request_snapshot_from_project_content(
+                project_root,
+                project_content,
+                subject_resolution_authority,
+            )?;
+            let request_authority = authority_snapshot_from_request(&request_snapshot);
+            let canonical_ref = &root_attestation.verified_subject.resolved.canonical_ref;
+            let (current, _source) = self.resolve_current_with_request_snapshot_and_source(
+                ctx,
+                canonical_ref,
+                Some(project_root.to_path_buf()),
+                &request_snapshot,
+                Some(project_content),
+            )?;
+            if self.attested_subject_digest(
+                &current,
+                Some(project_root),
+                subject_resolution_authority,
+            )? != root_attestation.subject_digest
+            {
+                return Err(EngineError::Internal(
+                    "verified artifact attestation source or resolution precedence changed before admission"
+                        .to_string(),
+                ));
+            }
+            let verified_root = self.consume_verified_attestation_under_authority(
+                ctx,
+                root_attestation,
+                subject_resolution_authority,
+                &request_authority,
+                false,
+            )?;
+            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let (output, probed_absent) =
+                crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
+                    &verified_root.resolved.canonical_ref,
+                    &self.kinds,
+                    &request_snapshot.parser_dispatcher,
+                    &roots,
+                    &request_snapshot.trust_store,
+                    &self.composers,
+                    project_root,
+                    project_content,
+                )
+                .map_err(|error| {
+                    resolution_error_to_engine(error, &verified_root.resolved.canonical_ref)
+                })?;
+            if output.root.resolved_ref != verified_root.resolved.canonical_ref.to_string()
+                || output.root.source_space != verified_root.resolved.source_space
+                || output.root.raw_content_digest != verified_root.resolved.raw_content_digest
+                || output.root.source_content_digest != verified_root.resolved.content_hash
+            {
+                return Err(EngineError::Internal(
+                    "canonical resolution closure root differs from its verified root subject"
+                        .to_string(),
+                ));
+            }
+            let resolution_closure_digest = self.resolution_closure_digest(
+                &output,
+                &probed_absent,
+                Some(project_root),
+                subject_resolution_authority,
+            )?;
+            let attestation = VerifiedArtifactAttestation {
+                verified_subject: root_attestation.verified_subject.clone(),
+                source_bytes: root_attestation.source_bytes.clone(),
+                subject_digest: root_attestation.subject_digest.clone(),
+                engine_generation_identity: root_attestation.engine_generation_identity.clone(),
+                trust_identity: root_attestation.trust_identity.clone(),
+                request_registry_fingerprint: root_attestation
+                    .request_registry_fingerprint
+                    .clone(),
+                subject_resolution_authority: root_attestation
+                    .subject_resolution_authority
+                    .clone(),
+                admitted_content_generation: root_attestation.admitted_content_generation.clone(),
+                resolution_closure_digest: Some(resolution_closure_digest),
+            };
+            Ok(VerifiedResolutionClosure {
+                output,
+                probed_absent,
+                attestation,
+            })
         })
     }
 
@@ -2352,7 +2892,7 @@ impl Engine {
     ) -> Result<VerifiedArtifactAttestation, EngineError> {
         ctx.subject_resolution_authority
             .validate_for_project_context(&ctx.project_context)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         if item.subject_resolution_authority != ctx.subject_resolution_authority {
             return Err(EngineError::Internal(
                 "resolved item carries different subject authority from its planning context"
@@ -2476,7 +3016,7 @@ impl Engine {
     ) -> Result<VerifiedItem, EngineError> {
         expected_subject_resolution_authority
             .validate_for_project_context(&ctx.project_context)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         if &request_authority.subject_resolution_authority != expected_subject_resolution_authority
         {
             return Err(EngineError::Internal(
@@ -2637,7 +3177,11 @@ impl Engine {
             materialized_project_root.as_deref(),
             subject_resolution_authority,
         )?;
-        let roots = self.resolution_roots(materialized_project_root.clone());
+        let roots = self
+            .resolution_roots(materialized_project_root.clone())
+            .with_logical_project_root(
+                ctx.effective_logical_project_root(materialized_project_root.as_deref()),
+            );
         let (output, probed_absent) = crate::resolution::run_resolution_pipeline_with_probes(
             &verified_root.resolved.canonical_ref,
             &self.kinds,
@@ -2697,7 +3241,11 @@ impl Engine {
             &materialized_project_root,
             admitted,
         )?;
-        let roots = self.resolution_roots(Some(materialized_project_root.clone()));
+        let roots = self
+            .resolution_roots(Some(materialized_project_root.clone()))
+            .with_logical_project_root(
+                ctx.effective_logical_project_root(Some(materialized_project_root.as_path())),
+            );
         let project_content = admitted.project_content_for_root(&materialized_project_root)?;
         let (output, probed_absent) =
             crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
@@ -2787,7 +3335,7 @@ impl Engine {
     ) -> Result<VerifiedItem, EngineError> {
         ctx.subject_resolution_authority
             .validate_for_project_context(&ctx.project_context)
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         if item.subject_resolution_authority != ctx.subject_resolution_authority {
             return Err(EngineError::Internal(
                 "resolved item authority differs from verification context".to_string(),
@@ -2830,10 +3378,11 @@ impl Engine {
         }
         let subject_digest = self.resolved_subject_digest(&item, project_root)?;
         let key_material = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "engine_generation_identity": self.request_engine_generation_identity(),
             "trust_identity": &request_authority.effective_trust_identity,
             "subject_digest": subject_digest,
+            "signer_project_root": project_root.map(|root| root.display().to_string()),
         });
         let key = lillux::canonical_json(&key_material)
             .map(|canonical| lillux::sha256_hex(canonical.as_bytes()))
@@ -3328,6 +3877,20 @@ impl Engine {
         self.checked_bundle_generation(|| self.effective_item_current(request))
     }
 
+    /// Resolve once and return the effective item together with the verified
+    /// resolution it was projected from. See
+    /// [`CheckedEngineGeneration::effective_item_with_resolution`].
+    pub fn effective_item_with_resolution(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<(EffectiveItem, crate::resolution::ResolutionOutput), EngineError> {
+        self.checked_bundle_generation(|| {
+            let output = self.effective_resolution_output_current(&request)?;
+            let item = self.effective_item_from_output(request, output.clone())?;
+            Ok((item, output))
+        })
+    }
+
     /// Resolve and compose an exact item closure for a downstream admission
     /// boundary. Unlike [`EffectiveItem`], this retains the complete verified
     /// root/ancestor/reference bytes and provenance required to seal and later
@@ -3353,7 +3916,9 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-        let roots = self.resolution_roots(request.project_root.clone());
+        let roots = self
+            .resolution_roots(request.project_root.clone())
+            .with_logical_project_root(request.effective_logical_project_root());
         let request_snapshot = self.effective_request_snapshot_current(
             request.project_root.as_deref(),
             &request.subject_resolution_authority,
@@ -3386,7 +3951,9 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-        let roots = self.resolution_roots(request.project_root.clone());
+        let roots = self
+            .resolution_roots(request.project_root.clone())
+            .with_logical_project_root(request.effective_logical_project_root());
         let snapshot = self.effective_request_snapshot_from_project_content(
             project_root,
             project_content,
@@ -3483,6 +4050,19 @@ impl Engine {
             });
         }
 
+        let shadows_bundle_item = output.root.source_space == crate::contracts::ItemSpace::Project
+            && self
+                .kinds
+                .get(&request.item_ref.kind)
+                .is_some_and(|schema| {
+                    crate::item_resolution::resolve_item_full(
+                        &self.resolution_roots(None),
+                        schema,
+                        &request.item_ref,
+                    )
+                    .is_ok()
+                });
+
         Ok(EffectiveItem {
             requested_ref: request.item_ref.to_string(),
             canonical_ref: output.root.resolved_ref.clone(),
@@ -3501,6 +4081,7 @@ impl Engine {
             derived: output.composed.derived,
             policy_facts: output.composed.policy_facts,
             diagnostics,
+            shadows_bundle_item,
         })
     }
 
@@ -3521,6 +4102,7 @@ impl Engine {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             self.build_plan_current(
@@ -3530,6 +4112,7 @@ impl Engine {
                 hints,
                 sealed_content,
                 filesystem_authority_ceiling,
+                selected_protocol,
             )
         })
     }
@@ -3542,6 +4125,7 @@ impl Engine {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         crate::scope::check_execution_scope(&ctx.requested_by)?;
 
@@ -3554,7 +4138,9 @@ impl Engine {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
             _ => None,
         };
-        let roots = self.resolution_roots(project_root.clone());
+        let roots = self
+            .resolution_roots(project_root.clone())
+            .with_logical_project_root(ctx.effective_logical_project_root(project_root.as_deref()));
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             &ctx.subject_resolution_authority,
@@ -3574,6 +4160,7 @@ impl Engine {
             node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
             filesystem_authority_ceiling,
+            selected_protocol,
             project_authority: None,
             sealed_content,
         })?;
@@ -3594,6 +4181,7 @@ impl Engine {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
@@ -3601,7 +4189,11 @@ impl Engine {
                 crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
                 _ => None,
             };
-            let roots = self.resolution_roots(project_root.clone());
+            let roots = self
+                .resolution_roots(project_root.clone())
+                .with_logical_project_root(
+                    ctx.effective_logical_project_root(project_root.as_deref()),
+                );
             let request_snapshot = self.effective_request_snapshot_current(
                 project_root.as_deref(),
                 &ctx.subject_resolution_authority,
@@ -3620,6 +4212,7 @@ impl Engine {
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
                 filesystem_authority_ceiling,
+                selected_protocol,
                 project_authority: None,
                 sealed_content,
             })?;
@@ -3630,7 +4223,6 @@ impl Engine {
     /// Compile current captured Bundle source with its retained logical
     /// execution-root coordinate. Program and executor lookup remains
     /// projectless; the logical root only supplies process-path templates.
-    #[allow(clippy::too_many_arguments)]
     pub fn build_bundle_plan_from_captured_root_with_logical_project_root(
         &self,
         ctx: &PlanContext,
@@ -3640,6 +4232,7 @@ impl Engine {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
         logical_project_root: Option<&Path>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.with_checked_bundle_generation(|generation| {
@@ -3667,6 +4260,7 @@ impl Engine {
                     node_trust_store: &self.node_trust_store,
                     host_env: &self.host_env,
                     filesystem_authority_ceiling,
+                    selected_protocol,
                     project_authority: None,
                     sealed_content,
                 },
@@ -3690,6 +4284,7 @@ impl Engine {
         admitted: &AdmittedRequestAuthoritySnapshot,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
@@ -3725,7 +4320,9 @@ impl Engine {
             }
             let request_snapshot =
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
-            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let roots = self
+                .resolution_roots(Some(project_root.to_path_buf()))
+                .with_logical_project_root(ctx.effective_logical_project_root(Some(project_root)));
             let project_content = admitted.project_content_for_root(project_root)?;
             let plan = crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
                 item,
@@ -3741,6 +4338,7 @@ impl Engine {
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
                 filesystem_authority_ceiling,
+                selected_protocol,
                 project_authority: Some((project_root, project_content)),
                 sealed_content,
             })?;
@@ -3761,6 +4359,7 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
+        logical_project_root: Option<PathBuf>,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
@@ -3769,6 +4368,7 @@ impl Engine {
                 root_executor_id,
                 root_kind,
                 project_root,
+                logical_project_root,
                 subject_resolution_authority,
             )
         })
@@ -3781,13 +4381,16 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: &Path,
+        logical_project_root: Option<PathBuf>,
         admitted: &AdmittedRequestAuthoritySnapshot,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
             admitted.validate_root_binding(project_root)?;
             let request_snapshot =
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
-            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let roots = self
+                .resolution_roots(Some(project_root.to_path_buf()))
+                .with_logical_project_root(logical_project_root);
             let project_content = admitted.project_content_for_root(project_root)?;
             crate::plan_builder::resolve_terminal_executor_under_project_authority(
                 root_executor_id,
@@ -3809,9 +4412,12 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
+        logical_project_root: Option<PathBuf>,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
-        let roots = self.resolution_roots(project_root.clone());
+        let roots = self
+            .resolution_roots(project_root.clone())
+            .with_logical_project_root(logical_project_root);
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             subject_resolution_authority,
@@ -3869,6 +4475,44 @@ impl Engine {
         })
     }
 
+    /// Preserve the original expiry through this existing held launch owner.
+    /// This accepts no new process scope or financial/native admission authority.
+    pub fn spawn_plan_with_resources_until(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        selections: &[crate::contracts::ExecutionResourceSelection],
+        devices: Option<&lillux::CharacterDeviceSet>,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::dispatch::spawn_plan_with_resources_until(
+                plan, ctx, selections, devices, deadline,
+            )
+        })
+    }
+
+    /// Carry the original funded window through the existing plan owner.
+    /// This does not mint admission, a financial debit or settlement authority.
+    pub fn spawn_plan_with_original_namespace_occupancy(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        selections: &[crate::contracts::ExecutionResourceSelection],
+        devices: &lillux::CharacterDeviceSet,
+        original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::dispatch::spawn_plan_with_original_namespace_occupancy(
+                plan,
+                ctx,
+                selections,
+                devices,
+                original_window,
+            )
+        })
+    }
+
     /// Spawn through a scope already retained by the caller's durable launch
     /// owner. It is not selected by
     /// executable name, kind, or a fallback after ordinary spawn fails.
@@ -3914,17 +4558,28 @@ impl Engine {
 
     /// Add node-local configuration to launch-config lookup only. Keeping this
     /// separate prevents mutable node state from becoming a general item root.
+    /// Launch-config lookup keeps the logical project of `roots`: a pinned
+    /// launch's project config layers are judged on the project the
+    /// generation stands for, never on its checkout.
     pub fn launch_config_roots(&self, roots: &ResolutionRoots) -> ResolutionRoots {
         let mut ordered = roots.ordered.clone();
         let Some(node_config_root) = &self.node_config_root else {
-            return ResolutionRoots { ordered };
+            return ResolutionRoots {
+                logical_project_root: roots.logical_project_root.clone(),
+                owned_namespaces: roots.owned_namespaces.clone(),
+                ordered,
+            };
         };
         let node_config_ai_root = node_config_root.join(crate::AI_DIR);
         if ordered
             .iter()
             .any(|root| root.ai_root == node_config_ai_root)
         {
-            return ResolutionRoots { ordered };
+            return ResolutionRoots {
+                logical_project_root: roots.logical_project_root.clone(),
+                owned_namespaces: roots.owned_namespaces.clone(),
+                ordered,
+            };
         }
         let position = ordered
             .iter()
@@ -3940,7 +4595,11 @@ impl Engine {
                 content_root: Some(node_config_root.clone()),
             },
         );
-        ResolutionRoots { ordered }
+        ResolutionRoots {
+            logical_project_root: roots.logical_project_root.clone(),
+            owned_namespaces: roots.owned_namespaces.clone(),
+            ordered,
+        }
     }
 
     /// Composite cache fingerprint over the kind registry and the
@@ -4048,16 +4707,12 @@ impl Engine {
 
                 let metadata =
                     crate::parser_overlay_cache::fingerprint_parser_overlay(&overlay_root)?;
-                let base_trust = self
-                    .request_trust_base
-                    .as_ref()
-                    .unwrap_or(&self.trust_store);
+                let base_trust = &self.trust_store;
                 let key = crate::parser_overlay_cache::ParserOverlayCacheKey {
                     project_root: path.to_path_buf(),
                     overlay_fingerprint: metadata.fingerprint,
                     effective_trust_fingerprint: trust_store.fingerprint(),
                     base_trust_fingerprint: base_trust.fingerprint(),
-                    caller_overlay_identity: self.request_trust_overlay_identity.clone(),
                     generation_fingerprint: self.request_engine_generation_identity(),
                 };
                 self.parser_overlay_cache.get_or_build(
@@ -4120,6 +4775,92 @@ mod tests {
     struct CountingGenerationLifeline {
         begins: AtomicUsize,
         checks: AtomicUsize,
+        /// Set by a test to stand for installed bundles that changed.
+        changed: std::sync::atomic::AtomicBool,
+    }
+
+    /// A test engine retaining its own registered generation, with the
+    /// lifeline that counts its verifications.
+    fn engine_with_counted_generation() -> (
+        Engine,
+        std::sync::Arc<CountingGenerationLifeline>,
+        std::sync::Arc<crate::isolation::IsolationRuntime>,
+    ) {
+        let lifeline = std::sync::Arc::new(CountingGenerationLifeline::default());
+        let isolation = std::sync::Arc::new(
+            crate::isolation::IsolationRuntime::disabled_for_authoring()
+                .retain_registered_generation(lifeline.clone(), TrustStore::empty(), vec![]),
+        );
+        let engine = test_engine().with_isolation_generation(isolation.clone());
+        (engine, lifeline, isolation)
+    }
+
+    #[test]
+    fn busy_resolution_step_is_typed_process_creation_busy() {
+        let root = CanonicalRef::parse("tool:hello").unwrap();
+        let error = resolution_error_to_engine(
+            crate::resolution::ResolutionError::StepFailed {
+                step: crate::resolution::ResolutionStepName::PipelineInit,
+                class: crate::resolution::ResolutionFailureClass::ProcessCreationBusy,
+                reason: "composer handler subprocess failed: busy".to_string(),
+            },
+            &root,
+        );
+        assert!(error.is_process_creation_busy(), "{error}");
+        let expected_subject = root.to_string();
+        assert!(
+            matches!(&error, EngineError::ProcessCreationBusy { subject, .. } if *subject == expected_subject),
+            "{error}"
+        );
+        // Every other step failure keeps its composition-failure shape.
+        let other = resolution_error_to_engine(
+            crate::resolution::ResolutionError::StepFailed {
+                step: crate::resolution::ResolutionStepName::PipelineInit,
+                class: crate::resolution::ResolutionFailureClass::DependencyUnavailable,
+                reason: "handler binary missing".to_string(),
+            },
+            &root,
+        );
+        assert!(!other.is_process_creation_busy(), "{other}");
+    }
+
+    #[test]
+    fn effective_content_bounds_measure_exact_utf8_and_serialized_json() {
+        let composed = serde_json::json!({ "text": "é\n" });
+        let bytes = serde_json::to_vec(&composed).unwrap().len();
+        assert!(
+            super::validate_effective_content_bounds("config:test/body", "é", &composed, 2, bytes)
+                .is_ok()
+        );
+        let source_error =
+            super::validate_effective_content_bounds("config:test/body", "é", &composed, 1, bytes)
+                .unwrap_err();
+        assert!(matches!(
+            source_error,
+            EngineError::EffectiveItemCompositionFailed { .. }
+        ));
+        assert!(
+            super::validate_effective_content_bounds(
+                "config:test/body",
+                "é",
+                &composed,
+                2,
+                bytes - 1
+            )
+            .is_err()
+        );
+        for (source_bound, composed_bound) in [(0, 4), (1, 0)] {
+            assert!(
+                super::validate_effective_content_bounds(
+                    "config:test/body",
+                    "",
+                    &serde_json::Value::Null,
+                    source_bound,
+                    composed_bound
+                )
+                .is_err()
+            );
+        }
     }
 
     impl crate::isolation::IsolationGenerationLifeline for CountingGenerationLifeline {
@@ -4130,6 +4871,9 @@ mod tests {
 
         fn ensure_current(&self) -> Result<(), String> {
             self.checks.fetch_add(1, Ordering::SeqCst);
+            if self.changed.load(Ordering::SeqCst) {
+                return Err("installed bundles changed".to_string());
+            }
             Ok(())
         }
     }
@@ -4217,6 +4961,7 @@ formats:
 
     fn test_plan_context() -> PlanContext {
         PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -4252,6 +4997,7 @@ formats:
         )
         .with_trust_store(trust_store)
         .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }]);
@@ -4322,6 +5068,239 @@ formats:
                 .contains("admitted exact trusted Bundle source"),
             "unexpected captured-source mismatch: {mismatch}"
         );
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_runs_the_named_bundle_item_as_trusted_bundle() {
+        let base = tempdir();
+        let early_root = base.join("early");
+        let chosen_root = base.join("chosen");
+        let kinds_dir = tempdir();
+        let trust_store = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).unwrap();
+        let handlers = crate::test_support::load_live_handler_registry();
+        let composers = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+
+        let write_tool = |root: &Path, note: &str| -> PathBuf {
+            let source = format!("# ryeos-tool:\n#   note: {note}\nprint('{note}')\n");
+            let signed = lillux::signature::sign_content(&source, &test_signing_key(), "#", None);
+            let path = root.join(AI_DIR).join("tools/chosen/hook.py");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, signed).unwrap();
+            path
+        };
+        let early_path = write_tool(&early_root, "early");
+        let chosen_path = write_tool(&chosen_root, "chosen");
+        fs::create_dir_all(early_root.join(AI_DIR).join("tools/only_early")).unwrap();
+        let early_only = lillux::signature::sign_content(
+            "# ryeos-tool:\n#   note: early only\nprint('early')\n",
+            &test_signing_key(),
+            "#",
+            None,
+        );
+        fs::write(
+            early_root.join(AI_DIR).join("tools/only_early/tool.py"),
+            early_only,
+        )
+        .unwrap();
+
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        )
+        .with_trust_store(trust_store)
+        .with_node_trust_store(test_trust_store())
+        .with_composers(composers)
+        .with_registered_bundle_roots(vec![
+            crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
+                name: "early".to_owned(),
+                canonical_root: early_root,
+            },
+            crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
+                name: "chosen".to_owned(),
+                canonical_root: chosen_root.clone(),
+            },
+        ]);
+        assert_eq!(
+            engine.registered_bundle_name_at(&chosen_root),
+            Some("chosen")
+        );
+        assert_eq!(
+            engine.registered_bundle_name_at(&chosen_root.join(AI_DIR)),
+            None
+        );
+
+        let ctx = test_plan_context();
+        let hook = CanonicalRef::parse("tool:chosen/hook").unwrap();
+        assert_eq!(engine.resolve(&ctx, &hook).unwrap().source_path, early_path);
+
+        {
+            let selection = crate::item_resolution::RegisteredBundleSelection::Only;
+            let selected = engine
+                .with_registered_bundle_selection("chosen", selection)
+                .unwrap();
+            assert_ne!(
+                selected.request_engine_generation_identity(),
+                engine.request_engine_generation_identity(),
+                "{selection:?}"
+            );
+            let resolved = selected.resolve(&ctx, &hook).unwrap();
+            assert_eq!(resolved.source_path, chosen_path, "{selection:?}");
+            assert_eq!(resolved.source_space, ItemSpace::Bundle);
+            assert_eq!(
+                resolved.source_root,
+                crate::contracts::ItemSourceRoot::Bundle {
+                    name: "chosen".to_owned()
+                }
+            );
+            let verified = selected.verify(&ctx, resolved).unwrap();
+            assert_eq!(verified.trust_class, TrustClass::Trusted);
+            let resolution = selected
+                .effective_resolution_output(EffectiveItemRequest {
+                    logical_project_root: None,
+                    item_ref: hook.clone(),
+                    expected_kind: Some("tool".to_owned()),
+                    project_root: None,
+                    subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+                })
+                .unwrap();
+            assert_eq!(
+                resolution.effective_trust_class,
+                crate::resolution::TrustClass::TrustedBundle,
+                "{selection:?}"
+            );
+        }
+
+        let only_early = CanonicalRef::parse("tool:only_early/tool").unwrap();
+        let only = engine
+            .with_registered_bundle_selection(
+                "chosen",
+                crate::item_resolution::RegisteredBundleSelection::Only,
+            )
+            .unwrap();
+        assert!(matches!(
+            only.resolve(&ctx, &only_early),
+            Err(EngineError::ItemNotFound { .. })
+        ));
+        assert!(engine.resolve(&ctx, &only_early).is_ok());
+        assert!(matches!(
+            engine.with_registered_bundle_selection(
+                "absent",
+                crate::item_resolution::RegisteredBundleSelection::Only,
+            ),
+            Err(EngineError::RegisteredBundleSelectionRefused {
+                refusal: crate::item_resolution::RegisteredBundleSelectionRefusal::NotRegistered,
+                name: _,
+            })
+        ));
+    }
+
+    #[test]
+    fn checked_generation_captures_signed_bundle_closure_and_refuses_dependency_drift() {
+        let bundle_root = tempdir();
+        let kinds_dir = tempdir();
+        let trust_store = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let schema = format!(
+            "{TOOL_SCHEMA_YAML}resolution:\n  - step: resolve_references\n    field: refs\n    max_depth: 2\n"
+        );
+        fs::write(
+            kinds_dir.join("tool/tool.kind-schema.yaml"),
+            sign_schema_yaml(&schema),
+        )
+        .unwrap();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).unwrap();
+        let handlers = crate::test_support::load_live_handler_registry();
+        let composers = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+
+        let source = "# ryeos-tool:\n#   note: retained signed source\n#   refs:\n#     - tool:dependency\nprint('verified')\n";
+        let signed_source = lillux::signature::sign_content(source, &test_signing_key(), "#", None);
+        let source_path = bundle_root.join(AI_DIR).join("tools/hello.py");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, &signed_source).unwrap();
+        let dependency = lillux::signature::sign_content(
+            "# ryeos-tool:\n#   note: dependency\nprint('dependency')\n",
+            &test_signing_key(),
+            "#",
+            None,
+        );
+        let dependency_path = bundle_root.join(AI_DIR).join("tools/dependency.py");
+        fs::write(&dependency_path, &dependency).unwrap();
+        let bundle_manifest = lillux::signature::sign_content(
+            "name: core\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n",
+            &test_signing_key(),
+            "#",
+            None,
+        );
+        fs::write(
+            bundle_root.join(AI_DIR).join("manifest.yaml"),
+            &bundle_manifest,
+        )
+        .unwrap();
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        )
+        .with_trust_store(trust_store)
+        .with_node_trust_store(test_trust_store())
+        .with_composers(composers)
+        .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
+            name: "core".to_owned(),
+            canonical_root: bundle_root,
+        }]);
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                let resolution = generation.effective_resolution_output(EffectiveItemRequest {
+                    logical_project_root: None,
+                    item_ref: CanonicalRef::parse("tool:hello")?,
+                    expected_kind: Some("tool".to_owned()),
+                    project_root: None,
+                    subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+                })?;
+                let captured = generation.capture_verified_signed_bundle_sources(&resolution)?;
+                assert_eq!(resolution.referenced_items.len(), 1);
+                assert_eq!(captured.len(), 2);
+                assert_eq!(captured[0].resolved_ref, "tool:dependency");
+                assert_eq!(captured[0].signed_bytes, dependency.as_bytes());
+                assert_eq!(captured[1].resolved_ref, "tool:hello");
+                assert_eq!(captured[1].signed_bytes, signed_source.as_bytes());
+                let manifests = generation.capture_verified_source_bundle_manifests(&captured)?;
+                assert_eq!(manifests.len(), 1);
+                assert_eq!(manifests[0].identity.name, "core");
+                assert_eq!(manifests[0].signed_bytes, bundle_manifest.as_bytes());
+                assert_eq!(
+                    captured[1].source_content_digest,
+                    resolution.root.source_content_digest
+                );
+
+                // The referenced item's diagnostic path is not authority to
+                // capture later bytes. A validly signed replacement refuses.
+                let replacement = lillux::signature::sign_content(
+                    "# ryeos-tool:\n#   note: changed\nprint('changed')\n",
+                    &test_signing_key(),
+                    "#",
+                    None,
+                );
+                fs::write(&dependency_path, replacement).unwrap();
+                let error = generation
+                    .capture_verified_signed_bundle_sources(&resolution)
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("changed under checked generation"),
+                    "unexpected recapture error: {error}"
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn immutable_request_fixture() -> Arc<EffectiveRequestSnapshot> {
@@ -4526,6 +5505,7 @@ formats:
                 assert!(
                     generation
                         .effective_resolution_output(EffectiveItemRequest {
+                            logical_project_root: None,
                             item_ref: CanonicalRef::parse("worker:missing").unwrap(),
                             expected_kind: Some("worker".to_string()),
                             project_root: None,
@@ -4542,8 +5522,346 @@ formats:
     }
 
     #[test]
+    fn nested_guarded_call_is_covered_by_the_enclosing_verification() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        engine
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                // A guarded engine call, a guarded call on a clone of the
+                // engine, and a bare verification point of the same retained
+                // generation: none verifies again.
+                engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                    engine
+                        .clone()
+                        .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
+                })?;
+                isolation.ensure_registered_generation_current_unless_covered()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            lifeline.checks.load(Ordering::SeqCst),
+            2,
+            "once before and once after the outermost operation"
+        );
+        assert_eq!(
+            lifeline.begins.load(Ordering::SeqCst),
+            3,
+            "each guarded call still holds the generation operation lock"
+        );
+    }
+
+    /// Only work that commits nothing is covered. The verification in front
+    /// of a workload launch, a resource allocation or a write, and an
+    /// explicit commit point, verify inside a guarded operation too.
+    #[test]
+    fn effect_side_verification_is_never_covered() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                // The covered kind: a handler launch's verification point.
+                isolation.ensure_registered_generation_current_unless_covered()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                // The effect-side kind, as used by launch compilation and
+                // process-scope planning and allocation.
+                isolation.ensure_registered_generation_current()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+                isolation.admission_class_provenance()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 4);
+                generation.verify_before_commit()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 5);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 6);
+
+        // A change during the operation is seen by the effect-side point at
+        // once, before any effect, not only by the after-verification.
+        let refused = engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+            lifeline.changed.store(true, Ordering::SeqCst);
+            isolation.ensure_registered_generation_current_unless_covered()?;
+            isolation.ensure_registered_generation_current()
+        });
+        assert!(matches!(
+            refused,
+            Err(EngineError::IsolationPolicyRefused { .. })
+        ));
+        assert_eq!(
+            lifeline.checks.load(Ordering::SeqCst),
+            8,
+            "the before-verification and the refusing effect-side point"
+        );
+    }
+
+    #[test]
+    fn verification_outside_a_guarded_operation_always_verifies() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        isolation
+            .ensure_registered_generation_current_unless_covered()
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+
+        engine
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 3);
+
+        // The operation has ended: nothing it verified covers a later call.
+        isolation
+            .ensure_registered_generation_current_unless_covered()
+            .unwrap();
+        engine
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 6);
+
+        // A failed operation also ends its coverage.
+        let failed = engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+            Err(EngineError::Internal("operation failed".into()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 7);
+        isolation
+            .ensure_registered_generation_current_unless_covered()
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn guarded_call_for_another_generation_verifies_for_itself() {
+        let (outer, outer_lifeline, _) = engine_with_counted_generation();
+        let (inner, inner_lifeline, inner_isolation) = engine_with_counted_generation();
+
+        outer
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                // The enclosing operation verified `outer`'s generation only.
+                inner_isolation.ensure_registered_generation_current_unless_covered()?;
+                assert_eq!(inner_lifeline.checks.load(Ordering::SeqCst), 1);
+                inner.with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })?;
+                assert_eq!(inner_lifeline.checks.load(Ordering::SeqCst), 3);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(outer_lifeline.checks.load(Ordering::SeqCst), 2);
+        assert_eq!(inner_lifeline.checks.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn bundle_change_during_a_guarded_operation_refuses_its_result() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+        let committed = std::cell::Cell::new(false);
+
+        let result = engine.with_checked_bundle_generation(|generation| {
+            // The bundles change while the operation runs. Nested calls are
+            // covered and do not notice.
+            lifeline.changed.store(true, Ordering::SeqCst);
+            engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })?;
+            isolation.ensure_registered_generation_current_unless_covered()?;
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+
+            // A commit point verifies for itself and refuses before the effect.
+            let before_commit = generation.verify_before_commit();
+            assert!(matches!(
+                before_commit,
+                Err(EngineError::IsolationPolicyRefused { .. })
+            ));
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+            if before_commit.is_ok() {
+                committed.set(true);
+            }
+            Ok::<_, EngineError>("value computed on changed bundles")
+        });
+
+        // The operation itself returned a value; the after-verification
+        // refuses it.
+        assert!(
+            matches!(result, Err(EngineError::IsolationPolicyRefused { ref reason })
+                if reason.contains("registered bundle generation changed")),
+            "{result:?}"
+        );
+        assert!(!committed.get());
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn bundle_change_before_a_guarded_operation_never_runs_it() {
+        let (engine, lifeline, _) = engine_with_counted_generation();
+        lifeline.changed.store(true, Ordering::SeqCst);
+        let ran = std::cell::Cell::new(false);
+
+        let result = engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+            ran.set(true);
+            Ok(())
+        });
+
+        assert!(matches!(
+            result,
+            Err(EngineError::IsolationPolicyRefused { .. })
+        ));
+        assert!(!ran.get());
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_panicking_guarded_operation_leaves_no_coverage_behind() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let _ = engine.with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                panic!("guarded operation panicked")
+            });
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            lifeline.checks.load(Ordering::SeqCst),
+            1,
+            "only the before-verification ran"
+        );
+
+        // The same thread and the same generation, outside any operation: a
+        // verification point and a guarded call both verify for themselves.
+        isolation
+            .ensure_registered_generation_current_unless_covered()
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+        engine
+            .with_checked_bundle_generation(|_| -> Result<(), EngineError> { Ok(()) })
+            .unwrap();
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn a_panicking_batch_worker_leaves_its_thread_uncovered() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            // Covered work on the worker panics.
+                            let unwound = catch_unwind(AssertUnwindSafe(|| {
+                                generation.verified.cover_current_thread::<()>(|| {
+                                    isolation
+                                        .ensure_registered_generation_current_unless_covered()
+                                        .unwrap();
+                                    assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+                                    panic!("batch worker panicked")
+                                })
+                            }));
+                            assert!(unwound.is_err());
+
+                            // The same worker thread afterwards is uncovered:
+                            // its verification point verifies for itself.
+                            isolation
+                                .ensure_registered_generation_current_unless_covered()
+                                .unwrap();
+                            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+                        })
+                        .join()
+                        .unwrap();
+                });
+                // The operation's own thread is still covered.
+                isolation.ensure_registered_generation_current_unless_covered()?;
+                assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn concurrent_operations_on_other_threads_share_no_coverage() {
+        let (engine, lifeline, isolation) = engine_with_counted_generation();
+        let (inside, wait_inside) = std::sync::mpsc::channel::<()>();
+        let (release, wait_release) = std::sync::mpsc::channel::<()>();
+
+        let (engine, isolation) = (&engine, &isolation);
+        std::thread::scope(|scope| {
+            // One thread sits inside a guarded operation.
+            let holder = scope.spawn(move || {
+                engine
+                    .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                        inside.send(()).unwrap();
+                        wait_release.recv().unwrap();
+                        isolation.ensure_registered_generation_current_unless_covered()?;
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            wait_inside.recv().unwrap();
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 1);
+
+            // Meanwhile this thread, and a second operation on a third thread,
+            // verify for themselves although the generation is the same.
+            isolation
+                .ensure_registered_generation_current_unless_covered()
+                .unwrap();
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+            scope
+                .spawn(|| {
+                    engine
+                        .with_checked_bundle_generation(|_| -> Result<(), EngineError> {
+                            isolation.ensure_registered_generation_current_unless_covered()
+                        })
+                        .unwrap();
+                })
+                .join()
+                .unwrap();
+            assert_eq!(lifeline.checks.load(Ordering::SeqCst), 4);
+
+            release.send(()).unwrap();
+            holder.join().unwrap();
+        });
+
+        // The holder's covered verification point added nothing; its
+        // after-verification added one.
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn batch_workers_run_under_the_enclosing_verification() {
+        let (engine, lifeline, _) = engine_with_counted_generation();
+        let ctx = test_plan_context();
+        let item_refs: Vec<CanonicalRef> = (0..4)
+            .map(|index| CanonicalRef::parse(&format!("tool:missing-{index}")).unwrap())
+            .collect();
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                let covered = super::parallel_map_ordered(&item_refs, |_| {
+                    generation.verified.cover_current_thread(|| {
+                        engine
+                            .isolation_generation
+                            .ensure_registered_generation_current_unless_covered()
+                    })
+                });
+                assert!(covered.into_iter().all(|outcome| outcome.is_ok()));
+                assert_eq!(generation.resolve_many(&ctx, &item_refs).len(), 4);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn retained_generation_identity_does_not_alias_same_registered_paths() {
         let roots = vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "same-name".to_string(),
             canonical_root: PathBuf::from("/same/canonical/root"),
         }];
@@ -4604,6 +5922,7 @@ formats:
     fn registered_resolution_roots_keep_project_ai_root_first() {
         let engine = test_engine().with_registered_bundle_roots(vec![
             crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "core".to_owned(),
                 canonical_root: PathBuf::from("/bundles/core"),
             },
@@ -4653,6 +5972,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -4749,6 +6069,7 @@ formats:
         .with_trust_store(trust_store);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -4794,6 +6115,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -4836,6 +6158,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -4883,6 +6206,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -4947,6 +6271,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -4995,6 +6320,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5063,6 +6389,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5122,6 +6449,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5168,110 +6496,6 @@ formats:
                 .unwrap(),
             engine.registry_fingerprint(),
             "no-project effective composite fingerprint must equal boot fingerprint"
-        );
-    }
-
-    #[test]
-    fn project_scoped_engine_does_not_retain_deleted_project_trust() {
-        let project_dir = tempdir();
-        let trusted_dir = project_dir.join(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
-        fs::create_dir_all(&trusted_dir).unwrap();
-
-        let signing_key = SigningKey::from_bytes(&[77u8; 32]);
-        let verifying_key = signing_key.verifying_key();
-        let fingerprint = crate::trust::compute_fingerprint(&verifying_key);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes());
-        let key_path = trusted_dir.join("project.pub");
-        fs::write(&key_path, encoded).unwrap();
-
-        let scoped = test_engine().for_project_root(&project_dir, None).unwrap();
-        assert!(scoped.trust_store.is_trusted(&fingerprint));
-        assert!(
-            !scoped
-                .effective_trust_store(None)
-                .unwrap()
-                .is_trusted(&fingerprint),
-            "projectless lookup must use the request trust base, not project-local keys"
-        );
-
-        fs::remove_file(key_path).unwrap();
-        let current = scoped.effective_trust_store(Some(&project_dir)).unwrap();
-        assert!(
-            !current.is_trusted(&fingerprint),
-            "project trust removals must be visible to the next request"
-        );
-    }
-
-    #[test]
-    fn logical_bundle_compile_subject_rejects_project_only_bundle_trust() {
-        let bundle_root = tempdir();
-        let project_root = tempdir();
-        let kinds_dir = tempdir();
-        let node_trust = test_trust_store();
-        write_signed_tool_schema(&kinds_dir);
-        let kinds = KindRegistry::load_base(&[kinds_dir], &node_trust).unwrap();
-
-        let project_signing_key = SigningKey::from_bytes(&[77u8; 32]);
-        let project_verifying_key = project_signing_key.verifying_key();
-        let project_fingerprint = crate::trust::compute_fingerprint(&project_verifying_key);
-        let trusted_dir = project_root.join(AI_DIR).join(crate::TRUST_KEYS_DIR);
-        fs::create_dir_all(&trusted_dir).unwrap();
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode(project_verifying_key.as_bytes());
-        fs::write(trusted_dir.join("project.pub"), encoded).unwrap();
-
-        let source = "# ryeos-tool:\n#   note: project-only publisher\nprint('project trusted')\n";
-        let signed_source =
-            lillux::signature::sign_content(source, &project_signing_key, "#", None);
-        let source_path = bundle_root.join(AI_DIR).join("tools/hello.py");
-        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
-        fs::write(source_path, signed_source).unwrap();
-
-        let engine = Engine::new(
-            kinds,
-            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            vec![],
-        )
-        .with_trust_store(node_trust.clone())
-        .with_node_trust_store(node_trust)
-        .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
-            name: "core".to_owned(),
-            canonical_root: bundle_root,
-        }])
-        .for_project_root(&project_root, None)
-        .unwrap();
-        assert!(
-            !engine
-                .effective_trust_store(None)
-                .unwrap()
-                .is_trusted(&project_fingerprint),
-            "project-only signer must be absent from the compile trust base"
-        );
-
-        let mut pinned_ctx = test_plan_context();
-        pinned_ctx.project_context = ProjectContext::LocalPath { path: project_root };
-        pinned_ctx.subject_resolution_authority = SubjectResolutionAuthority::PinnedGeneration {
-            snapshot_hash: "b".repeat(64),
-        };
-        let canonical_ref = CanonicalRef::parse("tool:hello").unwrap();
-        let pinned_item = engine
-            .with_checked_bundle_generation(|generation| {
-                let resolved = generation.resolve(&pinned_ctx, &canonical_ref)?;
-                generation.verify(&pinned_ctx, resolved)
-            })
-            .unwrap();
-        assert_eq!(pinned_item.trust_class, TrustClass::Trusted);
-
-        let error = engine
-            .with_checked_bundle_generation(|generation| {
-                logical_bundle_compile_subject(generation, &pinned_ctx, &pinned_item, source)
-            })
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("pinned qualification Bundle source differs"),
-            "project-local trust must not transfer to projectless Bundle compilation: {error}"
         );
     }
 
@@ -5457,6 +6681,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

@@ -26,6 +26,8 @@ pub(crate) struct PreparedExternalDirectInputs {
     /// Original verified B-source records for the app's ordinary-plan compiler.
     /// Their directory and generation lease are retained inside `authority`.
     pub source: Option<VerifiedAdmittedSourceRecords>,
+    pub project_file:
+        Option<std::sync::Arc<ryeos_app::thread_lifecycle::PreparedExternalDirectProjectFile>>,
 }
 
 pub(crate) fn prepare_external_direct_inputs(
@@ -34,6 +36,7 @@ pub(crate) fn prepare_external_direct_inputs(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
     thread_id: &str,
     chain_root_id: &str,
+    execution_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
 ) -> Result<PreparedExternalDirectInputs> {
     let sealed =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
@@ -49,6 +52,11 @@ pub(crate) fn prepare_external_direct_inputs(
     else {
         anyhow::bail!("external direct inputs require the exact immutable pinned generation");
     };
+    require_evaluator_execution_materialization(
+        sealed.candidate_evaluation_authority(),
+        snapshot_hash,
+        execution_materialization,
+    )?;
     let AdmittedExecutionClosure::DirectItemExecutor {
         command:
             AdmittedDirectCommandClosure::RealizationMember {
@@ -61,6 +69,12 @@ pub(crate) fn prepare_external_direct_inputs(
     else {
         anyhow::bail!("external direct inputs require an ordinary exact realization executable");
     };
+    let project_file = ryeos_app::thread_lifecycle::prepare_external_direct_project_file(
+        capsule,
+        protocol,
+        execution_materialization,
+    )?
+    .map(std::sync::Arc::new);
     let products = super::external_guest_inputs::prepare_product_inputs(
         state,
         resolution,
@@ -75,7 +89,7 @@ pub(crate) fn prepare_external_direct_inputs(
         "external direct executable lost its exact realized input"
     );
     let source = super::source_closure::bind_external_source(state, resolution, capsule)?;
-    let (environment, executable_search) =
+    let (environment, executable_search, workspace_view) =
         ryeos_app::thread_lifecycle::external_direct_environment(
             capsule,
             protocol,
@@ -94,6 +108,7 @@ pub(crate) fn prepare_external_direct_inputs(
     drop(guard);
     let base_descriptor = base.descriptor();
     let mut projection = ExternalGuestInputProjection {
+        workspace_view,
         schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: base_descriptor
@@ -127,6 +142,11 @@ pub(crate) fn prepare_external_direct_inputs(
     } else {
         None
     };
+    if let Some(file) = &project_file {
+        projection.inputs.push(file.input()?);
+        authorities.push(file.input_authority());
+        lifelines.push(Box::new(std::sync::Arc::clone(file)));
+    }
     let authority = ExternalGuestInputAuthority::new(
         projection,
         base_descriptor,
@@ -138,5 +158,25 @@ pub(crate) fn prepare_external_direct_inputs(
     Ok(PreparedExternalDirectInputs {
         authority,
         source: source_records,
+        project_file,
     })
+}
+
+/// Rejoin C execution custody independently of B definition/source authority.
+fn require_evaluator_execution_materialization(
+    evaluation: Option<&ryeos_app::thread_lifecycle::CandidateEvaluationAuthority>,
+    snapshot_hash: &str,
+    execution_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
+) -> Result<()> {
+    if let Some(evaluation) = evaluation {
+        evaluation.validate()?;
+        let materialization = execution_materialization
+            .context("external evaluator inputs have no verified execution materialization")?;
+        ensure!(
+            evaluation.candidate_snapshot_hash == snapshot_hash
+                && materialization.snapshot_hash() == snapshot_hash,
+            "external evaluator execution materialization differs from sealed candidate snapshot"
+        );
+    }
+    Ok(())
 }

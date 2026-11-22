@@ -1,0 +1,135 @@
+# ryeos:signed:2026-11-17T17:48:41Z:56c8a5bf55b78985a534b2e613cecfa0f01b30288e0db448012d8fdf8e509f3b:6pvDzi9wBD9x35RvNU8HsgJESYj6N+FElYxTJwnalFQvGXq7ztWDlX9Bwq49/ZY/M4YQqocOQVXoEebON+N5CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime/model-providers"
+family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "https://api.deepseek.com"
+auth:
+  env_var: DEEPSEEK_API_KEY
+  header_name: Authorization
+  prefix: "Bearer "
+headers:
+  Content-Type: application/json
+schemas:
+  accounting: {require_usage: true}
+  messages:
+    role_map: {user: user, assistant: assistant, system: system, tool: tool}
+    content_key: content
+    system_message: {mode: message_role}
+    tool_result:
+      role: tool
+      wrap_mode: direct
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      id: "{id}"
+      type: function
+      function:
+        name: "{name}"
+        arguments: "{input_json}"
+  tools:
+    template:
+      type: function
+      function:
+        name: "{name}"
+        description: "{description}"
+        parameters: "{schema}"
+  streaming:
+    mode: delta_merge
+    metadata:
+      usage:
+        path: usage
+        input_tokens_path: prompt_tokens
+        output_tokens_path: completion_tokens
+        reasoning_tokens_path: completion_tokens_details.reasoning_tokens
+        cache_read_tokens_path: prompt_cache_hit_tokens
+        cache_miss_tokens_path: prompt_cache_miss_tokens
+        cache_partition_of_input: true
+        reasoning_included_in_output: true
+        aggregation: latest_snapshot
+        single_snapshot: true
+      finish_reason_path: choices.0.finish_reason
+      response_id_path: id
+      error:
+        path: error
+        message_path: message
+        code_path: code
+        finish_reasons: [content_filter, insufficient_system_resource]
+  output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
+  reasoning:
+    mode:
+      path: thinking.type
+      values: {enabled: enabled, disabled: disabled}
+    effort:
+      path: reasoning_effort
+      values: {high: high, max: max}
+    capture:
+      - {id: text, kind: text_delta, fields: [reasoning_content]}
+    replay:
+      placements:
+        - from: text
+          into: {message_field: reasoning_content}
+          scope: all
+body_template:
+  model: "{model}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
+  stream_options:
+    include_usage: true
+profiles:
+  - name: deepseek-v4-pro-spend
+    match: [deepseek-v4-pro]
+    spend_authority:
+      billing_principal: deepseek-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: deepseek-standard-api-2026-08
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: deepseek-2026-08
+        cache_read_per_million: "0.003625"
+        cache_miss_per_million: "0.435"
+        output_per_million: "0.87"
+        covered_dimensions: [output_tokens, cache_read_tokens, cache_miss_tokens]
+  - name: deepseek-v4-flash-spend
+    match: [deepseek-v4-flash]
+    spend_authority:
+      billing_principal: deepseek-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: deepseek-standard-api-2026-08
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: deepseek-2026-08
+        cache_read_per_million: "0.0028"
+        cache_miss_per_million: "0.14"
+        output_per_million: "0.28"
+        covered_dimensions: [output_tokens, cache_read_tokens, cache_miss_tokens]
+pricing:
+  models:
+    deepseek-v4-pro:
+      input_per_million: "0.435"
+      output_per_million: "0.87"
+      cache_read_per_million: "0.003625"
+      cache_miss_per_million: "0.435"
+    deepseek-v4-flash:
+      input_per_million: "0.14"
+      output_per_million: "0.28"
+      cache_read_per_million: "0.0028"
+      cache_miss_per_million: "0.14"
+extra:
+  stream_url: "/chat/completions"
+  setup:
+    display_name: DeepSeek
+    priority: 22
+    credential: {label: API key, secret_name: DEEPSEEK_API_KEY, input: secret}
+    help_url: https://platform.deepseek.com/api_keys
+    validation: {ref: "service:model-providers/validate", url: "https://api.deepseek.com/models", timeout_seconds: 15}
+    models:
+      - {name: deepseek-v4-pro, display_name: DeepSeek V4 Pro, context_window: 1000000, recommended: true}
+      - {name: deepseek-v4-flash, display_name: DeepSeek V4 Flash, context_window: 1000000}
+  available_models:
+    flagship: [deepseek-v4-pro]
+    fast: [deepseek-v4-flash]

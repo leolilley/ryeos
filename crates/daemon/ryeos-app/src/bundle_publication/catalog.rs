@@ -6,6 +6,7 @@
 //! the closure protected until its compare-and-swap head commit is durable.
 
 use anyhow::{Context as _, bail};
+use ryeos_bundle_publication_contract::{BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY};
 use ryeos_bundle_publication_contract::{
     BundleCatalogPublication, BundleCatalogSnapshot, BundleGeneration, BundleSet,
 };
@@ -13,12 +14,9 @@ use ryeos_state::objects::Attestation;
 
 use super::{
     PublicationObjectReader,
-    attestation::{
-        BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY, ReleaseSubjectKind,
-        verify_release_attestation,
-    },
+    attestation::{ReleaseSubjectKind, verify_release_attestation},
 };
-use crate::node_policy::sections::{
+use ryeos_node_runtime::node_policy::sections::{
     bundle_publication::BundlePublicationPolicy, object_closure::NodeObjectClosurePolicy,
 };
 
@@ -86,7 +84,7 @@ pub fn stage_local_catalog_closure(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire catalog staging permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire catalog staging permit: {error:#}"))?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
@@ -564,7 +562,7 @@ pub fn publish_catalog(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire catalog publication permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire catalog publication permit: {error:#}"))?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
@@ -619,10 +617,10 @@ pub fn publish_catalog(
             &request.authenticated_principal,
         )?;
     stage.ensure_publication_contract(&publication_key, request.expected_current.as_deref())?;
-    if let Some(target) = stage.admitted_target_hash() {
-        if target != request.candidate_attestation_hash {
-            bail!("catalog upload session is already admitted for another publication target");
-        }
+    if let Some(target) = stage.admitted_target_hash()
+        && target != request.candidate_attestation_hash
+    {
+        bail!("catalog upload session is already admitted for another publication target");
     }
     stage.protect_cas_closure(
         &guard,
@@ -657,7 +655,7 @@ pub fn publish_catalog(
     );
     if let Err(error) = stage.finish_admitted(&guard, &request.candidate_attestation_hash) {
         tracing::warn!(
-            %error,
+            error = %format!("{error:#}"),
             staging_id = %stage.staging_id(),
             "catalog head published while its durable publication receipt remained retryable"
         );
@@ -751,7 +749,7 @@ fn checkpoint_catalog_head(
         // A failed local observation checkpoint must be repaired, but turning
         // this into a request failure would invite an ambiguous republish.
         tracing::warn!(
-            %error,
+            error = %format!("{error:#}"),
             %catalog_namespace,
             %target,
             "catalog published but local observation checkpoint did not advance"
@@ -900,9 +898,11 @@ mod transport_binding_tests {
     fn trusted_uploader_cannot_sign_publisher_artifacts() {
         let temp = tempfile::tempdir().unwrap();
         let publisher =
-            crate::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("publisher.pem"))
+                .unwrap();
         let uploader =
-            crate::identity::NodeIdentity::create(&temp.path().join("uploader.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&temp.path().join("uploader.pem"))
+                .unwrap();
         let mut trust = ryeos_state::TrustStore::new();
         trust.insert(
             publisher.fingerprint().to_owned(),

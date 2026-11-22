@@ -5,7 +5,7 @@
 //! never loosen that receipt's settlement or reopen a node cache as a host root.
 
 use super::*;
-use crate::node_policy::sections::external_content::{
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportLimits, ExternalContentImportPolicyRecord,
 };
 
@@ -32,7 +32,7 @@ pub(super) fn import(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
         })?;
     let cas = authority.cas_store()?;
     let binding = ryeos_state::objects::ExternalContentBinding::from_value(

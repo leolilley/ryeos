@@ -1,0 +1,55 @@
+# ryeos:signed:2026-11-14T12:20:23Z:02bbff99cdd757ddb289ac29ba80f75bdfd9cc27b05cf9cc2504ed36a8ccc520:aMISP47PwMtQULH3DuCMieZqXmgxTKhvNLanpZ3EDD2kMbksJWpKyOwwMAtPRyiSgxeFRrwrXXjLRdNxVbYqBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: qualification_consumer_callback_contained
+category: ryeos/core
+abi_version: v1
+description: Independent verifier callback protocol for one exact retained remote consumer attempt, run by a node that holds enforced isolation and captured filesystem authority.
+stdin:
+  shape: opaque
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections:
+  - { name: RYE_THREAD_ID, source: thread_id }
+  - { name: RYE_PROJECT_PATH, source: project_path }
+  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }
+  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }
+  - { name: RYEOSD_THREAD_ID, source: thread_id }
+  - { name: RYEOSD_PROJECT_STATE_SCOPE, source: project_state_scope }
+  - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+  - { name: RYEOSD_RUNTIME_STATE_ROOT, source: runtime_state_root }
+# A qualification verifier on the pinned-snapshot project lane runs against the exact snapshot the subject was
+# captured from, so its project source is a pushed head. The capability is open only to an item that declares that
+# lane (project_lane: pinned_snapshot); remote and detached dispatch stay closed.
+capabilities:
+  allows_pushed_head: true
+  pushed_head_requires_declaration: true
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: runtime_socket
+qualification_callback: remote_consumer
+# Admits this protocol to captured execution. The digest is the identity of the closed four-method
+# consumer-verification surface the daemon issues for `remote_consumer`; admission refuses any mismatch.
+captured_compatible_callback:
+  surface_digest: 24a9c5e3fa4bede622a36401964cdc6a09b6852e3d45341e1102a2ec9598ee80
+execution_evidence:
+  handler: handler:ryeos/core/scoped-qualification-execution-evidence
+  config: { subordinate: remote_consumer }
+  limits:
+    max_request_bytes: 2097152
+    max_response_bytes: 2097152
+    max_events: 128
+    max_event_bytes: 65536
+    max_calls: 1
+    max_call_bytes: 65536
+holding:
+  requires_guarantees:
+    - isolation:enforced
+    - filesystem:captured_execution
+    - callback:captured_compatible
+    - { any_of: [termination:scope, termination:pid_namespace] }
+    - { any_of: [recovery:scope, recovery:pid_namespace] }
+  filesystem_authority: captured_execution
+  root_settlement: containment_empty

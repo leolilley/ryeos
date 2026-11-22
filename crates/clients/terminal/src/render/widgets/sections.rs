@@ -5,6 +5,7 @@
 //! full-width selection) one indent level deeper.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::TextSurface;
 use ryeos_client_base::ui::view_model::{RyeOsRowVm, RyeOsSectionVm};
 
@@ -17,7 +18,7 @@ use super::super::theme::{
 
 /// Rows sit two cells in from the section header so the fold glyph column
 /// stays clear of content.
-const ROW_INDENT: usize = 2;
+const ROW_INDENT: usize = LAYOUT.cells.section_indent;
 
 pub fn draw_sections(
     surface: &mut TextSurface,
@@ -44,19 +45,38 @@ pub fn draw_sections(
             break;
         }
         let glyph = if section.collapsed { "▸" } else { "▾" };
-        let header = format!("{glyph} {} ({})", section.title, section.count);
+        let count = if section.source_status.is_some() {
+            "?".to_string()
+        } else {
+            section.count.to_string()
+        };
+        // A section's title is a dim, upper-case label.
+        let header = format!("{glyph} {} ({count})", section.title.to_uppercase());
         // A collapsed section's header is the point that re-expands it; when
         // it carries the cursor, highlight the full line like a selected row.
         let header_style = if section.header_selected {
             style_selected()
         } else {
-            style_fg().bold()
+            style_muted()
         };
         if section.header_selected {
             fill_line(surface, left, y, width, header_style);
         }
         surface.draw_text(left, y, &truncate(&header, width), header_style);
         y += 1;
+
+        if let Some(status) = &section.source_status
+            && y < bottom
+        {
+            let prefix = if status.stale {
+                "Last observation (stale) · "
+            } else {
+                ""
+            };
+            let message = format!("{prefix}{}: {}", status.state, status.message);
+            surface.draw_text(left, y, &truncate(&message, width), style_muted());
+            y += 1;
+        }
 
         if section.collapsed {
             continue;
@@ -104,26 +124,22 @@ fn draw_row(
     let glyph_x = left + ROW_INDENT;
     surface.draw_text(glyph_x, y, tone_glyph(row.tone), glyph_style);
 
-    let inner = width.saturating_sub(ROW_INDENT);
-    let meta = row.meta.as_deref().unwrap_or_default();
-    let meta_width = if meta.is_empty() {
-        0
-    } else {
-        display_width(meta).min(inner / 3)
-    };
-    let primary_width = inner.saturating_sub(3 + meta_width + usize::from(meta_width > 0));
-    let mut primary = row.primary.clone();
-    if let Some(secondary) = &row.secondary {
-        primary.push_str("  ");
-        primary.push_str(secondary);
-    }
-    surface.draw_text(glyph_x + 2, y, &truncate(&primary, primary_width), style);
-
-    if meta_width > 0 {
-        let meta_text = truncate(meta, meta_width);
-        let meta_x = left + width.saturating_sub(display_width(&meta_text));
-        let meta_style = if row.selected { style } else { style_muted() };
-        surface.draw_text(meta_x, y, &meta_text, meta_style);
+    // `name  value`: the name dim, then the value at the body ink.
+    let inner = width.saturating_sub(ROW_INDENT + 2);
+    let value = [row.secondary.as_deref(), row.meta.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("  ");
+    let name_style = if row.selected { style } else { style_muted() };
+    let name_text = truncate(&row.primary, inner);
+    surface.draw_text(glyph_x + 2, y, &name_text, name_style);
+    if !value.is_empty() {
+        let value_x = glyph_x + 2 + display_width(&name_text) + 2;
+        let used = value_x.saturating_sub(left);
+        if used < width {
+            surface.draw_text(value_x, y, &truncate(&value, width - used), style);
+        }
     }
 }
 
@@ -147,6 +163,7 @@ mod tests {
             expandable: false,
             expanded: false,
             detail: Vec::new(),
+            launch: None,
             changed_at_ms: None,
             changed_tone: None,
         }
@@ -157,6 +174,7 @@ mod tests {
             id: title.to_string(),
             cursor: 0,
             title: title.to_string(),
+            source_status: None,
             count: rows.len(),
             collapsed,
             header_selected: false,
@@ -181,6 +199,35 @@ mod tests {
     }
 
     #[test]
+    fn failed_collapsed_section_never_reports_successful_zero_count() {
+        let (mut s, rect) = surface(90, 4);
+        let mut failed = section("Remotes", true, vec![]);
+        failed.source_status = Some(ryeos_client_base::ui::view_model::RyeOsSourceStatusVm {
+            state: "failed".into(),
+            message: "service_cap_denied: Access denied".into(),
+            stale: false,
+        });
+        draw_sections(&mut s, rect, &[failed], 0);
+        assert!(row_text(&s, 90, 0).contains("(?)"));
+        assert!(!row_text(&s, 90, 0).contains("(0)"));
+        assert!(row_text(&s, 90, 1).contains("service_cap_denied"));
+    }
+
+    #[test]
+    fn stale_section_labels_retained_rows() {
+        let (mut s, rect) = surface(90, 5);
+        let mut stale = section("Threads", false, vec![row("T-old", None)]);
+        stale.source_status = Some(ryeos_client_base::ui::view_model::RyeOsSourceStatusVm {
+            state: "failed".into(),
+            message: "Refresh failed".into(),
+            stale: true,
+        });
+        draw_sections(&mut s, rect, &[stale], 0);
+        assert!(row_text(&s, 90, 1).contains("Last observation (stale)"));
+        assert!(row_text(&s, 90, 2).contains("T-old"));
+    }
+
+    #[test]
     fn header_carries_fold_glyph_title_and_count() {
         let (mut s, rect) = surface(40, 6);
         draw_sections(
@@ -195,7 +242,7 @@ mod tests {
         );
         let header = row_text(&s, 40, 0);
         assert!(header.starts_with('▾'), "expanded glyph leads: {header:?}");
-        assert!(header.contains("Threads"), "title rendered: {header:?}");
+        assert!(header.contains("THREADS"), "title rendered: {header:?}");
         assert!(header.contains("(1)"), "count rendered: {header:?}");
         // The row sits on the next line, indented past the fold column.
         let body = row_text(&s, 40, 1);
@@ -257,9 +304,9 @@ mod tests {
             ],
             0,
         );
-        assert!(row_text(&s, 40, 0).contains("Threads"));
+        assert!(row_text(&s, 40, 0).contains("THREADS"));
         assert!(row_text(&s, 40, 1).contains("T-ab"));
-        assert!(row_text(&s, 40, 2).contains("Bundles"));
+        assert!(row_text(&s, 40, 2).contains("BUNDLES"));
         assert!(row_text(&s, 40, 3).contains("ryeos"));
     }
 

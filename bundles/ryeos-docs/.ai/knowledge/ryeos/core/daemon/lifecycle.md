@@ -1,0 +1,126 @@
+<!-- ryeos:signed:2026-11-21T02:34:15Z:a72109a9b8d3f7a5c0b039c834a651854ee6e42d11fc1f0d996bc11fd38b3a37:mFD3LkjbZZgG7Ed42K3ds3esRlzbMOK4hWV2smXf/9/a++eGz+M7NhTkEzzGaS6CBW5+d1GC6QR0pM89oVOgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+---
+category: ryeos/core/daemon
+tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
+version: "2.5.0"
+description: >
+  Daemon process lifecycle: strict startup ordering, local lifecycle status,
+  exact signal control, daemon.json metadata, and shutdown cleanup.
+---
+
+# Daemon Process Lifecycle
+
+`ryeosd` is the long-running runtime process. It owns the HTTP API, UDS
+runtime callbacks, execution state, scheduler, CAS projection, and
+service registry. The local user lifecycle verbs are owned by
+`ryeos-node`; see [Local Node Lifecycle](../node/lifecycle.md).
+
+## Strict startup order
+
+Daemon startup is fail-closed and side-effect-minimal until operator
+initialization has been verified:
+
+1. `Cli::parse` and `Config::load` — side-effect-free config.
+2. Prove Linux pidfd process-group signalling (6.9) and `SO_PEERPIDFD` (6.5)
+   support on the node route, right after the node leads its own session;
+   an unsupported host fails with `kernel_feature_missing` naming the feature
+   and its kernel floor, before initialization repair or executable work. The
+   standalone subcommands do not run this probe.
+3. `bootstrap::verify_initialized` — requires signed bundle
+   registrations and bails with `Run: ryeos init` guidance if absent.
+4. Subcommand dispatch — `run-service` standalone takes its own state
+   lock immediately after init verification.
+5. Acquire daemon state lock before removing any socket.
+6. Initialize tracing/file sink only after init verification and state
+   lock acquisition.
+7. `bootstrap::repair_daemon_local` — repair only daemon-local artifacts
+   and fail when operator init artifacts are missing.
+8. Remove stale configured socket and ensure runtime paths.
+9. Two-phase node-config bootstrap, engine construction, and isolation-policy
+   snapshot resolution. Invalid policy fails startup; enforce mode resolves and
+   inspects the selected signed backend bundle.
+10. Service self-check, route table build, listeners, scheduler, and metadata
+   write.
+
+The state-lock-before-socket-unlink ordering prevents a second daemon
+from unlinking the first daemon's live socket.
+
+The isolation snapshot is immutable for the process lifetime. Operators validate
+edits with `ryeos node doctor` and restart before expecting a new policy
+generation. See [Execution Isolation](../node/execution-isolation.md).
+
+## Recovery ownership during live execution
+
+The final recovery ownership check is shared by startup and periodic live
+reconciliation. Besides verified subprocesses and durable launch/follow/handoff
+owners, a current daemon-owned handler is accounted for by the existing exact
+in-process handler registry. Long-running imports do not become ownerless merely
+because they have no subprocess PID. This is a launch-driver boundary, not a
+service-name or kind exception.
+
+That registry is volatile: after restart, a predecessor handler's durable
+reservation does not prove liveness. The normal owner-loss reconciliation must
+settle it before readiness. Releasing an owner without terminal settlement also
+removes its eligibility at the live ownership check.
+
+## State lock
+
+The daemon holds `<system>/.ai/state/operator.lock` for its lifetime.
+`StateLock` opens with `truncate(false)`, acquires `flock` first, and
+writes its PID only after winning, so a losing process can read the
+holder PID.
+
+## Daemon-local repair
+
+`repair_daemon_local` is not init. It verifies operator-owned artifacts
+created by `ryeos init` and repairs only daemon-local files. See
+[Daemon Bootstrap](bootstrap.md).
+
+## Local lifecycle UDS surface
+
+The daemon UDS server exposes one read-only lifecycle method:
+
+- `lifecycle.status` — returns `status: "running"`, PID, version,
+  started timestamp, bind address, and UDS path.
+
+It is a local UDS status message, not a public HTTP route and not signal
+authority. There is deliberately no unauthenticated shutdown RPC because
+isolated runtimes may receive the callback socket. Local `ryeos stop` captures
+the connected socket peer through `SO_PEERCRED` and `SO_PEERPIDFD` and signals
+that exact process incarnation.
+
+## `daemon.json`
+
+After listeners bind, the daemon writes `<system>/daemon.json` with PID,
+UDS path, HTTP bind address, start time, version, and system space. It is
+a discovery hint only; lifecycle code confirms liveness through
+`lifecycle.status`. On normal shutdown the daemon removes `daemon.json`
+and the configured UDS socket best-effort.
+
+## Runtime shutdown
+
+Graceful shutdown is triggered by Ctrl-C or `SIGTERM`. An early signal watcher
+is installed before slow bootstrap work. Once application state exists, the
+coordinator first closes the durable shutdown gate so no new root thread,
+callback mutation, continuation, or scheduler launch can be admitted. It then
+stops the HTTP and UDS listeners, lets already-decoded UDS requests finish under
+the same absolute listener deadline, drains attached process groups within the
+node-owned bound, removes metadata/socket files best-effort, and exits. A forced
+wire-task abort does not abort an admitted request's execution owner; the closed
+attachment gate and exact-identity drain still own any process it can spawn. A
+clean lifecycle marker is written only when every required drain step completes.
+
+Every daemon-owned subprocess crosses the same attachment-before-execution
+boundary. Lillux creates the exact target while it is held, the daemon persists
+that target and its process-group birth identity under the current launch
+owner, and the daemon rechecks terminal, stop, and shutdown state before
+release. A stop serialized before release aborts the held target; a stop after
+release addresses the already-persisted exact identity. This applies equally
+to synchronous and detached roots, callbacks, follow/fanout children,
+continuation successors, and recovery launches. See
+[Attachment Before Execution](../execution/attachment-before-execution.md).
+
+`ryeos stop --force` may escalate to pidfd `SIGKILL` after its timeout. That
+terminates the daemon immediately and therefore cannot promise graceful drain;
+the durable exact process identities and exclusive startup lock drive the next
+startup's orphan teardown and reconciliation.

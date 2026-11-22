@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-13T10:01:45Z:f215cb526a5bed908e5c13284da4d5e3f5b51b9f239da49381fda7cc2c4e30d2:pXnGLF0QDOBZbM2ivkyKAJ8jXeaUmp0feqKUJtjdUC7Fo9TJMkDw2KFhE/oG1akGu6NjtfrHU0nZ4mfGQu9AAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-execution, settle-unknown-allocation]
+description: Release one unknown external allocation outcome on the operator's statement, citing a provider inventory receipt
+forms:
+  - slots:
+      - field: placement_thread_id
+      - field: reason
+      - field: inventory
+help:
+  usage: ryeos external-execution settle-unknown-allocation <placement> <reason> <inventory-receipt>
+dispatch:
+  kind: execute_ref
+  execute: service:external-execution/settle-unknown-allocation

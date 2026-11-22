@@ -18,6 +18,8 @@ pub(crate) struct BoundSourceClosure {
     execution_root: PathBuf,
     members: std::collections::BTreeSet<String>,
     source_directory: lillux::PinnedDirectory,
+    custody_cache_root: lillux::PinnedDirectory,
+    private_workspace_identity: Option<lillux::secure_fs::PinnedDirectoryIdentity>,
     records: ryeos_state::source_verification::VerifiedAdmittedSourceRecords,
     _leases: Vec<std::fs::File>,
 }
@@ -40,10 +42,6 @@ pub(crate) fn bind_external_source(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
 ) -> anyhow::Result<Option<ExternalSourceDelivery>> {
-    use ryeos_external_execution_contract::{
-        GuestMountAccess, GuestMountContentAuthority, GuestMountInput, GuestMountKind,
-        GuestMountRole,
-    };
     capsule.validate()?;
     let expected = ryeos_state::objects::AdmittedLaunchCapsule::source_projection_in_program(
         &capsule.exact_program,
@@ -58,6 +56,20 @@ pub(crate) fn bind_external_source(
         actual == expected,
         "external source resolution differs from the retained launch capsule"
     );
+    bind_external_source_bytes(state, resolution, expected.as_ref())
+}
+
+/// Shared CAS redemption and descriptor construction after the caller's
+/// independent capsule provenance check.
+fn bind_external_source_bytes(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    expected: Option<&ryeos_state::objects::EffectiveSourceClosureProjection>,
+) -> anyhow::Result<Option<ExternalSourceDelivery>> {
+    use ryeos_external_execution_contract::{
+        GuestMountAccess, GuestMountContentAuthority, GuestMountInput, GuestMountKind,
+        GuestMountRole,
+    };
     validate_external_mount_separation(state, resolution, SourceMountPlacement::ExecutionRuntime)?;
     let Some(bound) = bind_source(
         state,
@@ -71,9 +83,7 @@ pub(crate) fn bind_external_source(
     };
     let records = bound.records.clone();
     records.validate_projection(
-        expected
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("external source lacks capsule authority"))?,
+        expected.ok_or_else(|| anyhow::anyhow!("external source lacks admitted authority"))?,
     )?;
     let binding_bytes = lillux::canonical_json(&records.binding().to_value()?)?;
     let manifest_bytes = lillux::canonical_json(&records.manifest().to_value()?)?;
@@ -150,9 +160,24 @@ impl BoundSourceClosure {
         &self.execution_entry_path
     }
 
+    /// Identity of the actual private copy destination; not a cleanup grant.
+    pub(crate) fn private_workspace_identity(
+        &self,
+    ) -> Option<&lillux::secure_fs::PinnedDirectoryIdentity> {
+        self.private_workspace_identity.as_ref()
+    }
+
+    pub(crate) fn custody_records(
+        &self,
+    ) -> (
+        &ryeos_state::source_verification::VerifiedAdmittedSourceRecords,
+        &lillux::PinnedDirectory,
+    ) {
+        (&self.records, &self.custody_cache_root)
+    }
+
     /// Exact verified materialization retained by this binding and its lease.
-    /// Daemon-side reads must use this authority, never reopen the workload's
-    /// execution coordinate or look up the installed/live source again.
+    /// Daemon-side reads use this authority, never the workload coordinate.
     pub(crate) fn source_directory(&self) -> &lillux::PinnedDirectory {
         &self.source_directory
     }
@@ -211,7 +236,11 @@ pub(crate) fn capsule_source_placement(
         }
         _ => false,
     });
-    Ok(source_member_placement(consumes_members, enforced))
+    // A host-direct plan ran under its per-launch disabled-shape view.
+    Ok(source_member_placement(
+        consumes_members,
+        enforced && !plan.execution_posture.is_host_direct(),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +333,37 @@ pub(crate) fn validate_external_mount_separation(
     Ok(())
 }
 
+/// The Q root carries these two accepted projections separately. Check their
+/// exact runtime destinations without constructing a live ResolutionOutput.
+pub(crate) fn validate_retained_qualification_mount_separation(
+    state: &ryeos_app::state::AppState,
+    source: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    realizations: &ryeos_state::objects::ExternalContentRealizationSet,
+) -> anyhow::Result<()> {
+    realizations.validate()?;
+    let authority = super::pinned_state_authority(state)?;
+    let cas = authority.cas_store()?;
+    let (binding, _) = retained_source_records_for_projection(&cas, source)?;
+    let source = SourceMountPlacement::Project.relative_mount(&binding)?;
+    let source = Path::new(&source);
+    for realization in realizations.iter() {
+        if mount_destinations_overlap(source, Path::new(&realization.mount)) {
+            anyhow::bail!("qualification Worker source and realization destinations overlap");
+        }
+    }
+    // Private descriptor delivery collapses both logical roots into one
+    // physical directory. Cross-root aliases must refuse before copying.
+    let entries: Vec<_> = realizations.iter().collect();
+    for (index, left) in entries.iter().enumerate() {
+        for right in &entries[index + 1..] {
+            if mount_destinations_overlap(Path::new(&left.mount), Path::new(&right.mount)) {
+                anyhow::bail!("qualification private realization destinations overlap");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn mount_destinations_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
@@ -319,6 +379,40 @@ pub(crate) fn bind_source(
         resolution,
         workspace,
         BindingMode::IsolationMount(placement),
+        None,
+    )
+}
+
+/// Redeem the source projection held by an authenticated qualification root.
+/// The caller owns its accepted-root/profile join; this function only verifies
+/// the exact retained CAS binding and materializes its immutable source bytes.
+pub(crate) fn bind_retained_qualification_source(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+    budget: &super::external_content::PrivateMaterializationBudget,
+) -> anyhow::Result<BoundSourceClosure> {
+    bind_source_projection_with(
+        state,
+        projection,
+        workspace,
+        BindingMode::PrivateWorkspace,
+        Some(budget),
+    )
+}
+
+/// Redeem the same retained Q source as a read-only execution-runtime mount
+/// for an enforced local Worker, outside its writable workspace.
+pub(crate) fn bind_retained_qualification_source_isolated(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+) -> anyhow::Result<BoundSourceClosure> {
+    bind_source_projection_with(
+        state,
+        projection,
+        workspace,
+        BindingMode::IsolationMount(SourceMountPlacement::ExecutionRuntime),
         None,
     )
 }
@@ -345,13 +439,29 @@ fn bind_source_with(
     mode: BindingMode,
     budget: Option<&super::external_content::PrivateMaterializationBudget>,
 ) -> anyhow::Result<Option<BoundSourceClosure>> {
+    let Some(value) = resolution
+        .composed
+        .derived
+        .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY)
+    else {
+        return Ok(None);
+    };
+    let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+    bind_source_projection_with(state, &projection, workspace, mode, budget).map(Some)
+}
+
+fn bind_source_projection_with(
+    state: &ryeos_app::state::AppState,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+    workspace: &Path,
+    mode: BindingMode,
+    budget: Option<&super::external_content::PrivateMaterializationBudget>,
+) -> anyhow::Result<BoundSourceClosure> {
     let authority = super::pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
-    let Some((binding, manifest, projection)) = retained_source_records(&cas, resolution)? else {
-        return Ok(None);
-    };
+    let (binding, manifest) = retained_source_records_for_projection(&cas, projection)?;
     let records =
         ryeos_state::source_verification::VerifiedAdmittedSourceRecords::from_canonical_bytes(
             &projection.binding_hash,
@@ -393,7 +503,7 @@ fn bind_source_with(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let cache = super::cache::MaterializationCache::new(
+    let cache = super::cache::MaterializationCache::source_closures(
         state
             .config
             .runtime_state_dir()
@@ -401,11 +511,16 @@ fn bind_source_with(
     );
     let generation = &projection.content_manifest_hash;
     let build = cache.generation_build_lock(generation)?;
+    let custody_cache_root = cache.pinned_root()?;
     if cache
         .verify_completion_marker_for_files(&files, generation)
         .is_err()
     {
-        cache.discard_generation(generation)?;
+        // CAS authority and the exact construction token precede the lease;
+        // retain current durable pins THROUGH actual descriptor-relative unlink.
+        cache.discard_generation_with(generation, &build, |retirement| {
+            retire_source_generation(&state.state_store, retirement)
+        })?;
         let cache_root = cache.pinned_root()?;
         let staging_name = OsString::from(format!(
             "{generation}.staging.{}.{}",
@@ -425,6 +540,7 @@ fn bind_source_with(
             let _ = staging.remove_contents_recursive().and_then(|()| {
                 cache_root
                     .remove_empty_child_if_same(&staging_name, &staging)
+                    .map(|receipt| receipt.is_some())
                     .map(|_| ())
             });
         }
@@ -437,6 +553,7 @@ fn bind_source_with(
     let source = lillux::PinnedDirectory::open(&source_path)?
         .ok_or_else(|| anyhow::anyhow!("admitted source generation disappeared"))?;
     let destination = placement.destination(workspace, &mount)?;
+    let mut private_workspace_identity = None;
     let mounts = match mode {
         BindingMode::IsolationMount(placement) => vec![match placement {
             SourceMountPlacement::Project => {
@@ -455,19 +572,19 @@ fn bind_source_with(
             }
         }],
         BindingMode::PrivateWorkspace => {
-            publish_private_source(
+            private_workspace_identity = Some(publish_private_source(
                 &source,
                 workspace,
                 &mount,
                 &manifest,
                 budget
                     .ok_or_else(|| anyhow::anyhow!("private source binding has no copy budget"))?,
-            )?;
+            )?);
             Vec::new()
         }
     };
     authority.ensure_guard(&guard)?;
-    Ok(Some(BoundSourceClosure {
+    Ok(BoundSourceClosure {
         mounts,
         sealed_identity_env,
         execution_entry_path: destination.join(entry),
@@ -478,9 +595,11 @@ fn bind_source_with(
             .map(|entry| entry.path.clone())
             .collect(),
         source_directory: source,
+        custody_cache_root,
+        private_workspace_identity,
         records,
         _leases: vec![lease],
-    }))
+    })
 }
 
 fn retained_source_records(
@@ -501,6 +620,18 @@ fn retained_source_records(
         return Ok(None);
     };
     let projection = ryeos_state::objects::EffectiveSourceClosureProjection::from_value(value)?;
+    let (binding, manifest) = retained_source_records_for_projection(cas, &projection)?;
+    Ok(Some((binding, manifest, projection)))
+}
+
+fn retained_source_records_for_projection(
+    cas: &lillux::CasStore,
+    projection: &ryeos_state::objects::EffectiveSourceClosureProjection,
+) -> anyhow::Result<(
+    ryeos_state::objects::EffectiveSourceBinding,
+    ryeos_state::objects::SourceClosureManifest,
+)> {
+    projection.validate()?;
     let binding_value = cas
         .get_object(&projection.binding_hash)?
         .ok_or_else(|| anyhow::anyhow!("admitted source binding is missing"))?;
@@ -514,12 +645,8 @@ fn retained_source_records(
             lillux::canonical_json(&binding_value)?.as_bytes(),
             lillux::canonical_json(&manifest_value)?.as_bytes(),
         )?;
-    records.validate_projection(&projection)?;
-    Ok(Some((
-        records.binding().clone(),
-        records.manifest().clone(),
-        projection,
-    )))
+    records.validate_projection(projection)?;
+    Ok((records.binding().clone(), records.manifest().clone()))
 }
 
 fn logical_mount(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyhow::Result<String> {
@@ -536,7 +663,7 @@ fn publish_private_source(
     mount: &str,
     manifest: &ryeos_state::objects::SourceClosureManifest,
     budget: &super::external_content::PrivateMaterializationBudget,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<lillux::secure_fs::PinnedDirectoryIdentity> {
     let workspace = lillux::PinnedDirectory::open(workspace)?
         .ok_or_else(|| anyhow::anyhow!("private source workspace is absent"))?;
     let (parent_path, name) = Path::new(mount)
@@ -554,7 +681,10 @@ fn publish_private_source(
         match existing {
             lillux::PinnedDirectoryEntry::Directory(directory) => {
                 directory.remove_contents_recursive()?;
-                if !parent.remove_empty_child_if_same(name, &directory)? {
+                if !parent
+                    .remove_empty_child_if_same(name, &directory)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!("private source shadow remained non-empty");
                 }
             }
@@ -585,7 +715,8 @@ fn publish_private_source(
     }
     target.sync_tree()?;
     ryeos_state::source_verification::verify_admitted_source_tree(&target, manifest)?;
-    Ok(())
+    workspace.ensure_path_binding()?;
+    workspace.identity()
 }
 
 fn open_source_parent(
@@ -605,6 +736,39 @@ fn open_source_parent(
     anyhow::bail!("admitted source path is empty")
 }
 
+/// The actual unlink stays inside current namespace pin authority. This checks
+/// retention only; it grants neither source admission nor process release.
+pub(super) fn retire_source_generation(
+    state_store: &ryeos_app::state_store::StateStore,
+    retirement: super::cache::GenerationRetirement<'_>,
+) -> anyhow::Result<()> {
+    let authority = state_store.pinned_state_authority()?;
+    let runtime = authority.runtime_directory();
+    runtime.ensure_path_binding()?;
+    let cache = runtime
+        .open_child_directory(OsStr::new("cache"))?
+        .ok_or_else(|| anyhow::anyhow!("protected source cache namespace is missing"))?;
+    let expected = cache
+        .open_child_directory(OsStr::new("source-closures"))?
+        .ok_or_else(|| anyhow::anyhow!("protected source cache root is missing"))?;
+    retirement.require_root(&expected)?;
+    state_store.with_process_resource_materialization_pins(|pins| {
+        use ryeos_app::runtime_db::process_resource_custody::{
+            ProcessMaterializationCache, ProcessMaterializationCustody,
+        };
+        if retirement.kind() != super::cache::MaterializationCacheKind::SourceClosure {
+            anyhow::bail!("source repair received a different cache domain");
+        }
+        if pins.contains(&ProcessMaterializationCustody {
+            cache: ProcessMaterializationCache::SourceClosure,
+            manifest_hash: retirement.generation().to_owned(),
+        }) {
+            anyhow::bail!("admitted source repair refused a retained generation");
+        }
+        retirement.remove()
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -621,7 +785,7 @@ pub(crate) mod tests {
                 item_kind: "tool".to_owned(),
                 source_space: ryeos_state::objects::SourceSpaceIdentity::Bundle,
                 source_root: ryeos_state::objects::SourceRootIdentity::Bundle {
-                    name: "standard".to_owned(),
+                    name: "knowledge".to_owned(),
                 },
                 root_source_content_digest: "a".repeat(64),
                 root_raw_content_digest: "b".repeat(64),
@@ -739,7 +903,7 @@ pub(crate) mod tests {
                 }, "executor_chain":[]}],
                 "entrypoint":"spawn", "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
                 "materialization_requirements":[], "network_authority_ceiling":"node_policy", "filesystem_authority_ceiling":"node_policy",
-                "target_requirement":null, "resource_authority_ceiling":"node_policy", "cache_key":"test", "executor_authorities":[]
+                "target_requirement":null, "endpoint_requirement":{"kind":"local"}, "external_endpoint_binding":null, "subprocess_limits":null, "resource_authority_ceiling":"node_policy", "cache_key":"test", "executor_authorities":[]
             }),
             protocol_descriptor_document: String::new(),
             command: AdmittedDirectCommandClosure::NodePolicy,
@@ -806,6 +970,10 @@ pub(crate) mod tests {
             source_directory: lillux::PinnedDirectory::open(cache.path())
                 .unwrap()
                 .unwrap(),
+            custody_cache_root: lillux::PinnedDirectory::open(cache.path())
+                .unwrap()
+                .unwrap(),
+            private_workspace_identity: None,
             records,
             _leases: Vec::new(),
         };

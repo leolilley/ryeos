@@ -1,0 +1,46 @@
+# ryeos:signed:2026-11-18T22:30:34Z:2c8b51f46bb4547e458278dde1af6129fd1a03931dd9019c448043ab38af2bd2:QYFYBBsIhGFDoEU2gqa5gaw+hKIvmroyemZLMlUT5TK/DwoyKfIb0sYkNyz27t98tiRdVqD/WSCQg9ors2FIDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+version: "1.0.0"
+description: Retained authored Codex semantic checker source; capture is not checker execution or qualification.
+recipe_purpose: general_product_v1
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots: []
+  products:
+    - name: semantic_checker_code
+      source: {kind: retained_project}
+      path: bundles/codex/.ai/tools/codex/qualification/lib/semantic-checker
+      shape: tree
+      storage: content
+      required: true
+      bounds:
+        maximum_entries: 16
+        maximum_depth: 4
+        maximum_file_bytes: 1048576
+        maximum_total_bytes: 2097152
+      expected_manifest_hash: ce5fb7a7b264e9744a8c9adb631b9ef5b99efb9b2e266df48f5fc90fd788a1c1
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    # The verifier Tool inspects the retained checker source through this edge;
+    # the code carries no qualification of its own.
+    - name: checker_code_to_consumer_verifier
+      producer:
+        canonical_ref: graph:codex/semantic-checker-code-capture
+        recipe_binding: product_recipe
+        product_name: semantic_checker_code
+        parameters: {}
+      consumer:
+        canonical_ref: tool:codex/qualification/consumer-runtime-verifier
+        declaration_id: checker-code
+      required_product:
+        shape: tree
+        storage: content
+        bounds:
+          maximum_entries: 16
+          maximum_depth: 4
+          maximum_file_bytes: 1048576
+          maximum_total_bytes: 2097152
+      qualification:
+        policy_ref: null
+        required_claims: []

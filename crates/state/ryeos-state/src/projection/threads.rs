@@ -12,144 +12,145 @@ pub fn project_thread_snapshot(
     snapshot: &crate::ThreadSnapshot,
     chain_root_id: &str,
 ) -> anyhow::Result<()> {
-    snapshot.validate()?;
-    tracing::trace!(
-        thread_id = %snapshot.thread_id,
-        chain_root_id = %chain_root_id,
-        status = %snapshot.status,
-        upstream = ?snapshot.upstream_thread_id,
-        "project thread snapshot"
-    );
-    let project_root = snapshot
-        .project_root
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned());
-    let captured_history_policy_json = snapshot
-        .captured_history_policy
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()?
-        .map(|value| lillux::canonical_json(&value))
-        .transpose()
-        .context("failed to canonicalize captured history policy")?;
-    let project_authority_json =
-        lillux::canonical_json(&serde_json::to_value(&snapshot.project_authority)?)
-            .context("failed to canonicalize project authority")?;
-
-    db.connection()
-        .execute(
-            "INSERT OR REPLACE INTO threads (
-            thread_id, chain_root_id, kind, status,
-            item_ref, executor_ref, launch_mode,
-            current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
-            project_authority_json, admitted_launch_capsule_hash,
-            base_project_snapshot_hash, result_project_snapshot_hash, result_workspace_output_capture_hash,
-            captured_history_policy_json, created_at, updated_at, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                &snapshot.thread_id,
-                chain_root_id,
-                &snapshot.kind_name,
-                snapshot.status.to_string(),
-                &snapshot.item_ref,
-                &snapshot.executor_ref,
-                &snapshot.launch_mode,
-                &snapshot.current_site_id,
-                &snapshot.origin_site_id,
-                &snapshot.upstream_thread_id,
-                &snapshot.requested_by,
-                project_root,
-                project_authority_json,
-                &snapshot.admitted_launch_capsule_hash,
-                &snapshot.base_project_snapshot_hash,
-                &snapshot.result_project_snapshot_hash,
-                &snapshot.result_workspace_output_capture_hash,
-                captured_history_policy_json,
-                &snapshot.created_at,
-                &snapshot.updated_at,
-                &snapshot.started_at,
-                &snapshot.finished_at,
-            ],
-        )
-        .context("failed to project thread snapshot")?;
-
-    // Project the snapshot's `result` / `error` fields into the
-    // `thread_results` table so callers (e.g. graph runtime callback
-    // dispatch through `dispatch_subprocess` → `build_execute_result`)
-    // can read the leaf value back. Without this insert, the
-    // `thread_results` table stays empty even on terminal status, and
-    // every `get_thread_result` returns None — which surfaces as
-    // `response.result == null` at the callback boundary.
-    //
-    // Idempotent under INSERT OR REPLACE: the snapshot is the source
-    // of truth, so re-projection (rebuild, re-apply) overwrites with
-    // the same row.
-    if snapshot.result.is_some() || snapshot.error.is_some() || snapshot.outcome_code.is_some() {
-        let result_blob = snapshot
-            .result
+    db.with_sql(|connection| {
+        snapshot.validate()?;
+        tracing::trace!(
+            thread_id = %snapshot.thread_id,
+            chain_root_id = %chain_root_id,
+            status = %snapshot.status,
+            upstream = ?snapshot.upstream_thread_id,
+            "project thread snapshot"
+        );
+        let project_root = snapshot
+            .project_root
             .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .with_context(|| format!("serialize result for thread {}", snapshot.thread_id))?;
-        // Store the error as JSON text so a structured error round-trips back
-        // into the same shape on read (a string error stays a JSON string).
-        let error_text = snapshot
-            .error
+            .map(|path| path.to_string_lossy().into_owned());
+        let captured_history_policy_json = snapshot
+            .captured_history_policy
             .as_ref()
-            .map(serde_json::to_string)
+            .map(serde_json::to_value)
+            .transpose()?
+            .map(|value| lillux::canonical_json(&value))
             .transpose()
-            .with_context(|| format!("serialize error for thread {}", snapshot.thread_id))?;
-        db.connection()
+            .context("failed to canonicalize captured history policy")?;
+        let project_authority_json =
+            lillux::canonical_json(&serde_json::to_value(&snapshot.project_authority)?)
+                .context("failed to canonicalize project authority")?;
+
+        connection
             .execute(
-                "INSERT OR REPLACE INTO thread_results (
-                thread_id, chain_root_id, status, result, outcome_code, error, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO threads (
+                thread_id, chain_root_id, kind, status,
+                item_ref, executor_ref, launch_mode,
+                current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
+                project_authority_json, admitted_launch_capsule_hash,
+                base_project_snapshot_hash, result_project_snapshot_hash, result_workspace_output_capture_hash,
+                captured_history_policy_json, created_at, updated_at, started_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     &snapshot.thread_id,
                     chain_root_id,
+                    &snapshot.kind_name,
                     snapshot.status.to_string(),
-                    result_blob,
-                    &snapshot.outcome_code,
-                    error_text,
+                    &snapshot.item_ref,
+                    &snapshot.executor_ref,
+                    &snapshot.launch_mode,
+                    &snapshot.current_site_id,
+                    &snapshot.origin_site_id,
+                    &snapshot.upstream_thread_id,
+                    &snapshot.requested_by,
+                    project_root,
+                    project_authority_json,
+                    &snapshot.admitted_launch_capsule_hash,
+                    &snapshot.base_project_snapshot_hash,
+                    &snapshot.result_project_snapshot_hash,
+                    &snapshot.result_workspace_output_capture_hash,
+                    captured_history_policy_json,
+                    &snapshot.created_at,
                     &snapshot.updated_at,
+                    &snapshot.started_at,
+                    &snapshot.finished_at,
                 ],
             )
-            .context("failed to project thread result")?;
-    }
+            .context("failed to project thread snapshot")?;
 
-    // Derive edge from upstream_thread_id (CAS-truth derived projection)
-    if let Some(ref upstream_id) = snapshot.upstream_thread_id {
-        // Avoid duplicate edges — only insert if not already present
-        let exists: bool = db
-            .connection()
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM thread_edges WHERE parent_thread_id = ? AND child_thread_id = ? AND chain_root_id = ?",
-                rusqlite::params![upstream_id, &snapshot.thread_id, chain_root_id],
-                |row| row.get(0),
-            )
-            .context("failed to check for an existing derived thread edge")?;
-
-        if !exists {
-            db.connection()
+        // Project the snapshot's `result` / `error` fields into the
+        // `thread_results` table so callers (e.g. graph runtime callback
+        // dispatch through `dispatch_subprocess` → `build_execute_result`)
+        // can read the leaf value back. Without this insert, the
+        // `thread_results` table stays empty even on terminal status, and
+        // every `get_thread_result` returns None — which surfaces as
+        // `response.result == null` at the callback boundary.
+        //
+        // Idempotent under INSERT OR REPLACE: the snapshot is the source
+        // of truth, so re-projection (rebuild, re-apply) overwrites with
+        // the same row.
+        if snapshot.result.is_some() || snapshot.error.is_some() || snapshot.outcome_code.is_some() {
+            let result_blob = snapshot
+                .result
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()
+                .with_context(|| format!("serialize result for thread {}", snapshot.thread_id))?;
+            // Store the error as JSON text so a structured error round-trips back
+            // into the same shape on read (a string error stays a JSON string).
+            let error_text = snapshot
+                .error
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .with_context(|| format!("serialize error for thread {}", snapshot.thread_id))?;
+            connection
                 .execute(
-                    "INSERT INTO thread_edges (
-                    chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
-                    spawn_reason, source_event_hash, created_at
-                ) VALUES (?, ?, ?, NULL, 'spawned', NULL, ?)",
+                    "INSERT OR REPLACE INTO thread_results (
+                    thread_id, chain_root_id, status, result, outcome_code, error, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     rusqlite::params![
-                        chain_root_id,
-                        upstream_id,
                         &snapshot.thread_id,
-                        &snapshot.created_at,
+                        chain_root_id,
+                        snapshot.status.to_string(),
+                        result_blob,
+                        &snapshot.outcome_code,
+                        error_text,
+                        &snapshot.updated_at,
                     ],
                 )
-                .context("failed to project derived thread edge")?;
+                .context("failed to project thread result")?;
         }
-    }
 
-    refresh_chain_retention(db, chain_root_id)?;
+        // Derive edge from upstream_thread_id (CAS-truth derived projection)
+        if let Some(ref upstream_id) = snapshot.upstream_thread_id {
+            // Avoid duplicate edges — only insert if not already present
+            let exists: bool = connection
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM thread_edges WHERE parent_thread_id = ? AND child_thread_id = ? AND chain_root_id = ?",
+                    rusqlite::params![upstream_id, &snapshot.thread_id, chain_root_id],
+                    |row| row.get(0),
+                )
+                .context("failed to check for an existing derived thread edge")?;
 
-    Ok(())
+            if !exists {
+                connection
+                    .execute(
+                        "INSERT INTO thread_edges (
+                        chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
+                        spawn_reason, source_event_hash, created_at
+                    ) VALUES (?, ?, ?, NULL, 'spawned', NULL, ?)",
+                        rusqlite::params![
+                            chain_root_id,
+                            upstream_id,
+                            &snapshot.thread_id,
+                            &snapshot.created_at,
+                        ],
+                    )
+                    .context("failed to project derived thread edge")?;
+            }
+        }
+
+        refresh_chain_retention(db, chain_root_id)?;
+
+        Ok(())
+    })
 }
 
 /// Project a newly-created child thread and its initial durable events as one

@@ -1,5 +1,6 @@
-# ryeos:signed:2026-09-14T10:03:09Z:19c9867a3f923d6112042e2afac1f62436a56a06dc6af837c4144183c1db21ad:gtKrfGwikG4Dia8EexhKFl4VbVsqMloMtVW7ZSK+o9OTgGN/TnrCvG7HkznSJdIrlf2d5iS2P8KemNfD3dlaCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:09:14Z:6135aa6e8d34faa0f7cd7b746d6a901ac42f004e869968f2147fd76c2bbdb629:b/fwHve6Q6HwInsjxT8u/HNvNlPw+tbx6n6riU4H293Z0PNvLqwuZ8WuKiuyw3B0WDEaf/jCpSJbB9MRTwGgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-workbench
+title: Workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
 
@@ -14,17 +15,15 @@ tiling:
   insert: end
 
 tiles:
-  - "view:ryeos/graph/topology"
   - "view:ryeos/threads/history"
-
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
 
 style:
   border: thin
 
 library:
+  - group: Inspection
+    views:
+      - view:ryeos/item/inspector
   - group: Threads
     views:
       - view:ryeos/threads/history
@@ -43,8 +42,6 @@ library:
       - view:ryeos/node/remotes
       - view:ryeos/node/bundles
       - view:ryeos/node/gc
-      - view:ryeos/graph/topology
-      - view:ryeos/atlas
       - view:ryeos/commands/grammar
 
 input:
@@ -63,16 +60,9 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
-
-ambient:
-  show_background: true
-  opacity: 1.0
+          model: directive:ryeos/models/general
 
 affordances:
-  - id: view.graph
-    label: Graph
-    category: View
   - id: view.threads
     label: Threads
     category: View

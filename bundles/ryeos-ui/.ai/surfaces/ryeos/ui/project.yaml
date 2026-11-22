@@ -1,5 +1,6 @@
-# ryeos:signed:2026-09-14T10:03:09Z:e2fe56953e5792d4e02410ade6828776e8d60a2e4651df0aede8f6653ea84ac2:tVdw7DqFpwcNYXhm8Ku4SSy0IIe6I7B1m9FGFIFZJieF8j786Rfommu+aRpKAJFTJi6wafl4sey9h4C9pYDtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:27:02Z:5da0abce5bbc84e3b324c0cdb8bd1427638fdcc3aa254d3b392fed7b52f394a8:DKEBDG7lD+FQoOEmofH3MHhYhiv5nGahiudiJ4KJsR0f38QW3Ki9ga3ZDM/G3j+lzjeG1bxK37SqHyzRX1QiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-project
+title: Project
 version: "1.0.0"
 description: Active project explorer for files, signed items, and related execution
 
@@ -19,17 +20,15 @@ tiles:
   - "view:ryeos/threads/history"
   - "view:ryeos/runs/comparison"
 
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
-  right:  { content: "view:ryeos/item/inspector", open: false, size: 40 }
-
 style:
   border: thin
 
-backdrop: view:ryeos/backdrop/prism-shards
 
 library:
+  - group: Inspection
+    views:
+      - view:ryeos/node/status
+      - view:ryeos/item/inspector
   - group: Threads
     views:
       - view:ryeos/threads/history
@@ -39,6 +38,9 @@ library:
     views:
       - view:ryeos/project/files
       - view:ryeos/project/items
+      - view:ryeos/project/directives
+      - view:ryeos/project/graphs
+      - view:ryeos/project/knowledge
       - view:ryeos/project/schedules
       - view:ryeos/items/space
 
@@ -58,11 +60,7 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
-
-ambient:
-  show_background: true
-  opacity: 1.0
+          model: directive:ryeos/models/general
 
 affordances:
   - id: view.files
@@ -75,7 +73,7 @@ affordances:
     label: Threads
     category: View
   - id: view.schedules
-    label: Schedules
+    label: My schedules
     category: View
   - id: view.item_inspector
     label: Inspector

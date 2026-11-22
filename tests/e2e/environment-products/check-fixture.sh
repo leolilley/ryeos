@@ -203,8 +203,8 @@ qualification_bundle=$disposable/qualification-bundle
 "$fixture_root/prepare-qualification-bundle.sh" \
   "$observed_manifest" \
   "$qualification_bundle" >/dev/null
-verifier=$qualification_bundle/standard/.ai/tools/test/verify-runtime.yaml
-policy=$qualification_bundle/standard/.ai/config/test/runtime-qualification.yaml
+verifier=$qualification_bundle/environment-qualification/.ai/tools/test/verify-runtime.yaml
+policy=$qualification_bundle/environment-qualification/.ai/config/test/runtime-qualification.yaml
 worker=$qualification_bundle/codex/.ai/workers/fixture/hosted.yaml
 enrollment_worker=$qualification_bundle/codex/.ai/workers/fixture/enrollment.yaml
 login=$qualification_bundle/codex/.ai/worker-executions/fixture/login.yaml
@@ -212,8 +212,8 @@ session=$qualification_bundle/codex/.ai/worker-executions/fixture/session.yaml
 profile=$qualification_bundle/codex/.ai/workers/fixture/lib/hosted/profile.json
 [[ -f $verifier && -f $policy && -f $worker && -f $enrollment_worker ]]
 [[ -f $login && -f $session && -f $profile ]]
-[[ ! -e $qualification_bundle/standard/.ai/workers ]]
-[[ ! -e $qualification_bundle/standard/.ai/worker-executions ]]
+[[ ! -e $qualification_bundle/environment-qualification/.ai/workers ]]
+[[ ! -e $qualification_bundle/environment-qualification/.ai/worker-executions ]]
 grep -F -q -- 'bin:core/ryeos-structured-session-bridge' "$worker"
 grep -F -q -- 'bin:core/ryeos-structured-session-bridge' "$enrollment_worker"
 [[ $(grep -F -c -- "$expected_manifest" "$verifier") -eq 2 ]]

@@ -34,6 +34,11 @@ pub const SPEND_VERIFIER_CONTRACT_V1: &str = "spend-verifier/v1";
 
 /// Upper bound applied to every free-text diagnostic accepted over RPC.
 pub const MAX_DIAGNOSTIC_LEN: usize = 2048;
+
+/// Typed refusal code for a provider attempt whose coordinate was already
+/// issued under a predecessor launch generation and whose answer was never
+/// recorded: its external outcome is unknown, so a second contact is refused.
+pub const PROVIDER_OUTCOME_UNKNOWN_CODE: &str = "provider_attempt_outcome_unknown";
 /// Upper bound applied to retained provider raw decimal audit text.
 pub const MAX_RAW_DECIMAL_LEN: usize = 128;
 pub const MAX_LOCAL_PROVIDER_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -107,10 +112,12 @@ impl ProviderAttemptPrepareParams {
         if self.attempt_number == 0 || self.turn == 0 {
             return Err("turn and attempt_number are 1-based".to_string());
         }
-        self.request.validate().map_err(|error| error.to_string())?;
+        self.request
+            .validate()
+            .map_err(|error| format!("{error:#}"))?;
         self.transport
             .validate()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         Ok(())
     }
 }
@@ -222,6 +229,26 @@ pub enum ProviderRetryReason {
     Timeout,
     Send { connect_phase: bool },
     MidStream { live_output_events_emitted: u64 },
+}
+
+impl ProviderRetryReason {
+    /// True when the failure leaves it unknown whether the provider acted on
+    /// the request: the request may have reached it and a response was lost or
+    /// cut. A status the provider returned, or a failure before the request
+    /// could have been sent, leaves the outcome known.
+    pub const fn leaves_outcome_unknown(&self) -> bool {
+        match self {
+            Self::Status { .. }
+            | Self::Send {
+                connect_phase: true,
+            } => false,
+            Self::Timeout
+            | Self::Send {
+                connect_phase: false,
+            }
+            | Self::MidStream { .. } => true,
+        }
+    }
 }
 
 /// Exact runtime decision to advance one failed physical provider attempt.
@@ -383,7 +410,7 @@ impl ProviderAttemptSettleParams {
     pub fn validate(&self) -> Result<(), String> {
         self.coordinate
             .validate()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         self.spend.validate()?;
         self.tokens.validate()?;
         if self.answer.is_some() && self.retry.is_some() {
@@ -393,7 +420,7 @@ impl ProviderAttemptSettleParams {
             retry.validate()?;
         }
         self.answer.as_ref().map_or(Ok(()), |answer| {
-            answer.validate().map_err(|error| error.to_string())
+            answer.validate().map_err(|error| format!("{error:#}"))
         })
     }
 }
@@ -478,7 +505,7 @@ impl ProviderAttemptLocalStreamStartParams {
         }
         self.coordinate
             .validate()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         if !matches!(
             self.coordinate.transport,
             ryeos_provider_contract::TransportCoordinate::AdmittedLocalWorker { .. }
@@ -625,7 +652,6 @@ pub struct ProviderAttemptBudgetRecord {
 /// against the reservation row. Both sides hash the same canonical value, so
 /// equality with the stored `request_hash` binds every component — including
 /// the exact request body digest — to the reservation the ledger billed.
-#[allow(clippy::too_many_arguments)]
 pub fn provider_attempt_request_hash(
     thread_id: &str,
     turn: u32,
@@ -646,6 +672,30 @@ pub fn provider_attempt_request_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_lost_or_cut_responses_leave_the_outcome_unknown() {
+        assert!(ProviderRetryReason::Timeout.leaves_outcome_unknown());
+        assert!(
+            ProviderRetryReason::Send {
+                connect_phase: false
+            }
+            .leaves_outcome_unknown()
+        );
+        assert!(
+            ProviderRetryReason::MidStream {
+                live_output_events_emitted: 0
+            }
+            .leaves_outcome_unknown()
+        );
+        assert!(!ProviderRetryReason::Status { code: 503 }.leaves_outcome_unknown());
+        assert!(
+            !ProviderRetryReason::Send {
+                connect_phase: true
+            }
+            .leaves_outcome_unknown()
+        );
+    }
 
     #[test]
     fn shared_derivations_are_deterministic_and_component_sensitive() {
@@ -789,13 +839,10 @@ mod tests {
     #[test]
     fn settlement_cannot_carry_both_answer_and_retry() {
         let answer = ryeos_provider_contract::ProviderCallAnswer {
-            message: ryeos_provider_contract::RecordedMessage {
-                role: "assistant".to_string(),
-                content: Some(serde_json::json!("done")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            message: ryeos_provider_contract::Message::text(
+                ryeos_provider_contract::Role::Assistant,
+                "done",
+            ),
             finish_reason: Some("stop".to_string()),
         };
         let params = ProviderAttemptSettleParams {

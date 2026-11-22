@@ -5,11 +5,14 @@
 //! the retained product; an independent restored-guest verifier owns that join.
 
 use anyhow::{Context as _, Result, ensure};
-use chrono::DateTime;
+use ryeos_effect_contract::rfc3339;
 use ryeos_external_execution_contract::runtime_snapshot::{
-    MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RUNTIME_SNAPSHOT_RESULT_SCHEMA,
-    RuntimeSnapshotAdapterRequest, RuntimeSnapshotAdapterResponse, RuntimeSnapshotIntent,
+    MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RUNTIME_SNAPSHOT_CREATE_RESULT_SCHEMA,
+    RUNTIME_SNAPSHOT_RESULT_SCHEMA, RUNTIME_SNAPSHOT_UPLOAD_RECEIPT_SCHEMA,
+    RuntimeSnapshotAdapterRequest, RuntimeSnapshotAdapterResponse,
+    RuntimeSnapshotCreateAdapterRequest, RuntimeSnapshotCreateResult, RuntimeSnapshotIntent,
     RuntimeSnapshotLocator, RuntimeSnapshotReadinessObservation, RuntimeSnapshotReadinessRequest,
+    RuntimeSnapshotUploadAdapterRequest, RuntimeSnapshotUploadReceipt,
 };
 use ryeos_http_transport::{
     Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource,
@@ -17,6 +20,8 @@ use ryeos_http_transport::{
 use serde::{Deserialize, Serialize};
 use std::io::Read as _;
 use zeroize::Zeroizing;
+
+use crate::fail_class::{Classify as _, FailClass, ensure_class};
 
 use crate::snapshot_provider_spec::{MAX_SPEC_BYTES, SnapshotProductionSpec};
 use crate::{
@@ -48,7 +53,8 @@ impl SnapshotProductionSettings {
     }
 
     fn validate_for_intent(&self, intent: &RuntimeSnapshotIntent) -> Result<()> {
-        ensure!(
+        ensure_class!(
+            FailClass::SettingsShape,
             self.schema == 1
                 && self.sandbox_group_id == intent.provider_group_id
                 && self.owner_id.len() <= 256
@@ -73,8 +79,9 @@ impl SnapshotProductionSettings {
 /// creation deadline is not reused: it authorized one POST sequence, whereas
 /// this invocation receives a fresh controller-owned observation deadline.
 pub(crate) fn observe_readiness(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
-    let deadline = operation_deadline()?;
-    ensure!(
+    let deadline = operation_deadline().classed(FailClass::Deadline)?;
+    ensure_class!(
+        FailClass::RequestParse,
         [
             LIFECYCLE_BOOTSTRAP_FD_ENV,
             LIFECYCLE_SIGNED_IMPORT_FD_ENV,
@@ -100,7 +107,8 @@ pub(crate) fn observe_readiness(adapter: &lillux::InheritedDescriptorAuthority) 
         "snapshot readiness request is noncanonical or selects another provider"
     );
     verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
-    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)?;
+    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)
+        .classed(FailClass::SpecDigest)?;
     let captured_spec_digest = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
         .context("snapshot observer lacks captured provider spec digest")?;
     ensure!(
@@ -146,8 +154,9 @@ pub(crate) fn observe_readiness(adapter: &lillux::InheritedDescriptorAuthority) 
 /// Only this first-claim invocation may contact Render. Reconciliation must
 /// read retained journal/provider identities and never call this entry again.
 pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
-    let deadline = operation_deadline()?;
-    ensure!(
+    let deadline = operation_deadline().classed(FailClass::Deadline)?;
+    ensure_class!(
+        FailClass::RequestParse,
         [
             LIFECYCLE_BOOTSTRAP_FD_ENV,
             LIFECYCLE_SIGNED_IMPORT_FD_ENV,
@@ -160,31 +169,42 @@ pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<
     let request_bytes = read_sealed_env(
         LIFECYCLE_REQUEST_FD_ENV,
         MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
-    )?;
+    )
+    .classed(FailClass::RequestParse)?;
     let request: RuntimeSnapshotAdapterRequest =
         ryeos_external_execution_contract::from_json_slice_strict(
             &request_bytes,
             MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
-        )?;
-    request.validate()?;
-    ensure!(
-        ryeos_external_execution_contract::canonical_json(&request)? == request_bytes
+        )
+        .classed(FailClass::RequestParse)?;
+    request.validate().classed(FailClass::RequestParse)?;
+    ensure_class!(
+        FailClass::RequestParse,
+        ryeos_external_execution_contract::canonical_json(&request)
+            .classed(FailClass::RequestParse)?
+            == request_bytes
             && request.intent.provider_id == ADAPTER_ID,
         "snapshot adapter request is noncanonical or selects another provider"
     );
     verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
-    let deadline = request_deadline(request.intent.attempt_deadline_ms, deadline)?;
-    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)?;
+    let deadline = request_deadline(request.intent.attempt_deadline_ms, deadline)
+        .classed(FailClass::Deadline)?;
+    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)
+        .classed(FailClass::SpecDigest)?;
     let captured_spec_digest = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
-        .context("snapshot producer lacks captured provider spec digest")?;
-    ensure!(
+        .context("snapshot producer lacks captured provider spec digest")
+        .classed(FailClass::SpecDigest)?;
+    ensure_class!(
+        FailClass::SpecDigest,
         captured_spec_digest == request.provider_spec_digest
             && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
         "snapshot provider spec changed its exact signed handoff"
     );
-    let spec = SnapshotProductionSpec::parse(&spec_bytes)?;
-    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
-    ensure!(
+    let spec = SnapshotProductionSpec::parse(&spec_bytes).classed(FailClass::SpecDigest)?;
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)
+        .classed(FailClass::SettingsDigest)?;
+    ensure_class!(
+        FailClass::SettingsDigest,
         lillux::sha256_hex(&settings_bytes) == request.intent.settings_digest,
         "snapshot production settings changed"
     );
@@ -192,22 +212,32 @@ pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<
         ryeos_external_execution_contract::from_json_slice_strict(
             &settings_bytes,
             MAX_SETTINGS_BYTES,
-        )?;
-    settings.validate_for(&request)?;
+        )
+        .classed(FailClass::SettingsShape)?;
+    settings
+        .validate_for(&request)
+        .classed(FailClass::SettingsShape)?;
     let creation_intent = creation_intent(&request, &settings);
-    creation_intent.validate()?;
+    creation_intent
+        .validate()
+        .classed(FailClass::RequestParse)?;
     // SAFETY: the trusted runner transferred this exact sealed descriptor
     // once into this single-threaded producer invocation.
     let upload = unsafe { lillux::take_inherited_descriptor_authority(request.upload_descriptor) }
-        .map_err(anyhow::Error::msg)?;
+        .map_err(anyhow::Error::msg)
+        .classed(FailClass::UploadModeOrDigest)?;
     crate::activation_contact::verify_package_before_contact(
         &upload,
         request.upload_bytes,
         &request.upload_sha256,
-    )?;
+    )
+    .classed(FailClass::UploadModeOrDigest)?;
     let network = crate::network_context_from_captured_inputs()?;
     let cancellation = lillux::network::NetworkCancellation::default();
-    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    // Snapshot production runs under Lillux's no-process-creation filter.
+    // A signal-listener thread would violate that local-writer fence. The
+    // inherited absolute deadline and default signal termination instead
+    // leave an interrupted provider mutation uncertain in the durable journal.
     let credential = crate::read_credential()?;
     let result = first_snapshot_attempt(
         &request,
@@ -220,11 +250,207 @@ pub(crate) fn operate(adapter: &lillux::InheritedDescriptorAuthority) -> Result<
         deadline,
         &cancellation,
     )?;
+    result
+        .validate_for(&request)
+        .classed(FailClass::CreateStatus)?;
+    write_response(&result)
+}
+
+/// First-contact upload stage. A completed response is only an upload
+/// acknowledgment; it cannot create or qualify a snapshot.
+pub(crate) fn operate_upload(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
+    let deadline = operation_deadline().classed(FailClass::Deadline)?;
+    ensure_class!(
+        FailClass::RequestParse,
+        [
+            LIFECYCLE_BOOTSTRAP_FD_ENV,
+            LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV
+        ]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "snapshot upload received worker activation authority"
+    );
+    let request_bytes = read_sealed_env(
+        LIFECYCLE_REQUEST_FD_ENV,
+        MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+    )
+    .classed(FailClass::RequestParse)?;
+    let request: RuntimeSnapshotUploadAdapterRequest =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &request_bytes,
+            MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+        )
+        .classed(FailClass::RequestParse)?;
+    request.validate().classed(FailClass::RequestParse)?;
+    ensure_class!(
+        FailClass::RequestParse,
+        ryeos_external_execution_contract::canonical_json(&request)
+            .classed(FailClass::RequestParse)?
+            == request_bytes
+            && request.intent.provider_id == ADAPTER_ID,
+        "snapshot upload request is noncanonical or selects another provider"
+    );
+    verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
+    let deadline = request_deadline(request.stage.attempt_deadline_ms, deadline)
+        .classed(FailClass::Deadline)?;
+    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)
+        .classed(FailClass::SpecDigest)?;
+    let captured_spec_digest = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("snapshot upload lacks captured provider spec digest")
+        .classed(FailClass::SpecDigest)?;
+    ensure_class!(
+        FailClass::SpecDigest,
+        captured_spec_digest == request.provider_spec_digest
+            && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
+        "snapshot upload provider spec changed its signed handoff"
+    );
+    let spec = SnapshotProductionSpec::parse(&spec_bytes).classed(FailClass::SpecDigest)?;
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)
+        .classed(FailClass::SettingsDigest)?;
+    ensure_class!(
+        FailClass::SettingsDigest,
+        lillux::sha256_hex(&settings_bytes) == request.intent.settings_digest,
+        "snapshot upload settings changed"
+    );
+    let settings: SnapshotProductionSettings =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &settings_bytes,
+            MAX_SETTINGS_BYTES,
+        )
+        .classed(FailClass::SettingsShape)?;
+    settings
+        .validate_for_intent(&request.intent)
+        .classed(FailClass::SettingsShape)?;
+    // SAFETY: this exact inherited descriptor is transferred once by the
+    // admitted no-process-creation runner into this upload-only invocation.
+    let upload = unsafe { lillux::take_inherited_descriptor_authority(request.upload_descriptor) }
+        .map_err(anyhow::Error::msg)
+        .classed(FailClass::UploadModeOrDigest)?;
+    crate::activation_contact::verify_package_before_contact(
+        &upload,
+        request.upload_bytes,
+        &request.upload_sha256,
+    )
+    .classed(FailClass::UploadModeOrDigest)?;
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let credential = crate::read_credential()?;
+    let observed = send_snapshot_upload(
+        &request.intent,
+        &spec,
+        &settings,
+        &upload,
+        &network,
+        &credential,
+        deadline,
+        &cancellation,
+    )?;
+    let receipt = RuntimeSnapshotUploadReceipt {
+        schema: RUNTIME_SNAPSHOT_UPLOAD_RECEIPT_SCHEMA,
+        upload_operation_id: request.stage.operation_id.clone(),
+        upload_intent_digest: request.stage.digest()?,
+        parent_operation_id: request.intent.operation_id.clone(),
+        parent_intent_digest: request.intent.digest()?,
+        source_occurrence_id: request.intent.source_occurrence_id.clone(),
+        provider_group_id: request.intent.provider_group_id.clone(),
+        upload_path: spec.upload_path().into(),
+        content_type: spec.upload_content_type().into(),
+        upload_sha256: request.intent.upload_sha256.clone(),
+        upload_bytes: request.intent.upload_bytes,
+        source_response_sha256: observed.source_response_sha256,
+        provider_response_sha256: observed.provider_response_sha256,
+        provider_status: observed.provider_status,
+        completed_at_ms: observed.completed_at_ms,
+    };
+    receipt.validate_observation_for_stage(&request.intent, &request.stage)?;
+    write_response(&receipt)
+}
+
+/// First-contact create stage. It receives the retained upload receipt, not
+/// the byte descriptor, and rechecks the exact live source before its sole
+/// non-idempotent snapshot-create POST.
+pub(crate) fn operate_create(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
+    let deadline = operation_deadline()?;
+    ensure_class!(
+        FailClass::RequestParse,
+        [
+            LIFECYCLE_BOOTSTRAP_FD_ENV,
+            LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV
+        ]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "snapshot create received worker activation authority"
+    );
+    let request_bytes = read_sealed_env(
+        LIFECYCLE_REQUEST_FD_ENV,
+        MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+    )?;
+    let request: RuntimeSnapshotCreateAdapterRequest =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &request_bytes,
+            MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+        )?;
+    request.validate()?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&request)? == request_bytes
+            && request.intent.provider_id == ADAPTER_ID,
+        "snapshot create request is noncanonical or selects another provider"
+    );
+    verify_artifact(adapter, &request.intent.adapter_artifact_hash, None)?;
+    let deadline = request_deadline(request.create_stage.attempt_deadline_ms, deadline)?;
+    let spec_bytes = read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, MAX_SPEC_BYTES)?;
+    let captured_spec_digest = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("snapshot create lacks captured provider spec digest")?;
+    ensure!(
+        captured_spec_digest == request.provider_spec_digest
+            && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
+        "snapshot create provider spec changed its signed handoff"
+    );
+    let spec = SnapshotProductionSpec::parse(&spec_bytes)?;
+    ensure!(
+        request.accepted_upload.upload_path == spec.upload_path()
+            && request.accepted_upload.content_type == spec.upload_content_type(),
+        "snapshot create upload receipt differs from signed provider route"
+    );
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
+    ensure!(
+        lillux::sha256_hex(&settings_bytes) == request.intent.settings_digest,
+        "snapshot create settings changed"
+    );
+    let settings: SnapshotProductionSettings =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &settings_bytes,
+            MAX_SETTINGS_BYTES,
+        )?;
+    settings.validate_for_intent(&request.intent)?;
+    let creation_intent = creation_intent_for(&request.intent, &settings);
+    creation_intent.validate()?;
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let credential = crate::read_credential()?;
+    let creation = send_snapshot_create(
+        &request.intent,
+        &creation_intent,
+        &spec,
+        &settings,
+        &network,
+        &credential,
+        deadline,
+        &cancellation,
+    )?;
+    let result = RuntimeSnapshotCreateResult {
+        schema: RUNTIME_SNAPSHOT_CREATE_RESULT_SCHEMA,
+        create_operation_id: request.create_stage.operation_id.clone(),
+        create_intent_digest: request.create_stage.digest()?,
+        accepted_upload_receipt_digest: request.accepted_upload.digest()?,
+        locator: bind_snapshot_locator_for(&request.intent, &creation, &settings)?,
+    };
     result.validate_for(&request)?;
     write_response(&result)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn first_snapshot_attempt(
     request: &RuntimeSnapshotAdapterRequest,
     creation_intent: &SnapshotCreationIntent,
@@ -236,10 +462,55 @@ fn first_snapshot_attempt(
     deadline: lillux::time::MonotonicDeadline,
     cancellation: &lillux::network::NetworkCancellation,
 ) -> Result<RuntimeSnapshotAdapterResponse> {
-    let source_id = &request.intent.source_occurrence_id;
-    let source_path = spec.source_status_path(source_id)?;
-    let source_url = control_url(&source_path, &settings.owner_id, None)?;
-    let (status, source_body) = read_control_json(send_control(
+    send_snapshot_upload(
+        &request.intent,
+        spec,
+        settings,
+        upload,
+        network,
+        credential,
+        deadline,
+        cancellation,
+    )?;
+    let creation = send_snapshot_create(
+        &request.intent,
+        creation_intent,
+        spec,
+        settings,
+        network,
+        credential,
+        deadline,
+        cancellation,
+    )?;
+    let locator =
+        bind_snapshot_locator(request, &creation, settings).classed(FailClass::CreateStatus)?;
+    Ok(RuntimeSnapshotAdapterResponse::Bound { locator })
+}
+
+struct SnapshotUploadObservation {
+    source_response_sha256: String,
+    provider_response_sha256: String,
+    provider_status: u16,
+    completed_at_ms: i64,
+}
+
+fn send_snapshot_upload(
+    intent: &RuntimeSnapshotIntent,
+    spec: &SnapshotProductionSpec,
+    settings: &SnapshotProductionSettings,
+    upload: &lillux::InheritedDescriptorAuthority,
+    network: &lillux::network::NetworkContext,
+    credential: &Zeroizing<String>,
+    deadline: lillux::time::MonotonicDeadline,
+    cancellation: &lillux::network::NetworkCancellation,
+) -> Result<SnapshotUploadObservation> {
+    let source_id = &intent.source_occurrence_id;
+    let source_path = spec
+        .source_status_path(source_id)
+        .classed(FailClass::SourceGetStatusOrShape)?;
+    let source_url = control_url(&source_path, &settings.owner_id, None)
+        .classed(FailClass::SourceGetStatusOrShape)?;
+    let response = send_control(
         network,
         &source_url,
         "GET",
@@ -248,7 +519,10 @@ fn first_snapshot_attempt(
         settings,
         deadline,
         cancellation,
-    )?)?;
+    )
+    .classed(FailClass::SourceGetTransport)?;
+    let (status, source_body) =
+        read_control_json(response).classed(FailClass::SourceGetStatusOrShape)?;
     ensure!(
         status == spec.get_status(),
         "snapshot source did not return exact status"
@@ -256,32 +530,24 @@ fn first_snapshot_attempt(
     let source: crate::RenderSandbox = ryeos_external_execution_contract::from_json_slice_strict(
         &source_body,
         MAX_SNAPSHOT_RESPONSE_BYTES,
-    )?;
-    ensure!(
-        source.id == *source_id
-            && source.status == crate::RenderSandboxStatus::Running
-            && source.terminated_at.is_none()
-            && source.network_policy.default == crate::RenderNetworkPolicyDefault::DenyAll
-            && source.region == settings.region
-            && source.timeout_seconds > 0
-            && DateTime::parse_from_rfc3339(&source.created_at).is_ok()
-            && matches!(
-                (source.plan, settings.plan),
-                (crate::RenderSandboxPlan::Starter, RenderPlan::Starter)
-                    | (crate::RenderSandboxPlan::Standard, RenderPlan::Standard)
-                    | (crate::RenderSandboxPlan::Pro, RenderPlan::Pro)
-            ),
-        "snapshot source is not the exact running denied-network sandbox"
-    );
+    )
+    .classed(FailClass::SourceGetStatusOrShape)?;
+    validate_snapshot_source(&source, intent, settings)
+        .classed(FailClass::SourceNotDenyAllRunning)?;
+    let source_response_sha256 = lillux::sha256_hex(&source_body);
 
     crate::activation_contact::verify_package_before_contact(
         upload,
-        request.upload_bytes,
-        &request.upload_sha256,
-    )?;
-    let token_path = spec.source_upload_token_path(source_id)?;
-    let token_url = control_url(&token_path, &settings.owner_id, Some(spec.upload_path()))?;
-    let (status, token_body) = read_control_json(send_control(
+        intent.upload_bytes,
+        &intent.upload_sha256,
+    )
+    .classed(FailClass::UploadModeOrDigest)?;
+    let token_path = spec
+        .source_upload_token_path(source_id)
+        .classed(FailClass::TokenStatus)?;
+    let token_url = control_url(&token_path, &settings.owner_id, Some(spec.upload_path()))
+        .classed(FailClass::TokenStatus)?;
+    let response = send_control(
         network,
         &token_url,
         "POST",
@@ -290,8 +556,14 @@ fn first_snapshot_attempt(
         settings,
         deadline,
         cancellation,
-    )?)?;
-    ensure!(status == 201, "snapshot upload token was not accepted");
+    )
+    .classed(FailClass::TokenStatus)?;
+    let (status, token_body) = read_control_json(response).classed(FailClass::TokenStatus)?;
+    ensure_class!(
+        FailClass::TokenStatus,
+        status == 201,
+        "snapshot upload token was not accepted"
+    );
     let operation = crate::proxy_route::ProxyOperation::UploadFile {
         remote_path: spec.upload_path(),
     };
@@ -301,22 +573,25 @@ fn first_snapshot_attempt(
         &settings.region,
         operation,
         lillux::time::timestamp_millis(),
-    )?;
+    )
+    .classed(FailClass::ProxyRoute)?;
     crate::proxy_route::validate_proxy_route(
         token.route.as_str(),
         &token.method,
         source_id,
         &settings.region,
         operation,
-    )?;
-    ensure!(
+    )
+    .classed(FailClass::ProxyRoute)?;
+    ensure_class!(
+        FailClass::ProxyRoute,
         token.expires_at_ms > lillux::time::timestamp_millis(),
         "snapshot upload proxy token expired before use"
     );
     let mut bearer = Zeroizing::new(b"Bearer ".to_vec());
     bearer.extend_from_slice(token.bearer.as_bytes());
     let mut limits = Limits::control_plane();
-    limits.request_body_bytes = request.upload_bytes;
+    limits.request_body_bytes = intent.upload_bytes;
     limits.response_body_bytes = MAX_SNAPSHOT_RESPONSE_BYTES as u64;
     limits.response_body_wire_bytes = (MAX_SNAPSHOT_RESPONSE_BYTES * 2) as u64;
     let uploaded = HttpClient::new(network.clone()).execute(HttpRequest {
@@ -329,25 +604,93 @@ fn first_snapshot_attempt(
         ],
         body: RequestBodySource::from_inherited_regular_file(
             upload.clone(),
-            request.upload_bytes,
-            request.upload_sha256.clone(),
+            intent.upload_bytes,
+            intent.upload_sha256.clone(),
         ),
-        tls_roots_der: tls_roots_from_base64(&settings.tls_roots_der_base64)?,
+        tls_roots_der: tls_roots_from_base64(&settings.tls_roots_der_base64)
+            .classed(FailClass::SettingsShape)?,
         limits,
-        deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline),
+        deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline)
+            .with_response_wait(crate::upload_response_wait(intent.upload_bytes)),
         cancellation: cancellation.clone(),
-    })?;
-    ensure!(
+    });
+    let uploaded = uploaded
+        .map_err(anyhow::Error::from)
+        .classed(FailClass::UploadStatus)?;
+    ensure_class!(
+        FailClass::UploadStatus,
         (200..300).contains(&uploaded.status),
         "snapshot owner-product directory upload was not accepted"
     );
+    let provider_status = uploaded.status;
+    let mut response_body = Vec::new();
+    uploaded
+        .body
+        .take(MAX_SNAPSHOT_RESPONSE_BYTES as u64 + 1)
+        .read_to_end(&mut response_body)?;
+    ensure!(
+        response_body.len() <= MAX_SNAPSHOT_RESPONSE_BYTES,
+        "snapshot upload response exceeds bound"
+    );
+    Ok(SnapshotUploadObservation {
+        source_response_sha256,
+        provider_response_sha256: lillux::sha256_hex(&response_body),
+        provider_status,
+        completed_at_ms: lillux::time::timestamp_millis(),
+    })
+}
 
-    let create_path = spec.create_path(source_id)?;
-    let create_url = control_url(&create_path, &settings.owner_id, None)?;
+fn send_snapshot_create(
+    intent: &RuntimeSnapshotIntent,
+    creation_intent: &SnapshotCreationIntent,
+    spec: &SnapshotProductionSpec,
+    settings: &SnapshotProductionSettings,
+    network: &lillux::network::NetworkContext,
+    credential: &Zeroizing<String>,
+    deadline: lillux::time::MonotonicDeadline,
+    cancellation: &lillux::network::NetworkCancellation,
+) -> Result<BoundSnapshotCreation> {
+    let source_id = &intent.source_occurrence_id;
+    let source_path = spec
+        .source_status_path(source_id)
+        .classed(FailClass::SourceGetStatusOrShape)?;
+    let source_url = control_url(&source_path, &settings.owner_id, None)
+        .classed(FailClass::SourceGetStatusOrShape)?;
+    let response = send_control(
+        network,
+        &source_url,
+        "GET",
+        None,
+        credential,
+        settings,
+        deadline,
+        cancellation,
+    )
+    .classed(FailClass::SourceGetTransport)?;
+    let (status, source_body) =
+        read_control_json(response).classed(FailClass::SourceGetStatusOrShape)?;
+    ensure_class!(
+        FailClass::SourceGetStatusOrShape,
+        status == spec.get_status(),
+        "snapshot source did not return exact status"
+    );
+    let source: crate::RenderSandbox = ryeos_external_execution_contract::from_json_slice_strict(
+        &source_body,
+        MAX_SNAPSHOT_RESPONSE_BYTES,
+    )
+    .classed(FailClass::SourceGetStatusOrShape)?;
+    validate_snapshot_source(&source, intent, settings)
+        .classed(FailClass::SourceNotDenyAllRunning)?;
+    let create_path = spec
+        .create_path(source_id)
+        .classed(FailClass::CreateStatus)?;
+    let create_url =
+        control_url(&create_path, &settings.owner_id, None).classed(FailClass::CreateStatus)?;
     let body = ryeos_external_execution_contract::canonical_json(
         &serde_json::json!({"kind": spec.create_kind()}),
-    )?;
-    let (status, response_body) = read_control_json(send_control(
+    )
+    .classed(FailClass::CreateStatus)?;
+    let response = send_control(
         network,
         &create_url,
         "POST",
@@ -356,10 +699,46 @@ fn first_snapshot_attempt(
         settings,
         deadline,
         cancellation,
-    )?)?;
-    let creation = bind_snapshot_create_response(spec, creation_intent, status, &response_body)?;
-    let locator = bind_snapshot_locator(request, &creation, settings)?;
-    Ok(RuntimeSnapshotAdapterResponse::Bound { locator })
+    )
+    .classed(FailClass::CreateStatus)?;
+    let (status, response_body) = read_control_json(response).classed(FailClass::CreateStatus)?;
+    bind_snapshot_create_response(spec, creation_intent, status, &response_body)
+        .classed(FailClass::CreateStatus)
+}
+
+fn validate_snapshot_source(
+    source: &crate::RenderSandbox,
+    intent: &RuntimeSnapshotIntent,
+    settings: &SnapshotProductionSettings,
+) -> Result<()> {
+    ensure!(
+        source.id == intent.source_occurrence_id
+            && source.status == crate::RenderSandboxStatus::Running
+            && source.terminated_at.is_none()
+            && source
+                .network_policy
+                .matches(&crate::provider_spec::EgressPolicy::deny_all())
+            && source.region == settings.region
+            && source.timeout_seconds > 0
+            && source.sandbox_group_id == settings.sandbox_group_id
+            && source.provider_attributes_valid()
+            && rfc3339::parse_unix_nanos(&source.created_at).is_ok()
+            && intent
+                .source_created_at
+                .as_deref()
+                .is_none_or(|expected| source.created_at == expected)
+            && intent
+                .source_timeout_seconds
+                .is_none_or(|expected| source.timeout_seconds == expected)
+            && matches!(
+                (source.plan, settings.plan),
+                (crate::RenderSandboxPlan::Starter, RenderPlan::Starter)
+                    | (crate::RenderSandboxPlan::Standard, RenderPlan::Standard)
+                    | (crate::RenderSandboxPlan::Pro, RenderPlan::Pro)
+            ),
+        "snapshot source is not the exact running denied-network sandbox"
+    );
+    Ok(())
 }
 
 fn bind_snapshot_locator(
@@ -367,22 +746,30 @@ fn bind_snapshot_locator(
     creation: &BoundSnapshotCreation,
     settings: &SnapshotProductionSettings,
 ) -> Result<RuntimeSnapshotLocator> {
-    let provider_creation_observation = serde_json::to_value(&creation)?;
+    bind_snapshot_locator_for(&request.intent, creation, settings)
+}
+
+fn bind_snapshot_locator_for(
+    intent: &RuntimeSnapshotIntent,
+    creation: &BoundSnapshotCreation,
+    settings: &SnapshotProductionSettings,
+) -> Result<RuntimeSnapshotLocator> {
+    let provider_creation_observation = serde_json::to_value(creation)?;
     let adapter_observation_sha256 = lillux::sha256_hex(
         &ryeos_external_execution_contract::canonical_json(&provider_creation_observation)?,
     );
     let locator = RuntimeSnapshotLocator {
         schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
-        operation_id: request.intent.operation_id.clone(),
-        intent_digest: request.intent.digest()?,
-        source_occurrence_id: request.intent.source_occurrence_id.clone(),
+        operation_id: intent.operation_id.clone(),
+        intent_digest: intent.digest()?,
+        source_occurrence_id: intent.source_occurrence_id.clone(),
         provider_group_id: settings.sandbox_group_id.clone(),
         snapshot_id: creation.snapshot_id.clone(),
         provider_response_sha256: creation.response_sha256.clone(),
         provider_creation_observation,
         adapter_observation_sha256,
     };
-    locator.validate_for(&request.intent)?;
+    locator.validate_for(intent)?;
     Ok(locator)
 }
 
@@ -409,12 +796,11 @@ fn retained_snapshot_creation(
     let creation: BoundSnapshotCreation =
         ryeos_external_execution_contract::from_json_slice_strict(&observation, 4096)?;
     ensure!(
-        creation.schema == 1
+        creation.schema == 2
             && creation.operation_id == intent.operation_id
             && creation.intent_digest == intent.digest()?
-            && creation.product_witness_hash == intent.product_witness_hash
+            && creation.source == intent.source
             && creation.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash
-            && creation.controller_public_root == intent.controller_public_root
             && creation.owner_executable_sha256 == intent.owner_executable_sha256
             && creation.source_sandbox_id == intent.source_sandbox_id
             && creation.sandbox_group_id == intent.sandbox_group_id
@@ -463,11 +849,10 @@ fn creation_intent_for(
     settings: &SnapshotProductionSettings,
 ) -> SnapshotCreationIntent {
     SnapshotCreationIntent {
-        schema: 1,
+        schema: 2,
         operation_id: intent.operation_id.clone(),
-        product_witness_hash: intent.product_witness_hash.clone(),
+        source: intent.source.clone(),
         guest_runtime_manifest_hash: intent.guest_runtime_manifest_hash.clone(),
-        controller_public_root: intent.controller_public_root.clone(),
         owner_executable_sha256: intent.owner_executable_sha256.clone(),
         owner_id: settings.owner_id.clone(),
         sandbox_group_id: settings.sandbox_group_id.clone(),
@@ -511,7 +896,6 @@ fn snapshot_readiness_url(
     Ok(url)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn send_control(
     network: &lillux::network::NetworkContext,
     url: &url::Url,
@@ -586,9 +970,8 @@ fn read_control_json(response: HttpResponse) -> Result<(u16, Vec<u8>)> {
 pub(crate) struct SnapshotCreationIntent {
     pub schema: u32,
     pub operation_id: String,
-    pub product_witness_hash: String,
+    pub source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
-    pub controller_public_root: String,
     pub owner_executable_sha256: String,
     pub owner_id: String,
     pub sandbox_group_id: String,
@@ -598,9 +981,8 @@ pub(crate) struct SnapshotCreationIntent {
 
 impl SnapshotCreationIntent {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 1, "unsupported snapshot creation intent");
+        ensure!(self.schema == 2, "unsupported snapshot creation intent");
         for hash in [
-            &self.product_witness_hash,
             &self.guest_runtime_manifest_hash,
             &self.owner_executable_sha256,
         ] {
@@ -609,6 +991,7 @@ impl SnapshotCreationIntent {
                 "snapshot source identity is invalid"
             );
         }
+        self.source.validate()?;
         ensure!(
             self.operation_id.len() <= 256
                 && !self.operation_id.is_empty()
@@ -637,23 +1020,6 @@ impl SnapshotCreationIntent {
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
             "snapshot creation source is invalid"
         );
-        let root = self
-            .controller_public_root
-            .strip_prefix("ed25519:")
-            .ok_or_else(|| anyhow::anyhow!("snapshot source has no controller public root"))?;
-        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, root)?;
-        let bytes: [u8; 32] = decoded
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("snapshot controller root has wrong length"))?;
-        let key = lillux::crypto::VerifyingKey::from_bytes(&bytes)?;
-        ensure!(
-            !key.is_weak()
-                && base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    key.to_bytes()
-                ) == root,
-            "snapshot controller root is weak or noncanonical"
-        );
         Ok(())
     }
 
@@ -668,22 +1034,25 @@ impl SnapshotCreationIntent {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RenderSnapshotCreateResponse {
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(default)]
     captured_at: Option<String>,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(default)]
     error: Option<String>,
     expires_at: String,
     id: String,
     kind: SnapshotKind,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(default)]
     name: Option<String>,
     plan: RenderPlan,
     requested_at: String,
     sandbox_group_id: String,
-    #[serde(deserialize_with = "required_nullable")]
+    #[serde(default)]
     size_bytes: Option<i64>,
     source_sandbox_id: String,
     status: SnapshotStatus,
+    /// Retention the provider granted the snapshot; it bounds `expires_at`
+    /// and must be positive.
+    ttl_seconds: u64,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -701,12 +1070,32 @@ enum SnapshotStatus {
     Failed,
 }
 
-fn required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
+/// Whether two RFC 3339 timestamps name the same instant at the coarser of
+/// their two fractional-second precisions. Render reports a snapshot's request
+/// and expiry with nanosecond digits on creation and microsecond digits on
+/// later reads, so the finer value is truncated, never rounded, to the digits
+/// of the coarser one. Either value failing to parse is a mismatch.
+fn same_instant(left: &str, right: &str) -> bool {
+    fn fractional_digits(value: &str) -> u32 {
+        value
+            .split_once('.')
+            .map_or(0, |(_, rest)| {
+                rest.bytes().take_while(u8::is_ascii_digit).count() as u32
+            })
+            .min(9)
+    }
+    let (Ok(left_time), Ok(right_time)) = (
+        rfc3339::parse_unix_nanos(left),
+        rfc3339::parse_unix_nanos(right),
+    ) else {
+        return false;
+    };
+    let digits = fractional_digits(left).min(fractional_digits(right));
+    let unit = 10_u32.pow(9 - digits);
+    const NANOS: i128 = 1_000_000_000;
+    left_time.div_euclid(NANOS) == right_time.div_euclid(NANOS)
+        && left_time.rem_euclid(NANOS) / i128::from(unit)
+            == right_time.rem_euclid(NANOS) / i128::from(unit)
 }
 
 /// A provider locator, not an installed-runtime or product qualification.
@@ -716,9 +1105,8 @@ pub(crate) struct BoundSnapshotCreation {
     pub schema: u32,
     pub operation_id: String,
     pub intent_digest: String,
-    pub product_witness_hash: String,
+    pub source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
-    pub controller_public_root: String,
     pub owner_executable_sha256: String,
     pub source_sandbox_id: String,
     pub sandbox_group_id: String,
@@ -770,11 +1158,12 @@ pub(crate) fn bind_snapshot_create_response(
             && snapshot.sandbox_group_id == intent.sandbox_group_id
             && snapshot.plan == intent.plan
             && snapshot.name.is_none()
-            && snapshot.error.is_none(),
+            && snapshot.error.is_none()
+            && snapshot.ttl_seconds > 0,
         "snapshot create response differs from exact source or filesystem kind"
     );
-    let requested = DateTime::parse_from_rfc3339(&snapshot.requested_at)?;
-    let expires = DateTime::parse_from_rfc3339(&snapshot.expires_at)?;
+    let requested = rfc3339::parse_unix_nanos(&snapshot.requested_at)?;
+    let expires = rfc3339::parse_unix_nanos(&snapshot.expires_at)?;
     ensure!(
         expires > requested,
         "snapshot expiry is not after its request"
@@ -788,7 +1177,7 @@ pub(crate) fn bind_snapshot_create_response(
             snapshot
                 .captured_at
                 .as_deref()
-                .is_some_and(|value| DateTime::parse_from_rfc3339(value)
+                .is_some_and(|value| rfc3339::parse_unix_nanos(value)
                     .is_ok_and(|captured| captured >= requested && captured < expires))
                 && snapshot.size_bytes.is_some_and(|bytes| bytes > 0),
             "available snapshot lacks complete capture metadata"
@@ -796,12 +1185,11 @@ pub(crate) fn bind_snapshot_create_response(
         SnapshotStatus::Failed => anyhow::bail!("provider reported failed snapshot creation"),
     }
     Ok(BoundSnapshotCreation {
-        schema: 1,
+        schema: 2,
         operation_id: intent.operation_id.clone(),
         intent_digest: intent.digest()?,
-        product_witness_hash: intent.product_witness_hash.clone(),
+        source: intent.source.clone(),
         guest_runtime_manifest_hash: intent.guest_runtime_manifest_hash.clone(),
-        controller_public_root: intent.controller_public_root.clone(),
         owner_executable_sha256: intent.owner_executable_sha256.clone(),
         source_sandbox_id: intent.source_sandbox_id.clone(),
         sandbox_group_id: intent.sandbox_group_id.clone(),
@@ -821,12 +1209,11 @@ pub(crate) fn observe_snapshot_available(
 ) -> Result<AvailableSnapshotObservation> {
     intent.validate()?;
     ensure!(
-        creation.schema == 1
+        creation.schema == 2
             && creation.operation_id == intent.operation_id
             && creation.intent_digest == intent.digest()?
-            && creation.product_witness_hash == intent.product_witness_hash
+            && creation.source == intent.source
             && creation.guest_runtime_manifest_hash == intent.guest_runtime_manifest_hash
-            && creation.controller_public_root == intent.controller_public_root
             && creation.owner_executable_sha256 == intent.owner_executable_sha256
             && creation.source_sandbox_id == intent.source_sandbox_id
             && creation.sandbox_group_id == intent.sandbox_group_id
@@ -852,16 +1239,17 @@ pub(crate) fn observe_snapshot_available(
             && snapshot.plan == intent.plan
             && snapshot.name.is_none()
             && snapshot.error.is_none()
-            && snapshot.requested_at == creation.requested_at
-            && snapshot.expires_at == creation.expires_at,
+            && snapshot.ttl_seconds > 0
+            && same_instant(&snapshot.requested_at, &creation.requested_at)
+            && same_instant(&snapshot.expires_at, &creation.expires_at),
         "available snapshot differs from its exact creation"
     );
-    let requested = DateTime::parse_from_rfc3339(&snapshot.requested_at)?;
-    let expires = DateTime::parse_from_rfc3339(&snapshot.expires_at)?;
+    let requested = rfc3339::parse_unix_nanos(&snapshot.requested_at)?;
+    let expires = rfc3339::parse_unix_nanos(&snapshot.expires_at)?;
     let captured_at = snapshot
         .captured_at
         .context("available snapshot has no capture timestamp")?;
-    let captured = DateTime::parse_from_rfc3339(&captured_at)?;
+    let captured = rfc3339::parse_unix_nanos(&captured_at)?;
     let size_bytes = snapshot
         .size_bytes
         .context("available snapshot has no byte count")?;
@@ -884,6 +1272,9 @@ pub(crate) fn observe_snapshot_available(
 }
 
 #[cfg(test)]
+mod live_render;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine as _;
@@ -894,16 +1285,13 @@ mod tests {
     }
 
     fn intent() -> SnapshotCreationIntent {
-        let key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
         SnapshotCreationIntent {
-            schema: 1,
+            schema: 2,
             operation_id: "snapshot-op-1".into(),
-            product_witness_hash: "1".repeat(64),
+            source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "1".repeat(64),
+            },
             guest_runtime_manifest_hash: "2".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
-            ),
             owner_executable_sha256: "3".repeat(64),
             owner_id: "owner".into(),
             sandbox_group_id: "sbg-exact".into(),
@@ -919,7 +1307,8 @@ mod tests {
             "kind": "filesystem", "name": null, "plan": "starter",
             "requestedAt": "2026-09-28T00:00:00Z",
             "sandboxGroupId": "sbg-exact", "sizeBytes": null,
-            "sourceSandboxId": "sbx-exact", "status": "creating"
+            "sourceSandboxId": "sbx-exact", "status": "creating",
+            "ttlSeconds": 2592000
         })
     }
 
@@ -928,20 +1317,22 @@ mod tests {
         let source = intent();
         let mut durable =
             ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotIntent {
-                schema: 1,
+                schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_INTENT_SCHEMA,
                 operation_id: String::new(),
                 owner_principal: format!("fp:{}", "1".repeat(64)),
                 provider_id: ADAPTER_ID.into(),
                 source_occurrence_id: source.source_sandbox_id.clone(),
+                source_bootstrap_operation_id: None,
+                source_created_at: None,
+                source_timeout_seconds: None,
                 provider_group_id: source.sandbox_group_id.clone(),
                 production_profile_digest: "2".repeat(64),
                 adapter_artifact_hash: "3".repeat(64),
                 provider_spec_digest: "4".repeat(64),
                 settings_digest: "5".repeat(64),
-                product_witness_hash: source.product_witness_hash.clone(),
+                source: source.source.clone(),
                 guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(),
                 owner_executable_sha256: source.owner_executable_sha256.clone(),
-                controller_public_root: source.controller_public_root.clone(),
                 upload_sha256: "6".repeat(64),
                 upload_bytes: 1024,
                 attempt_deadline_ms: 1_800_000_000_000,
@@ -967,10 +1358,6 @@ mod tests {
         settings.validate_for(&request).unwrap();
         let prepared = creation_intent(&request, &settings);
         prepared.validate().unwrap();
-        assert_eq!(
-            prepared.controller_public_root,
-            source.controller_public_root
-        );
         let profile = SnapshotProductionSpec::parse(include_bytes!(
             "../fixtures/snapshot-production-spec.json"
         ))
@@ -1062,13 +1449,82 @@ mod tests {
     }
 
     #[test]
+    fn materialized_source_final_get_rechecks_creation_identity() {
+        let mut intent = RuntimeSnapshotIntent {
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_INTENT_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: format!("fp:{}", "1".repeat(64)),
+            provider_id: ADAPTER_ID.into(),
+            source_occurrence_id: "sbx-exact".into(),
+            source_bootstrap_operation_id: Some("d".repeat(64)),
+            source_created_at: Some("2026-09-29T00:00:00Z".into()),
+            source_timeout_seconds: Some(900),
+            provider_group_id: "sbg-exact".into(),
+            production_profile_digest: "2".repeat(64),
+            adapter_artifact_hash: "3".repeat(64),
+            provider_spec_digest: "4".repeat(64),
+            settings_digest: "5".repeat(64),
+            source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::BundleMaterialization {
+                materialization_attestation_hash: "a".repeat(64),
+                source_coordinate_digest: "b".repeat(64),
+                materialization_binding_digest: "c".repeat(64),
+            },
+            guest_runtime_manifest_hash: "6".repeat(64),
+            owner_executable_sha256: "7".repeat(64),
+            upload_sha256: "8".repeat(64),
+            upload_bytes: 1024,
+            attempt_deadline_ms: 1_800_000_000_000,
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let settings = SnapshotProductionSettings {
+            schema: 1,
+            owner_id: "owner-exact".into(),
+            region: "oregon".into(),
+            plan: RenderPlan::Standard,
+            sandbox_group_id: intent.provider_group_id.clone(),
+            tls_roots_der_base64: vec![base64::engine::general_purpose::STANDARD.encode(b"root")],
+        };
+        let mut source = crate::RenderSandbox {
+            name: None,
+            created_at: intent.source_created_at.clone().unwrap(),
+            id: intent.source_occurrence_id.clone(),
+            idle_timeout_seconds: 900,
+            network_policy: crate::RenderNetworkPolicy {
+                policy_type: crate::RenderNetworkPolicyType::DenyAll,
+                default: Some(crate::RenderNetworkPolicyType::DenyAll),
+                rules: None,
+            },
+            plan: crate::RenderSandboxPlan::Standard,
+            region: settings.region.clone(),
+            sandbox_group_id: settings.sandbox_group_id.clone(),
+            status: crate::RenderSandboxStatus::Running,
+            terminated_at: None,
+            timeout_seconds: 900,
+        };
+        validate_snapshot_source(&source, &intent, &settings).unwrap();
+        source.sandbox_group_id = "sbg-other".into();
+        assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
+        source.sandbox_group_id = settings.sandbox_group_id.clone();
+        source.idle_timeout_seconds = 0;
+        assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
+        source.idle_timeout_seconds = 86_401;
+        assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
+        source.idle_timeout_seconds = 900;
+        source.created_at = "2026-09-30T00:00:00Z".into();
+        assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
+        source.created_at = intent.source_created_at.clone().unwrap();
+        source.timeout_seconds = 901;
+        assert!(validate_snapshot_source(&source, &intent, &settings).is_err());
+    }
+
+    #[test]
     fn accepted_create_only_binds_a_locator_for_the_exact_source() {
         let profile = profile();
         let intent = intent();
         let body = serde_json::to_vec(&response()).unwrap();
         let bound = bind_snapshot_create_response(&profile, &intent, 202, &body).unwrap();
         assert_eq!(bound.snapshot_id, "snp-exact");
-        assert_eq!(bound.product_witness_hash, intent.product_witness_hash);
+        assert_eq!(bound.source, intent.source);
         assert_eq!(bound.intent_digest, intent.digest().unwrap());
         assert!(bind_snapshot_create_response(&profile, &intent, 201, &body).is_err());
         for (field, value) in [
@@ -1096,14 +1552,14 @@ mod tests {
         assert!(
             bind_snapshot_create_response(&profile, &intent, 202, duplicated.as_bytes()).is_err()
         );
-        let mut missing = response();
-        missing.as_object_mut().unwrap().remove("sizeBytes");
+        let mut claimed = response();
+        claimed["sizeBytes"] = serde_json::json!(10);
         assert!(
             bind_snapshot_create_response(
                 &profile,
                 &intent,
                 202,
-                &serde_json::to_vec(&missing).unwrap()
+                &serde_json::to_vec(&claimed).unwrap()
             )
             .is_err()
         );
@@ -1141,6 +1597,7 @@ mod tests {
             ("id", serde_json::json!("snp-other")),
             ("requestedAt", serde_json::json!("2026-09-27T00:00:00Z")),
             ("sizeBytes", serde_json::json!(0)),
+            ("ttlSeconds", serde_json::json!(0)),
         ] {
             let mut changed = available.clone();
             changed[field] = replacement;
@@ -1162,6 +1619,148 @@ mod tests {
         );
         assert!(
             observe_snapshot_available(&profile, &intent, &creation, 200, duplicated.as_bytes())
+                .is_err()
+        );
+    }
+
+    const LIVE_CREATE: &str = r#"{"expiresAt":"2026-11-28T23:16:59.190498656Z","id":"snp-dbht7qr346tc73dqpacg","kind":"filesystem","plan":"starter","requestedAt":"2026-10-29T23:16:59.230783106Z","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","sourceSandboxId":"sbx-18p4gdbht7ogae00c739p3070","status":"creating","ttlSeconds":2592000}"#;
+    const LIVE_AVAILABLE: &str = r#"{"capturedAt":"2026-10-29T23:16:59.34709Z","expiresAt":"2026-11-28T23:16:59.190498Z","id":"snp-dbht7qr346tc73dqpacg","kind":"filesystem","plan":"starter","requestedAt":"2026-10-29T23:16:59.230783Z","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","sizeBytes":4660019,"sourceSandboxId":"sbx-18p4gdbht7ogae00c739p3070","status":"available","ttlSeconds":2592000}"#;
+
+    fn live_intent() -> SnapshotCreationIntent {
+        let mut live = intent();
+        live.sandbox_group_id = "sbg-damv59p42hec73ck8b7g".into();
+        live.source_sandbox_id = "sbx-18p4gdbht7ogae00c739p3070".into();
+        live
+    }
+
+    #[test]
+    fn live_snapshot_shapes_omit_absent_fields() {
+        let profile = profile();
+        let intent = live_intent();
+        let available = LIVE_AVAILABLE
+            .replace("59.230783Z", "59.230783106Z")
+            .replace("59.190498Z", "59.190498656Z");
+        let bound =
+            bind_snapshot_create_response(&profile, &intent, 202, LIVE_CREATE.as_bytes()).unwrap();
+        let observed =
+            observe_snapshot_available(&profile, &intent, &bound, 200, available.as_bytes())
+                .unwrap();
+        assert_eq!(observed.size_bytes, 4_660_019);
+        assert_eq!(observed.captured_at, "2026-10-29T23:16:59.34709Z");
+        let shifted = available.replace("59.230783106Z", "59.230784106Z");
+        assert!(
+            observe_snapshot_available(&profile, &intent, &bound, 200, shifted.as_bytes()).is_err()
+        );
+        // An available snapshot must carry its capture metadata and no name or error.
+        for (key, value) in [("name", "x"), ("error", "boom")] {
+            let mut changed: serde_json::Value = serde_json::from_str(&available).unwrap();
+            changed[key] = serde_json::json!(value);
+            assert!(
+                observe_snapshot_available(
+                    &profile,
+                    &intent,
+                    &bound,
+                    200,
+                    &serde_json::to_vec(&changed).unwrap()
+                )
+                .is_err()
+            );
+        }
+        for key in ["capturedAt", "sizeBytes"] {
+            let mut changed: serde_json::Value = serde_json::from_str(&available).unwrap();
+            changed.as_object_mut().unwrap().remove(key);
+            assert!(
+                observe_snapshot_available(
+                    &profile,
+                    &intent,
+                    &bound,
+                    200,
+                    &serde_json::to_vec(&changed).unwrap()
+                )
+                .is_err()
+            );
+        }
+        let mut empty: serde_json::Value = serde_json::from_str(&available).unwrap();
+        empty["sizeBytes"] = serde_json::json!(0);
+        assert!(
+            observe_snapshot_available(
+                &profile,
+                &intent,
+                &bound,
+                200,
+                &serde_json::to_vec(&empty).unwrap()
+            )
+            .is_err()
+        );
+        // A creating snapshot may not claim captured content.
+        let mut creating: serde_json::Value = serde_json::from_str(LIVE_CREATE).unwrap();
+        creating["capturedAt"] = serde_json::json!("2026-10-29T23:16:59.34709Z");
+        assert!(
+            bind_snapshot_create_response(
+                &profile,
+                &intent,
+                202,
+                &serde_json::to_vec(&creating).unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn same_instant_compares_at_the_coarser_precision_without_rounding() {
+        assert!(same_instant(
+            "2026-10-29T23:16:59.230783106Z",
+            "2026-10-29T23:16:59.230783Z"
+        ));
+        assert!(same_instant(
+            "2026-10-29T23:16:59.230783Z",
+            "2026-10-29T23:16:59.230783999Z"
+        ));
+        assert!(same_instant(
+            "2026-10-29T23:16:59.230783Z",
+            "2026-10-29T23:16:59.230783Z"
+        ));
+        assert!(same_instant(
+            "2026-10-29T23:16:59Z",
+            "2026-10-29T23:16:59.999999999Z"
+        ));
+        assert!(same_instant(
+            "2026-10-30T12:16:59.5+13:00",
+            "2026-10-29T23:16:59.5Z"
+        ));
+        assert!(!same_instant(
+            "2026-10-29T23:16:59.230783106Z",
+            "2026-10-29T23:16:59.230784Z"
+        ));
+        assert!(!same_instant(
+            "2026-10-29T23:16:59.230783999Z",
+            "2026-10-29T23:16:59.230784Z"
+        ));
+        assert!(!same_instant(
+            "2026-10-29T23:16:59.230783Z",
+            "2026-10-29T23:17:59.230783Z"
+        ));
+        assert!(!same_instant("not-a-time", "2026-10-29T23:16:59Z"));
+    }
+
+    #[test]
+    fn live_readiness_accepts_microsecond_echoes_of_nanosecond_creation() {
+        let profile = profile();
+        let intent = live_intent();
+        let bound =
+            bind_snapshot_create_response(&profile, &intent, 202, LIVE_CREATE.as_bytes()).unwrap();
+        let observed =
+            observe_snapshot_available(&profile, &intent, &bound, 200, LIVE_AVAILABLE.as_bytes())
+                .unwrap();
+        assert_eq!(observed.size_bytes, 4_660_019);
+        assert_eq!(observed.captured_at, "2026-10-29T23:16:59.34709Z");
+        let shifted = LIVE_AVAILABLE.replace("59.230783Z", "59.230784Z");
+        assert!(
+            observe_snapshot_available(&profile, &intent, &bound, 200, shifted.as_bytes()).is_err()
+        );
+        let other_expiry = LIVE_AVAILABLE.replace("2026-11-28T", "2026-11-29T");
+        assert!(
+            observe_snapshot_available(&profile, &intent, &bound, 200, other_expiry.as_bytes())
                 .is_err()
         );
     }

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-19T05:15:46Z:4252b20d101b249fe1aafd90311a53b9d9a9cc2abc4aef42cb95077f30fc035f:U9F1HfOn/qm/q7t0HCXmWANgX2mcl/HHT+TKu9c/kfe7jk2/2qIoDSf/lI+XOja2utONL4TScG7WXE8tPieVCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- node
+- machine
+- list
+description: List the machines you declared and any declaration that could not be used
+help:
+  usage: "ryeos node machine list"
+dispatch:
+  kind: execute_ref
+  execute: service:node/machine/list

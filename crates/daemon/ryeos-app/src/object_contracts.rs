@@ -1,21 +1,93 @@
 //! Application composition for durable CAS object contracts owned above state.
 
 use ryeos_state::object_closure::{
-    ObjectContractRegistration, RegisteredObjectEdge, RegisteredObjectExpectation,
-    RegisteredObjectLinks,
+    EventPayloadContractRegistration, ObjectContractRegistration, RegisteredObjectEdge,
+    RegisteredObjectExpectation, RegisteredObjectLinks,
 };
+use ryeos_state::objects::ThreadEvent;
 use serde_json::Value;
 use std::sync::OnceLock;
 
+/// Outcome of the single process-wide object-contract installation.
+static OBJECTS: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Selectors of the event contracts the single process-wide event
+/// installation registered, or the refusal it produced.
+static EVENTS: OnceLock<Result<Vec<&'static str>, String>> = OnceLock::new();
+
+/// Ensure the application object contracts are installed. This never touches
+/// the event-contract set: that belongs to the composition root and is
+/// installed separately, so calling this first cannot foreclose it.
 pub fn install() -> anyhow::Result<()> {
-    static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
-    INSTALLED
-        .get_or_init(|| install_once().map_err(|error| error.to_string()))
+    OBJECTS
+        .get_or_init(|| install_objects().map_err(|error| format!("{error:#}")))
         .clone()
         .map_err(anyhow::Error::msg)
 }
 
-fn install_once() -> anyhow::Result<()> {
+/// Install the application object contracts together with the domain event
+/// payload contracts the composition root owns. The event set installs once
+/// per process: repeating the same selector set is accepted, a different one
+/// is refused rather than merged or replaced.
+pub fn install_with_event_contracts(
+    events: Vec<EventPayloadContractRegistration>,
+) -> anyhow::Result<()> {
+    install()?;
+    let mut requested: Vec<&'static str> = events.iter().map(|event| event.event_type).collect();
+    requested.sort_unstable();
+    let installed = EVENTS
+        .get_or_init(|| {
+            ryeos_state::object_closure::install_event_payload_contracts(events)
+                .map(|()| requested.clone())
+                .map_err(|error| format!("{error:#}"))
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        installed == requested,
+        "application event contracts were already installed with a different selector set"
+    );
+    Ok(())
+}
+
+/// The composition's judgement of one retained evidence event: it decides
+/// what the event means for a retiring chain, which State never does.
+pub type RetainedEvidenceValidator = fn(&ThreadEvent) -> anyhow::Result<()>;
+
+/// The single process-wide validator the composition root installed.
+static EVIDENCE_VALIDATOR: OnceLock<RetainedEvidenceValidator> = OnceLock::new();
+
+/// Install the composition's retained-evidence validator. It installs once
+/// per process: repeating the same validator is accepted, a different one is
+/// refused rather than replaced.
+pub fn install_retained_evidence_validator(
+    validator: RetainedEvidenceValidator,
+) -> anyhow::Result<()> {
+    let installed = EVIDENCE_VALIDATOR.get_or_init(|| validator);
+    anyhow::ensure!(
+        std::ptr::fn_addr_eq(*installed, validator),
+        "a retained-evidence validator was already installed with a different function"
+    );
+    Ok(())
+}
+
+/// Test validator shared by every test of this process: the installation is
+/// process-wide, so all tests must install the same function.
+#[cfg(test)]
+pub(crate) fn accept_evidence(_: &ThreadEvent) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// The installed validator, or a refusal: retained evidence is never admitted
+/// without the composition that owns its meaning.
+pub fn retained_evidence_validator() -> anyhow::Result<RetainedEvidenceValidator> {
+    EVIDENCE_VALIDATOR
+        .get()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("no composition installed a retained-evidence validator"))
+}
+
+fn install_objects() -> anyhow::Result<()> {
     ryeos_state::object_closure::install_object_contracts(vec![
         registration(
             ryeos_bundle_publication_contract::BUNDLE_CATALOG_PUBLICATION_KIND,
@@ -31,6 +103,11 @@ fn install_once() -> anyhow::Result<()> {
             ryeos_bundle_publication_contract::BUNDLE_GENERATION_KIND,
             validate_generation,
             generation_links,
+        ),
+        registration(
+            ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
+            validate_payload_ownership,
+            no_links,
         ),
         registration(
             ryeos_bundle_publication_contract::BUNDLE_SET_KIND,
@@ -85,6 +162,9 @@ fn registration(
 fn validate_generation(value: &Value) -> anyhow::Result<()> {
     ryeos_bundle_publication_contract::BundleGeneration::from_current_value(value).map(|_| ())
 }
+fn validate_payload_ownership(value: &Value) -> anyhow::Result<()> {
+    ryeos_bundle_publication_contract::BundlePayloadOwnership::from_current_value(value).map(|_| ())
+}
 fn validate_materialization(value: &Value) -> anyhow::Result<()> {
     ryeos_bundle_publication_contract::PublisherMaterializationResult::from_current_value(value)
         .map(|_| ())
@@ -135,6 +215,11 @@ fn generation_links(value: &Value) -> Result<RegisteredObjectLinks, String> {
         &mut links,
         &object.publisher_materialization_result_hash,
         ryeos_bundle_publication_contract::PUBLISHER_MATERIALIZATION_RESULT_KIND,
+    );
+    push_kind(
+        &mut links,
+        &object.payload_ownership_hash,
+        ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
     );
     if let Some(hash) = &object.source_snapshot_hash {
         push_kind(&mut links, hash, "project_snapshot");
@@ -369,6 +454,36 @@ mod tests {
         std::iter::repeat_n(byte, 64).collect()
     }
 
+    fn accept_any_event(_: &Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn no_event_links(_: &Value) -> Result<RegisteredObjectLinks, String> {
+        Ok(RegisteredObjectLinks::default())
+    }
+
+    fn event_set(selector: &'static str) -> Vec<EventPayloadContractRegistration> {
+        vec![EventPayloadContractRegistration {
+            event_type: selector,
+            validate: accept_any_event,
+            links: no_event_links,
+        }]
+    }
+
+    #[test]
+    fn bare_install_leaves_event_set_open_and_a_different_set_is_refused() {
+        install().unwrap();
+        install_with_event_contracts(event_set("contract.first_consumer.event.v1")).unwrap();
+        install().unwrap();
+        install_with_event_contracts(event_set("contract.first_consumer.event.v1")).unwrap();
+        let refused = install_with_event_contracts(event_set("contract.second_consumer.event.v1"))
+            .unwrap_err();
+        assert!(refused.to_string().contains("different selector set"));
+        let installed = ryeos_state::object_closure::current_event_payload_selectors();
+        assert!(installed.contains(&"contract.first_consumer.event.v1"));
+        assert!(!installed.contains(&"contract.second_consumer.event.v1"));
+    }
+
     #[test]
     fn composed_registry_contains_all_application_contracts() {
         install().unwrap();
@@ -378,6 +493,7 @@ mod tests {
             ryeos_provider_contract::LOCAL_WORKER_OBSERVATION_KIND,
             ryeos_bundle_publication_contract::PUBLISHER_MATERIALIZATION_RESULT_KIND,
             ryeos_bundle_publication_contract::BUNDLE_GENERATION_KIND,
+            ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
             ryeos_bundle_publication_contract::BUNDLE_SET_KIND,
             ryeos_bundle_publication_contract::NODE_BUNDLE_SELECTION_KIND,
             ryeos_bundle_publication_contract::BUNDLE_CATALOG_SNAPSHOT_KIND,
@@ -385,6 +501,35 @@ mod tests {
         ] {
             assert!(kinds.contains(&kind), "missing {kind}");
         }
+    }
+
+    #[test]
+    fn generation_closure_carries_the_payload_ownership_object() {
+        let value = json!({
+            "schema": ryeos_bundle_publication_contract::BUNDLE_GENERATION_SCHEMA,
+            "kind": ryeos_bundle_publication_contract::BUNDLE_GENERATION_KIND,
+            "bundle_name": "knowledge", "authored_version": "1.2.3",
+            "content_manifest_hash": hash('a'), "manifest_item_hash": hash('b'),
+            "target": {"kind":"portable"}, "build_profile": "release",
+            "substrate_protocol": 1, "bundle_manifest_format": "ryeos.bundle-manifest/v1",
+            "accepted_product_result_hash": hash('c'), "selected_product_identity": "bundle",
+            "selected_product_witness": hash('d'),
+            "publisher_materialization_result_hash": hash('e'),
+            "accepted_capture_result_hash": hash('f'),
+            "selected_signed_product_identity": "signed-bundle",
+            "selected_signed_product_witness": hash('9'),
+            "payload_ownership_hash": hash('8'),
+            "source_snapshot_hash": null, "qualification_evidence_hashes": [],
+            "provenance_hash": null, "sbom_hash": null
+        });
+        let links = generation_links(&value).unwrap();
+        assert!(links.object_edges.iter().any(|edge| edge.hash == hash('8')
+            && matches!(
+                edge.expected,
+                RegisteredObjectExpectation::Kind(
+                    ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND
+                )
+            )));
     }
 
     #[test]
@@ -429,5 +574,21 @@ mod tests {
                 .iter()
                 .all(|edge| edge.hash != predecessor)
         );
+    }
+
+    fn refuse_evidence(_: &ThreadEvent) -> anyhow::Result<()> {
+        anyhow::bail!("refused")
+    }
+
+    #[test]
+    fn retained_evidence_validator_installs_once_and_refuses_a_different_one() {
+        install_retained_evidence_validator(accept_evidence).unwrap();
+        install_retained_evidence_validator(accept_evidence).unwrap();
+        let refused = install_retained_evidence_validator(refuse_evidence).unwrap_err();
+        assert!(refused.to_string().contains("different function"));
+        assert!(std::ptr::fn_addr_eq(
+            retained_evidence_validator().unwrap(),
+            accept_evidence as RetainedEvidenceValidator
+        ));
     }
 }

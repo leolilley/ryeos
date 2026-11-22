@@ -26,8 +26,8 @@ use ryeos_accounting::{
     TokenAccounting, credential_binding_digest,
 };
 use ryeos_app::accounting_db::{
-    AccountingDb, IssueOutcome, ProviderLocalWorkerObservationReference, ReserveArgs,
-    ReserveOutcome,
+    AccountingDb, IssueCredentialBinding, IssueOutcome, ProviderLocalWorkerObservationReference,
+    ReserveArgs, ReserveOutcome,
 };
 use ryeos_app::callback_token::{CallbackCapability, ThreadAuthState};
 use ryeos_app::state::AppState;
@@ -75,7 +75,7 @@ fn lookup_provider_call(
         .lookup_replay_record(&namespace, cache_key, |indexed| {
             if let Err(error) = authority.ensure_guard(&guard) {
                 return ryeos_state::ReplayRecordVerification::Unavailable {
-                    reason: error.to_string(),
+                    reason: format!("{error:#}"),
                 };
             }
             let value = match cas.get_object(&indexed.record_hash) {
@@ -90,7 +90,7 @@ fn lookup_provider_call(
                 }
                 Err(error) => {
                     return ryeos_state::ReplayRecordVerification::Unavailable {
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     };
                 }
             };
@@ -98,7 +98,7 @@ fn lookup_provider_call(
                 Ok(record) => record,
                 Err(error) => {
                     return ryeos_state::ReplayRecordVerification::IntegrityFailure {
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     };
                 }
             };
@@ -170,9 +170,9 @@ fn sealed_financial_authority(
     let external_effect_authority = prepared.external_effect_authority.ok_or_else(|| {
         anyhow!("thread {thread_id} was admitted without external-effect authority")
     })?;
-    external_effect_authority
-        .validate()
-        .map_err(|error| anyhow!("sealed external-effect authority failed validation: {error}"))?;
+    external_effect_authority.validate().map_err(|error| {
+        anyhow!("sealed external-effect authority failed validation: {error:#}")
+    })?;
     let mut required_secret_names: Vec<String> = prepared
         .required_secrets
         .into_iter()
@@ -205,6 +205,156 @@ fn sealed_financial_authority(
     })
 }
 
+/// The credential binding a provider attempt is prepared under. Credentials
+/// are read through the principal and project authority the launch was
+/// admitted under; any credential that cannot be delivered refuses the
+/// preparation by name.
+fn prepared_attempt_credential_binding(
+    sources: &ryeos_app::vault::SecretSources<'_>,
+    principal: &str,
+    names: &[String],
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    binding_key: &[u8],
+    authority: &ProviderAccountingAuthority,
+) -> Result<ryeos_accounting::HexDigest> {
+    let secrets = ryeos_app::vault::read_required_secrets_with_authority(
+        sources,
+        ryeos_app::vault::SecretRecipient { principal },
+        names,
+        project_authority,
+    )
+    .map_err(|error| {
+        anyhow!("read launch credentials for provider-attempt preparation: {error}")
+    })?;
+    let ordered_secrets = names
+        .iter()
+        .map(|name| {
+            secrets
+                .get(name)
+                .cloned()
+                .map(|value| (name.clone(), value))
+                .ok_or_else(|| anyhow!("required launch credential `{name}` is unavailable"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    credential_binding_digest(binding_key, authority, &ordered_secrets)
+        .map_err(|error| anyhow!("derive provider credential binding: {error}"))
+}
+
+/// The credential binding as it stands when a prepared attempt is issued.
+///
+/// `Ok(None)` means a sealed credential is definitively missing now, which
+/// the ledger records as a non-matching binding and so releases the
+/// reservation before provider contact. A delivery refusal (a recipient rule
+/// that no longer admits the sealed principal and scopes, or an authority
+/// mismatch) is returned as a typed, non-retryable
+/// [`DispatchError::CapabilityRejected`] naming what was refused: the sealed
+/// recipient cannot change for this attempt, so the runtime must not
+/// re-issue it, and [`issue_reserved_attempt`] releases its reservation. A
+/// transient read failure stays an untyped error and changes nothing.
+///
+/// [`DispatchError::CapabilityRejected`]: ryeos_executor::dispatch_error::DispatchError::CapabilityRejected
+fn issued_attempt_credential_binding(
+    sources: &ryeos_app::vault::SecretSources<'_>,
+    principal: &str,
+    names: &[String],
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    binding_key: &[u8],
+    authority: &ProviderAccountingAuthority,
+) -> Result<Option<ryeos_accounting::HexDigest>> {
+    let values = match ryeos_app::vault::read_required_secrets_with_authority(
+        sources,
+        ryeos_app::vault::SecretRecipient { principal },
+        names,
+        project_authority,
+    ) {
+        Ok(values) => values,
+        Err(ryeos_app::vault::VaultReadError::MissingSecrets { .. }) => return Ok(None),
+        Err(
+            error @ (ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+            | ryeos_app::vault::VaultReadError::NameRefused(_)),
+        ) => {
+            return Err(anyhow::Error::new(
+                ryeos_executor::dispatch_error::DispatchError::CapabilityRejected {
+                    reason: format!("provider-attempt issue refused: {error}"),
+                },
+            ));
+        }
+        Err(ryeos_app::vault::VaultReadError::Internal(error)) => {
+            return Err(error.context("re-read launch credentials at provider-attempt issue"));
+        }
+    };
+    let Some(secrets) = names
+        .iter()
+        .map(|name| values.get(name).cloned().map(|value| (name.clone(), value)))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    credential_binding_digest(binding_key, authority, &secrets)
+        .map(Some)
+        .map_err(|error| anyhow!("derive provider credential binding at issue: {error}"))
+}
+
+/// Whether an issue-time credential failure is the typed delivery refusal
+/// raised by [`issued_attempt_credential_binding`].
+fn is_issue_refusal(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>(),
+        Some(ryeos_executor::dispatch_error::DispatchError::CapabilityRejected { .. })
+    )
+}
+
+/// Record the issue boundary of a reserved attempt from the launch
+/// credentials as they stand now.
+///
+/// A binding, or a definitively missing credential, goes to the ledger as
+/// the current binding. A delivery refusal releases the reservation before
+/// provider contact, recorded as a credential that is unavailable at issue,
+/// and is then returned so the runtime stops without retrying; the budget is
+/// not held until the launch's terminal fence. A transient read failure is
+/// returned without touching the ledger.
+fn issue_reserved_attempt(
+    ledger: &AccountingDb,
+    launch_owner: &str,
+    request: &ProviderAttemptMarkIssuedParams,
+    credentials: Result<Option<ryeos_accounting::HexDigest>>,
+    now_ms: i64,
+    acceptance_window_ms: i64,
+) -> Result<IssueOutcome> {
+    let refusal = match credentials {
+        Ok(binding) => {
+            return ledger.mark_provider_attempt_issued_with_credential_binding(
+                &request.thread_id,
+                launch_owner,
+                &request.attempt_id,
+                &request.request_hash,
+                IssueCredentialBinding::Current(binding.as_ref().map(|digest| digest.as_str())),
+                now_ms,
+                acceptance_window_ms,
+            );
+        }
+        Err(error) if is_issue_refusal(&error) => error,
+        Err(error) => return Err(error),
+    };
+    ledger
+        .mark_provider_attempt_issued_with_credential_binding(
+            &request.thread_id,
+            launch_owner,
+            &request.attempt_id,
+            &request.request_hash,
+            IssueCredentialBinding::Refused,
+            now_ms,
+            acceptance_window_ms,
+        )
+        .with_context(|| {
+            format!(
+                "release attempt {} after its issue was refused",
+                request.attempt_id
+            )
+        })?;
+    Err(refusal)
+}
+
 pub(super) fn handle_provider_attempt_prepare(
     params: &Value,
     state: &AppState,
@@ -226,29 +376,14 @@ pub(super) fn handle_provider_attempt_prepare(
     let effective_definition_digest = cap.effective_definition_digest.clone().ok_or_else(|| {
         anyhow!("provider attempt requires an admitted effective-definition identity")
     })?;
-    let secrets = ryeos_app::vault::read_required_secrets_with_authority(
-        state.vault.as_ref(),
+    let credential_binding = prepared_attempt_credential_binding(
+        &state.secret_sources(),
         &thread_auth.acting_principal,
         &sealed.required_secret_names,
         cap.provenance.project_authority(),
-    )
-    .map_err(|error| {
-        anyhow!("read launch credentials for provider-attempt preparation: {error}")
-    })?;
-    let ordered_secrets = sealed
-        .required_secret_names
-        .iter()
-        .map(|name| {
-            secrets
-                .get(name)
-                .cloned()
-                .map(|value| (name.clone(), value))
-                .ok_or_else(|| anyhow!("required launch credential `{name}` is unavailable"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let credential_binding =
-        credential_binding_digest(ledger.credential_binding_key(), authority, &ordered_secrets)
-            .map_err(|error| anyhow!("derive provider credential binding: {error}"))?;
+        ledger.credential_binding_key(),
+        authority,
+    )?;
     let transport = match request.transport {
         ryeos_provider_contract::PreparedTransportIntent::RemoteHttp { method, url } => {
             TransportCoordinate::RemoteHttp { method, url }
@@ -318,34 +453,31 @@ pub(super) fn handle_provider_attempt_prepare(
         anyhow::bail!("verified spend bound authority contradicts the admitted authority");
     }
 
-    if coordinate.admitted_effect_class.is_some() {
-        match lookup_provider_call(state, &coordinate_key)? {
-            Some((record_hash, record)) => {
-                ensure_provider_call_publication_proof(state, &record_hash, &record)?;
-                publish_provider_call_observation(
-                    state,
-                    &cap.thread_id,
-                    request.turn,
-                    request.attempt_number,
-                    &coordinate_key,
-                    &record.answer_digest,
-                    &record_hash,
-                    ryeos_state::ProviderCallObservationSource::Replay,
-                    ryeos_state::ProviderCallObservationPublication::NotApplicable,
-                    Some(ryeos_state::ProviderCallReplaySource {
-                        produced_by_thread: record.first_observation.produced_by_thread.clone(),
-                        attempt_id: record.first_observation.attempt_id.clone(),
-                    }),
-                )?;
-                return Ok(serde_json::to_value(
-                    ProviderAttemptPrepareResponse::Replay {
-                        record_hash,
-                        answer: record.answer,
-                    },
-                )?);
-            }
-            None => {}
-        }
+    if coordinate.admitted_effect_class.is_some()
+        && let Some((record_hash, record)) = lookup_provider_call(state, &coordinate_key)?
+    {
+        ensure_provider_call_publication_proof(state, &record_hash, &record)?;
+        publish_provider_call_observation(
+            state,
+            &cap.thread_id,
+            request.turn,
+            request.attempt_number,
+            &coordinate_key,
+            &record.answer_digest,
+            &record_hash,
+            ryeos_state::ProviderCallObservationSource::Replay,
+            ryeos_state::ProviderCallObservationPublication::NotApplicable,
+            Some(ryeos_state::ProviderCallReplaySource {
+                produced_by_thread: record.first_observation.produced_by_thread.clone(),
+                attempt_id: record.first_observation.attempt_id.clone(),
+            }),
+        )?;
+        return Ok(serde_json::to_value(
+            ProviderAttemptPrepareResponse::Replay {
+                record_hash,
+                answer: record.answer,
+            },
+        )?);
     }
 
     if !ledger.hard_admission_enabled() {
@@ -440,48 +572,28 @@ pub(super) fn handle_provider_attempt_mark_issued(
     // issue-to-provider-acceptance window beyond the durable Issued boundary.
     let accounting_policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::accounting::NodeAccountingPolicy>(
+        .require::<ryeos_node_runtime::node_policy::sections::accounting::NodeAccountingPolicy>(
     )?;
     let acceptance_window_ms =
         i64::try_from(accounting_policy.issue_acceptance_window_ms).unwrap_or(i64::MAX);
     let sealed = sealed_financial_authority(state, &cap.thread_id)?;
     // Re-read through the same daemon-owned principal and project authority
-    // used at launch. A definitively missing or revoked credential is
-    // represented as a non-matching binding so the ledger durably releases
-    // the reservation before provider contact. A transient read failure is
-    // NOT revocation evidence: it must surface as a retryable RPC error, not
-    // durably brand the attempt as released.
-    let current_binding = match ryeos_app::vault::read_required_secrets_with_authority(
-        state.vault.as_ref(),
+    // used at launch. A definitively missing credential becomes a
+    // non-matching binding, a refusal releases the reservation and is
+    // answered as the refusal, and a transient failure is an error.
+    let credentials = issued_attempt_credential_binding(
+        &state.secret_sources(),
         &thread_auth.acting_principal,
         &sealed.required_secret_names,
         cap.provenance.project_authority(),
-    ) {
-        Ok(values) => sealed
-            .required_secret_names
-            .iter()
-            .map(|name| values.get(name).cloned().map(|value| (name.clone(), value)))
-            .collect::<Option<Vec<_>>>()
-            .and_then(|secrets| {
-                credential_binding_digest(
-                    ledger.credential_binding_key(),
-                    &sealed.authority,
-                    &secrets,
-                )
-                .ok()
-            }),
-        Err(ryeos_app::vault::VaultReadError::MissingSecrets { .. })
-        | Err(ryeos_app::vault::VaultReadError::AuthorityViolation(_)) => None,
-        Err(ryeos_app::vault::VaultReadError::Internal(error)) => {
-            return Err(error.context("re-read launch credentials at provider-attempt issue"));
-        }
-    };
-    let outcome = ledger.mark_provider_attempt_issued_with_credential_binding(
-        &cap.thread_id,
+        ledger.credential_binding_key(),
+        &sealed.authority,
+    );
+    let outcome = issue_reserved_attempt(
+        ledger,
         launch_owner,
-        &request.attempt_id,
-        &request.request_hash,
-        current_binding.as_ref().map(|digest| digest.as_str()),
+        &request,
+        credentials,
         now_ms(),
         acceptance_window_ms,
     )?;
@@ -496,6 +608,33 @@ pub(super) fn handle_provider_attempt_mark_issued(
         },
     };
     Ok(serde_json::to_value(response)?)
+}
+
+/// Gate a retry that follows an unknown provider outcome. The ceiling comes
+/// from the sealed launch authority, never from runtime-supplied or mutable
+/// configuration, so a runtime cannot widen what the admitted launch allows.
+/// Other retry reasons are not judged here.
+fn check_unknown_outcome_retry(
+    retry: &ryeos_accounting::ProviderRetryDecision,
+    transport: &TransportCoordinate,
+    sealed_ceiling: u32,
+) -> Result<()> {
+    if !retry.reason.leaves_outcome_unknown() {
+        return Ok(());
+    }
+    if !matches!(transport, TransportCoordinate::RemoteHttp { .. }) {
+        anyhow::bail!(
+            "provider retry after an unknown outcome is refused: the transport does not admit repeated contact"
+        );
+    }
+    if retry.failed_attempt_number > sealed_ceiling {
+        anyhow::bail!(
+            "provider retry after an unknown outcome is refused: failed attempt {} exceeds the sealed ceiling {}",
+            retry.failed_attempt_number,
+            sealed_ceiling
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn handle_provider_attempt_settle(
@@ -537,6 +676,21 @@ pub(super) fn handle_provider_attempt_settle(
         || request.coordinate.authority_digest != authority.authority_digest.as_str()
     {
         anyhow::bail!("provider settlement coordinate contradicts admitted launch authority");
+    }
+    // The retry's `reason` is runtime-asserted, exactly like the spend and
+    // completion the runtime also reports: the daemon cannot observe which
+    // failure the runtime saw. This gate bounds how many unknown-outcome
+    // retries a launch may issue and on which transport; the transport is
+    // sealed through the request hash. A runtime that mislabels a failure can
+    // only spend attempts already bounded by the ceiling and the ledger.
+    if let Some(retry) = &request.retry {
+        check_unknown_outcome_retry(
+            retry,
+            &request.coordinate.transport,
+            sealed
+                .external_effect_authority
+                .unknown_outcome_retry_ceiling,
+        )?;
     }
     let binding = ledger
         .reservation_publication_binding(&request.attempt_id)?
@@ -730,7 +884,7 @@ fn publish_provider_call(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow!("cannot acquire provider-publication write permit: {error}"))?;
+        .map_err(|error| anyhow!("cannot acquire provider-publication write permit: {error:#}"))?;
     let cas = authority.cas_store()?;
     let mut staged = authority
         .require_recovery()?
@@ -824,7 +978,6 @@ fn publish_provider_call(
     Ok(publication)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn publish_provider_call_observation(
     state: &AppState,
     thread_id: &str,
@@ -1186,7 +1339,7 @@ fn persist_local_worker_observation(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow!("cannot acquire local-observation write permit: {error}"))?;
+        .map_err(|error| anyhow!("cannot acquire local-observation write permit: {error:#}"))?;
     let mut staged = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(&guard, "provider-local-worker-observation")?;
@@ -1216,6 +1369,7 @@ pub(super) fn handle_provider_attempt_local_stream_start(
     params: &Value,
     state: &AppState,
     cap: &CallbackCapability,
+    original_budget: Option<ryeos_app::handler_context::OriginalExecutionBudget>,
 ) -> Result<Value> {
     let request: ProviderAttemptLocalStreamStartParams = serde_json::from_value(params.clone())
         .context("decode provider_attempt_local_stream_start params")?;
@@ -1347,6 +1501,7 @@ pub(super) fn handle_provider_attempt_local_stream_start(
             &owned_state,
             &owned_capsule,
             owned_accounting_scope.as_ref(),
+            original_budget.as_ref(),
             &ryeos_app::persistent_session::PersistentSessionRequestIdentity {
                 thread_id: owned_thread_id.clone(),
                 request_digest: ryeos_accounting::HexDigest::new(owned_request_hash.clone())
@@ -1477,6 +1632,80 @@ pub(super) fn handle_provider_attempt_local_stream_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retry_decision(
+        failed_attempt_number: u32,
+        reason: ryeos_accounting::ProviderRetryReason,
+    ) -> ryeos_accounting::ProviderRetryDecision {
+        let digest = HexDigest::new(lillux::sha256_hex(b"retry")).unwrap();
+        ryeos_accounting::ProviderRetryDecision {
+            turn: 1,
+            failed_attempt_number,
+            next_attempt_number: failed_attempt_number + 1,
+            backoff_ms: 0,
+            reason,
+            failure_digest: digest.clone(),
+            retry_policy_digest: digest,
+        }
+    }
+
+    fn remote() -> TransportCoordinate {
+        TransportCoordinate::RemoteHttp {
+            method: "POST".to_owned(),
+            url: "https://example.test/v1".to_owned(),
+        }
+    }
+
+    fn local_worker() -> TransportCoordinate {
+        TransportCoordinate::AdmittedLocalWorker {
+            worker_ref: "worker:fixtures/local".to_owned(),
+            effective_definition_digest: "d".repeat(64),
+            capsule_hash: "c".repeat(64),
+            execution_realization_hash: "e".repeat(64),
+        }
+    }
+
+    #[test]
+    fn unknown_outcome_retry_refusal_matrix() {
+        use ryeos_accounting::ProviderRetryReason as Reason;
+        let unknown = [
+            Reason::Timeout,
+            Reason::Send {
+                connect_phase: false,
+            },
+            Reason::MidStream {
+                live_output_events_emitted: 3,
+            },
+        ];
+        for reason in unknown {
+            // Undeclared: ceiling 0 refuses every attempt.
+            assert!(
+                check_unknown_outcome_retry(&retry_decision(1, reason.clone()), &remote(), 0)
+                    .is_err()
+            );
+            // Boundary: attempt equal to the ceiling passes, one past refuses.
+            check_unknown_outcome_retry(&retry_decision(2, reason.clone()), &remote(), 2).unwrap();
+            assert!(
+                check_unknown_outcome_retry(&retry_decision(3, reason.clone()), &remote(), 2)
+                    .is_err()
+            );
+            // A local worker never gains repeated contact, whatever the ceiling.
+            assert!(
+                check_unknown_outcome_retry(&retry_decision(1, reason), &local_worker(), 5)
+                    .is_err()
+            );
+        }
+        // Known outcomes are not judged by this gate.
+        for reason in [
+            Reason::Status { code: 503 },
+            Reason::Send {
+                connect_phase: true,
+            },
+        ] {
+            check_unknown_outcome_retry(&retry_decision(9, reason.clone()), &remote(), 0).unwrap();
+            check_unknown_outcome_retry(&retry_decision(9, reason), &local_worker(), 0).unwrap();
+        }
+    }
     use ryeos_accounting::{
         ChargeReconciliationAuthority, HexDigest, SpendAccounting, SpendBoundAuthority,
         SpendBoundCommitments, UsdNanos, VerifiedPreparedSpendBound,
@@ -1560,10 +1789,12 @@ mod tests {
 
     #[test]
     fn indexed_provider_record_repairs_missing_accounting_publication_proof() {
-        let (tmp, mut state) = super::super::tests::setup_app_state();
-        let ledger = Arc::new(
-            AccountingDb::open_default(&tmp.path().join("accounting-proof-repair")).unwrap(),
-        );
+        let (tmp, _state_owner, mut state) = super::super::tests::setup_app_state();
+        let ledger_owner = ryeos_app::test_support::TestAccountingDb::open(
+            &tmp.path().join("accounting-proof-repair"),
+        )
+        .unwrap();
+        let ledger = ledger_owner.shared();
         state.accounting = Some(Arc::clone(&ledger));
 
         let thread_id = "T-publication-repair";
@@ -1649,13 +1880,7 @@ mod tests {
             .unwrap();
 
         let answer = ProviderCallAnswer {
-            message: RecordedMessage {
-                role: "assistant".to_owned(),
-                content: Some(Value::String("done".to_owned())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+            message: RecordedMessage::text(ryeos_provider_contract::Role::Assistant, "done"),
             finish_reason: Some("stop".to_owned()),
         };
         let answer_digest = answer.digest().unwrap();
@@ -1725,6 +1950,10 @@ mod tests {
         assert_eq!(proof.record_hash, record_hash);
         verify_provider_call_publication_proof(&state, &proof).unwrap();
         authority_store.ensure_guard(&guard).unwrap();
+        // The ledger closes into the census after every alias is gone.
+        drop(state);
+        drop(ledger);
+        ledger_owner.close().unwrap();
     }
 
     #[test]
@@ -1756,5 +1985,356 @@ mod tests {
                 .unwrap(),
             LocalStreamStartDisposition::Contact
         );
+    }
+
+    const WORKFLOW_KEY: &str = "OPENAI_API_KEY";
+    const WORKFLOW_KEY_VALUE: &str = "sk-hosted-workflow-value";
+    const RECEIVE_WORKFLOW_KEY: &str = "ryeos.receive.provider_env.openai_api_key";
+    const WORKFLOW_PRINCIPAL: &str = "fp:hosted-workflow";
+
+    /// A node shaped like the hosted-workflow profile: the workflow key is
+    /// taken from the node's environment and delivered to holders of one
+    /// receive capability.
+    fn hosted_workflow_environment(
+        receive_capability: &str,
+    ) -> ryeos_app::vault::ProviderEnvironment {
+        use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName;
+        use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
+        ryeos_app::vault::ProviderEnvironment::captured(
+            vec![ProviderEnvironmentName {
+                name: WORKFLOW_KEY.to_owned(),
+                recipients: NameRecipients {
+                    principals: Vec::new(),
+                    capabilities: vec![receive_capability.to_owned()],
+                },
+            }],
+            vec![(
+                WORKFLOW_KEY.to_owned(),
+                WORKFLOW_KEY_VALUE.to_owned().into(),
+            )],
+        )
+        .unwrap()
+    }
+
+    fn admit_hosted_workflow(
+        environment: &ryeos_app::vault::ProviderEnvironment,
+        project: &std::path::Path,
+        caller_scopes: &[String],
+    ) -> Result<ryeos_state::objects::ExecutionProjectAuthority> {
+        let mut policy = ryeos_app::execution_policy::ExecutionPolicy::local_live(
+            ryeos_app::execution_policy::ExecutionResponse::Accepted,
+        );
+        policy.environment =
+            ryeos_app::execution_policy::ExecutionEnvironmentPolicy::ProviderEnvironment {
+                name_policy: ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::Exact {
+                    names: vec![WORKFLOW_KEY.to_owned()],
+                },
+            };
+        ryeos_api::routes::response_modes::execute_mode::resolve_execution_project_authority(
+            &policy,
+            Some(project),
+            None,
+            None,
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            caller_scopes,
+            ryeos_api::routes::response_modes::execute_mode::ProviderEnvironmentRecipient {
+                environment,
+                principal: WORKFLOW_PRINCIPAL,
+            },
+        )
+    }
+
+    /// The three deliveries of one hosted workflow: the admitted root launch,
+    /// a child whose capability ceiling was narrowed away from the receive
+    /// capability, and the provider-attempt callbacks (prepare and issue)
+    /// made under the child's authority.
+    fn deliver_root_child_and_callback(
+        environment: &ryeos_app::vault::ProviderEnvironment,
+        root: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> [Result<()>; 4] {
+        let vault = ryeos_app::vault::EmptyVault;
+        let sources = ryeos_app::vault::SecretSources {
+            vault: &vault,
+            provider_env: environment,
+            ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:test-operator"),
+        };
+        let names = vec![WORKFLOW_KEY.to_owned()];
+        let child = root
+            .clone()
+            .for_child()
+            .unwrap()
+            .with_capability_ceiling(vec!["ryeos.execute.tool.*".to_owned()])
+            .unwrap();
+        assert_eq!(child.environment(), root.environment());
+        let launch = |authority: &ryeos_state::objects::ExecutionProjectAuthority| {
+            ryeos_app::vault::authorize_secret_delivery(
+                &sources,
+                ryeos_app::vault::SecretRecipient {
+                    principal: WORKFLOW_PRINCIPAL,
+                },
+                &names,
+                authority,
+            )
+            .map(|delivered| {
+                assert_eq!(delivered.get(WORKFLOW_KEY), Some(WORKFLOW_KEY_VALUE));
+            })
+            .map_err(|error| anyhow!("{error}"))
+        };
+        let binding_key = [7_u8; 32];
+        let authority = free_authority();
+        [
+            launch(root),
+            launch(&child),
+            prepared_attempt_credential_binding(
+                &sources,
+                WORKFLOW_PRINCIPAL,
+                &names,
+                &child,
+                &binding_key,
+                &authority,
+            )
+            .map(drop),
+            issued_attempt_credential_binding(
+                &sources,
+                WORKFLOW_PRINCIPAL,
+                &names,
+                &child,
+                &binding_key,
+                &authority,
+            )
+            .map(|binding| assert!(binding.is_some(), "issue lost the credential binding")),
+        ]
+    }
+
+    /// An issue refused by the recipient rule reaches the runtime as a typed
+    /// refusal it does not retry, never as an untyped request failure.
+    fn assert_issue_refusal_is_permanent(issue: Result<()>) {
+        let error = issue.unwrap_err();
+        let typed = error
+            .downcast_ref::<ryeos_executor::dispatch_error::DispatchError>()
+            .unwrap_or_else(|| panic!("issue refusal is untyped: {error:#}"));
+        assert_eq!(typed.code(), "capability_rejected");
+        assert!(!typed.retryable());
+        assert!(
+            typed.to_string().contains("provider-attempt issue refused"),
+            "{typed}"
+        );
+    }
+
+    fn assert_refused_by_name(outcome: &Result<()>) {
+        let message = format!("{:#}", outcome.as_ref().unwrap_err());
+        assert!(
+            message.contains(WORKFLOW_KEY) && message.contains(WORKFLOW_PRINCIPAL),
+            "{message}"
+        );
+        assert!(!message.contains(WORKFLOW_KEY_VALUE), "{message}");
+    }
+
+    #[test]
+    fn hosted_workflow_key_reaches_root_child_and_callback_only_under_the_sealed_scopes() {
+        let project = tempfile::tempdir().unwrap();
+        let project = project.path().canonicalize().unwrap();
+        let environment = hosted_workflow_environment(RECEIVE_WORKFLOW_KEY);
+
+        // The principal holds the receive capability: every delivery of the
+        // lineage receives the key, though the child and its callbacks run
+        // with capabilities that no longer include it.
+        let root = admit_hosted_workflow(
+            &environment,
+            &project,
+            &[
+                "ryeos.execute.*".to_owned(),
+                RECEIVE_WORKFLOW_KEY.to_owned(),
+            ],
+        )
+        .unwrap();
+        for outcome in deliver_root_child_and_callback(&environment, &root) {
+            outcome.unwrap();
+        }
+
+        // The principal does not hold it: admission is refused by name.
+        let error = admit_hosted_workflow(&environment, &project, &["ryeos.execute.*".to_owned()])
+            .unwrap_err();
+        assert_refused_by_name(&Err(error));
+
+        // An authority whose sealed scopes lack the capability is refused at
+        // every delivery, and issue surfaces the refusal instead of releasing.
+        let ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+            authority_id: _,
+            authored_project_identity,
+            canonical_root,
+            live_access,
+            environment: _,
+            capability_ceiling,
+            child_policy,
+        } = root.clone()
+        else {
+            panic!("hosted workflow admits a live project authority");
+        };
+        let unsealed = ryeos_state::objects::ExecutionProjectAuthority::live(
+            canonical_root,
+            authored_project_identity,
+            live_access.access,
+            live_access.confinement,
+            ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+                declared_names: vec![WORKFLOW_KEY.to_owned()],
+                recipient_principal: WORKFLOW_PRINCIPAL.to_owned(),
+                recipient_scopes: vec!["ryeos.execute.*".to_owned()],
+                name_authority: ryeos_state::objects::EnvironmentNameAuthority::Exact {
+                    names: vec![WORKFLOW_KEY.to_owned()],
+                },
+            },
+            capability_ceiling,
+        )
+        .unwrap()
+        .with_child_policy(child_policy)
+        .unwrap();
+        for outcome in deliver_root_child_and_callback(&environment, &unsealed) {
+            assert_refused_by_name(&outcome);
+        }
+        let [_, _, _, issue] = deliver_root_child_and_callback(&environment, &unsealed);
+        assert_issue_refusal_is_permanent(issue);
+
+        // The operator moves the key to another capability and restarts: the
+        // lineage admitted under the old rule is refused at every delivery.
+        let moved = hosted_workflow_environment("ryeos.receive.provider_env.other");
+        for outcome in deliver_root_child_and_callback(&moved, &root) {
+            assert_refused_by_name(&outcome);
+        }
+        let [_, _, _, issue] = deliver_root_child_and_callback(&moved, &root);
+        assert_issue_refusal_is_permanent(issue);
+    }
+
+    /// Reserve one explicitly-free attempt of `thread_id` behind an open
+    /// launch gate, returning its issue request.
+    fn reserved_free_attempt(
+        ledger: &AccountingDb,
+        thread_id: &str,
+        generation: &str,
+    ) -> ProviderAttemptMarkIssuedParams {
+        let execution_budget = format!("execution-{thread_id}");
+        ledger
+            .create_execution_account_prepared(&execution_budget, thread_id, None)
+            .unwrap();
+        ledger
+            .activate_account(&execution_budget, "execution", &execution_budget)
+            .unwrap();
+        ledger
+            .open_launch_gate(thread_id, generation, &execution_budget, thread_id)
+            .unwrap();
+        let authority = free_authority();
+        let cache_key = local_coordinate(&authority).cache_key().unwrap();
+        let request_hash =
+            ryeos_accounting::rpc::provider_attempt_request_hash(thread_id, 1, 1, &cache_key);
+        let SpendBoundAuthority::ExplicitlyFree { contract_digest } = &authority.spend_bound else {
+            panic!("the free fixture authority has an explicitly-free bound");
+        };
+        let bound = VerifiedPreparedSpendBound {
+            prepared_request_digest: digest("prepared-request"),
+            authority_digest: authority.authority_digest.clone(),
+            maximum: UsdNanos::ZERO,
+            commitments: SpendBoundCommitments::ExplicitlyFree {
+                contract_digest: contract_digest.clone(),
+            },
+            verifier_contract_digest: HexDigest::new(lillux::sha256_hex(
+                ryeos_accounting::rpc::SPEND_VERIFIER_CONTRACT_V1.as_bytes(),
+            ))
+            .unwrap(),
+        };
+        let ReserveOutcome::Reserved { attempt_id, .. } = ledger
+            .reserve_provider_attempt(ReserveArgs {
+                thread_id,
+                launch_generation: generation,
+                turn: 1,
+                attempt_number: 1,
+                request_hash: &request_hash,
+                provider_coordinate_key: &lillux::sha256_hex(b"provider-coordinate"),
+                config_hash: &authority.config_hash,
+                verified_bound: &bound,
+                authority: &authority,
+                execution_budget_id: &execution_budget,
+                directive_budget_id: None,
+                root_chain_id: thread_id,
+                audit_chain_root_id: thread_id,
+                now_ms: 1,
+            })
+            .unwrap()
+        else {
+            panic!("the free fixture attempt is reserved");
+        };
+        ProviderAttemptMarkIssuedParams {
+            thread_id: thread_id.to_owned(),
+            attempt_id,
+            request_hash,
+            expected_state: ryeos_accounting::AttemptBudgetState::Reserved,
+        }
+    }
+
+    #[test]
+    fn refused_issue_releases_its_reservation_and_answers_the_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger_owner = ryeos_app::test_support::TestAccountingDb::open(
+            &tmp.path().join("accounting-issue-refusal"),
+        )
+        .unwrap();
+        let ledger = ledger_owner.shared();
+        let generation = "launch-1";
+        let attempt_state = |request: &ProviderAttemptMarkIssuedParams| {
+            ledger
+                .get_provider_attempt(&request.thread_id, &request.attempt_id)
+                .unwrap()
+                .unwrap()
+        };
+
+        // A transient read failure leaves the reservation untouched.
+        let transient = reserved_free_attempt(&ledger, "T-issue-transient", generation);
+        let error = issue_reserved_attempt(
+            &ledger,
+            generation,
+            &transient,
+            Err(anyhow!("the vault could not be read just now")),
+            2,
+            60_000,
+        )
+        .unwrap_err();
+        assert!(!is_issue_refusal(&error), "{error:#}");
+        assert_eq!(
+            attempt_state(&transient).state,
+            ryeos_accounting::AttemptBudgetState::Reserved
+        );
+
+        // A recipient-rule refusal releases the reservation before any
+        // provider contact, records why, and is still answered as the
+        // typed refusal the runtime does not retry.
+        let refused = reserved_free_attempt(&ledger, "T-issue-refused", generation);
+        let error = issue_reserved_attempt(
+            &ledger,
+            generation,
+            &refused,
+            Err(anyhow::Error::new(
+                ryeos_executor::dispatch_error::DispatchError::CapabilityRejected {
+                    reason: "provider-attempt issue refused: the recipient rule no longer \
+                             admits the sealed principal"
+                        .to_owned(),
+                },
+            )),
+            2,
+            60_000,
+        )
+        .map(drop);
+        assert_issue_refusal_is_permanent(error);
+        let record = attempt_state(&refused);
+        assert_eq!(
+            record.state,
+            ryeos_accounting::AttemptBudgetState::ReleasedUnissued
+        );
+        assert_eq!(
+            record.reason,
+            Some(ryeos_accounting::ReconciliationReason::CredentialUnavailableBeforeIssue)
+        );
+
+        drop(ledger);
+        ledger_owner.close().unwrap();
     }
 }

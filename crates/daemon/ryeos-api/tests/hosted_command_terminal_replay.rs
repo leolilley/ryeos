@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use ryeos_app::process::{ExecutionProcessIdentity, PROCESS_IDENTITY_SCHEMA_VERSION};
 use ryeos_app::runtime_db::{
@@ -32,7 +32,7 @@ fn store_structured_session_capsule_with_schema(
         PersistentSessionWireContract,
     };
 
-    let contract = json!({"fixture":"terminal-replay", "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
+    let contract = json!({"fixture":"terminal-replay", "schema_version":ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]}, "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
     let profile_hash = ryeos_state::objects::canonical_value_digest(&contract).unwrap();
     let schema_hashes =
         std::collections::BTreeMap::from([("request.json".to_owned(), "e".repeat(64))]);
@@ -54,6 +54,7 @@ fn store_structured_session_capsule_with_schema(
             ready_timeout_ms: 1,
             request_timeout_ms: 1,
             idle_timeout_ms: 1,
+            max_lifetime_seconds_ceiling: 603_600,
         },
         wire: PersistentSessionWireContract {
             channel_env: "RYEOS_SESSION_FD".to_owned(),
@@ -72,7 +73,9 @@ fn store_structured_session_capsule_with_schema(
             protocol_ref: "protocol:fixture/session".to_owned(),
             protocol_content_hash: "c".repeat(64),
             protocol_signer_fingerprint: "f".repeat(64),
-            execution_plan_hash: "d".repeat(64),
+            execution_plan_hash: lillux::sha256_hex(
+                lillux::canonical_json(&json!({})).unwrap().as_bytes(),
+            ),
             executable_identity: DirectExecutableIdentity::CapturedContent {
                 content_hash: executable_blob_hash.clone(),
             },
@@ -95,6 +98,7 @@ fn store_structured_session_capsule_with_schema(
                     std::path::Path::new("fixture-session"),
                 )
                 .unwrap(),
+                host_origin: None,
             },
             admitted_project_root: None,
         },
@@ -102,12 +106,18 @@ fn store_structured_session_capsule_with_schema(
         source_binding_hash: None,
         retained_product_selections: None,
         retained_external_runtime_qualification: None,
+        retained_external_runtime_content_qualification: None,
         structured_session_profile: Some(AdmittedStructuredSessionProfile {
             profile_hash: profile_hash.clone(),
             contract,
             schema_hashes: schema_hashes.clone(),
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
+            configuration_absence: ryeos_state::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
             auxiliary_configs: Vec::new(),
             runtime_configs: Vec::new(),
         }),
@@ -411,6 +421,7 @@ fn seed_pending_turn_fixture_with_schema(
     state
         .state_store
         .create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id: &profile_id,
             owner_principal: owner,
             home_id: &format!("home-{root}"),
@@ -449,7 +460,9 @@ fn seed_pending_turn_fixture_with_schema(
                 target_start_time_ticks: 10,
                 group_leader_pid: 101,
                 group_leader_start_time_ticks: 10,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 resource_selections: Vec::new(),
+                resource_settlement_authority: None,
                 resource_operations: Vec::new(),
                 resource_allocation_limit: None,
                 resource_occupancy_start: None,
@@ -576,6 +589,7 @@ fn append_final_turn_batch(
         root, "hosted_worker_command_observation_batch", sequence, request_digest, 1,
         json!({"schema":1,"origin":"daemon_observed_io",
             "response_digest":ryeos_state::objects::canonical_value_digest(result).unwrap(),
+            "succeeded":result["response"].get("error").is_none(),
             "canonical_batch":{"events":result["events"],"session_observations":result["session_observations"]}}),
     )]).unwrap();
 }
@@ -661,7 +675,7 @@ fn seed_workload_child(
             call_id: call_id.to_owned(),
         },
         child_thread_id,
-        child_thread_id,
+        root,
         child_owner,
     );
 }
@@ -821,7 +835,7 @@ fn seed_nonworkload_child(state: &ryeos_app::state::AppState, root: &str, child_
 
 #[test]
 fn command_observation_projects_only_children_of_its_exact_turn() {
-    let (tmp, state) = test_state::build_test_state();
+    let (tmp, state_owner, state) = test_state::build_test_state();
     let root = "T-exact-turn-children";
     let pending = seed_pending_turn_fixture(&state, root, false);
     settle_pending_turn(&state, root, &pending);
@@ -856,12 +870,15 @@ fn command_observation_projects_only_children_of_its_exact_turn() {
     // normal admission path would refuse such a callback while this turn is
     // current, but observation must still exclude it if retained state ever
     // contains it.
-    let projection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    projection
-        .execute(
-            "UPDATE dedicated_session SET remote_thread_id='other-upstream', current_turn_id='other-turn' WHERE placement_thread_id=?1",
-            [root],
-        )
+    state
+        .state_store
+        .with_runtime_sql_for_test(|projection| {
+            projection.execute(
+                "UPDATE dedicated_session SET remote_thread_id='other-upstream', current_turn_id='other-turn' WHERE placement_thread_id=?1",
+                [root],
+            )?;
+            Ok(())
+        })
         .unwrap();
     seed_workload_child(
         &state,
@@ -873,13 +890,16 @@ fn command_observation_projects_only_children_of_its_exact_turn() {
         "T-child-other-session",
         "fp:test-operator",
     );
-    projection
-        .execute(
-            "UPDATE dedicated_session SET remote_thread_id='upstream-thread', current_turn_id=?2 WHERE placement_thread_id=?1",
-            rusqlite::params![root, pending.turn_id],
-        )
+    state
+        .state_store
+        .with_runtime_sql_for_test(|projection| {
+            projection.execute(
+                "UPDATE dedicated_session SET remote_thread_id='upstream-thread', current_turn_id=?2 WHERE placement_thread_id=?1",
+                rusqlite::params![root, pending.turn_id],
+            )?;
+            Ok(())
+        })
         .unwrap();
-    drop(projection);
 
     let running_session = state.state_store.dedicated_session(root).unwrap().unwrap();
     let running_command = state
@@ -998,7 +1018,9 @@ fn command_observation_projects_only_children_of_its_exact_turn() {
     );
 
     drop(state);
-    let reopened = test_state::reopen_test_state(&tmp);
+    // Close the first Store and release its operator lock before reopening.
+    drop(state_owner);
+    let (_reopened_owner, reopened) = test_state::reopen_test_state(&tmp);
     let reconstructed = ryeos_app::dedicated_session_service::command_observation(
         &reopened,
         root,
@@ -1011,7 +1033,7 @@ fn command_observation_projects_only_children_of_its_exact_turn() {
 
 #[test]
 fn command_observation_refuses_a_child_with_contradictory_owner() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-contradictory-child-owner";
     let pending = seed_pending_turn_fixture(&state, root, false);
     settle_pending_turn(&state, root, &pending);
@@ -1046,10 +1068,12 @@ fn command_observation_refuses_a_child_with_contradictory_owner() {
 
 #[test]
 fn command_observation_refuses_a_child_with_contradictory_root() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-contradictory-child-root";
     let pending = seed_pending_turn_fixture(&state, root, false);
     settle_pending_turn(&state, root, &pending);
+    // The intent is inline, so its child belongs in the placement's chain;
+    // this one is its own chain root instead.
     seed_workspace_child(
         &state,
         root,
@@ -1060,7 +1084,7 @@ fn command_observation_refuses_a_child_with_contradictory_root() {
             call_id: "call-wrong-root".to_owned(),
         },
         "T-child-wrong-root",
-        root,
+        "T-child-wrong-root",
         "fp:test-operator",
     );
     complete_turn(&state, root, &pending.turn_id);
@@ -1074,38 +1098,42 @@ fn command_observation_refuses_a_child_with_contradictory_root() {
 }
 
 #[tokio::test]
-async fn terminal_predecessor_command_history_is_preserved_without_replay() {
-    let (_tmp, state) = test_state::build_test_state();
+async fn terminal_predecessor_command_history_refuses_with_schema_cutover() {
     let root = "T-terminal-predecessor";
-    let pending = seed_pending_turn_fixture_with_schema(
-        &state,
-        root,
-        false,
-        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 1),
-    );
-    // Neither a live placement nor an unproved cleanup is historical authority.
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
-    state
-        .state_store
-        .settle_worker_process(&pending.worker_instance_id, root, 1, "unproved", "fixture")
-        .unwrap();
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
-    state
-        .state_store
-        .settle_worker_process(&pending.worker_instance_id, root, 1, "reaped", "fixture")
-        .unwrap();
-    // Use the normal terminal transition, then restart fencing is deliberately
-    // not sufficient: this still-attached terminal must not take the opaque path.
-    state
-        .state_store
-        .terminalize_dedicated_session(root, &pending.worker_instance_id, 1, "fixture")
-        .unwrap();
-    finalize_fixture_thread(&state, root);
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    // The process admits one live Store at a time: this first node closes
+    // before the separate placement below opens its own.
+    {
+        let (_tmp, _state_owner, state) = test_state::build_test_state();
+        let pending = seed_pending_turn_fixture_with_schema(
+            &state,
+            root,
+            false,
+            json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 1),
+        );
+        // Neither a live placement nor an unproved cleanup is historical authority.
+        assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+        state
+            .state_store
+            .settle_worker_process(&pending.worker_instance_id, root, 1, "unproved", "fixture")
+            .unwrap();
+        assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+        state
+            .state_store
+            .settle_worker_process(&pending.worker_instance_id, root, 1, "reaped", "fixture")
+            .unwrap();
+        // Use the normal terminal transition, then restart fencing is deliberately
+        // not sufficient: this still-attached terminal must not take the opaque path.
+        state
+            .state_store
+            .terminalize_dedicated_session(root, &pending.worker_instance_id, 1, "fixture")
+            .unwrap();
+        finalize_fixture_thread(&state, root);
+        assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
+    }
 
     // A separate placement exercises the exact installed failure: its prior
     // worker was fenced and detached before the session/root became terminal.
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let pending = seed_pending_turn_fixture_with_schema(
         &state,
         root,
@@ -1129,9 +1157,16 @@ async fn terminal_predecessor_command_history_is_preserved_without_replay() {
             .unwrap(),
     )
     .unwrap();
+    // A predecessor capsule is not decoded as history: command recovery
+    // refuses, naming the schema cutover reset, and changes nothing.
     for _ in 0..2 {
-        ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
-        ryeos_app::dedicated_session_service::reconcile_observation_outboxes(&state).unwrap();
+        let error =
+            ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains(ryeos_app::execution_history_reset::OBJECT_SCHEMA_CUTOVER_COMMAND),
+            "{error:#}"
+        );
         assert_eq!(
             serde_json::to_value(state.state_store.dedicated_session(root).unwrap()).unwrap(),
             session_before
@@ -1165,70 +1200,6 @@ async fn terminal_predecessor_command_history_is_preserved_without_replay() {
             .is_err()
         );
     }
-    // Model an orphaned unproved boot not present in the detached slot. The
-    // existing indexed cleanup owner, not slot absence, must refuse retention.
-    let projection = rusqlite::Connection::open(&state.config.db_path).unwrap();
-    projection
-        .execute(
-            "UPDATE worker_process SET cleanup_state='unproved' WHERE worker_instance_id=?1",
-            [&pending.worker_instance_id],
-        )
-        .unwrap();
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
-    projection
-        .execute(
-            "UPDATE worker_process SET cleanup_state='reaped' WHERE worker_instance_id=?1",
-            [&pending.worker_instance_id],
-        )
-        .unwrap();
-    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
-
-    // A stale/corrupt session row may not select another old capsule to evade
-    // exact immutable command association checks.
-    let original_capsule = state
-        .state_store
-        .dedicated_session(root)
-        .unwrap()
-        .unwrap()
-        .admitted_capsule_hash;
-    let (other_capsule, _, _) = store_structured_session_capsule_with_schema(
-        &state,
-        json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION - 2),
-    );
-    projection
-        .execute(
-            "UPDATE dedicated_session SET admitted_capsule_hash=?1 WHERE placement_thread_id=?2",
-            [&other_capsule, root],
-        )
-        .unwrap();
-    assert!(ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).is_err());
-    projection
-        .execute(
-            "UPDATE dedicated_session SET admitted_capsule_hash=?1 WHERE placement_thread_id=?2",
-            [&original_capsule, root],
-        )
-        .unwrap();
-    drop(projection);
-
-    // The old row must not stop current unrelated commands from being repaired.
-    let current = seed_pending_turn_fixture(&state, "T-current-alongside-history", false);
-    append_final_turn_batch(
-        &state,
-        "T-current-alongside-history",
-        current.sequence,
-        &current.request_digest,
-        &current.result,
-    );
-    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
-    assert_eq!(
-        state
-            .state_store
-            .dedicated_session_command("T-current-alongside-history", current.sequence)
-            .unwrap()
-            .unwrap()
-            .state,
-        "completed"
-    );
 }
 
 fn finalize_fixture_thread(state: &ryeos_app::state::AppState, root: &str) {
@@ -1277,7 +1248,7 @@ async fn terminal_history_does_not_hide_malformed_or_future_session_capsules() {
         json!(1.5),
         json!(ryeos_state::objects::PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION + 1),
     ] {
-        let (_tmp, state) = test_state::build_test_state();
+        let (_tmp, _state_owner, state) = test_state::build_test_state();
         let root = "T-invalid-terminal-capsule";
         let pending = seed_pending_turn_fixture_with_schema(&state, root, false, schema);
         retire_fixture_session(&state, root, &pending);
@@ -1293,7 +1264,7 @@ async fn command_progress_recovery_preserves_the_exact_crash_frontier() {
         ("before-settlement", true, false, true),
         ("completion-before-settlement", true, true, true),
     ] {
-        let (_tmp, state) = test_state::build_test_state();
+        let (_tmp, _state_owner, state) = test_state::build_test_state();
         let root = format!("T-progress-{label}");
         let pending = seed_pending_turn_fixture(&state, &root, true);
         if projected {
@@ -1376,8 +1347,122 @@ async fn command_progress_recovery_preserves_the_exact_crash_frontier() {
 }
 
 #[tokio::test]
+async fn fenced_worker_command_settles_from_testimony_without_replaying_observations() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let root = "T-fenced-enrollment";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    let result = json!({
+        "events":[],
+        "session_observations":[{
+            "kind":"credential_enrollment_started",
+            "login_id":"login-fenced",
+            "ttl_seconds":60,
+        }],
+    });
+    append_final_turn_batch(
+        &state,
+        root,
+        pending.sequence,
+        &pending.request_digest,
+        &result,
+    );
+    state
+        .state_store
+        .fence_abandoned_worker_process(&pending.worker_instance_id, root, 1, "reaped")
+        .unwrap();
+    let session_before = state.state_store.dedicated_session(root).unwrap().unwrap();
+    assert!(session_before.worker_instance_id.is_none());
+    assert!(session_before.worker_boot_epoch.is_none());
+    let profile_before = state
+        .state_store
+        .credential_profile(&session_before.credential_profile_id)
+        .unwrap()
+        .unwrap();
+
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+
+    let command = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    assert_eq!(command.state, "completed");
+    assert_eq!(
+        command.result.as_ref().unwrap()["recovered_from_root_chain"],
+        true
+    );
+    let session_after = state.state_store.dedicated_session(root).unwrap().unwrap();
+    assert_eq!(session_after.state, session_before.state);
+    assert!(session_after.worker_instance_id.is_none());
+    assert!(session_after.worker_boot_epoch.is_none());
+    let profile_after = state
+        .state_store
+        .credential_profile(&session_before.credential_profile_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(profile_after.state, profile_before.state);
+    assert_eq!(
+        profile_after.active_login_id,
+        profile_before.active_login_id
+    );
+    assert_eq!(profile_after.login_epoch, profile_before.login_epoch);
+    assert_eq!(
+        profile_after.authority_revision,
+        profile_before.authority_revision
+    );
+    // A second pass finds no unsettled command and stays quiet.
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+}
+
+#[tokio::test]
+async fn workload_error_response_recovers_as_a_contacted_failed_command() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let root = "T-route-error";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    // A workload that was contacted and answered with a JSON-RPC error
+    // refused the command: it is settled, but not successful.
+    let result = json!({
+        "response":{"error":{"code":-32000,"message":"refused"}},
+        "events":[],
+        "session_observations":[],
+    });
+    append_final_turn_batch(
+        &state,
+        root,
+        pending.sequence,
+        &pending.request_digest,
+        &result,
+    );
+    state
+        .state_store
+        .fence_abandoned_worker_process(&pending.worker_instance_id, root, 1, "reaped")
+        .unwrap();
+
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+
+    let command = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    assert_eq!(command.state, "failed");
+    let observation =
+        ryeos_app::dedicated_session_service::command_observation(&state, root, pending.sequence)
+            .unwrap();
+    assert_eq!(observation["command_state"], "failed");
+    // The failed projection is idempotent across further recovery passes.
+    ryeos_app::dedicated_session_service::reconcile_command_outboxes(&state).unwrap();
+    let again = state
+        .state_store
+        .dedicated_session_command(root, pending.sequence)
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.state, "failed");
+}
+
+#[tokio::test]
 async fn command_progress_recovery_refuses_a_conflicting_final_start() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-progress-conflicting-final";
     let pending = seed_pending_turn_fixture(&state, root, true);
     project_turn_start(&state, root, &pending.turn_id);
@@ -1406,7 +1491,7 @@ async fn command_progress_recovery_refuses_a_conflicting_final_start() {
 
 #[tokio::test]
 async fn completed_command_retains_its_early_progress_start_authority() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-progress-completed-fence";
     let fixture = seed_completed_turn_fixture_with_progress(&state, root, true);
     let observed = ryeos_app::dedicated_session_service::command_observation(
@@ -1435,7 +1520,7 @@ async fn completed_command_retains_its_early_progress_start_authority() {
 
 #[tokio::test]
 async fn completed_termination_requires_the_exact_immutable_turn_fence_and_frontier() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-completed-fence";
     let fixture = seed_completed_turn_fixture(&state, root);
 
@@ -1602,7 +1687,9 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
                 target_start_time_ticks: 20,
                 group_leader_pid: 102,
                 group_leader_start_time_ticks: 20,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 resource_selections: Vec::new(),
+                resource_settlement_authority: None,
                 resource_operations: Vec::new(),
                 resource_allocation_limit: None,
                 resource_occupancy_start: None,
@@ -1644,6 +1731,7 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
             recovered_root,
             reattach.command_sequence,
             2,
+            true,
             &json!({"redacted":true}),
         )
         .unwrap();
@@ -1676,7 +1764,7 @@ async fn completed_termination_requires_the_exact_immutable_turn_fence_and_front
 
 #[tokio::test]
 async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let root = "T-terminal-hosted-replay";
     let owner = "fp:test-operator";
     let (capsule_hash, protocol_profile_hash, protocol_schema_hashes) =
@@ -1754,6 +1842,7 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
     state
         .state_store
         .create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-terminal-hosted-replay",
             owner_principal: owner,
             home_id: "home-terminal-hosted-replay",
@@ -1791,7 +1880,9 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
                 target_start_time_ticks: 10,
                 group_leader_pid: 101,
                 group_leader_start_time_ticks: 10,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
                 resource_selections: Vec::new(),
+                resource_settlement_authority: None,
                 resource_operations: Vec::new(),
                 resource_allocation_limit: None,
                 resource_occupancy_start: None,
@@ -1883,6 +1974,7 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
                         "schema":1,
                         "origin":"daemon_observed_io",
                         "response_digest":response_digest,
+                        "succeeded":true,
                         "canonical_batch":{
                             "events":result["events"],
                             "session_observations":result["session_observations"],
@@ -2444,4 +2536,227 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
         unsettled.to_string().contains("not durably appendable"),
         "{unsettled:#}"
     );
+}
+
+struct ReservedApproval {
+    approval_id: String,
+    upstream_request_id: Value,
+    request_digest: String,
+    reservation_token: String,
+    decision_digest: String,
+}
+
+/// Reserve an owner decision on one pending approval of the fixture's running
+/// turn, exactly as the resolver does before contacting the worker.
+fn reserve_approval(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    pending: &PendingTurnFixture,
+    request: &str,
+) -> ReservedApproval {
+    let upstream_request_id = json!(request);
+    let request_digest =
+        ryeos_state::objects::canonical_value_digest(&json!({"fixture_request":request})).unwrap();
+    let approval_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "worker_boot_epoch":1,
+        "upstream_request_id":upstream_request_id,
+        "request_digest":request_digest,
+    }))
+    .unwrap();
+    state
+        .state_store
+        .create_dedicated_session_approval(ryeos_app::state_store::NewDedicatedSessionApproval {
+            placement_thread_id: root,
+            approval_id: &approval_id,
+            worker_instance_id: &pending.worker_instance_id,
+            worker_boot_epoch: 1,
+            request_digest: &request_digest,
+            operation_class: "command_execution",
+            requested_authority: &json!({"request_id":upstream_request_id}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+    let reservation_token = format!("reservation-{request}");
+    let decision = json!({
+        "kind":"approval_decision",
+        "request_id":upstream_request_id,
+        "request_digest":request_digest,
+        "decision":"decline",
+        "reservation_token":reservation_token,
+    });
+    let decision_digest = ryeos_state::objects::canonical_value_digest(&decision).unwrap();
+    state
+        .state_store
+        .reserve_dedicated_session_approval_decision(
+            root,
+            &approval_id,
+            1,
+            &request_digest,
+            "fp:test-operator",
+            &decision,
+            &decision_digest,
+            &reservation_token,
+        )
+        .unwrap();
+    ReservedApproval {
+        approval_id,
+        upstream_request_id,
+        request_digest,
+        reservation_token,
+        decision_digest,
+    }
+}
+
+/// The worker's pushed `approval.expired` observation, ingested and therefore
+/// acknowledged. Returns the batch digest.
+fn ingest_approval_expiry(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    turn_id: &str,
+    first_sequence: u64,
+    previous_digest: Option<&str>,
+    upstream_request_id: &Value,
+    request_digest: &str,
+) -> String {
+    let mut batch = json!({
+        "first_sequence":first_sequence,
+        "count":1,
+        "previous_digest":previous_digest,
+        "events":[{"event_type":"approval.expired","payload":{
+            "request_id":upstream_request_id,
+            "operation_class":"command_execution",
+            "upstream_session_id":"upstream-thread",
+            "operation_id":turn_id,
+            "request_digest":request_digest,
+        }}],
+        "session_observations":[],
+    });
+    let digest = ryeos_state::objects::canonical_value_digest(&batch).unwrap();
+    batch["batch_digest"] = Value::String(digest.clone());
+    ryeos_app::dedicated_session_service::ingest_observation_batch(state, root, 1, batch).unwrap();
+    digest
+}
+
+fn explain_absent(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    approval: &ReservedApproval,
+    worker_boot_epoch: u64,
+    upstream_request_id: &Value,
+) -> Option<ryeos_app::dedicated_session_service::ObservedApprovalExpiry> {
+    let session = state.state_store.dedicated_session(root).unwrap().unwrap();
+    ryeos_app::dedicated_session_service::observed_expiry_explaining_absent_delivery(
+        state,
+        &session,
+        &approval.approval_id,
+        worker_boot_epoch,
+        &approval.request_digest,
+        &approval.reservation_token,
+        &approval.decision_digest,
+        upstream_request_id,
+    )
+    .unwrap()
+}
+
+fn worker_state(
+    state: &ryeos_app::state::AppState,
+    worker_instance_id: &str,
+) -> WorkerProcessState {
+    state
+        .state_store
+        .worker_process(worker_instance_id)
+        .unwrap()
+        .unwrap()
+        .state
+}
+
+#[tokio::test]
+async fn absent_delivery_after_an_acknowledged_expiry_settles_as_expired() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let root = "T-approval-absent-explained";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    project_turn_start(&state, root, &pending.turn_id);
+
+    // The owner reserves while the approval is still pending.
+    let approval = reserve_approval(&state, root, &pending, "approval-one");
+    // The worker then expires it and RyeOS records and acknowledges that
+    // expiry before the reserved decision reaches the worker.
+    let batch_digest = ingest_approval_expiry(
+        &state,
+        root,
+        &pending.turn_id,
+        1,
+        None,
+        &approval.upstream_request_id,
+        &approval.request_digest,
+    );
+    assert_eq!(
+        state
+            .state_store
+            .dedicated_session_approval(root, &approval.approval_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "expired"
+    );
+
+    // The worker has forgotten the acknowledged expiry and answers `absent`.
+    // That answer is explained by the recorded expiry, which the resolver
+    // cites by its exact observation sequence instead of fencing the worker.
+    assert_eq!(
+        explain_absent(&state, root, &approval, 1, &approval.upstream_request_id),
+        Some(
+            ryeos_app::dedicated_session_service::ObservedApprovalExpiry {
+                batch_digest,
+                first_sequence: 1,
+                through_sequence: 1,
+                event_sequence: 1,
+            }
+        )
+    );
+    assert_eq!(
+        worker_state(&state, &pending.worker_instance_id),
+        WorkerProcessState::Live
+    );
+}
+
+#[tokio::test]
+async fn absent_delivery_without_its_own_recorded_expiry_stays_unexplained() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let root = "T-approval-absent-unexplained";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    project_turn_start(&state, root, &pending.turn_id);
+
+    // No expiry was ever recorded for this reserved decision.
+    let unexpired = reserve_approval(&state, root, &pending, "approval-unexpired");
+    assert_eq!(
+        explain_absent(&state, root, &unexpired, 1, &unexpired.upstream_request_id),
+        None
+    );
+
+    // An expiry recorded for a different request does not explain it either.
+    let other = reserve_approval(&state, root, &pending, "approval-other");
+    ingest_approval_expiry(
+        &state,
+        root,
+        &pending.turn_id,
+        1,
+        None,
+        &other.upstream_request_id,
+        &other.request_digest,
+    );
+    assert_eq!(
+        explain_absent(&state, root, &unexpired, 1, &unexpired.upstream_request_id),
+        None
+    );
+    // The recorded expiry is only for its exact request id and incarnation.
+    assert_eq!(
+        explain_absent(&state, root, &other, 1, &unexpired.upstream_request_id),
+        None
+    );
+    assert_eq!(
+        explain_absent(&state, root, &other, 2, &other.upstream_request_id),
+        None
+    );
+    assert!(explain_absent(&state, root, &other, 1, &other.upstream_request_id).is_some());
 }

@@ -64,6 +64,8 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "external_content_binding",
     "external_content_manifest",
     "external_large_content_manifest",
+    "guest_runtime_materialization_source",
+    "guest_runtime_materialization_subject",
     "item_source",
     "observed_execution_realization",
     "persistent_session_capsule",
@@ -74,10 +76,16 @@ pub(super) const CURRENT_OBJECT_KINDS: &[&str] = &[
     "project_snapshot",
     "project_snapshot_policy",
     "project_tree",
+    "qualification_fixture_capture",
+    "qualification_worker_transcript",
+    "retained_lifecycle_artifacts",
+    "retired_chain_closure_page",
+    "retired_chain_manifest",
     "ryeos.effective_source_binding",
     "ryeos.source_closure_manifest",
     "source_manifest",
     "state_manifest",
+    "thread_attachment",
     "thread_event",
     "thread_snapshot",
     "workspace_output_capture",
@@ -145,6 +153,16 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         links: links_external_large_content_manifest,
     },
     ObjectContract {
+        kind: crate::objects::GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
+        validate: validate_guest_runtime_materialization_source,
+        links: links_guest_runtime_materialization_source,
+    },
+    ObjectContract {
+        kind: crate::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND,
+        validate: validate_guest_runtime_materialization_subject,
+        links: links_guest_runtime_materialization_subject,
+    },
+    ObjectContract {
         kind: "item_source",
         validate: validate_item_source,
         links: links_item_source,
@@ -196,6 +214,31 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         links: links_project_tree,
     },
     ObjectContract {
+        kind: crate::objects::qualification_fixture::Q_FIXTURE_CAPTURE_KIND,
+        validate: validate_qualification_fixture_capture,
+        links: links_qualification_fixture_capture,
+    },
+    ObjectContract {
+        kind: crate::objects::QUALIFICATION_WORKER_TRANSCRIPT_KIND,
+        validate: validate_qualification_worker_transcript,
+        links: links_qualification_worker_transcript,
+    },
+    ObjectContract {
+        kind: crate::objects::RETAINED_LIFECYCLE_ARTIFACTS_KIND,
+        validate: validate_retained_lifecycle_artifacts,
+        links: links_retained_lifecycle_artifacts,
+    },
+    ObjectContract {
+        kind: crate::objects::RETIRED_CHAIN_CLOSURE_PAGE_KIND,
+        validate: validate_retired_chain_closure_page,
+        links: links_retired_chain_closure_page,
+    },
+    ObjectContract {
+        kind: crate::objects::RETIRED_CHAIN_MANIFEST_KIND,
+        validate: validate_retired_chain_manifest,
+        links: links_retired_chain_manifest,
+    },
+    ObjectContract {
         kind: crate::objects::EFFECTIVE_SOURCE_BINDING_KIND,
         validate: validate_effective_source_binding,
         links: links_effective_source_binding,
@@ -214,6 +257,11 @@ const CURRENT_OBJECT_CONTRACTS: &[ObjectContract] = &[
         kind: crate::objects::STATE_MANIFEST_KIND,
         validate: validate_state_manifest,
         links: links_state_manifest,
+    },
+    ObjectContract {
+        kind: crate::objects::THREAD_ATTACHMENT_KIND,
+        validate: validate_thread_attachment,
+        links: links_thread_attachment,
     },
     ObjectContract {
         kind: "thread_event",
@@ -286,6 +334,51 @@ fn validate_attestation(value: &Value) -> anyhow::Result<()> {
     crate::objects::Attestation::from_value(value).map(|_| ())
 }
 
+fn validate_qualification_fixture_capture(value: &Value) -> anyhow::Result<()> {
+    crate::objects::qualification_fixture::QFixtureCaptureMetadata::from_value(value).map(|_| ())
+}
+
+fn links_qualification_fixture_capture(value: &Value) -> Result<ContractLinks, String> {
+    let metadata =
+        crate::objects::qualification_fixture::QFixtureCaptureMetadata::from_value(value)
+            .map_err(|error| format!("invalid Q fixture capture: {error:#}"))?;
+    // Native, fixture-contract and derived ProjectFile digests are commitments,
+    // not CAS object links. Only the captured blob belongs to this closure.
+    Ok(ContractLinks {
+        object_edges: Vec::new(),
+        blob_hashes: vec![metadata.blob_hash],
+        large_object_hashes: Vec::new(),
+    })
+}
+
+fn validate_qualification_worker_transcript(value: &Value) -> anyhow::Result<()> {
+    crate::objects::QualificationWorkerTranscriptManifest::from_current_value(value).map(|_| ())
+}
+
+fn links_qualification_worker_transcript(value: &Value) -> Result<ContractLinks, String> {
+    let manifest = crate::objects::QualificationWorkerTranscriptManifest::from_current_value(value)
+        .map_err(|error| format!("invalid Q Worker transcript: {error:#}"))?;
+    Ok(ContractLinks {
+        object_edges: manifest
+            .fixture_capture
+            .into_iter()
+            .map(|capture| ObjectEdge {
+                hash: capture.metadata_hash,
+                expected: ExpectedObject::Kind(
+                    crate::objects::qualification_fixture::Q_FIXTURE_CAPTURE_KIND,
+                ),
+                history_graph: None,
+            })
+            .collect(),
+        blob_hashes: manifest
+            .chunks
+            .into_iter()
+            .map(|chunk| chunk.blob_hash)
+            .collect(),
+        large_object_hashes: Vec::new(),
+    })
+}
+
 fn validate_bundle_event(value: &Value) -> anyhow::Result<()> {
     let object = serde_json::from_value::<crate::objects::BundleEventObject>(value.clone())?;
     object.validate()
@@ -302,6 +395,18 @@ fn validate_execution_identity(value: &Value) -> anyhow::Result<()> {
 
 fn validate_external_content_manifest(value: &Value) -> anyhow::Result<()> {
     crate::objects::ExternalContentManifestObject::from_value(value).map(|_| ())
+}
+
+fn validate_guest_runtime_materialization_source(value: &Value) -> anyhow::Result<()> {
+    crate::objects::GuestRuntimeMaterializationSourceEvidence::from_value(value).map(|_| ())
+}
+
+fn validate_guest_runtime_materialization_subject(value: &Value) -> anyhow::Result<()> {
+    crate::objects::GuestRuntimeMaterializationSubject::from_value(value).map(|_| ())
+}
+
+fn validate_retained_lifecycle_artifacts(value: &Value) -> anyhow::Result<()> {
+    crate::objects::RetainedLifecycleArtifacts::from_value(value).map(|_| ())
 }
 
 fn validate_external_content_activation(value: &Value) -> anyhow::Result<()> {
@@ -405,9 +510,14 @@ fn validate_state_manifest(value: &Value) -> anyhow::Result<()> {
     crate::objects::StateManifest::from_current_value(value.clone()).map(|_| ())
 }
 
+fn validate_thread_attachment(value: &Value) -> anyhow::Result<()> {
+    crate::objects::ThreadAttachment::from_value(value).map(|_| ())
+}
+
 fn validate_thread_event(value: &Value) -> anyhow::Result<()> {
     let object = serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())?;
-    object.validate()
+    object.validate()?;
+    super::validate_registered_event(value)
 }
 
 fn validate_thread_snapshot(value: &Value) -> anyhow::Result<()> {
@@ -436,7 +546,7 @@ fn links_effective_source_binding(value: &Value) -> Result<ContractLinks, String
 
 fn links_source_closure_manifest(value: &Value) -> Result<ContractLinks, String> {
     let manifest = crate::objects::SourceClosureManifest::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     links.blob_hashes = manifest.blob_hashes();
     Ok(links)
@@ -451,7 +561,7 @@ fn links_dispatch_effect_record(value: &Value) -> Result<ContractLinks, String> 
             .ok_or_else(|| "dispatch_effect_record missing answer".to_owned())?,
     )
     .map_err(|error| format!("invalid dispatch effect answer: {error}"))?;
-    answer.validate().map_err(|error| error.to_string())?;
+    answer.validate().map_err(|error| format!("{error:#}"))?;
     if let ryeos_effect_contract::DispatchEffectAnswer::Retained {
         retained_result, ..
     } = answer
@@ -484,7 +594,7 @@ fn links_dispatch_effect_record(value: &Value) -> Result<ContractLinks, String> 
 
 fn links_admitted_execution_realization(value: &Value) -> Result<ContractLinks, String> {
     let realization = crate::objects::AdmittedExecutionRealization::from_current_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     super::push_typed_hash(
         &realization.substrate_identity_hash,
@@ -504,7 +614,7 @@ fn links_admitted_execution_realization(value: &Value) -> Result<ContractLinks, 
 
 fn links_observed_execution_realization(value: &Value) -> Result<ContractLinks, String> {
     let realization = crate::objects::ObservedExecutionRealization::from_current_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     super::push_typed_hash(
         &realization.admitted_realization_hash,
@@ -585,17 +695,17 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         &mut links.object_edges,
     )?;
     let attestation = crate::objects::Attestation::from_value(value)
-        .map_err(|error| format!("invalid attestation links: {error}"))?;
+        .map_err(|error| format!("invalid attestation links: {error:#}"))?;
     if attestation.claim
         == crate::external_content::products::qualification::PRODUCT_QUALIFICATION_CLAIM
         && attestation.policy
             == crate::external_content::products::qualification::PRODUCT_QUALIFICATION_ATTESTATION_POLICY
     {
         let evidence = crate::external_content::products::qualification::ProductQualificationEvidence::from_attestation(&attestation)
-            .map_err(|error| format!("invalid product qualification evidence links: {error}"))?;
+            .map_err(|error| format!("invalid product qualification evidence links: {error:#}"))?;
         for hash in evidence
             .owning_attestation_hashes()
-            .map_err(|error| format!("invalid product qualification proof links: {error}"))?
+            .map_err(|error| format!("invalid product qualification proof links: {error:#}"))?
         {
             super::push_typed_hash(
                 &hash,
@@ -607,6 +717,15 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
         if let Some(content) = &evidence.consumer_content {
             push_qualification_consumer_content_edges(content, &mut links)?;
         }
+        if let Some(hash) = &evidence.qualification_worker_transcript_manifest_hash {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind(crate::objects::QUALIFICATION_WORKER_TRANSCRIPT_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+        push_qualification_subordinate_edges(&evidence.execution_proof, &mut links);
         for verifier in evidence.execution_verifiers() {
             super::push_typed_hash(
                 &verifier.execution_realization_hash,
@@ -616,7 +735,50 @@ fn links_attestation(value: &Value) -> Result<ContractLinks, String> {
             )?;
         }
     }
+    if attestation.claim
+        == crate::external_content::qualification_evidence::CONTENT_QUALIFICATION_CLAIM
+        && attestation.policy
+            == crate::external_content::qualification_evidence::CONTENT_QUALIFICATION_ATTESTATION_POLICY
+    {
+        let evidence = crate::external_content::qualification_evidence::ContentQualificationEvidence
+            ::from_attestation(&attestation)
+            .map_err(|error| format!("invalid content qualification evidence links: {error:#}"))?;
+        push_qualification_purpose_edges(
+            &serde_json::to_value(&evidence.purpose).map_err(|error| error.to_string())?,
+            &mut links,
+        )?;
+        push_qualification_subordinate_edges(&evidence.execution_proof, &mut links);
+        for verifier in std::iter::once(&evidence.verifier).chain(
+            evidence.execution_proof.participants.iter().map(|participant| &participant.verifier),
+        ) {
+            super::push_typed_hash(
+                &verifier.execution_realization_hash,
+                ExpectedObject::Kind(crate::objects::ADMITTED_EXECUTION_REALIZATION_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
     Ok(links)
+}
+
+fn push_qualification_subordinate_edges(
+    proof: &crate::external_content::products::qualification::ProductQualificationExecutionProof,
+    links: &mut ContractLinks,
+) {
+    use crate::external_content::products::qualification::ProductQualificationSubordinateAttemptProof;
+    if let Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof }) =
+        &proof.subordinate_attempt
+    {
+        // Retained testimony owns the exact evidence bytes, independently of
+        // whether its runtime journal is still present on this node.
+        links
+            .blob_hashes
+            .push(proof.observation.evidence_sha256.clone());
+        links
+            .blob_hashes
+            .push(proof.consumer_input_blob_hash.clone());
+    }
 }
 
 fn push_qualification_consumer_content_edges(
@@ -633,6 +795,7 @@ fn push_qualification_consumer_content_edges(
         .worker_literals
         .iter()
         .chain(content.environment_realizations.iter())
+        .chain(std::iter::once(&content.runtime_realization))
     {
         super::push_typed_hash(
             &realized.manifest_hash,
@@ -644,9 +807,120 @@ fn push_qualification_consumer_content_edges(
     Ok(())
 }
 
+fn push_qualification_purpose_edges(
+    value: &Value,
+    links: &mut ContractLinks,
+) -> Result<(), String> {
+    use crate::external_content::qualification_purpose::QualificationSubject;
+    let subject: QualificationSubject = serde_json::from_value(
+        value
+            .get("subject")
+            .cloned()
+            .ok_or_else(|| "qualification purpose has no explicit subject".to_string())?,
+    )
+    .map_err(|error| format!("invalid qualification subject: {error}"))?;
+    subject.validate().map_err(|error| format!("{error:#}"))?;
+    match subject {
+        QualificationSubject::CapturedProduct {
+            product_witness_hash,
+            witness_source,
+            ..
+        } => {
+            super::push_typed_hash(
+                &product_witness_hash,
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?;
+            if let crate::external_content::products::transfer::ProductWitnessSource::Received {
+                acceptance_hash,
+            } = witness_source
+            {
+                super::push_typed_hash(
+                    &acceptance_hash,
+                    ExpectedObject::Kind("attestation"),
+                    None,
+                    &mut links.object_edges,
+                )?;
+            }
+        }
+        QualificationSubject::ActivatedContent { content } => {
+            for (hash, expected) in [
+                (
+                    &content.activation_receipt_hash,
+                    ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_ACTIVATION_KIND),
+                ),
+                (
+                    &content.binding_hash,
+                    ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_BINDING_KIND),
+                ),
+                (
+                    &content.manifest_hash,
+                    ExpectedObject::OneOf(EXTERNAL_MANIFEST_KINDS),
+                ),
+            ] {
+                super::push_typed_hash(hash, expected, None, &mut links.object_edges)?;
+            }
+        }
+    }
+    if let Some(content) = value
+        .get("consumer_content")
+        .filter(|content| !content.is_null())
+    {
+        let content: crate::external_content::products::qualification::ProductQualificationConsumerContentIdentity =
+            serde_json::from_value(content.clone())
+                .map_err(|error| format!("invalid retained qualification consumer content: {error}"))?;
+        push_qualification_consumer_content_edges(&content, links)?;
+    }
+    if let Some(sources) = value.get("remote_verifier_sources") {
+        let sources: std::collections::BTreeMap<String,
+            crate::external_content::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource> =
+            serde_json::from_value(sources.clone())
+                .map_err(|error| format!("invalid retained remote verifier inventory: {error}"))?;
+        if sources.len() > crate::external_content::products::qualification::MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
+            return Err("retained remote verifier inventory exceeds its bound".into());
+        }
+        for source in sources.values() {
+            source.validate().map_err(|error| format!("{error:#}"))?;
+            links.blob_hashes.extend(
+                source
+                    .signed_items
+                    .iter()
+                    .map(|item| item.signed_blob_hash.clone()),
+            );
+            links.blob_hashes.extend(
+                source
+                    .signed_bundle_manifests
+                    .iter()
+                    .map(|manifest| manifest.signed_blob_hash.clone()),
+            );
+            let executor = &source.executor;
+            links
+                .blob_hashes
+                .extend(source.recipe_resolution_blob_hash.clone());
+            links.blob_hashes.extend([
+                source.policy_resolution_blob_hash.clone(),
+                executor.payload_blob_hash.clone(),
+                executor.signed_manifest_ref_blob_hash.clone(),
+                executor.manifest_object_blob_hash.clone(),
+                executor.signed_sidecar_blob_hash.clone(),
+            ]);
+            super::push_typed_hash(
+                &executor.item_source_object_hash,
+                ExpectedObject::ItemSource {
+                    item_ref: executor.item_ref.clone(),
+                },
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn links_placement_runtime_seed(value: &Value) -> Result<ContractLinks, String> {
     let seed = crate::objects::PlacementRuntimeSeed::from_current_value(value.clone())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     super::push_typed_hash(
         &seed.target_launch_capsule_hash,
@@ -660,7 +934,7 @@ fn links_placement_runtime_seed(value: &Value) -> Result<ContractLinks, String> 
 
 fn links_placement_transfer_manifest(value: &Value) -> Result<ContractLinks, String> {
     let manifest = crate::objects::PlacementTransferManifest::from_current_value(value.clone())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     for (hash, expected) in [
         (
@@ -687,7 +961,7 @@ fn links_placement_transfer_manifest(value: &Value) -> Result<ContractLinks, Str
 
 fn links_external_content_activation(value: &Value) -> Result<ContractLinks, String> {
     let receipt = crate::objects::ExternalContentActivationReceipt::from_value(value)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let mut links = ContractLinks::leaf();
     for component in receipt.components {
         super::push_typed_hash(
@@ -835,14 +1109,11 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
         value.pointer("/sealed_invocation/resolution_output"),
         &mut links,
     )?;
-    if let Some(content) = value
-        .pointer("/sealed_invocation/product_qualification/consumer_content")
-        .filter(|content| !content.is_null())
+    if let Some(purpose) = value
+        .pointer("/sealed_invocation/qualification")
+        .filter(|purpose| !purpose.is_null())
     {
-        let content: crate::external_content::products::qualification::ProductQualificationConsumerContentIdentity =
-            serde_json::from_value(content.clone())
-                .map_err(|error| format!("invalid retained qualification consumer content: {error}"))?;
-        push_qualification_consumer_content_edges(&content, &mut links)?;
+        push_qualification_purpose_edges(purpose, &mut links)?;
     }
 
     let execution_closure = value
@@ -974,17 +1245,81 @@ fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, Stri
     }
     match value.get("retained_external_runtime_qualification") {
         Some(Value::Null) => {}
-        Some(proof) => super::push_required_object_edge(
-            proof.get("proof").ok_or_else(|| {
-                "persistent-session external runtime qualification missing proof".to_owned()
-            })?,
-            "attestation_hash",
-            ExpectedObject::Kind("attestation"),
-            None,
-            &mut links.object_edges,
-        )?,
+        // A remote testimony's attestation lives in the origin's store; the
+        // capsule reaches only this node's own acceptance of it.
+        Some(proof) => match proof.get("remote_testimony") {
+            Some(remote) if !remote.is_null() => super::push_required_object_edge(
+                remote,
+                "acceptance_hash",
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?,
+            _ => super::push_required_object_edge(
+                proof.get("proof").ok_or_else(|| {
+                    "persistent-session external runtime qualification missing proof".to_owned()
+                })?,
+                "attestation_hash",
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?,
+        },
         None => {
             return Err("persistent-session capsule missing external runtime qualification".into());
+        }
+    }
+    match value.get("retained_external_runtime_content_qualification") {
+        Some(Value::Null) => {}
+        // A remote testimony's qualification attestation lives in the
+        // origin's store; this node owns, and the capsule reaches, only its
+        // own acceptance of it and its own activation receipt and binding,
+        // as a local qualification reaches its receipt and binding through
+        // its attestation's purpose.
+        Some(proof) => match proof.get("remote_testimony") {
+            Some(remote) if !remote.is_null() => {
+                super::push_required_object_edge(
+                    remote,
+                    "acceptance_hash",
+                    ExpectedObject::Kind("attestation"),
+                    None,
+                    &mut links.object_edges,
+                )?;
+                let join = proof
+                    .get("receiver_join")
+                    .filter(|join| !join.is_null())
+                    .ok_or_else(|| {
+                        "persistent-session remote runtime content has no receiver join".to_owned()
+                    })?;
+                for (field, kind) in [
+                    (
+                        "activation_receipt_hash",
+                        crate::objects::EXTERNAL_CONTENT_ACTIVATION_KIND,
+                    ),
+                    (
+                        "binding_hash",
+                        crate::objects::EXTERNAL_CONTENT_BINDING_KIND,
+                    ),
+                ] {
+                    super::push_required_object_edge(
+                        join,
+                        field,
+                        ExpectedObject::Kind(kind),
+                        None,
+                        &mut links.object_edges,
+                    )?;
+                }
+            }
+            _ => super::push_required_object_edge(
+                proof,
+                "attestation_hash",
+                ExpectedObject::Kind("attestation"),
+                None,
+                &mut links.object_edges,
+            )?,
+        },
+        None => {
+            return Err("persistent-session capsule missing runtime content qualification".into());
         }
     }
     push_evidence_attachment_event_edges(
@@ -1111,7 +1446,7 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
         .map_err(|error| format!("invalid remote continuation authority: {error}"))?;
         remote
             .validate()
-            .map_err(|error| format!("invalid remote continuation authority: {error}"))?;
+            .map_err(|error| format!("invalid remote continuation authority: {error:#}"))?;
         for (hash, expected) in [
             (
                 &remote.preflight_attestation_hash,
@@ -1156,6 +1491,25 @@ fn links_thread_event(value: &Value) -> Result<ContractLinks, String> {
                 &mut links.object_edges,
             )?;
         }
+    }
+    if let Some(payload) = value.get("payload") {
+        for hash in crate::objects::payload_attachment_refs(payload)
+            .map_err(|error| format!("invalid thread event attachment references: {error:#}"))?
+        {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind(crate::objects::THREAD_ATTACHMENT_KIND),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
+    if let Some(registered) = super::links_registered_event(value)? {
+        links.object_edges.extend(registered.object_edges);
+        links.blob_hashes.extend(registered.blob_hashes);
+        links
+            .large_object_hashes
+            .extend(registered.large_object_hashes);
     }
     Ok(links)
 }
@@ -1210,6 +1564,150 @@ fn links_external_content_manifest(value: &Value) -> Result<ContractLinks, Strin
     for entry in entries {
         super::push_optional_hash(entry, "blob_hash", &mut links.blob_hashes)?;
     }
+    Ok(links)
+}
+
+fn links_guest_runtime_materialization_source(value: &Value) -> Result<ContractLinks, String> {
+    let source = crate::objects::GuestRuntimeMaterializationSourceEvidence::from_value(value)
+        .map_err(|error| format!("{error:#}"))?;
+    let mut links = ContractLinks::leaf();
+    for item in &source.signed_recipe_items {
+        links.blob_hashes.push(item.signed_blob_hash.clone());
+    }
+    for bundle in &source.signed_bundle_manifests {
+        links.blob_hashes.push(bundle.signed_blob_hash.clone());
+    }
+    let executor = &source.executor;
+    links.blob_hashes.extend([
+        executor.signed_manifest_ref_blob_hash.clone(),
+        executor.manifest_object_blob_hash.clone(),
+        executor.signed_sidecar_blob_hash.clone(),
+        executor.payload_blob_hash.clone(),
+    ]);
+    super::push_typed_hash(
+        &executor.item_source_object_hash,
+        ExpectedObject::ItemSource {
+            item_ref: executor.item_ref.clone(),
+        },
+        None,
+        &mut links.object_edges,
+    )?;
+    Ok(links)
+}
+
+fn links_guest_runtime_materialization_subject(value: &Value) -> Result<ContractLinks, String> {
+    let subject = crate::objects::GuestRuntimeMaterializationSubject::from_value(value)
+        .map_err(|error| format!("{error:#}"))?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &subject.runtime_manifest_hash,
+        ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    super::push_typed_hash(
+        &subject.source_evidence_hash,
+        ExpectedObject::Kind(crate::objects::GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND),
+        None,
+        &mut links.object_edges,
+    )?;
+    Ok(links)
+}
+
+fn validate_retired_chain_manifest(value: &Value) -> anyhow::Result<()> {
+    crate::objects::RetiredChainManifest::from_value(value)?;
+    Ok(())
+}
+
+fn links_retired_chain_manifest(value: &Value) -> Result<ContractLinks, String> {
+    let manifest = crate::objects::RetiredChainManifest::from_value(value)
+        .map_err(|error| format!("{error:#}"))?;
+    let mut links = ContractLinks::leaf();
+    super::push_typed_hash(
+        &manifest.snapshot_hash,
+        ExpectedObject::Kind("thread_snapshot"),
+        None,
+        &mut links.object_edges,
+    )?;
+    if let Some(hash) = manifest.terminal_event_hash {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind("thread_event"),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    if let Some(hash) = manifest.closure_page_head {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind(crate::objects::RETIRED_CHAIN_CLOSURE_PAGE_KIND),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    Ok(links)
+}
+
+fn validate_retired_chain_closure_page(value: &Value) -> anyhow::Result<()> {
+    crate::objects::RetiredChainClosurePage::from_value(value)?;
+    Ok(())
+}
+
+fn links_retired_chain_closure_page(value: &Value) -> Result<ContractLinks, String> {
+    let page = crate::objects::RetiredChainClosurePage::from_value(value)
+        .map_err(|error| format!("{error:#}"))?;
+    let mut links = ContractLinks::leaf();
+    if let Some(hash) = page.next_page_hash {
+        super::push_typed_hash(
+            &hash,
+            ExpectedObject::Kind(crate::objects::RETIRED_CHAIN_CLOSURE_PAGE_KIND),
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    for coordinate in page.retained_evidence {
+        for hash in [
+            &coordinate.event_hash,
+            &coordinate.owner_tip.event_hash,
+            &coordinate.counterpart_tip.event_hash,
+        ] {
+            super::push_typed_hash(
+                hash,
+                ExpectedObject::Kind("thread_event"),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
+    Ok(links)
+}
+
+fn links_retained_lifecycle_artifacts(value: &Value) -> Result<ContractLinks, String> {
+    let source = crate::objects::RetainedLifecycleArtifacts::from_value(value)
+        .map_err(|error| format!("{error:#}"))?;
+    let mut links = ContractLinks::leaf();
+    links
+        .blob_hashes
+        .push(source.signed_bundle_manifest_blob_hash);
+    for executable in source.executables {
+        links.blob_hashes.extend([
+            executable.payload_blob_hash,
+            executable.signed_manifest_ref_blob_hash,
+            executable.manifest_object_blob_hash,
+            executable.signed_sidecar_blob_hash,
+        ]);
+        super::push_typed_hash(
+            &executable.item_source_object_hash,
+            ExpectedObject::ItemSource {
+                item_ref: executable.item_ref,
+            },
+            None,
+            &mut links.object_edges,
+        )?;
+    }
+    links
+        .blob_hashes
+        .extend(source.specs.into_iter().map(|spec| spec.blob_hash));
     Ok(links)
 }
 
@@ -1361,6 +1859,12 @@ fn links_project_tree(value: &Value) -> Result<ContractLinks, String> {
     Ok(links)
 }
 
+fn links_thread_attachment(value: &Value) -> Result<ContractLinks, String> {
+    let mut links = ContractLinks::leaf();
+    super::push_required_hash(value, "blob_hash", &mut links.blob_hashes)?;
+    Ok(links)
+}
+
 fn links_project_file(value: &Value) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
     super::push_required_hash(value, "blob_hash", &mut links.blob_hashes)?;
@@ -1376,6 +1880,123 @@ fn links_item_source(value: &Value) -> Result<ContractLinks, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualification_purpose_retains_the_complete_remote_verifier_closure() {
+        let (source, _) = crate::external_content::products::qualification::remote_verifier_source::tests::fixture();
+        let purpose = serde_json::json!({
+            "subject": crate::external_content::qualification_purpose::QualificationSubject::CapturedProduct {
+                product_witness_hash: "7".repeat(64),
+                witness_source: crate::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                relationship_name: "fixture".into(),
+            },
+            "remote_verifier_sources": {"remote_codex": source.clone()},
+        });
+        let mut links = ContractLinks::leaf();
+        push_qualification_purpose_edges(&purpose, &mut links).unwrap();
+        for hash in source
+            .signed_items
+            .iter()
+            .map(|item| &item.signed_blob_hash)
+            .chain(
+                source
+                    .signed_bundle_manifests
+                    .iter()
+                    .map(|manifest| &manifest.signed_blob_hash),
+            )
+            .chain([
+                &source.policy_resolution_blob_hash,
+                source.recipe_resolution_blob_hash.as_ref().unwrap(),
+                &source.executor.payload_blob_hash,
+                &source.executor.signed_manifest_ref_blob_hash,
+                &source.executor.manifest_object_blob_hash,
+                &source.executor.signed_sidecar_blob_hash,
+            ])
+        {
+            assert!(
+                links.blob_hashes.contains(hash),
+                "missing verifier blob edge {hash}"
+            );
+        }
+        assert!(
+            links
+                .object_edges
+                .iter()
+                .any(|edge| edge.hash == source.executor.item_source_object_hash
+                    && matches!(&edge.expected,
+                ExpectedObject::ItemSource { item_ref } if item_ref == &source.executor.item_ref))
+        );
+        let mut invalid = purpose;
+        invalid["remote_verifier_sources"]["remote_codex"]["executor"]["item_ref"] =
+            serde_json::json!("bin/x86_64-unknown-linux-musl/codex");
+        assert!(push_qualification_purpose_edges(&invalid, &mut ContractLinks::leaf()).is_err());
+    }
+
+    #[test]
+    fn activated_qualification_retains_its_own_provenance() {
+        use crate::external_content::qualification_purpose::{
+            QualificationSubject, tests::content_subject,
+        };
+        let content = content_subject(&"e".repeat(64));
+        let purpose = serde_json::json!({
+            "subject": QualificationSubject::ActivatedContent { content: content.clone() }
+        });
+        let mut links = ContractLinks::leaf();
+        push_qualification_purpose_edges(&purpose, &mut links).unwrap();
+        assert_eq!(links.object_edges.len(), 3);
+        for hash in [
+            &content.activation_receipt_hash,
+            &content.binding_hash,
+            &content.manifest_hash,
+        ] {
+            assert!(links.object_edges.iter().any(|edge| &edge.hash == hash));
+        }
+        assert!(
+            !links
+                .object_edges
+                .iter()
+                .any(|edge| matches!(edge.expected, ExpectedObject::Kind("attestation")))
+        );
+    }
+
+    #[test]
+    fn qualification_retention_refuses_ambiguous_source() {
+        let mut links = ContractLinks::leaf();
+        assert!(push_qualification_purpose_edges(&serde_json::json!({}), &mut links).is_err());
+        let mixed = serde_json::json!({"subject": {
+            "kind": "captured_product",
+            "product_witness_hash": "a".repeat(64),
+            "witness_source": {"kind": "local_capture"},
+            "relationship_name": "runtime",
+            "content": {}
+        }});
+        assert!(push_qualification_purpose_edges(&mixed, &mut links).is_err());
+        assert!(links.object_edges.is_empty());
+    }
+
+    #[test]
+    fn received_product_qualification_retains_acceptance_and_witness() {
+        let witness = "a".repeat(64);
+        let acceptance = "b".repeat(64);
+        let purpose = serde_json::json!({"subject": {
+            "kind": "captured_product",
+            "product_witness_hash": witness,
+            "witness_source": {"kind": "received", "acceptance_hash": acceptance},
+            "relationship_name": "runtime"
+        }});
+        let mut links = ContractLinks::leaf();
+        push_qualification_purpose_edges(&purpose, &mut links).unwrap();
+        assert_eq!(links.object_edges.len(), 2);
+        for hash in [&witness, &acceptance] {
+            assert!(links.object_edges.iter().any(|edge| &edge.hash == hash));
+        }
+        assert!(
+            links
+                .object_edges
+                .iter()
+                .all(|edge| matches!(edge.expected, ExpectedObject::Kind("attestation")))
+        );
+    }
 
     #[test]
     fn qualification_launch_capsule_roots_exact_consumer_source_and_manifests() {
@@ -1410,13 +2031,16 @@ mod tests {
             mount: id.into(),
         };
         let content = ProductQualificationConsumerContentIdentity {
+            qualification_use: None,
             definitions: ProductQualificationConsumerDefinitionIdentity {
                 bundle_generation_identity: "generation".into(),
                 worker: definition("worker:codex/authoring"),
                 environment: definition("config:codex/environment"),
                 worker_execution: definition("worker_execution:codex/bounded-turn"),
             },
-            relationship_definition: definition("config:codex/products"),
+            declaration_authority: crate::external_content::products::qualification::QualificationConsumerDeclarationAuthority::CapturedProduct {
+                relationship_definition: definition("config:codex/products"),
+            },
             worker_source: EffectiveSourceClosureProjection {
                 schema: crate::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
                 binding_hash: source_binding.clone(),
@@ -1426,6 +2050,7 @@ mod tests {
                 total_bytes: 1,
             },
             worker_profile_hash: "6".repeat(64),
+            runtime_realization: realization("runtime", "b".repeat(64)),
             worker_preselection_effective_definition_digest: "7".repeat(64),
             worker_literals: ExternalContentRealizationSet::new(vec![realization(
                 "codex",
@@ -1449,13 +2074,21 @@ mod tests {
         let capsule = serde_json::json!({
             "project_authority": {"kind":"projectless"},
             "execution_realization_hash": "9".repeat(64),
-            "sealed_invocation": {"product_qualification": {"consumer_content": content}},
+            "sealed_invocation": {"qualification": {
+                "subject": {"kind":"captured_product", "product_witness_hash":"a".repeat(64), "witness_source":{"kind":"local_capture"}, "relationship_name":"runtime"},
+                "consumer_content": content
+            }},
             "execution_closure": {"driver":"other"},
         });
         let links = links_admitted_launch_capsule(&capsule).unwrap();
         let mut evidence_edges = ContractLinks::leaf();
         push_qualification_consumer_content_edges(&content, &mut evidence_edges).unwrap();
-        for hash in [&source_binding, &worker_manifest, &environment_manifest] {
+        for hash in [
+            &source_binding,
+            &worker_manifest,
+            &environment_manifest,
+            &content.runtime_realization.manifest_hash,
+        ] {
             assert!(links.object_edges.iter().any(|edge| &edge.hash == hash));
             assert!(
                 evidence_edges
@@ -1464,7 +2097,7 @@ mod tests {
                     .any(|edge| &edge.hash == hash)
             );
         }
-        assert_eq!(links.object_edges.len(), 4);
+        assert_eq!(links.object_edges.len(), 6);
     }
 
     #[test]
@@ -1510,6 +2143,143 @@ mod tests {
         let mut malformed = value;
         malformed["products"][0]["witness_hash"] = serde_json::json!("not-a-hash");
         assert!(links_product_build_accepted_result(&malformed).is_err());
+    }
+
+    #[test]
+    fn q_fixture_capture_roots_only_its_exact_blob() {
+        use crate::external_execution::{
+            NativeNamespaceExit, NativeQualificationScopeSettlementObservation,
+            NativeWriterExclusionMechanism,
+        };
+        use crate::objects::qualification_fixture::{
+            Q_FIXTURE_CAPTURE_KIND, Q_FIXTURE_CAPTURE_SCHEMA, QFixtureCaptureMetadata,
+        };
+        let metadata = QFixtureCaptureMetadata {
+            kind: Q_FIXTURE_CAPTURE_KIND.into(),
+            schema: Q_FIXTURE_CAPTURE_SCHEMA,
+            fixture_contract_digest: "a".repeat(64),
+            blob_hash: "b".repeat(64),
+            size_bytes: 3,
+            normalized_mode: crate::objects::ProjectFile::REGULAR_MODE,
+            native_settlement: NativeQualificationScopeSettlementObservation {
+                schema: 1,
+                binding_digest: "c".repeat(64),
+                launcher_occurrence_digest: "d".repeat(64),
+                applied_runtime_receipt_digest: "e".repeat(64),
+                completion_frame_digest: "f".repeat(64),
+                completion_request_digest: "0".repeat(64),
+                mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+                exit: NativeNamespaceExit::Signal(9),
+            },
+        };
+        let value = metadata.to_value().unwrap();
+        let contract = contract(Q_FIXTURE_CAPTURE_KIND).unwrap();
+        (contract.validate)(&value).unwrap();
+        let links = (contract.links)(&value).unwrap();
+        assert_eq!(links.blob_hashes, vec![metadata.blob_hash]);
+        assert!(links.object_edges.is_empty() && links.large_object_hashes.is_empty());
+        let mut changed = value.clone();
+        changed["normalized_mode"] = serde_json::json!(493);
+        assert!((contract.validate)(&changed).is_err());
+        assert!((contract.links)(&changed).is_err());
+        changed = value;
+        changed["schema"] = serde_json::json!(0);
+        assert!((contract.links)(&changed).is_err());
+    }
+
+    #[test]
+    fn thread_attachment_roots_only_its_blob() {
+        let attachment = crate::objects::ThreadAttachment {
+            media_type: "image/png".to_owned(),
+            byte_length: 5,
+            blob_hash: "b".repeat(64),
+        };
+        let value = attachment.to_value();
+        let contract = contract(crate::objects::THREAD_ATTACHMENT_KIND).unwrap();
+        (contract.validate)(&value).unwrap();
+        let links = (contract.links)(&value).unwrap();
+        assert_eq!(links.blob_hashes, vec![attachment.blob_hash]);
+        assert!(links.object_edges.is_empty() && links.large_object_hashes.is_empty());
+        let mut changed = value.clone();
+        changed["media_type"] = serde_json::json!("Image/PNG");
+        assert!((contract.validate)(&changed).is_err());
+        changed = value;
+        changed["blob_hash"] = serde_json::json!("not-a-hash");
+        assert!((contract.validate)(&changed).is_err());
+        assert!((contract.links)(&changed).is_err());
+    }
+
+    fn thread_event_value(event_type: &str, payload: Value) -> Value {
+        serde_json::json!({
+            "schema": 1,
+            "kind": "thread_event",
+            "chain_root_id": "chain",
+            "chain_seq": 1,
+            "thread_id": "thread",
+            "thread_seq": 1,
+            "event_type": event_type,
+            "durability": "durable",
+            "ts": "2026-01-01T00:00:00Z",
+            "prev_chain_event_hash": null,
+            "prev_thread_event_hash": null,
+            "payload": payload,
+        })
+    }
+
+    #[test]
+    fn any_thread_event_type_links_its_attachment_refs() {
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        for event_type in ["cognition_frame", "tool_call_result", "milestone"] {
+            let value = thread_event_value(
+                event_type,
+                serde_json::json!({"attachment_refs": [first, second]}),
+            );
+            let links = links_thread_event(&value).unwrap();
+            let hashes = links
+                .object_edges
+                .iter()
+                .map(|edge| edge.hash.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                hashes,
+                vec![first.as_str(), second.as_str()],
+                "{event_type}"
+            );
+            assert!(links.object_edges.iter().all(|edge| edge.expected
+                == ExpectedObject::Kind("thread_attachment")
+                && edge.history_graph.is_none()));
+        }
+        let none = thread_event_value("cognition_in", serde_json::json!({"turn": 1}));
+        assert!(links_thread_event(&none).unwrap().object_edges.is_empty());
+    }
+
+    #[test]
+    fn malformed_attachment_refs_are_refused_by_links_and_validation() {
+        let hash = "a".repeat(64);
+        let too_many = (0..65)
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        for refs in [
+            serde_json::json!("not-a-list"),
+            serde_json::json!([1]),
+            serde_json::json!(["not-a-hash"]),
+            serde_json::json!(["A".repeat(64)]),
+            serde_json::json!([hash, hash]),
+            serde_json::json!(too_many),
+        ] {
+            let value = thread_event_value(
+                "cognition_frame",
+                serde_json::json!({"attachment_refs": refs}),
+            );
+            assert!(links_thread_event(&value).is_err(), "{refs}");
+            assert!(validate_thread_event(&value).is_err(), "{refs}");
+        }
+        let valid = thread_event_value(
+            "cognition_frame",
+            serde_json::json!({"attachment_refs": [hash]}),
+        );
+        validate_thread_event(&valid).unwrap();
     }
 
     #[test]

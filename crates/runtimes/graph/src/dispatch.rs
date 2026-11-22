@@ -9,7 +9,7 @@ use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
 use crate::context::ExecutionContext;
 use crate::model::FanoutItemStatus;
 #[cfg(test)]
-use crate::model::GraphRunStatus;
+use ryeos_runtime::graph_result::GraphRunStatus;
 
 const NATIVE_FAILURE_DIAGNOSTIC_CHARS: usize = 4_096;
 pub(crate) const GRAPH_ACTION_OCCURRENCE_SCHEMA: &str = "ryeos.runtime_action_occurrence.v1";
@@ -93,6 +93,11 @@ pub struct ActionFailure {
     /// with `on_error`, because doing so could settle after losing accounting.
     pub integrity: bool,
     pub dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+    /// The structured terminal outcome a followed worker child reported, when
+    /// its settled value carries one: the whole follow value, including its
+    /// `outcome_kind` and any partial `result`. `None` for every failure whose
+    /// child reported no outcome classification.
+    pub outcome: Option<Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -138,11 +143,14 @@ pub struct ActionSuccess {
     /// sub-graph) in the envelope's `cost` field. `None` for subprocess
     /// leaves, cache hits, and bare values — cost is never invented.
     pub cost: Option<RuntimeCost>,
-    /// The spawned child thread's id, when this dispatch launched a native
-    /// child thread (a directive or sub-graph). `None` for subprocess/tool
-    /// leaves, bare values, and cache hits — nothing new was spawned. The
-    /// walker emits a `child_thread_spawned` event from this so the dispatch
-    /// edge lands in the parent's portable braid.
+    /// The spawned child thread's id, when this dispatch launched a child
+    /// thread: a native child (a directive or sub-graph) or an inline
+    /// in-process service child, which the daemon records in this graph's
+    /// chain with the graph thread as upstream. `None` for subprocess/tool
+    /// leaves, unrecorded service reads, bare values, and cache hits —
+    /// nothing new was spawned. The walker emits a `child_thread_spawned`
+    /// event from this so the dispatch edge lands in the parent's portable
+    /// braid.
     pub child_thread_id: Option<String>,
     /// The durable effect record this result was replayed from, when the
     /// daemon substituted a recorded result for execution. Flows into the
@@ -285,10 +293,11 @@ pub async fn dispatch_action(
     // failure rather than a silent `null`. Only success peels to the bare
     // leaf value; a leaf that still requests inline continuation
     // (`continuation_id` at its top level) is then rejected loudly.
-    // A native child snapshot identifies a spawned directive/sub-graph child;
-    // capture its id BEFORE classifying `result` so the walker can emit a
-    // `child_thread_spawned` event. In-process service envelopes instead carry
-    // invocation/audit metadata and are explicitly excluded below.
+    // A native child snapshot identifies a spawned directive/sub-graph child
+    // and a recorded service envelope identifies an inline in-process child;
+    // capture the id BEFORE classifying `result` so the walker can emit a
+    // `child_thread_spawned` event. Unrecorded service envelopes carry only an
+    // invocation id for a hot read and are excluded below.
     let (child_thread_id, child_thread_id_error) = callback_child_thread_identity(&response.thread);
 
     response
@@ -362,6 +371,7 @@ pub async fn dispatch_action(
                     child_thread_id: None,
                     integrity: true,
                     dispatch: Some(daemon_dispatch),
+                    outcome: None,
                 }));
             }
             success.dispatch = Some(daemon_dispatch);
@@ -373,6 +383,7 @@ pub async fn dispatch_action(
                     child_thread_id: None,
                     integrity: true,
                     dispatch: success.dispatch,
+                    outcome: None,
                 }));
             }
             success.child_thread_id = child_thread_id;
@@ -402,6 +413,7 @@ pub async fn dispatch_action(
                     child_thread_id: success.child_thread_id,
                     integrity: false,
                     dispatch: success.dispatch,
+                    outcome: None,
                 }));
             }
             Ok(ActionOutcome::Success(success))
@@ -409,16 +421,30 @@ pub async fn dispatch_action(
     }
 }
 
-/// Extract the identity of a native child launched by one callback action.
+/// Extract the identity of a child thread launched by one callback action.
 ///
-/// In-process services also return a `thread` object, but its `svc-*`
-/// identity is invocation/audit metadata rather than a spawned runtime child.
-/// The service envelope carries the explicit `recorded` discriminator, so it
-/// must never produce a graph lineage edge. Native child snapshots have no
-/// such discriminator and retain the strict runtime thread-id contract.
+/// Native child snapshots carry no `recorded` discriminator and retain the
+/// strict runtime thread-id contract. In-process service envelopes carry the
+/// daemon-authored `recorded` discriminator: an unrecorded service is a hot
+/// read whose `svc-*` id is invocation metadata, not a thread, so it never
+/// produces a lineage edge; a recorded service ran as a thread. When that
+/// thread has a runtime thread id it is the inline in-process child the
+/// callback pre-minted, recorded in this graph's chain with the graph thread
+/// as upstream, so it produces the same `child_thread_spawned` edge as a
+/// native child. A recorded `svc-*` id is a direct invocation's own chain
+/// root and is not a child of this graph.
 fn callback_child_thread_identity(thread: &Value) -> (Option<String>, Option<String>) {
     match thread.get("recorded") {
-        Some(Value::Bool(_)) => return (None, None),
+        Some(Value::Bool(false)) => return (None, None),
+        Some(Value::Bool(true))
+            if thread
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .is_some_and(|thread_id| thread_id.starts_with("svc-")) =>
+        {
+            return (None, None);
+        }
+        Some(Value::Bool(true)) => {}
         Some(_) => {
             return (
                 None,
@@ -623,6 +649,57 @@ struct FollowResultEnvelope {
     cost: Value,
 }
 
+/// A followed worker child's settled value is its own outcome record: an
+/// object naming its `outcome_kind` beside the child thread, status, partial
+/// result and cost. A failure value of that shape is surfaced whole so the
+/// graph can branch on the kind and read the partial result.
+fn worker_outcome(result: &Value) -> Option<Value> {
+    let object = result.as_object()?;
+    (object.get("outcome_kind").is_some_and(Value::is_string)
+        && object.get("child_thread_id").is_some_and(Value::is_string))
+    .then(|| result.clone())
+}
+
+/// A followed child that the run deadline stopped has no outcome record of its
+/// own, so the graph is given the same shape a worker child reports: the
+/// `deadline` classification beside the child thread, status and partial
+/// result. A recovery node can then branch on `state._outcome.outcome_kind`.
+fn deadline_outcome(
+    status: RuntimeResultStatus,
+    child_thread_id: &str,
+    result: &Value,
+) -> Option<Value> {
+    (status == RuntimeResultStatus::TimedOut).then(|| {
+        json!({
+            "outcome_kind": ryeos_runtime::envelope::status_outcome_kind(status),
+            "child_thread_id": child_thread_id,
+            "status": status.as_str(),
+            "result": result,
+        })
+    })
+}
+
+/// A followed child that failed with a structured runtime failure and has no
+/// outcome record of its own is given a generic one: the status classification
+/// and the failure's own `failure_code`, beside the child thread and the
+/// failure value. A recovery node can branch on `state._outcome.failure_code`
+/// without the graph runtime knowing what any code means.
+fn failure_code_outcome(
+    status: RuntimeResultStatus,
+    child_thread_id: &str,
+    result: &Value,
+    failure: Option<&ryeos_runtime::RuntimeFailure>,
+) -> Option<Value> {
+    let failure = failure?;
+    Some(json!({
+        "outcome_kind": ryeos_runtime::envelope::status_outcome_kind(status),
+        "failure_code": failure.code,
+        "child_thread_id": child_thread_id,
+        "status": status.as_str(),
+        "result": result,
+    }))
+}
+
 /// Exact cohort wrapper written by the daemon's follow join. Every field is
 /// required and unknown fields are rejected before graph execution resumes.
 #[derive(Debug, Deserialize)]
@@ -716,6 +793,16 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
         })
     } else {
         let structured_failure = parse_runtime_failure(&result);
+        let failure_outcome = worker_outcome(&result)
+            .or_else(|| deadline_outcome(status, &envelope_child_thread_id, &result))
+            .or_else(|| {
+                failure_code_outcome(
+                    status,
+                    &envelope_child_thread_id,
+                    &result,
+                    structured_failure.as_ref(),
+                )
+            });
         let mut runtime_failure_contract_error = runtime_failure_contract_error(&result);
         if let Some(failure) = structured_failure.as_ref()
             && failure.diagnostic_locator.thread_id != envelope_child_thread_id
@@ -758,6 +845,7 @@ fn classify_follow_envelope_value(value: Value) -> Result<ClassifiedFollowEnvelo
             child_thread_id,
             integrity: runtime_failure_contract_error.is_some(),
             dispatch: None,
+            outcome: failure_outcome,
         })
     };
 
@@ -880,6 +968,7 @@ fn classify_native_runtime_envelope(
                 child_thread_id: None,
                 integrity: true,
                 dispatch: None,
+                outcome: None,
             });
         }
     };
@@ -924,6 +1013,7 @@ fn classify_native_runtime_envelope(
             child_thread_id: structured_failure.map(|failure| failure.diagnostic_locator.thread_id),
             integrity: runtime_failure_contract_error.is_some(),
             dispatch: None,
+            outcome: None,
         })
     }
 }
@@ -939,6 +1029,7 @@ fn malformed_native_runtime_failure(
         child_thread_id: None,
         integrity: true,
         dispatch: None,
+        outcome: None,
     })
 }
 
@@ -953,6 +1044,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
                 child_thread_id: None,
                 integrity: true,
                 dispatch: None,
+                outcome: None,
             });
         }
     };
@@ -979,6 +1071,7 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
             child_thread_id: None,
             integrity: false,
             dispatch: None,
+            outcome: None,
         })
     }
 }
@@ -997,7 +1090,7 @@ fn native_success_value(
 ) -> Result<Value, String> {
     match projection {
         NativeResultProjection::GraphReturn => {
-            ryeos_graph_definition::project_graph_action_result(result, outputs)
+            ryeos_runtime::graph_result::project_graph_action_result(result, outputs)
         }
         NativeResultProjection::KindDefined => Ok(
             ryeos_runtime::envelope::project_kind_defined_action_result(result, outputs),
@@ -1195,6 +1288,40 @@ mod tests {
     }
 
     #[test]
+    fn recorded_inline_service_child_is_a_spawned_child() {
+        let (child, error) = callback_child_thread_identity(&json!({
+            "thread_id": "T-inline_child_1",
+            "recorded": true,
+            "kind": "service_run",
+        }));
+        assert_eq!(child.as_deref(), Some("T-inline_child_1"));
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn recorded_inline_service_child_retains_strict_runtime_identity() {
+        let (child, error) = callback_child_thread_identity(&json!({
+            "thread_id": "not a thread id",
+            "recorded": true,
+        }));
+        assert!(child.is_none());
+        assert!(
+            error.is_some(),
+            "a recorded non-invocation id must validate"
+        );
+    }
+
+    #[test]
+    fn unrecorded_service_read_never_spawns_a_child() {
+        let (child, error) = callback_child_thread_identity(&json!({
+            "thread_id": "T-inline_child_1",
+            "recorded": false,
+        }));
+        assert!(child.is_none());
+        assert!(error.is_none());
+    }
+
+    #[test]
     fn service_invocation_metadata_requires_a_boolean_discriminator() {
         let (child, error) = callback_child_thread_identity(&json!({
             "thread_id": "svc-1786320000000-deadbeef",
@@ -1304,16 +1431,15 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_event(
-            &self,
-            _: &str,
-            _: &str,
-            _: Value,
-            _: &str,
-        ) -> Result<Value, CallbackError> {
+        async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
@@ -1407,16 +1533,15 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_event(
-            &self,
-            _: &str,
-            _: &str,
-            _: Value,
-            _: &str,
-        ) -> Result<Value, CallbackError> {
+        async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
@@ -2472,6 +2597,162 @@ mod tests {
         .expect("canonical follow envelope");
         assert_eq!(classified.fanout_status(), FanoutItemStatus::Completed);
         assert_eq!(expect_success(classified.outcome), json!({"answer": 42}));
+    }
+
+    fn worker_follow_value(status: &str, outcome_kind: &str, result: Value) -> Value {
+        json!({
+            "child_thread_id": "T-follow-child",
+            "status": status,
+            "outcome_kind": outcome_kind,
+            "result": result,
+            "cost": null,
+        })
+    }
+
+    #[test]
+    fn a_failed_worker_follow_exposes_its_structured_outcome() {
+        for kind in [
+            "deadline",
+            "budget",
+            "approval_required",
+            "outcome_unknown",
+            "worker_failure",
+            "cancelled",
+            "failed",
+        ] {
+            let value = worker_follow_value("cancelled", kind, json!({"turn_id": "t1"}));
+            let classified = classify_follow_envelope(canonical_follow_envelope(
+                false,
+                RuntimeResultStatus::Cancelled,
+                value.clone(),
+            ))
+            .expect("canonical failed worker follow envelope");
+            assert_eq!(classified.fanout_status(), FanoutItemStatus::Failed);
+            let failure = expect_action_failure(classified.outcome);
+            assert_eq!(failure.outcome, Some(value), "{kind}");
+            assert_eq!(failure.child_thread_id.as_deref(), Some("T-follow-child"));
+        }
+    }
+
+    #[test]
+    fn a_child_stopped_by_the_run_deadline_exposes_a_deadline_outcome() {
+        let stopped = json!({"outcome": "deadline", "phase": "hard_stop"});
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::TimedOut,
+            stopped.clone(),
+        ))
+        .expect("canonical timed-out follow envelope");
+        let outcome = expect_action_failure(classified.outcome)
+            .outcome
+            .expect("a deadline outcome record");
+        assert_eq!(outcome["outcome_kind"], "deadline");
+        assert_eq!(outcome["status"], "timed_out");
+        assert_eq!(outcome["child_thread_id"], "T-follow-child");
+        assert_eq!(outcome["result"], stopped);
+
+        // Other failures without a classification still report none.
+        let failed = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            json!("boom"),
+        ))
+        .expect("canonical failed follow envelope");
+        assert!(expect_action_failure(failed.outcome).outcome.is_none());
+    }
+
+    fn structured_failure_value(code: &str) -> Value {
+        json!({
+            "kind": ryeos_runtime::RUNTIME_FAILURE_KIND,
+            "version": 1,
+            "code": code,
+            "summary": "the provider refused the request",
+            "diagnostic_locator": {
+                "thread_id": "T-follow-child",
+                "event_type": "thread_failed",
+            },
+            "retryable": false,
+        })
+    }
+
+    #[test]
+    fn a_child_failing_with_a_structured_failure_exposes_its_failure_code() {
+        let result = structured_failure_value("provider_context_length_exceeded");
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            result.clone(),
+        ))
+        .expect("canonical failed follow envelope");
+        let outcome = expect_action_failure(classified.outcome)
+            .outcome
+            .expect("a failure-code outcome record");
+        assert_eq!(outcome["outcome_kind"], "failed");
+        assert_eq!(outcome["failure_code"], "provider_context_length_exceeded");
+        assert_eq!(outcome["status"], "failed");
+        assert_eq!(outcome["child_thread_id"], "T-follow-child");
+        assert_eq!(outcome["result"], result);
+    }
+
+    #[test]
+    fn worker_and_deadline_outcomes_keep_their_shapes_over_a_failure_code() {
+        // A worker outcome record is surfaced whole, as before.
+        let worker = json!({"outcome_kind": "worker_failure", "child_thread_id": "T-follow-child"});
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            worker.clone(),
+        ))
+        .expect("canonical failed follow envelope");
+        assert_eq!(
+            expect_action_failure(classified.outcome).outcome,
+            Some(worker)
+        );
+        // A deadline stop keeps its classification even with a failure value.
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::TimedOut,
+            structured_failure_value("some_code"),
+        ))
+        .expect("canonical timed-out follow envelope");
+        let outcome = expect_action_failure(classified.outcome)
+            .outcome
+            .expect("a deadline outcome record");
+        assert_eq!(outcome["outcome_kind"], "deadline");
+        assert!(outcome.get("failure_code").is_none());
+    }
+
+    #[test]
+    fn a_failure_without_an_outcome_classification_reports_no_outcome() {
+        for result in [
+            json!("unstructured child failure"),
+            json!({"outcome_kind": 3, "child_thread_id": "T-follow-child"}),
+            json!({"outcome_kind": "failed"}),
+        ] {
+            let classified = classify_follow_envelope(canonical_follow_envelope(
+                false,
+                RuntimeResultStatus::Failed,
+                result,
+            ))
+            .expect("canonical failed follow envelope");
+            assert!(expect_action_failure(classified.outcome).outcome.is_none());
+        }
+    }
+
+    #[test]
+    fn a_completed_worker_follow_assigns_its_whole_value() {
+        let value = worker_follow_value(
+            "completed",
+            "completed",
+            json!({"result": {"text": "done", "truncated": false}}),
+        );
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            true,
+            RuntimeResultStatus::Completed,
+            value.clone(),
+        ))
+        .expect("canonical completed worker follow envelope");
+        assert_eq!(expect_success(classified.outcome), value);
     }
 
     #[test]

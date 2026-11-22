@@ -1,12 +1,11 @@
-//! Node-config loader: two-phase bootstrap for daemon-consumed control-plane items.
+//! Full domain node-config loader; bundle bootstrap belongs to Node Runtime.
 //!
-//! Phase 1: `load_bundle_section()` — minimal bootstrap verifier, bundle roots only.
 //! Phase 2: `load_full()` — full engine-based scan across all sources.
 //!
 //! Section directories support recursive subfolders. For example:
 //!
-//!   .ai/node/routes/ui/ryeos-ui/dimension-get.yaml
-//!   .ai/node/routes/ui/ryeos-ui/items/list.yaml
+//!   .ai/node/routes/ui/session/current.yaml
+//!   .ai/node/routes/ui/session/seat/open.yaml
 //!   .ai/node/commands/web.yaml
 //!
 //! The section invariant requires the file to live under
@@ -16,43 +15,37 @@
 //! Security: signed-required, trusted-signer-required, symlinks rejected,
 //! regular files only, deterministic traversal order.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 #[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
 use serde_json::Value;
 
-use ryeos_engine::contracts::SignatureEnvelope;
 use ryeos_engine::trust::TrustStore;
 
-use super::sections::bundle::BundleSection;
 use super::sections::command::CommandRecord;
 use super::{
     BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeConfigSourceScope, NodeConfigTable,
-    NodeItemContext, SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
+    SectionCardinality, SectionLoadPhase, SectionSignerPolicy, SectionTraversal,
 };
-use crate::node_policy::sections::command_registration::CommandRegistrationAuthority;
 use crate::route_raw::RawRouteSpec;
+use ryeos_node_runtime::node_config_source::{
+    VerifiedNodeConfigItem, check_bundle_collisions, scan_yaml_files, scan_yaml_files_recursive,
+    verify_and_parse_in_space,
+};
+#[cfg(test)]
+use ryeos_node_runtime::node_config_source::{strip_signature, verify_and_parse};
+use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
 
-/// Bootstrap loader for node-config items.
+/// Full loader for domain node-config items.
 ///
-/// Phase 1: `load_bundle_section()` — minimal bootstrap verifier, bundle roots only.
 /// Phase 2: `load_full()` — full engine-based scan across all sources.
-pub struct BootstrapLoader<'a> {
+pub struct NodeConfigLoader<'a> {
     pub app_root: &'a Path,
     pub trust_store: &'a TrustStore,
-}
-
-/// A verified and parsed node-config YAML file, ready for section-specific handling.
-struct VerifiedItem {
-    path: PathBuf,
-    ctx: NodeItemContext,
-    signer_fingerprint: String,
-    signer_verifying_key: [u8; 32],
-    body: Value,
-    signed_source: std::sync::Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,12 +104,16 @@ pub(crate) struct NodeConfigSnapshotBuilder {
     runtime_snapshot_production: Vec<
         super::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
     >,
+    guest_runtime_materialization: Vec<
+        super::sections::guest_runtime_materialization::InstalledGuestRuntimeMaterializationBinding,
+    >,
     runtime_snapshot_qualification: Vec<
         super::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
     >,
     bundles: Vec<BundleRecord>,
     routes: Vec<RawRouteSpec>,
     commands: Vec<CommandRecord>,
+    stale_bindings: Vec<super::coherence::StaleBinding>,
     command_registration_authority: CommandRegistrationAuthority,
 }
 
@@ -128,10 +125,12 @@ impl NodeConfigSnapshotBuilder {
         Ok(Self {
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
             runtime_snapshot_qualification: Vec::new(),
             bundles: validate_prospective_bundle_records(bundles)?,
             routes: Vec::new(),
             commands: Vec::new(),
+            stale_bindings: Vec::new(),
             command_registration_authority,
         })
     }
@@ -139,10 +138,10 @@ impl NodeConfigSnapshotBuilder {
     fn admit(
         &mut self,
         record: Box<dyn super::CompiledNodeConfigItem>,
-        verified: &VerifiedItem,
+        verified: &VerifiedNodeConfigItem,
         source: &NodeConfigSource,
     ) -> Result<()> {
-        let context = &verified.ctx;
+        let context = verified.context();
         if record.section_name() != context.section {
             bail!(
                 "node-config compiler `{}` returned record for section `{}`",
@@ -153,9 +152,9 @@ impl NodeConfigSnapshotBuilder {
         let admission = NodeConfigAdmission {
             source_file: context.source_file.clone(),
             command_provenance: source.command_provenance()?,
-            signed_source: verified.signed_source.clone(),
-            signer_fingerprint: verified.signer_fingerprint.clone(),
-            signer_verifying_key: verified.signer_verifying_key,
+            signed_source: std::sync::Arc::clone(verified.signed_source()),
+            signer_fingerprint: verified.signer_fingerprint().to_owned(),
+            signer_verifying_key: verified.signer_verifying_key(),
         };
         record.admit(self, &admission)
     }
@@ -191,6 +190,21 @@ impl NodeConfigSnapshotBuilder {
             bail!("duplicate runtime snapshot production binding identity");
         }
         self.runtime_snapshot_production.push(record);
+        Ok(())
+    }
+
+    pub(crate) fn push_guest_runtime_materialization(
+        &mut self,
+        record: super::sections::guest_runtime_materialization::InstalledGuestRuntimeMaterializationBinding,
+    ) -> Result<()> {
+        if self
+            .guest_runtime_materialization
+            .iter()
+            .any(|prior| prior.id() == record.id())
+        {
+            bail!("duplicate guest runtime materialization binding identity");
+        }
+        self.guest_runtime_materialization.push(record);
         Ok(())
     }
 
@@ -233,243 +247,17 @@ impl NodeConfigSnapshotBuilder {
         Ok(NodeConfigSnapshot {
             external_execution: self.external_execution,
             runtime_snapshot_production: self.runtime_snapshot_production,
+            guest_runtime_materialization: self.guest_runtime_materialization,
             runtime_snapshot_qualification: self.runtime_snapshot_qualification,
             bundles: self.bundles,
             routes: self.routes,
             commands: self.commands,
+            stale_bindings: self.stale_bindings,
         })
     }
 }
 
-/// Signature envelope used for all node-config items.
-fn node_config_envelope() -> SignatureEnvelope {
-    SignatureEnvelope {
-        prefix: "#".into(),
-        suffix: None,
-        after_shebang: false,
-    }
-}
-
-const MAX_NODE_CONFIG_ENTRIES_PER_ROOT: usize = 512;
-const MAX_NODE_CONFIG_DEPTH: usize = 32;
-
-/// Recursively collect all `.yaml`/`.yml` regular files under a directory.
-///
-/// Returns files in deterministic depth-first order, with entries sorted
-/// alphabetically at each directory level. Rejects symlinks at every level
-/// (both files and directories).
-fn scan_yaml_files_recursive(dir: &Path) -> Result<Vec<lillux::PinnedRegularFile>> {
-    scan_yaml_files(dir, true)
-}
-
-fn scan_yaml_files(dir: &Path, recursive: bool) -> Result<Vec<lillux::PinnedRegularFile>> {
-    let files = lillux::collect_pinned_regular_files_no_follow_bounded(
-        dir,
-        recursive,
-        lillux::DirectoryTraversalBudget::new(
-            MAX_NODE_CONFIG_ENTRIES_PER_ROOT,
-            MAX_NODE_CONFIG_DEPTH,
-        ),
-    )?
-    .unwrap_or_default();
-    for file in &files {
-        let path = file.path();
-        let ext = path.extension().and_then(|extension| extension.to_str());
-        if !matches!(ext, Some("yaml" | "yml")) {
-            bail!(
-                "node config directory contains unsupported non-YAML entry {}",
-                path.display()
-            );
-        }
-    }
-    Ok(files)
-}
-
-/// Verify signature, trust, and section invariant for a single node-config file.
-///
-/// The `section_root` is the `.ai/node/<section>/` directory (e.g. the
-/// `routes/` dir). The invariant checks that:
-/// 1. `file` lives under `section_root` (at any depth)
-fn verify_and_parse(
-    file: &lillux::PinnedRegularFile,
-    section_root: &Path,
-    expected_section: &str,
-    trust_store: &TrustStore,
-) -> Result<VerifiedItem> {
-    let path = file.path();
-    let ext = path.extension().and_then(|e| e.to_str());
-    if ext != Some("yaml") && ext != Some("yml") {
-        bail!(
-            "node config item at {} is not a .yaml or .yml file",
-            path.display()
-        );
-    }
-
-    let stem = path.file_stem().and_then(|s| s.to_str()).context(format!(
-        "node config item at {} has no filename stem",
-        path.display()
-    ))?;
-
-    let content = file.read_bounded(crate::node_document::MAX_ITEM_BYTES)?;
-    let content = std::str::from_utf8(&content)
-        .with_context(|| format!("node config item at {} is not UTF-8", path.display()))?;
-
-    let envelope = node_config_envelope();
-
-    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
-        .with_context(|| {
-            format!(
-                "node config item at {} has no valid signature line",
-                path.display()
-            )
-        })?;
-    let signer_fingerprint = header.signer_fingerprint.clone();
-
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)?;
-
-    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
-        bail!(
-            "node config item at {} is not trusted (trust_class: {:?}); \
-             only trusted items are allowed in node config",
-            path.display(),
-            trust_class
-        );
-    }
-    let signer_verifying_key = trust_store
-        .get(&signer_fingerprint)
-        .context("verified node-config signer disappeared from trust store")?
-        .verifying_key
-        .to_bytes();
-
-    let body_str = strip_signature(&content);
-    let body: Value = serde_yaml::from_str(&body_str)
-        .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
-
-    // Check section invariant: file must live under section_root. Section is
-    // selected by path, not duplicated in the body.
-    if !path.starts_with(section_root) {
-        bail!(
-            "node config item at {} is not under expected section directory '{}' \
-             (section containment invariant violated)",
-            path.display(),
-            section_root.display()
-        );
-    }
-
-    for forbidden in ["category", "section"] {
-        if body.get(forbidden).is_some() {
-            bail!(
-                "node config item at {} declares path-owned structural field '{}' \
-                 (section/category are derived from path and must not be in node YAML)",
-                path.display(),
-                forbidden
-            );
-        }
-    }
-
-    let rel_path = path.strip_prefix(section_root).with_context(|| {
-        format!(
-            "node config item at {} is not under expected section directory {}",
-            path.display(),
-            section_root.display()
-        )
-    })?;
-    let mut id_path = rel_path.to_path_buf();
-    id_path.set_extension("");
-    let id = id_path
-        .components()
-        .map(|component| match component {
-            std::path::Component::Normal(part) => part
-                .to_str()
-                .map(|s| s.to_string())
-                .context("node config path contains non-UTF-8 segment"),
-            _ => bail!("node config relative path contains non-normal segment"),
-        })
-        .collect::<Result<Vec<_>>>()?
-        .join("/");
-
-    if id.is_empty() {
-        bail!(
-            "node config item at {} has empty path-derived id",
-            path.display()
-        );
-    }
-
-    let ctx = NodeItemContext {
-        section: expected_section.to_string(),
-        id,
-        stem: stem.to_string(),
-        rel_path: rel_path.to_path_buf(),
-        source_file: path.to_path_buf(),
-        signer_fingerprint: signer_fingerprint.clone(),
-    };
-
-    Ok(VerifiedItem {
-        path: path.to_path_buf(),
-        ctx,
-        signer_fingerprint,
-        signer_verifying_key,
-        body,
-        signed_source: content.into(),
-    })
-}
-
-impl<'a> BootstrapLoader<'a> {
-    /// Phase 1: load only the `bundles` section to determine effective bundle roots.
-    ///
-    /// Scans `<app_root>/.ai/node/bundles/` (flat only — no recursion).
-    /// Uses minimal bootstrap verifier (signature + hash, no full engine).
-    pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
-        let section = BundleSection;
-        let mut records: Vec<BundleRecord> = Vec::new();
-
-        let node_dir = self
-            .app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("node")
-            .join(section.name());
-        // Bundles use one exact flat YAML namespace. Missing is empty; any
-        // directory, symlink, special file, or non-YAML entry is an error.
-        for path in scan_yaml_files(&node_dir, false)? {
-            let verified = verify_and_parse(&path, &node_dir, section.name(), self.trust_store)?;
-
-            let mut record = section
-                .parse_bundle(&verified.ctx, &verified.body)
-                .with_context(|| {
-                    format!("failed to parse bundle record {}", verified.path.display())
-                })?;
-            record.source_file = verified.path.clone();
-
-            // Validate path: canonicalize, must exist as directory
-            if !record.path.is_dir() {
-                bail!(
-                    "bundle '{}' path '{}' does not exist or is not a directory (declared in {})",
-                    record.name,
-                    record.path.display(),
-                    record.source_file.display()
-                );
-            }
-
-            let canonical = record.path.canonicalize().with_context(|| {
-                format!(
-                    "failed to canonicalize bundle '{}' path '{}'",
-                    record.name,
-                    record.path.display()
-                )
-            })?;
-            record.path = canonical;
-
-            records.push(record);
-        }
-
-        // Collision detection: by canonical path AND by name (fail-closed)
-        check_bundle_collisions(&records)?;
-        validate_section_cardinality(&section, records.len())?;
-
-        Ok(records)
-    }
-
+impl<'a> NodeConfigLoader<'a> {
     /// Phase 2: full node-config scan across all sections and sources.
     ///
     /// Sections explicitly select app-root-only or app-root-plus-bundle scan scope.
@@ -478,10 +266,12 @@ impl<'a> BootstrapLoader<'a> {
         config_table: &NodeConfigTable,
         bundles: &[BundleRecord],
         command_registration_authority: &CommandRegistrationAuthority,
-        policy_table: &crate::node_policy::NodePolicyTable,
+        policy_table: &ryeos_node_runtime::node_policy::NodePolicyTable,
     ) -> Result<NodeConfigSnapshot> {
-        let node_fingerprint = node_identity_fingerprint(self.app_root)?;
-        validate_bundle_command_authority(bundles, command_registration_authority)?;
+        let node_fingerprint =
+            ryeos_node_runtime::identity::node_identity_fingerprint(self.app_root)?;
+        command_registration_authority
+            .require_bundle_sources(bundles.iter().map(|bundle| bundle.name.as_str()))?;
         let mut builder =
             NodeConfigSnapshotBuilder::new(bundles, command_registration_authority.clone())?;
         reject_disallowed_bundle_section_contributions(config_table, policy_table, bundles)?;
@@ -517,26 +307,63 @@ impl<'a> BootstrapLoader<'a> {
                     SectionTraversal::Flat => scan_yaml_files(&section_dir, false)?,
                 };
                 for path in yaml_files {
-                    let verified =
-                        verify_and_parse(&path, &section_dir, section_name, self.trust_store)
-                            .with_context(|| {
-                                format!(
-                                    "failed to verify node config item {} in section '{}'",
-                                    path.path().display(),
-                                    section_name
-                                )
-                            })?;
-                    verify_section_signer(section, &verified, &node_fingerprint)?;
-                    let record =
-                        section
-                            .parse(&verified.ctx, &verified.body)
-                            .with_context(|| {
-                                format!(
-                                    "failed to parse node config item {} in section '{}'",
-                                    verified.path.display(),
-                                    section_name
-                                )
-                            })?;
+                    let signer_space = match scan_root.source {
+                        NodeConfigSource::Node { .. } => ryeos_engine::trust::SignerSpace::Node,
+                        NodeConfigSource::Bundle { .. } => ryeos_engine::trust::SignerSpace::Bundle,
+                    };
+                    let verified = verify_and_parse_in_space(
+                        &path,
+                        &section_dir,
+                        section_name,
+                        self.trust_store,
+                        signer_space,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to verify node config item {} in section '{}'",
+                            path.path().display(),
+                            section_name
+                        )
+                    })?;
+                    verify_section_signer(
+                        section,
+                        &verified,
+                        &node_fingerprint,
+                        &scan_root.source,
+                    )?;
+                    // The signature and signer are verified above. A body signed
+                    // under a schema number this node retired is set aside
+                    // undecoded; any other parse failure stays fatal.
+                    if let Some(schema) =
+                        super::coherence::retired_binding_schema(section_name, verified.body())
+                    {
+                        let id = verified.context().id.clone();
+                        let reason = super::coherence::StaleBinding::retired_reason(schema);
+                        tracing::warn!(
+                            section = section_name,
+                            id = %id,
+                            schema,
+                            file = %verified.path().display(),
+                            "node-config binding is signed under a retired schema and was not admitted; retire it with `ryeos node external-execution retire <section>/<id>` and compose it again"
+                        );
+                        builder.stale_bindings.push(super::coherence::StaleBinding {
+                            section: section.name().to_owned(),
+                            id,
+                            schema,
+                            file: verified.path().display().to_string(),
+                            reason,
+                        });
+                        continue;
+                    }
+                    let record = section
+                        .parse(verified.context(), verified.body())
+                        .with_context(|| {
+                            format!(
+                                "failed to parse node config item {} in section '{}'",
+                                verified.path().display(),
+                                section_name
+                            )
+                        })?;
                     builder.admit(record, &verified, &scan_root.source)?;
                     count = count.saturating_add(1);
                 }
@@ -546,21 +373,6 @@ impl<'a> BootstrapLoader<'a> {
 
         builder.finish()
     }
-}
-
-pub(crate) fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
-    let key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("identity")
-        .join("private_key.pem");
-    let identity = crate::identity::NodeIdentity::load(&key_path).with_context(|| {
-        format!(
-            "load node identity for node-owned command registration policy from {}",
-            key_path.display()
-        )
-    })?;
-    Ok(identity.fingerprint().to_string())
 }
 
 fn system_scan_root(app_root: &Path, policy: &CommandRegistrationAuthority) -> NodeConfigScanRoot {
@@ -613,36 +425,34 @@ fn section_scan_roots(
     Ok(roots)
 }
 
-fn validate_bundle_command_authority(
-    bundles: &[BundleRecord],
-    policy: &CommandRegistrationAuthority,
-) -> Result<()> {
-    for bundle in bundles {
-        if !policy.bundle_source_caps.contains_key(&bundle.name) {
-            bail!(
-                "command registration policy has no explicit authority for active bundle `{}`",
-                bundle.name
-            );
-        }
-    }
-    Ok(())
-}
-
+/// Bind a node-config item to the one key allowed to sign it.
+///
+/// Every item under the app root's `.ai/node/` is node state, written only by
+/// the node, so it must be signed by the current node key whatever the
+/// section's policy. Bundle-root items of a `Trusted` section (routes and
+/// commands shipped by a publisher) keep their publisher signatures.
 fn verify_section_signer(
     section: &dyn NodeConfigSection,
-    item: &VerifiedItem,
+    item: &VerifiedNodeConfigItem,
     node_fingerprint: &str,
+    source: &NodeConfigSource,
 ) -> Result<()> {
-    if section.load_spec().signer == SectionSignerPolicy::CurrentNode
-        && item.signer_fingerprint != node_fingerprint
-    {
-        bail!(
-            "node-config item {} in section `{}` must be signed by current node {}; got {}",
-            item.path.display(),
-            section.name(),
+    let node_only = section.load_spec().signer == SectionSignerPolicy::CurrentNode
+        || matches!(source, NodeConfigSource::Node { .. });
+    if node_only {
+        ryeos_engine::trust::require_document_signer(
+            item.path(),
+            item.signer_fingerprint(),
             node_fingerprint,
-            item.signer_fingerprint
-        );
+            "node",
+            ryeos_engine::trust::NODE_DOCUMENT_CURE,
+        )
+        .with_context(|| {
+            format!(
+                "node-config item in section `{}` must be signed by the current node",
+                section.name()
+            )
+        })?;
     }
     Ok(())
 }
@@ -666,7 +476,7 @@ fn validate_section_cardinality(section: &dyn NodeConfigSection, count: usize) -
 
 fn reject_disallowed_bundle_section_contributions(
     config_table: &NodeConfigTable,
-    policy_table: &crate::node_policy::NodePolicyTable,
+    policy_table: &ryeos_node_runtime::node_policy::NodePolicyTable,
     bundles: &[BundleRecord],
 ) -> Result<()> {
     let mut forbidden_directories = BTreeSet::new();
@@ -676,7 +486,7 @@ fn reject_disallowed_bundle_section_contributions(
         }
         forbidden_directories.insert(section.name());
     }
-    forbidden_directories.insert(crate::node_policy::generation::POLICIES_DIRECTORY);
+    forbidden_directories.insert(ryeos_node_runtime::node_policy::generation::POLICIES_DIRECTORY);
     for section in policy_table.sections() {
         forbidden_directories.insert(section.name());
     }
@@ -710,16 +520,6 @@ fn reject_disallowed_bundle_section_contributions(
 }
 
 /// Strip the signature line(s) from the top of a file.
-fn strip_signature(content: &str) -> String {
-    content
-        .lines()
-        .skip_while(|l| l.starts_with("# ryeos:signed:"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_start()
-        .to_string()
-}
-
 fn validate_prospective_bundle_records(records: &[BundleRecord]) -> Result<Vec<BundleRecord>> {
     let mut validated = Vec::with_capacity(records.len());
     for record in records {
@@ -751,47 +551,6 @@ fn validate_prospective_bundle_records(records: &[BundleRecord]) -> Result<Vec<B
     Ok(validated)
 }
 
-/// Fail-closed collision detection for bundle records.
-///
-/// Errors if two records share either:
-/// - the same canonical path (the engine would mount the same bundle twice), or
-/// - the same name (accidental duplicate registration).
-///
-/// All `BundleRecord::path` values must already be canonicalized before this
-/// is called.
-fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
-    let mut by_path: HashMap<&Path, &BundleRecord> = HashMap::new();
-    let mut by_name: HashMap<&str, &BundleRecord> = HashMap::new();
-
-    for record in records {
-        if let Some(prev) = by_name.get(record.name.as_str()) {
-            bail!(
-                "node config section 'bundles' has duplicate name '{}': \
-                 first registered from '{}' (path: {}), second from '{}' (path: {})",
-                record.name,
-                prev.source_file.display(),
-                prev.path.display(),
-                record.source_file.display(),
-                record.path.display(),
-            );
-        }
-        if let Some(prev) = by_path.get(record.path.as_path()) {
-            bail!(
-                "node config section 'bundles' has duplicate canonical path '{}': \
-                 first registered as '{}' (from {}), second as '{}' (from {})",
-                record.path.display(),
-                prev.name,
-                prev.source_file.display(),
-                record.name,
-                record.source_file.display(),
-            );
-        }
-        by_name.insert(record.name.as_str(), record);
-        by_path.insert(record.path.as_path(), record);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,88 +563,37 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .unwrap()
             .to_path_buf();
-        let trust = TrustStore::load_from_dir(
-            &workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers"),
-        )
-        .unwrap();
+        let trust = ryeos_engine::test_support::live_trust_store();
         let system = temp_system_with_command_registration_policy(&workspace);
-        let identity = crate::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &system.path().join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
         let dir = system.path().join(".ai/node").join(SECTION_NAME);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("primary.yaml");
-        let controller_tls_roots = vec![base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            b"fixture controller TLS root",
-        )];
-        let settings_schema_digest = "3".repeat(64);
-        let settings = serde_json::json!({"region":"singapore", "plan":"standard"});
-        let settings_digest =
-            super::super::sections::external_execution::adapter_settings_digest(&settings).unwrap();
-        let mut body = serde_json::json!({"kind":"node", "schema":10,
-            "protocol":ryeos_state::external_execution::admission::PROTOCOL,
-            "workload": {
-                "kind":"structured_session",
-                "provider_declaration_id":"codex-hosted",
-                "provider_configuration_destination":"environments.toml",
-                "runtime_manifest_hash":"b".repeat(64),
-                "runtime_selection_identity":"c".repeat(64),
-                "configuration_adapter_artifact_hash":"2".repeat(64),
-                "configuration_adapter_artifact_bytes":4096,
-                "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
-                "connector_artifact_hash":"f".repeat(64),
-                "connector_artifact_bytes":4096
-            },
-            "backend":"qualified-backend", "account":"account-1",
-            "capacity_group":"candidate-workers",
-            "credential_generation":"a".repeat(64),
-            "settings_schema_digest":settings_schema_digest,
-            "settings_digest":settings_digest,
-            "settings":settings,
-            "backend_artifact_hash":"d".repeat(64),
-            "backend_artifact_bytes":4096,
-            "supervisor_artifact_hash":"1".repeat(64),
-            "supervisor_artifact_bytes":4096,
-            "launcher_artifact_hash":"e".repeat(64),
-            "launcher_artifact_bytes":4096,
-            "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
-            "storage_policy":"ephemeral_private_candidate_v1",
-            "cleanup_proof":"provider_terminal_occurrence_v1",
-            "controller_transport": {
-                "schema":2,
-                "https_origin":"https://controller.example:7443",
-                "route_contract":ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT,
-                "tls_root_bundle_digest":
-                    ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                        &controller_tls_roots,
-                    ).unwrap(),
-                "connect_timeout_ms":5000,
-                "request_timeout_ms":10000,
-                "maximum_response_bytes":1048576,
-                "network_inputs": {
-                    "resolver":{"source":"/etc/resolv.conf", "max_bytes":65536},
-                    "hosts":{"source":"/etc/hosts", "max_bytes":65536}
-                }
-            },
-            "controller_tls_root_certificates_der_base64":controller_tls_roots,
-            "max_active":2, "timeout_seconds":300, "contact_timeout_seconds":30,
-            "observation_timeout_seconds":60, "cleanup_timeout_seconds":120,
-            "max_workspace_bytes":1048576, "max_export_bytes":524288,
-            "max_transfer_bytes":2097152,
-            "max_guest_package_regular_bytes":1048576,
-            "max_guest_package_framed_bytes":2097152 });
+        // The current signed binding shape; the loader signs it as this
+        // node's own item.
+        let mut body = super::super::sections::external_execution::RetainedExternalExecutionBinding::test_fixture_document_value();
+        // Byte budgets whose admitted bounds the refusals below sit next to.
+        body["max_workspace_bytes"] = Value::from(1_048_576_u64);
+        body["max_export_bytes"] = Value::from(524_288_u64);
+        body["max_transfer_bytes"] = Value::from(2_097_152_u64);
         let write = |body: &Value| {
             fs::write(
                 &path,
-                crate::node_document::render_signed_item(SECTION_NAME, "primary", body, &identity)
-                    .unwrap(),
+                ryeos_node_runtime::node_document::render_signed_item(
+                    SECTION_NAME,
+                    "primary",
+                    body,
+                    &identity,
+                )
+                .unwrap(),
             )
             .unwrap()
         };
         write(&body);
-        let loader = BootstrapLoader {
+        let loader = NodeConfigLoader {
             app_root: system.path(),
             trust_store: &trust,
         };
@@ -894,7 +602,7 @@ mod tests {
                 &NodeConfigTable::new(),
                 &[],
                 &command_policy([]),
-                &crate::node_policy::NodePolicyTable::new(),
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
             )
         };
         let first = load().unwrap();
@@ -920,7 +628,7 @@ mod tests {
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         let requirement =
             ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                schema: 6,
+                schema: 7,
                 required_lifecycle_capabilities: Default::default(),
                 protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
                 connector_protocol:
@@ -929,6 +637,7 @@ mod tests {
                 provider_declaration_id: "codex-hosted".into(),
                 provider_configuration_destination: "environments.toml".into(),
                 runtime_product_declaration_id: "runtime".into(),
+                runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
                 runtime_recipe,
             };
         let qualification_use =
@@ -942,10 +651,16 @@ mod tests {
                 qualification_use,
                 runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
                 runtime_manifest_hash: "b".repeat(64),
-                runtime_witness_hash: "1".repeat(64),
+                runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
                 qualification_attestation_hash: "2".repeat(64),
                 selection_identity_digest: "c".repeat(64),
                 runtime_recipe_digest,
+                placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                    workload_class: "fixture.workload".into(),
+                    lease: Vec::new(),
+                    guest: Vec::new(),
+                    ready_timeout_ms: 60_000,
+                },
             };
         binding.check_program(&program).unwrap();
         for field in [
@@ -967,7 +682,7 @@ mod tests {
                     changed.requirement.provider_configuration_destination = "other.toml".into()
                 }
                 "requirement_schema" => changed.requirement.schema = 2,
-                _ => changed.runtime_witness_hash = "not-a-hash".into(),
+                _ => changed.runtime_source = ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "not-a-hash".into() },
             }
             assert!(binding.check_program(&changed).is_err());
         }
@@ -1084,17 +799,17 @@ mod tests {
         assert_eq!(section.source_scope(), NodeConfigSourceScope::AppRootOnly);
         let files = scan_yaml_files(&dir, false).unwrap();
         let verified = verify_and_parse(&files[0], &dir, SECTION_NAME, &trust).unwrap();
-        assert!(verify_section_signer(&section, &verified, &"f".repeat(64)).is_err());
-        let record = section.parse(&verified.ctx, &verified.body).unwrap();
-        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         let source = NodeConfigSource::Node {
             command_registration_caps: Vec::new(),
         };
+        assert!(verify_section_signer(&section, &verified, &"f".repeat(64), &source).is_err());
+        let record = section.parse(verified.context(), verified.body()).unwrap();
+        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         builder.admit(record, &verified, &source).unwrap();
         assert!(
             builder
                 .admit(
-                    section.parse(&verified.ctx, &verified.body).unwrap(),
+                    section.parse(verified.context(), verified.body()).unwrap(),
                     &verified,
                     &source
                 )
@@ -1118,7 +833,7 @@ mod tests {
                     &NodeConfigTable::new(),
                     &[contributed],
                     &command_policy([("test", Vec::new())]),
-                    &crate::node_policy::NodePolicyTable::new()
+                    &ryeos_node_runtime::node_policy::NodePolicyTable::new()
                 )
                 .is_err()
         );
@@ -1130,7 +845,7 @@ mod tests {
             ("contact_timeout_seconds", 0),
             ("contact_timeout_seconds", 61),
             ("observation_timeout_seconds", 0),
-            ("observation_timeout_seconds", 301),
+            ("observation_timeout_seconds", 901),
             ("cleanup_timeout_seconds", 0),
             ("cleanup_timeout_seconds", 601),
         ] {
@@ -1242,10 +957,7 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .unwrap()
             .to_path_buf();
-        let trust = TrustStore::load_from_dir(
-            &workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers"),
-        )
-        .unwrap();
+        let trust = ryeos_engine::test_support::live_trust_store();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("current.yaml");
         fs::copy(
@@ -1256,7 +968,11 @@ mod tests {
         let original = fs::read_to_string(&path).unwrap();
         let expected_signer = ryeos_engine::item_resolution::parse_signature_header(
             &original,
-            &node_config_envelope(),
+            &ryeos_engine::contracts::SignatureEnvelope {
+                prefix: "#".into(),
+                suffix: None,
+                after_shebang: false,
+            },
         )
         .unwrap()
         .signer_fingerprint;
@@ -1374,9 +1090,9 @@ mod tests {
                 "/etc/ryeos/.ai/node/bundles/core.yaml",
             ),
             make_record(
-                "standard",
-                "/var/lib/ryeos/bundles/standard",
-                "/etc/ryeos/.ai/node/bundles/standard.yaml",
+                "knowledge",
+                "/var/lib/ryeos/bundles/knowledge",
+                "/etc/ryeos/.ai/node/bundles/knowledge.yaml",
             ),
         ];
         check_bundle_collisions(&records).unwrap();
@@ -1590,8 +1306,7 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .expect("workspace root with bundles/ directory")
             .to_path_buf();
-        let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
-        let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
+        let trust_store = ryeos_engine::test_support::live_trust_store();
 
         let system = temp_system_with_command_registration_policy(&workspace);
         let ryeos_ui = temp_bundle_with_node_section(&workspace.join("bundles/ryeos-ui"), "routes");
@@ -1602,7 +1317,7 @@ mod tests {
         }];
         let command_policy = command_policy([("ryeos-ui", Vec::new())]);
 
-        let loader = BootstrapLoader {
+        let loader = NodeConfigLoader {
             app_root: system.path(),
             trust_store: &trust_store,
         };
@@ -1611,21 +1326,21 @@ mod tests {
                 &NodeConfigTable::new(),
                 &bundles,
                 &command_policy,
-                &crate::node_policy::NodePolicyTable::new(),
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
             )
             .expect("load full node config with RyeOS UI bundle");
 
-        let ryeos_dimension_route = snapshot
+        let nested_route = snapshot
             .routes
             .iter()
-            .find(|route| route.path == "/ui/api/ryeos-ui/dimension")
-            .expect("RyeOS UI dimension route should load from nested route directory");
+            .find(|route| route.path == "/ui/api/session/current")
+            .expect("RyeOS UI session route should load from nested route directory");
         assert!(
-            ryeos_dimension_route
+            nested_route
                 .source_file
-                .ends_with(".ai/node/routes/ui/ryeos-ui/dimension-get.yaml"),
+                .ends_with(".ai/node/routes/ui/session/current.yaml"),
             "route source should preserve nested path, got {}",
-            ryeos_dimension_route.source_file.display()
+            nested_route.source_file.display()
         );
         assert!(
             snapshot.routes.iter().any(|route| route.path == "/ui"),
@@ -1635,8 +1350,9 @@ mod tests {
             snapshot
                 .routes
                 .iter()
-                .any(|route| route.path == "/ui/api/items/effective"),
-            "browser-session effective item route should load from nested route directory"
+                .all(|route| route.path != "/ui/api/items/effective"
+                    && !route.path.starts_with("/ui/api/ryeos-ui/")),
+            "UI reads are reachable only through seat dispatch, not direct signed routes"
         );
         assert!(
             snapshot
@@ -1645,6 +1361,191 @@ mod tests {
                 .any(|route| route.path == "/ui/api/invocations/dispatch"),
             "browser-session invocation route should load from nested route directory"
         );
+    }
+
+    /// Writes one node-signed item for each case and loads the node config.
+    struct RetiredFixture {
+        system: tempfile::TempDir,
+        trust: ryeos_engine::trust::TrustStore,
+        identity: ryeos_node_runtime::identity::NodeIdentity,
+    }
+
+    impl RetiredFixture {
+        fn new() -> Self {
+            let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .find(|p| p.join("bundles").is_dir())
+                .unwrap()
+                .to_path_buf();
+            let system = temp_system_with_command_registration_policy(&workspace);
+            let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+                &system.path().join(".ai/node/identity/private_key.pem"),
+            )
+            .unwrap();
+            Self {
+                system,
+                trust: ryeos_engine::test_support::live_trust_store(),
+                identity,
+            }
+        }
+
+        fn write(&self, section: &str, id: &str, body: &Value) -> PathBuf {
+            let dir = self.system.path().join(".ai/node").join(section);
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(format!("{id}.yaml"));
+            fs::write(
+                &path,
+                ryeos_node_runtime::node_document::render_signed_item(
+                    section,
+                    id,
+                    body,
+                    &self.identity,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            path
+        }
+
+        fn load(&self) -> Result<NodeConfigSnapshot> {
+            NodeConfigLoader {
+                app_root: self.system.path(),
+                trust_store: &self.trust,
+            }
+            .load_full(
+                &NodeConfigTable::new(),
+                &[],
+                &command_policy([]),
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+            )
+        }
+    }
+
+    fn placement_body(schema: u64) -> Value {
+        let mut body = super::super::sections::external_execution::RetainedExternalExecutionBinding::test_fixture_document_value();
+        body["schema"] = Value::from(schema);
+        body
+    }
+
+    #[test]
+    fn retired_schema_binding_is_set_aside_with_its_signature_verified() {
+        use super::super::sections::{
+            external_execution, runtime_snapshot_production, runtime_snapshot_qualification,
+        };
+        let fixture = RetiredFixture::new();
+        // Old shape: no `required` on the network inputs, so it cannot decode.
+        let mut old = placement_body(19);
+        old["provider_network_inputs"] = serde_json::json!({"inputs": [{"unknown_old": true}]});
+        fixture.write(external_execution::SECTION_NAME, "old-placement", &old);
+        fixture.write(
+            runtime_snapshot_production::SECTION_NAME,
+            "old-producer",
+            &serde_json::json!({"kind": "node", "schema": 1, "protocol": "any"}),
+        );
+        fixture.write(
+            runtime_snapshot_qualification::SECTION_NAME,
+            "old-qualification",
+            &serde_json::json!({"kind": "node", "schema": 5, "protocol": "any"}),
+        );
+        let snapshot = fixture.load().unwrap();
+        assert!(snapshot.external_execution.is_empty());
+        assert!(snapshot.runtime_snapshot_production.is_empty());
+        assert!(snapshot.runtime_snapshot_qualification.is_empty());
+        let mut stale = snapshot
+            .stale_bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.section.as_str(),
+                    binding.id.as_str(),
+                    binding.schema,
+                )
+            })
+            .collect::<Vec<_>>();
+        stale.sort();
+        assert_eq!(
+            stale,
+            [
+                ("external_execution", "old-placement", 19),
+                ("runtime_snapshot_production", "old-producer", 1),
+                ("runtime_snapshot_qualification", "old-qualification", 5),
+            ]
+        );
+        assert!(
+            snapshot.stale_bindings[0]
+                .fix()
+                .contains("compose it again")
+        );
+        // Every retired item is also reported as a typed refusal on demand.
+        let refusal = snapshot.absent_binding_error(
+            external_execution::SECTION_NAME,
+            Some("old-placement"),
+            "absent",
+        );
+        let refusal = refusal
+            .downcast_ref::<super::super::coherence::StaleBindingRefusal>()
+            .expect("typed retired-binding refusal");
+        assert_eq!(
+            refusal.code(),
+            super::super::coherence::BINDING_RETIRED_SCHEMA
+        );
+        assert!(refusal.to_string().contains("old-placement"));
+        assert!(refusal.to_string().contains("retire and compose again"));
+        // An id that is not stale stays a plain absence.
+        let plain = snapshot.absent_binding_error(
+            external_execution::SECTION_NAME,
+            Some("other"),
+            "absent",
+        );
+        assert!(
+            plain
+                .downcast_ref::<super::super::coherence::StaleBindingRefusal>()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn retired_schema_with_a_bad_signature_is_still_fatal() {
+        use super::super::sections::external_execution::SECTION_NAME;
+        let fixture = RetiredFixture::new();
+        let path = fixture.write(SECTION_NAME, "tampered", &placement_body(19));
+        fixture.load().unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("schema: 19"), "{text}");
+        fs::write(&path, text.replace("schema: 19", "schema: 18")).unwrap();
+        let error = fixture.load().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("failed to verify node config item"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn current_schema_decode_errors_and_unlisted_schemas_stay_fatal() {
+        use super::super::sections::external_execution::SECTION_NAME;
+        let fixture = RetiredFixture::new();
+        let mut missing = placement_body(20);
+        missing.as_object_mut().unwrap().remove("account");
+        let path = fixture.write(SECTION_NAME, "primary", &missing);
+        let error = fixture.load().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("invalid external placement binding"),
+            "{error:#}"
+        );
+        // A schema number outside the closed retired list is not skipped.
+        fixture.write(SECTION_NAME, "primary", &placement_body(16));
+        let error = fixture.load().unwrap_err();
+        assert!(
+            error.chain().any(|cause| cause
+                .downcast_ref::<super::super::coherence::BindingSchemaUnsupported>()
+                .is_some()),
+            "{error:#}"
+        );
+        fs::remove_file(path).unwrap();
+        fixture.write(SECTION_NAME, "primary", &placement_body(20));
+        let snapshot = fixture.load().unwrap();
+        assert_eq!(snapshot.external_execution.len(), 1);
+        assert!(snapshot.stale_bindings.is_empty());
     }
 
     fn temp_system_with_command_registration_policy(
@@ -1702,8 +1603,8 @@ mod tests {
         let mut policy = command_policy([
             ("core", Vec::new()),
             (
-                "standard",
-                vec!["ryeos.register.command.root.standard".into()],
+                "knowledge",
+                vec!["ryeos.register.command.root.knowledge".into()],
             ),
         ]);
         policy.system_source_caps = vec!["ryeos.register.command.root.execute".into()];
@@ -1712,10 +1613,10 @@ mod tests {
             path: std::path::PathBuf::from("/system/.ai/bundles/core"),
             source_file: std::path::PathBuf::from("/system/.ai/node/bundles/core.yaml"),
         };
-        let standard = BundleRecord {
-            name: "standard".into(),
-            path: std::path::PathBuf::from("/system/.ai/bundles/standard"),
-            source_file: std::path::PathBuf::from("/system/.ai/node/bundles/standard.yaml"),
+        let knowledge = BundleRecord {
+            name: "knowledge".into(),
+            path: std::path::PathBuf::from("/system/.ai/bundles/knowledge"),
+            source_file: std::path::PathBuf::from("/system/.ai/node/bundles/knowledge.yaml"),
         };
 
         assert_eq!(
@@ -1736,13 +1637,13 @@ mod tests {
             Vec::<String>::new()
         );
         assert_eq!(
-            bundle_scan_root(&standard, &policy)
+            bundle_scan_root(&knowledge, &policy)
                 .unwrap()
                 .source
                 .command_provenance()
                 .unwrap()
                 .command_registration_caps,
-            vec!["ryeos.register.command.root.standard"]
+            vec!["ryeos.register.command.root.knowledge"]
         );
     }
 }

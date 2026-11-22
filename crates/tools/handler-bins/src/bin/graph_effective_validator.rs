@@ -1,5 +1,5 @@
-use ryeos_handler_bins::{graph_effective_validator, run_handler};
-use ryeos_handler_protocol::HandlerRequest;
+use ryeos_handler_bins::graph_effective_validator;
+use ryeos_handler_protocol::{HandlerRequest, run_handler};
 
 fn main() {
     std::process::exit(run_handler(|request| match request {

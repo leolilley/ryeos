@@ -1,243 +1,92 @@
-# ryeos:signed:2026-09-15T00:55:34Z:9e64da38b36d3715024744b181a3243fde2548a11b65e11f0342774b3bf58558:qRe0XmeMhtTNO+ZBym9LxDUw80Eq/7cavj3qeb+Q2s2cUSpofCpAB96e/T2FlH9UsA2PDa/539n4qRrfZdo7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T07:18:23Z:a4abe3f85236c308314abc4d78091f304b16ace6f806f44eaeffa0d1f2f04801:br+I/2OYTIk33OX1WRfZ8TS3TK5Jk5iRqD8XJ3uGmXO9aiuTHgKYJOPBBc7ijODvqxPupuzLzIedPR8WbnL7AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
 description: >-
-  Coherent activity feed for the input route's durable work chain. It preserves
-  the exact event braid while presenting operator intent, cognition, tool
-  operations, children, placement boundaries, artifacts, receipts, and raw
-  event detail through the shared semantic timeline.
+  Coherent activity feed for the input route's durable work chain: operator
+  intent, cognition, operations, children and outcomes, folded by the daemon's
+  timeline service from the chain's events.
 
 widget: timeline
 sources:
   default:
-    ref: service:events/chain_replay
+    ref: service:ui/ryeos-ui/timeline/thread
     params:
       chain_root_id: "@facet:input.route.chain_root"
-    collection: events
+      limit: "@facet:timeline.window.limit|200"
+    collection: items
+    dynamic_parameters: [since_chain_seq]
+  raw:
+    ref: service:ui/ryeos-ui/timeline/raw
+    role: timeline_raw
+    params:
+      chain_root_id: "@facet:input.route.chain_root"
+      from_chain_seq: ""
+      to_chain_seq: ""
+    dynamic_parameters: [from_chain_seq, to_chain_seq]
+    activation: on_demand
+    refresh: {}
 projections:
   expand:
     fields:
-      - payload.payload.key
-      - payload.payload.value
-      - event_type
-      - chain_seq
-      - payload.graph_run_id
-      - payload.node
-      - payload.step
-      - payload.item_id
-      - payload.tool
-      - payload.status
-      - payload.error
-      - payload.result_size_bytes
-      - payload.truncated_reason
-      - payload.uri
-      - payload.content_hash
-      - payload.turn_id
-      - payload.approval_id
-      - payload.observation.operation_class
-      - payload.decision
-      - payload.worker_boot_epoch
-      - payload.source_placement_thread_id
-      - payload.successor_placement_thread_id
-      - payload.candidate_snapshot_hash
-      - payload.candidate_evaluation.candidate_snapshot_hash
-      - payload.base_snapshot_hash
-      - payload.outcome.kind
-      - payload.terminal_reason
-  event_kinds:
-    seat.facet:
-      primary: payload.payload.key
-      meta: event_type
-      role: boundary
-    cognition_out:
-      primary: payload.content
-      role: flow
-    thread_continued:
-      primary: payload.previous_thread_id
-      meta: event_type
-      role: boundary
-    cognition_in:
-      primary: payload.turn
-      meta: event_type
-      role: boundary
-    tool_call_start:
-      primary: payload.tool
-      meta: payload.call_id
-      role: pair_open
-      pair_key: payload.call_id
-    tool_call_result:
-      primary: payload.tool
-      meta: payload.result_size_bytes
-      role: pair_close
-      pair_key: payload.call_id
-      tone:
-        field: payload.truncated_reason
-        missing: good
-        map:
-          error_envelope: danger
-          size_cap_exceeded: warn
-          result_guard: warn
-        default: good
-    provider_retry:
-      primary: payload.error
-      meta: payload.attempt
-      role: boundary
-      tone:
-        field: event_type
-        missing: warn
-        map:
-          provider_retry: warn
-        default: warn
-    cost_untracked:
-      primary: payload.model
-      meta: payload.reason
-      role: boundary
-      tone:
-        field: event_type
-        missing: warn
-        map:
-          cost_untracked: warn
-        default: warn
-    graph_follow_suspended:
-      primary: payload.node
-      meta: payload.item_id
-      role: boundary
-    hosted_session.turn_started:
-      primary: payload.turn_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_session.turn_started: accent
-        default: accent
-    hosted_session.turn_completed:
-      primary: payload.turn_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_session.turn_completed: good
-        default: good
-    hosted_session.approval_requested:
-      primary: payload.observation.operation_class
-      meta: payload.approval_id
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_session.approval_requested: warn
-        default: warn
-    hosted_approval.decision_reserved:
-      primary: payload.decision
-      meta: payload.approval_id
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_approval.decision_reserved: accent
-        default: accent
-    hosted_approval.delivery_contacting:
-      primary: payload.approval_id
-      meta: event_type
-      role: line
-    hosted_approval.delivery_unknown:
-      primary: payload.approval_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_approval.delivery_unknown: danger
-        default: danger
-    hosted_approval.delivery_settled:
-      primary: payload.approval_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_approval.delivery_settled: good
-        default: good
-    worker_session.restored:
-      primary: payload.successor_placement_thread_id
-      meta: payload.source_placement_thread_id
-      role: line
-      tone:
-        field: event_type
-        map:
-          worker_session.restored: accent
-        default: accent
-    hosted_candidate.captured:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.captured: accent
-        default: accent
-    hosted_candidate.qualified:
-      primary: payload.candidate_evaluation.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.qualified: good
-        default: good
-    hosted_candidate.publication_reserved:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-    hosted_candidate.published:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.published: good
-        default: good
-    hosted_candidate.publication_not_applied:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.publication_not_applied: warn
-        default: warn
-    hosted_candidate.publication_unknown:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.publication_unknown: danger
-        default: danger
-    hosted_candidate.discarded:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-    hosted_bounded_execution.terminal_outcome:
-      primary: payload.outcome.kind
-      meta: payload.terminal_reason
-      role: line
-    milestone:
-      primary: payload.kind
-      meta: payload.node
-      role: line
-      tone:
-        field: event_type
-        map:
-          milestone: accent
-        default: accent
-  default:
-    primary: event_type
-    meta: ts
+      - id
+      - type
+      - state
+      - thread
+      - slots.body
+      - slots.detail
+      - slots.reason
+      - slots.tool
+      - slots.target
+# Activating the "N older" line widens the window: the service names the wider
+# limit and the affordance writes it to the facet the source reads.
+selection:
+  activate: older
+affordances:
+  - id: older
+    label: Load older
+    invoke:
+      plane: ui
+      facet: timeline.window
+      value:
+        limit: "{record.next_limit}"
+  # Answering a docked pending ask: the digest-fenced service the approvals
+  # views call. A client lists these beside an ask only where the surface
+  # admits them. The record is the ask's own fields plus the chain id.
+  - id: accept
+    label: Approve
+    producer: selection
+    # Offered only where the request allows accepting it; otherwise Decline is
+    # the only answer.
+    visible_when:
+      all:
+        - { field: type, equals: ask }
+        - { field: state, equals: pending }
+        - { field: accept_allowed, equals: true }
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: true
+      notice: Approval accepted
+  - id: decline
+    label: Decline
+    producer: selection
+    visible_when:
+      all:
+        - { field: type, equals: ask }
+        - { field: state, equals: pending }
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: false
+      notice: Approval declined
 refresh:
   on_hint: thread

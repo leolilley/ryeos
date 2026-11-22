@@ -13,15 +13,17 @@
 //! the durable row and exact execution request; later failures finalize that
 //! row, so accepted launch never returns a phantom or leaves `created` stuck.
 
-mod common;
+use ryeosd::test_support as common;
+#[path = "common/project_push.rs"]
+mod project_push;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::DaemonHarness;
 use common::build_signed_headers_for_bytes;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_with_scopes,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -470,13 +472,13 @@ async fn accepted_launch_owner_recovers_lost_ack_through_intrinsic_status_route(
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_admits_graph_ref() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_smoke_graph(project.path(), &fixture.publisher).expect("plant smoke graph");
@@ -501,13 +503,97 @@ async fn execute_launch_admits_graph_ref() {
     assert_completed(&thread, &thread_id);
 }
 
+/// Every `thread.json` below `root`, without following symlinks.
+fn thread_records_below(root: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            thread_records_below(&path, found);
+        } else if file_type.is_file() && entry.file_name() == "thread.json" {
+            found.push(path);
+        }
+    }
+}
+
+/// A published snapshot executed read-only runs against a shared immutable
+/// materialization. The launch must reach the runtime and complete, and its
+/// own thread record must never be written into that materialization.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_launch_from_published_snapshot_keeps_thread_state_out_of_the_materialization() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with the workflow bundles");
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    plant_smoke_graph(source.path(), &fixture.publisher).expect("plant smoke graph");
+    let live = tempfile::tempdir().expect("live project tempdir");
+    let live_path = live
+        .path()
+        .canonicalize()
+        .expect("canonical live project")
+        .to_str()
+        .expect("utf-8 live project path")
+        .to_owned();
+    let captured = project_push::capture_ai_only_snapshot(source.path(), None)
+        .expect("capture published snapshot");
+    let pushed = project_push::push_snapshot(&h, &live_path, &captured)
+        .await
+        .expect("publish snapshot");
+
+    let (status, body) = h
+        .post_json(
+            "/execute/launch",
+            json!({
+                "item_ref": "graph:smoke",
+                "launch_id": TEST_LAUNCH_ID,
+                "ref_bindings": {},
+                "project_path": live_path,
+                "parameters": {},
+                "execution_policy":
+                    ryeos_app::execution_policy::ExecutionPolicy::local_pinned_snapshot_read_only(
+                        ryeos_app::execution_policy::ExecutionResponse::Accepted,
+                        pushed.snapshot_hash.clone(),
+                    )
+            }),
+        )
+        .await
+        .expect("post /execute/launch from a published snapshot");
+
+    let thread_id = unwrap_accepted(status, &body);
+    let thread = wait_for_terminal_thread(&h, &thread_id).await;
+    assert_completed(&thread, &thread_id);
+
+    let mut records = Vec::new();
+    thread_records_below(&h.state_path, &mut records);
+    for record in records {
+        assert!(
+            !record
+                .components()
+                .any(|part| part.as_os_str() == "snapshots"),
+            "thread record was written into a materialized snapshot: {}",
+            record.display()
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_admits_directive_ref() {
     let mock = MockProvider::start(vec![MockResponse::Text("hello".into())]).await;
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_config_fixture_bundle(
             state_path,
             "fixture-execute-launch-model-config",
@@ -517,7 +603,7 @@ async fn execute_launch_admits_directive_ref() {
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
@@ -543,19 +629,87 @@ async fn execute_launch_admits_directive_ref() {
     assert_completed(&thread, &thread_id);
 }
 
+/// A directive root with no `model` binding binds `model` to its own canonical
+/// ref through the directive runtime's signed `caller_or_primary_ref` source.
+/// Validation shows the defaulted binding; launch then completes without one.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_launch_directive_without_model_binding_models_itself() {
+    let mock = MockProvider::start(vec![MockResponse::Text("hello".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-execute-launch-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with the workflow bundles");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive(project.path(), "test/launch", &fixture.publisher).expect("plant directive");
+
+    let (status, preview) = h
+        .post_json(
+            "/execute",
+            json!({
+                "item_ref": "directive:test/launch",
+                "ref_bindings": {},
+                "project_path": project.path().to_str().unwrap(),
+                "parameters": {},
+                "validate_only": true,
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("post validate-only directive without ref bindings");
+    assert_eq!(status, reqwest::StatusCode::OK, "preview={preview:#}");
+    assert_eq!(
+        preview.pointer("/runtime_preparation/binding_records/model/canonical_ref"),
+        Some(&json!("directive:test/launch")),
+        "an unbound directive must model itself; preview={preview:#}"
+    );
+
+    let (status, body) = h
+        .post_json(
+            "/execute/launch",
+            json!({
+                "item_ref": "directive:test/launch",
+                "launch_id": TEST_LAUNCH_ID,
+                "ref_bindings": {},
+                "project_path": project.path().to_str().unwrap(),
+                "parameters": {},
+                "execution_policy": accepted_policy(true)
+            }),
+        )
+        .await
+        .expect("post /execute/launch directive without ref bindings");
+
+    let thread_id = unwrap_accepted(status, &body);
+    let thread = wait_for_terminal_thread(&h, &thread_id).await;
+    assert_completed(&thread, &thread_id);
+}
+
 /// Knowledge is method-dispatched. This proves the method-dispatch path
 /// honors the pre-minted thread id — the returned id is the id created, not a
 /// phantom.
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_admits_knowledge_query() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_knowledge_item(project.path(), "test/fact", &fixture.publisher).expect("plant knowledge");
@@ -580,18 +734,79 @@ async fn execute_launch_admits_knowledge_query() {
     assert_completed(&thread, &thread_id);
 }
 
-/// A method launch missing a required arg must fail in preflight — before a
-/// thread_id is minted (no phantom).
+/// A knowledge item whose frontmatter does not parse fails `query` with an
+/// error naming it, the same as `compose`; it is never indexed as raw text.
 #[tokio::test(flavor = "multi_thread")]
-async fn execute_launch_method_missing_required_arg_is_rejected() {
+async fn knowledge_query_refuses_malformed_frontmatter_item() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_knowledge_item(project.path(), "test/fact", &fixture.publisher).expect("plant knowledge");
+    // Signed by the pinned publisher, but the metadata fence never closes.
+    let broken = project.path().join(".ai/knowledge/test/broken.md");
+    let content = "```yaml\nname: broken\ncategory: \"test\"\n\nAn accepted fixture whose fence never closes.\n";
+    std::fs::write(
+        &broken,
+        lillux::signature::sign_content(content, &fixture.publisher, "<!--", Some("-->")),
+    )
+    .expect("plant malformed knowledge");
+
+    let (status, body) = h
+        .post_json(
+            "/execute/launch",
+            json!({
+                "item_ref": "knowledge:test/fact",
+                "launch_id": TEST_LAUNCH_ID,
+                "ref_bindings": {},
+                "project_path": project.path().to_str().unwrap(),
+                "call": { "method": "query", "args": { "query": "accepted" } },
+                "execution_policy": accepted_policy(true)
+            }),
+        )
+        .await
+        .expect("post /execute/launch knowledge query");
+
+    let thread_id = unwrap_accepted(status, &body);
+    let thread = wait_for_terminal_thread(&h, &thread_id).await;
+    assert_eq!(
+        thread
+            .get("thread")
+            .and_then(|t| t.get("status"))
+            .and_then(Value::as_str),
+        Some("failed"),
+        "a query over a malformed item must fail: {thread}"
+    );
+    let detail = h
+        .get_thread(&thread_id)
+        .await
+        .expect("get thread detail")
+        .expect("thread detail exists");
+    assert!(
+        detail.to_string().contains("frontmatter parse failure for")
+            && detail.to_string().contains("test/broken"),
+        "the failure must name the malformed item: {detail:#}"
+    );
+}
+
+/// A method launch missing a required arg must fail in preflight — before a
+/// thread_id is minted (no phantom).
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_launch_method_missing_required_arg_is_rejected() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_knowledge_item(project.path(), "test/fact", &fixture.publisher).expect("plant knowledge");
@@ -625,13 +840,13 @@ async fn execute_launch_method_missing_required_arg_is_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_unsigned_knowledge_is_rejected_by_trust_policy() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_unsigned_knowledge_item(project.path(), "test/unsigned").expect("plant knowledge");
@@ -660,11 +875,11 @@ async fn execute_launch_unsigned_knowledge_is_rejected_by_trust_policy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_unsigned_directive_is_rejected_by_trust_policy() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_workflow_bundles(state_path, fixture)
     };
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_unsigned_directive(project.path(), "test/unsigned").expect("plant directive");
@@ -861,7 +1076,7 @@ async fn execute_launch_invalid_item_does_not_return_phantom_thread_id() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_direct_runtime_missing_cap_is_rejected() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         // Grant only the per-ref execute cap, NOT the runtime's required
         // `runtime.execute` cap, so the direct-runtime cap gate rejects.
@@ -875,7 +1090,7 @@ async fn execute_launch_direct_runtime_missing_cap_is_rejected() {
     };
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let (status, body) = h
         .post_json(

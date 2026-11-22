@@ -1,86 +1,75 @@
 //! Remote node configuration.
 //!
-//! Remotes are named connection targets stored in YAML. The config is
-//! loaded from `<app_root>/.ai/config/remotes/remotes.yaml`.
+//! A remote is a named connection target whose node key is pinned. Each pin
+//! is one node-signed record, `<app_root>/.ai/node/remotes/<name>.yaml`
+//! (schema `ryeos/remote-pin/v1`). The node key signs the record when the
+//! local operator configures the remote; the loader verifies that signature
+//! on every read, so a pinned key, URL or binding cannot be changed by
+//! editing a file. Remote pins live only at the node level: a project never
+//! contributes remotes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
+pub use super::descriptor::{RemoteDescriptor, RemoteDescriptorError, RemoteDescriptorNode};
 pub use ryeos_state::project_sync::ProjectSyncScope;
 
-/// Provider/import descriptor for a remote RyeOS node.
-///
-/// A descriptor is a trust pin and discovery convenience, not a credential.
-/// Importing one records the expected node identity for `remote configure`,
-/// which still verifies the live node before writing local remote config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RemoteDescriptor {
-    pub version: u32,
-    pub name: Option<String>,
-    pub url: String,
-    pub node: RemoteDescriptorNode,
-    #[serde(default)]
-    pub capabilities: Option<serde_yaml::Value>,
-    #[serde(default)]
-    pub admission: Option<serde_yaml::Value>,
-    #[serde(default)]
-    pub provider: Option<serde_yaml::Value>,
+/// Schema of a node-signed remote pin record.
+pub const REMOTE_PIN_SCHEMA: &str = "ryeos/remote-pin/v1";
+
+/// Upper bound on one remote pin record.
+const MAX_REMOTE_PIN_BYTES: u64 = 1024 * 1024;
+/// Upper bound on the number of remote pin records.
+const MAX_REMOTE_PINS: usize = 1024;
+
+/// Validate a remote descriptor that has already been parsed and
+/// signature-checked: its URL must be canonical and its pinned key must match
+/// its fingerprint.
+pub fn validate_descriptor(descriptor: &RemoteDescriptor) -> Result<()> {
+    if descriptor.name.trim().is_empty() {
+        anyhow::bail!("remote descriptor name must not be empty");
+    }
+    if let Some(url) = &descriptor.url {
+        validate_url(url)?;
+    }
+    ryeos_node_runtime::identity::validate_canonical_site_id(&descriptor.site_id)
+        .context("remote descriptor site_id is not canonical")?;
+    if descriptor.vault_fingerprint.trim().is_empty() {
+        anyhow::bail!("remote descriptor vault_fingerprint must not be empty");
+    }
+    let key = decode_signing_key(&descriptor.node.public_key)
+        .context("invalid remote descriptor node.public_key")?;
+    let actual_fingerprint = lillux::crypto::fingerprint(&key);
+    if descriptor.node.fingerprint != actual_fingerprint {
+        anyhow::bail!(
+            "remote descriptor fingerprint mismatch: node.fingerprint {}, public_key fingerprint {}",
+            descriptor.node.fingerprint,
+            actual_fingerprint,
+        );
+    }
+    if descriptor.site_id != format!("site:{actual_fingerprint}") {
+        anyhow::bail!(
+            "remote descriptor site_id {} is not the site of node {actual_fingerprint}",
+            descriptor.site_id
+        );
+    }
+    Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RemoteDescriptorNode {
-    /// Remote node Ed25519 public key in `ed25519:<base64>` form.
-    pub public_key: String,
-    /// Expected fingerprint for `public_key`.
-    pub fingerprint: String,
-}
-
-impl RemoteDescriptor {
-    pub fn from_yaml_str(input: &str) -> Result<Self> {
-        let descriptor: Self = serde_yaml::from_str(input).context("invalid remote descriptor")?;
-        descriptor.validate()?;
-        Ok(descriptor)
-    }
-
-    pub fn from_path(path: &Path) -> Result<Self> {
-        let input = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read remote descriptor: {}", path.display()))?;
-        Self::from_yaml_str(&input)
-            .with_context(|| format!("invalid remote descriptor: {}", path.display()))
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.version != 1 {
-            anyhow::bail!(
-                "unsupported remote descriptor version {}; expected 1",
-                self.version
-            );
-        }
-        if let Some(name) = &self.name
-            && name.trim().is_empty()
-        {
-            anyhow::bail!("remote descriptor name must not be empty when present");
-        }
-        validate_url(&self.url)?;
-        let key = decode_signing_key(&self.node.public_key)
-            .context("invalid remote descriptor node.public_key")?;
-        let actual_fingerprint = lillux::crypto::fingerprint(&key);
-        if self.node.fingerprint != actual_fingerprint {
-            anyhow::bail!(
-                "remote descriptor fingerprint mismatch: node.fingerprint {}, public_key fingerprint {}",
-                self.node.fingerprint,
-                actual_fingerprint,
-            );
-        }
-        Ok(())
-    }
+/// Read, verify and validate a signed remote descriptor file.
+pub fn load_descriptor(path: &Path) -> Result<RemoteDescriptor> {
+    let input = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read remote descriptor: {}", path.display()))?;
+    let descriptor = RemoteDescriptor::parse_signed(&input)
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("invalid remote descriptor: {}", path.display()))?;
+    validate_descriptor(&descriptor)
+        .with_context(|| format!("invalid remote descriptor: {}", path.display()))?;
+    Ok(descriptor)
 }
 
 /// Explicit local-to-remote project binding for a configured remote.
@@ -98,17 +87,23 @@ pub struct RemoteProjectBinding {
 /// Named remote configuration.
 ///
 /// Authored by `ryeos remote configure`, which contacts the remote's
-/// `/public-key` endpoint and populates every field. Hand-edited
-/// stubs that omit fields will be rejected at load time with a
-/// per-entry warning (the rest of the file still loads).
+/// `/public-key` endpoint and populates every field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteConfig {
-    /// Human-readable name (also the key in the map).
+    /// Human-readable name (also the record's file stem).
     pub name: String,
     /// Base URL, e.g. `https://ryeos.example.com`.
-    /// Must be HTTPS except for loopback addresses.
-    pub url: String,
+    /// Must be HTTPS except for loopback addresses. Absent exactly when the
+    /// remote is [`Reachability::InboundOnly`]: a node behind NAT that this
+    /// node never dials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Whether this node may dial the remote. An inbound-only pin still
+    /// holds everything inbound verification needs (site, node key, vault
+    /// fingerprint), and every outbound path refuses it.
+    #[serde(default)]
+    pub reachability: Reachability,
     /// Pinned principal_id of the remote node (from `/public-key`).
     pub principal_id: String,
     /// Pinned remote daemon Ed25519 verifying key in `ed25519:<base64>` form.
@@ -125,19 +120,69 @@ pub struct RemoteConfig {
     /// Cached remote ingest-ignore config, populated during
     /// `remote configure`. Required for push to use the correct
     /// ignore rules. Re-run `remote configure` if stale.
-    pub ingest_ignore: ryeos_app::ignore::IgnoreConfig,
-    /// Canonical local project path -> remote project binding.
-    ///
-    /// These bindings are operator-local and are written only to the
-    /// user/operator remotes file. Project-level remotes may be layered for
-    /// read-only remote definition, but project-to-remote bindings still
-    /// live here.
+    /// A remote pinned from a descriptor that carried none has none, and
+    /// nothing is pushed to it ([`RemoteConfig::ingest_rules`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_ignore: Option<ryeos_app::ignore::IgnoreConfig>,
+    /// Canonical local project path -> remote project binding. Operator-local.
     #[serde(default)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub project_bindings: HashMap<String, RemoteProjectBinding>,
 }
 
+/// Whether this node may dial a pinned remote.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reachability {
+    /// The remote has a URL this node dials.
+    #[default]
+    Outbound,
+    /// The remote only ever calls in. Nothing is dialed.
+    InboundOnly,
+}
+
+/// Stable refusal code: the remote is pinned inbound-only, so this node never
+/// dials it.
+pub const REMOTE_INBOUND_ONLY: &str = "remote_inbound_only";
+/// Stable refusal code: the remote was pinned from a descriptor that carried
+/// no ingest rules, so nothing may be pushed to it.
+pub const REMOTE_PINNED_WITHOUT_INGEST_RULES: &str = "remote_pinned_without_ingest_rules";
+
 impl RemoteConfig {
+    /// The URL this node dials, or the typed refusal
+    /// [`REMOTE_INBOUND_ONLY`] for an inbound-only pin. Every outbound path
+    /// goes through this.
+    pub fn outbound_url(&self) -> Result<&str, RemotePinError> {
+        match (self.reachability, &self.url) {
+            (Reachability::Outbound, Some(url)) => Ok(url),
+            _ => Err(RemotePinError::InboundOnly {
+                name: self.name.clone(),
+            }),
+        }
+    }
+
+    /// The remote's ingest rules, or the typed refusal
+    /// [`REMOTE_PINNED_WITHOUT_INGEST_RULES`] for a remote pinned without
+    /// them.
+    pub fn ingest_rules(
+        &self,
+    ) -> Result<&ryeos_app::ignore::IgnoreConfig, crate::handler_error::HandlerError> {
+        self.ingest_ignore.as_ref().ok_or_else(|| {
+            crate::handler_error::HandlerError::Structured {
+                code: REMOTE_PINNED_WITHOUT_INGEST_RULES.to_owned(),
+                status: 409,
+                body: serde_json::json!({
+                    "code": REMOTE_PINNED_WITHOUT_INGEST_RULES,
+                    "message": format!(
+                        "remote '{}' was pinned from a descriptor without ingest rules, so this node pushes nothing to it; run `ryeos remote configure {} --url <url> --expect-fingerprint <fingerprint>` once the remote is reachable, or pin a descriptor that carries them",
+                        self.name, self.name
+                    ),
+                    "remote": self.name,
+                }),
+            }
+        })
+    }
+
     /// Decode and validate the pinned daemon signing key against the
     /// remote's pinned principal/fingerprint identity.
     pub fn pinned_signing_key(&self) -> Result<lillux::crypto::VerifyingKey> {
@@ -156,12 +201,20 @@ impl RemoteConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.name.trim().is_empty() {
-            anyhow::bail!("remote name must not be empty");
+        validate_remote_name(&self.name)?;
+        match (self.reachability, &self.url) {
+            (Reachability::Outbound, Some(url)) => validate_url(url)?,
+            (Reachability::Outbound, None) => {
+                anyhow::bail!("remote '{}' is reachable but has no url", self.name)
+            }
+            (Reachability::InboundOnly, None) => {}
+            (Reachability::InboundOnly, Some(_)) => anyhow::bail!(
+                "remote '{}' is inbound-only and must not carry a url",
+                self.name
+            ),
         }
-        validate_url(&self.url)?;
         self.pinned_signing_key()?;
-        ryeos_app::identity::validate_canonical_site_id(&self.site_id)
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.site_id)
             .with_context(|| format!("remote '{}' site_id is not canonical", self.name))?;
         if self.vault_fingerprint.trim().is_empty() {
             anyhow::bail!("remote '{}' vault_fingerprint must not be empty", self.name);
@@ -189,44 +242,173 @@ impl RemoteConfig {
     }
 }
 
-/// Where a loaded remote config came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteConfigScope {
-    /// Operator-level runtime config under the app root.
-    Operator,
-    /// Project-level config rooted at this local project path.
-    Project { root: PathBuf },
+/// A remote name is also a file stem, so it is restricted to a safe alphabet.
+pub fn validate_remote_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if !valid {
+        anyhow::bail!(
+            "remote name '{name}' must be 1-128 characters of letters, digits, '-', '_' or '.' and must not start with '.'"
+        );
+    }
+    Ok(())
 }
 
-impl RemoteConfigScope {
-    pub fn label(&self) -> &'static str {
+/// How the remote node key was pinned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PinSource {
+    Descriptor,
+    /// Pinned from a signed descriptor alone, without contacting the remote
+    /// (`remote pin`, `node.remote.pin`).
+    DescriptorWithoutContact,
+    ExpectedFingerprint,
+    DescriptorAndExpectedFingerprint,
+}
+
+impl PinSource {
+    pub fn as_str(self) -> &'static str {
         match self {
-            RemoteConfigScope::Operator => "operator",
-            RemoteConfigScope::Project { .. } => "project",
+            PinSource::Descriptor => "descriptor",
+            PinSource::DescriptorWithoutContact => "descriptor_without_contact",
+            PinSource::ExpectedFingerprint => "expected_fingerprint",
+            PinSource::DescriptorAndExpectedFingerprint => "descriptor_and_expected_fingerprint",
         }
     }
 }
 
-/// A valid remote config plus its source scope.
+/// The signed on-disk record for one remote pin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemotePinRecord {
+    schema: String,
+    pin_source: PinSource,
+    /// RFC 3339 time the pin was first made.
+    pinned_at: String,
+    /// Digest of the operator request that made the pin, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request: Option<String>,
+    remote: RemoteConfig,
+}
+
+/// Why a remote pin or the remote layout was refused. Every variant has a
+/// stable code and names the cure.
+#[derive(Debug, thiserror::Error)]
+pub enum RemotePinError {
+    #[error(
+        "remote_pin_unsigned: {path} carries no `# ryeos:signed:` line. Remote pins must be \
+         signed by this node's key. Delete the file and re-pin the remote with \
+         `ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`"
+    )]
+    Unsigned { path: PathBuf },
+
+    #[error(
+        "remote_pin_wrong_signer: {path} is signed by {signer}, not by this node's key {node}. \
+         Only the node key may sign remote pins. Delete the file and re-pin the remote with \
+         `ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`"
+    )]
+    WrongSigner {
+        path: PathBuf,
+        signer: String,
+        node: String,
+    },
+
+    #[error(
+        "remote_pin_tampered: {path} {reason}. The record was edited after signing or is \
+         malformed. Delete the file and re-pin the remote with `ryeos remote configure <name> \
+         --url <url> --expect-fingerprint <fingerprint>`"
+    )]
+    Tampered { path: PathBuf, reason: String },
+
+    #[error(
+        "remote_pin_invalid: {path} {reason}. Delete the file and re-pin the remote with \
+         `ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`"
+    )]
+    Invalid { path: PathBuf, reason: String },
+
+    #[error(
+        "remote_inbound_only: remote '{name}' is pinned inbound-only, a node that only calls in, \
+         so this node never dials it. Run this operation on the remote, or pin it with a URL: \
+         `ryeos remote configure {name} --url <url> --expect-fingerprint <fingerprint>`"
+    )]
+    InboundOnly { name: String },
+
+    #[error("remote_pins_unreadable: {path} cannot be read securely: {reason}")]
+    Unreadable { path: PathBuf, reason: String },
+}
+
+impl RemotePinError {
+    /// Stable machine code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            RemotePinError::Unsigned { .. } => "remote_pin_unsigned",
+            RemotePinError::WrongSigner { .. } => "remote_pin_wrong_signer",
+            RemotePinError::Tampered { .. } => "remote_pin_tampered",
+            RemotePinError::Invalid { .. } => "remote_pin_invalid",
+            RemotePinError::InboundOnly { .. } => REMOTE_INBOUND_ONLY,
+            RemotePinError::Unreadable { .. } => "remote_pins_unreadable",
+        }
+    }
+}
+
+/// Turn a remote load failure into a structured handler refusal. A typed
+/// remote pin refusal keeps its stable code and cure, as does an already
+/// structured handler error; anything else goes through `fallback`.
+pub fn typed_load_error_or(
+    error: anyhow::Error,
+    fallback: impl FnOnce(anyhow::Error) -> crate::handler_error::HandlerError,
+) -> crate::handler_error::HandlerError {
+    use crate::handler_error::HandlerError;
+    if let Some(typed) = error.downcast_ref::<RemotePinError>() {
+        return HandlerError::Structured {
+            code: typed.code().to_string(),
+            status: 409,
+            body: serde_json::json!({ "code": typed.code(), "message": typed.to_string() }),
+        };
+    }
+    match crate::handler_error::extract_handler_error(&error) {
+        Some(typed @ HandlerError::Structured { .. }) => typed,
+        _ => fallback(error),
+    }
+}
+
+impl From<RemotePinError> for crate::handler_error::HandlerError {
+    fn from(error: RemotePinError) -> Self {
+        crate::handler_error::HandlerError::Structured {
+            code: error.code().to_string(),
+            status: 409,
+            body: serde_json::json!({ "code": error.code(), "message": error.to_string() }),
+        }
+    }
+}
+
+/// Where a loaded remote came from.
 #[derive(Debug, Clone)]
 pub struct LoadedRemote {
     pub config: RemoteConfig,
-    pub scope: RemoteConfigScope,
     pub config_path: PathBuf,
+    pub pin_source: PinSource,
+    pub pinned_at: String,
 }
 
-/// A remote entry that was present on disk but failed strict validation.
+/// A remote pin that was present on disk but failed verification or
+/// validation.
 #[derive(Debug, Clone)]
 pub struct InvalidRemote {
     pub name: String,
-    pub scope: RemoteConfigScope,
     pub config_path: PathBuf,
+    /// Stable refusal code (`remote_pin_*`).
+    pub code: String,
     pub error: String,
     pub url: Option<String>,
     pub repair_hint: String,
 }
 
-/// Layered remote load result with both usable configs and diagnostics.
+/// Remote load result with both usable configs and diagnostics.
 #[derive(Debug, Clone, Default)]
 pub struct RemotesLoadReport {
     pub remotes: HashMap<String, LoadedRemote>,
@@ -241,123 +423,181 @@ pub struct ResolvedProjectBinding {
     pub sync_scope: ProjectSyncScope,
 }
 
-/// Full remotes file. Top-level structure tolerates extra fields so
-/// older or richer (e.g. project-level) configs keep loading; only the
-/// `remotes` map is consumed here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemotesFile {
-    #[serde(default)]
-    remotes: HashMap<String, serde_yaml::Value>,
+/// Directory holding the node-signed remote pin records.
+pub fn remote_pins_dir(app_root: &Path) -> PathBuf {
+    ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).remote_pins_dir()
 }
 
-/// Path under [`ryeos_engine::AI_DIR`] where the remotes config lives.
-pub const REMOTES_CONFIG_SUBPATH: &[&str] = &["config", "remotes", "remotes.yaml"];
+/// Path of one remote's pin record.
+pub fn remote_pin_path(app_root: &Path, name: &str) -> PathBuf {
+    remote_pins_dir(app_root).join(format!("{name}.yaml"))
+}
 
-/// Resolve the absolute path to a remotes config file given a
-/// space/project root.
-pub fn remotes_config_path(root: &Path) -> PathBuf {
-    let mut p = root.join(ryeos_engine::AI_DIR);
-    for seg in REMOTES_CONFIG_SUBPATH {
-        p = p.join(seg);
+fn map_trust_error(error: ryeos_engine::trust::TrustError) -> RemotePinError {
+    use ryeos_engine::trust::TrustError;
+    match error {
+        TrustError::RecordUnsigned { path } => RemotePinError::Unsigned { path },
+        TrustError::RecordWrongSigner { path, signer, node } => {
+            RemotePinError::WrongSigner { path, signer, node }
+        }
+        TrustError::RecordTampered { path, reason } => RemotePinError::Tampered { path, reason },
+        TrustError::NodeIdentityUnavailable { path, reason } => {
+            RemotePinError::Unreadable { path, reason }
+        }
+        other => RemotePinError::Invalid {
+            path: remote_pins_dir(Path::new("")),
+            reason: other.to_string(),
+        },
     }
-    p
 }
 
-/// Load remotes config from disk. Returns empty map if file doesn't exist.
+fn parse_remote_pin(
+    path: &Path,
+    bytes: &[u8],
+    node_key: &lillux::crypto::VerifyingKey,
+) -> Result<RemotePinRecord, RemotePinError> {
+    let body = ryeos_engine::trust::verify_node_signed_text(path, bytes, node_key)
+        .map_err(map_trust_error)?;
+    let record: RemotePinRecord =
+        serde_yaml::from_str(&body).map_err(|error| RemotePinError::Tampered {
+            path: path.to_path_buf(),
+            reason: format!("does not match the remote pin shape: {error}"),
+        })?;
+    if record.schema != REMOTE_PIN_SCHEMA {
+        return Err(RemotePinError::Invalid {
+            path: path.to_path_buf(),
+            reason: format!(
+                "declares schema `{}`, this node reads `{REMOTE_PIN_SCHEMA}`",
+                record.schema
+            ),
+        });
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    if stem != record.remote.name {
+        return Err(RemotePinError::Invalid {
+            path: path.to_path_buf(),
+            reason: format!(
+                "describes remote `{}` but is named `{stem}.yaml`",
+                record.remote.name
+            ),
+        });
+    }
+    record
+        .remote
+        .validate()
+        .map_err(|error| RemotePinError::Invalid {
+            path: path.to_path_buf(),
+            reason: format!("is not a valid remote: {error:#}"),
+        })?;
+    Ok(record)
+}
+
+/// Read every file under the pin directory. A missing directory is empty.
+fn read_pin_files(dir: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>, RemotePinError> {
+    let unreadable = |reason: String| RemotePinError::Unreadable {
+        path: dir.to_path_buf(),
+        reason,
+    };
+    let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    lillux::visit_regular_files_no_follow_bounded(
+        dir,
+        lillux::DirectoryTraversalBudget::new(MAX_REMOTE_PINS + 1, 1),
+        |_, is_directory| Ok(is_directory),
+        |relative, file| {
+            if files.len() >= MAX_REMOTE_PINS {
+                anyhow::bail!("more than {MAX_REMOTE_PINS} remote pin records");
+            }
+            let bytes = lillux::read_open_regular_file_bounded(file, MAX_REMOTE_PIN_BYTES)?;
+            files.push((dir.join(relative), bytes));
+            Ok(())
+        },
+    )
+    .map_err(|error| unreadable(format!("{error:#}")))?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+fn repair_hint(name: &str, url: Option<&str>) -> String {
+    match url {
+        Some(url) => format!(
+            "run `ryeos remote configure {name} --url {url} --expect-fingerprint <fingerprint>` (or `--descriptor <file>`)"
+        ),
+        None => format!(
+            "run `ryeos remote configure {name} --url <https-url> --expect-fingerprint <fingerprint>` (or `--descriptor <file>`)"
+        ),
+    }
+}
+
+/// Load every remote pin with diagnostics for the ones that fail
+/// verification.
 ///
-/// Resilience: a single malformed entry (e.g. missing required
-/// `site_id` from an older config) is skipped with a warning to
-/// stderr rather than failing the whole file load. Operators are
-/// guided to repair such entries via `ryeos remote configure`, but
-/// stale entries must not block listing or using other valid remotes,
-/// including project-level overrides layered on top.
-pub fn load_remotes(app_root: &Path) -> Result<HashMap<String, RemoteConfig>> {
-    let path = remotes_config_path(app_root);
-    load_remotes_at(&path)
-}
-
-/// Load a remotes file from an explicit absolute path. Same per-entry
-/// resilience as [`load_remotes`].
-pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
-    Ok(load_remotes_at_report(path, RemoteConfigScope::Operator)?
-        .remotes
-        .into_iter()
-        .map(|(name, loaded)| (name, loaded.config))
-        .collect())
-}
-
-fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<RemotesLoadReport> {
+/// A malformed or unsigned record is reported in `invalid` rather than
+/// failing the whole load, so one stale record cannot block listing or using
+/// the other remotes.
+pub fn load_remotes_report(app_root: &Path) -> Result<RemotesLoadReport> {
+    let dir = remote_pins_dir(app_root);
     let mut report = RemotesLoadReport::default();
-    if !path.exists() {
+    let files = read_pin_files(&dir)?;
+    if files.is_empty() {
         return Ok(report);
     }
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
-    let file: RemotesFile = serde_yaml::from_str(&content)
-        .with_context(|| format!("invalid remotes config: {}", path.display()))?;
-    for (name, raw) in file.remotes {
-        let raw_url = raw
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned);
-        let diagnostic_url = raw_url
-            .as_deref()
-            .and_then(|url| normalize_url(url).ok())
-            .filter(|normalized| raw_url.as_deref() == Some(normalized.as_str()));
-        match serde_yaml::from_value::<RemoteConfig>(raw).and_then(|cfg| {
-            if cfg.name != name {
-                return Err(serde_yaml::Error::custom(format!(
-                    "remote map key '{}' does not match remote.name '{}'",
-                    name, cfg.name,
-                )));
-            }
-            if matches!(scope, RemoteConfigScope::Project { .. }) && !cfg.project_bindings.is_empty()
-            {
-                return Err(serde_yaml::Error::custom(
-                    "project remotes must not contain project_bindings; run `ryeos remote bind-project` to create operator-local bindings",
-                ));
-            }
-            cfg.validate()
-                .map_err(|e| serde_yaml::Error::custom(e.to_string()))?;
-            Ok(cfg)
-        }) {
-            Ok(cfg) => {
+    let node_key =
+        ryeos_engine::trust::load_node_verifying_key(app_root).map_err(map_trust_error)?;
+    for (path, bytes) in files {
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let is_yaml = path.extension().and_then(|e| e.to_str()) == Some("yaml");
+        let outcome = if is_yaml {
+            parse_remote_pin(&path, &bytes, &node_key)
+        } else {
+            Err(RemotePinError::Invalid {
+                path: path.clone(),
+                reason: "is not a `<name>.yaml` remote pin record".to_string(),
+            })
+        };
+        match outcome {
+            Ok(record) => {
                 report.remotes.insert(
-                    name,
+                    record.remote.name.clone(),
                     LoadedRemote {
-                        config: cfg,
-                        scope: scope.clone(),
-                        config_path: path.to_path_buf(),
+                        config: record.remote,
+                        config_path: path,
+                        pin_source: record.pin_source,
+                        pinned_at: record.pinned_at,
                     },
                 );
             }
-            Err(e) => {
+            Err(error) => {
                 tracing::warn!(
                     target: "ryeos_api::remote::config",
                     config_path = %path.display(),
                     remote = %name,
-                    error = %e,
-                    "skipping malformed remote entry; run `ryeos remote configure --remote {}` to repair or remove the entry from {}",
-                    name,
-                    path.display(),
+                    code = error.code(),
+                    "skipping unusable remote pin record"
                 );
-                let repair_hint = match &scope {
-                    RemoteConfigScope::Project { .. } => format!(
-                        "edit or remove {} and re-sign the project config",
-                        path.display()
-                    ),
-                    RemoteConfigScope::Operator => match diagnostic_url.as_deref() {
-                        Some(url) => format!("run `ryeos remote configure {} --url {}`", name, url),
-                        None => format!("run `ryeos remote configure {} --url <https-url>`", name),
-                    },
-                };
+                let diagnostic_url = serde_yaml::from_slice::<serde_yaml::Value>(&bytes)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("remote")?
+                            .get("url")?
+                            .as_str()
+                            .map(ToOwned::to_owned)
+                    })
+                    .and_then(|raw| normalize_url(&raw).ok().filter(|n| *n == raw));
                 report.invalid.push(InvalidRemote {
+                    repair_hint: repair_hint(&name, diagnostic_url.as_deref()),
                     name,
-                    scope: scope.clone(),
-                    config_path: path.to_path_buf(),
-                    error: e.to_string(),
+                    config_path: path,
+                    code: error.code().to_string(),
+                    error: error.to_string(),
                     url: diagnostic_url,
-                    repair_hint,
                 });
             }
         }
@@ -365,80 +605,134 @@ fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<Remot
     Ok(report)
 }
 
-/// Load remotes layered project-over-user.
-///
-/// Loads the operator-level remotes file from `app_root`, then if
-/// `project_path` is provided, loads project-level remotes from
-/// `<project>/.ai/config/remotes/remotes.yaml` and merges them on top
-/// (project entries win on name collision). Either side missing or
-/// individually malformed does not prevent the other from being used.
-pub fn load_remotes_layered(
-    app_root: &Path,
-    project_path: Option<&Path>,
-) -> Result<HashMap<String, RemoteConfig>> {
-    Ok(load_remotes_layered_report(app_root, project_path)?
+/// Load the usable remote configs.
+pub fn load_remotes(app_root: &Path) -> Result<HashMap<String, RemoteConfig>> {
+    Ok(load_remotes_report(app_root)?
         .remotes
         .into_iter()
         .map(|(name, loaded)| (name, loaded.config))
         .collect())
 }
 
-/// Load operator remotes plus optional project remotes, retaining invalid
-/// entries as diagnostics for user-facing commands.
-pub fn load_remotes_layered_report(
+/// Write one remote's node-signed pin record, replacing any previous record
+/// for the name. The signature is made with the node key; callers must have
+/// admitted the local operator before calling.
+pub fn write_remote_pin(
     app_root: &Path,
-    project_path: Option<&Path>,
-) -> Result<RemotesLoadReport> {
-    let mut report =
-        load_remotes_at_report(&remotes_config_path(app_root), RemoteConfigScope::Operator)?;
-    let user_bindings: HashMap<String, HashMap<String, RemoteProjectBinding>> = report
-        .remotes
-        .iter()
-        .map(|(name, loaded)| (name.clone(), loaded.config.project_bindings.clone()))
-        .collect();
-    if let Some(project) = project_path {
-        let canonical_project = canonical_local_project_path(project)?;
-        let project_report = load_remotes_at_report(
-            &remotes_config_path(&canonical_project),
-            RemoteConfigScope::Project {
-                root: canonical_project,
-            },
-        )?;
-        for (name, mut loaded) in project_report.remotes {
-            if let Some(bindings) = user_bindings.get(&name) {
-                loaded.config.project_bindings = bindings.clone();
-            }
-            report.remotes.insert(name, loaded);
+    node_key: &lillux::crypto::SigningKey,
+    config: &RemoteConfig,
+    pin_source: PinSource,
+    request_digest: Option<String>,
+) -> Result<PathBuf> {
+    config
+        .validate()
+        .with_context(|| format!("invalid remote '{}'", config.name))?;
+    let dir = remote_pins_dir(app_root);
+    let directory = lillux::PinnedDirectory::open_or_create(&dir)
+        .with_context(|| format!("open remote pin directory {}", dir.display()))?;
+    let _lock = directory.lock_exclusive()?;
+    let path = remote_pin_path(app_root, &config.name);
+    let pinned_at = match read_pin_files(&dir)?
+        .into_iter()
+        .find(|(existing, _)| *existing == path)
+    {
+        Some((existing, bytes)) => {
+            let verifying = node_key.verifying_key();
+            parse_remote_pin(&existing, &bytes, &verifying)
+                .map(|record| record.pinned_at)
+                .unwrap_or_else(|_| lillux::time::iso8601_now())
         }
-        report.invalid.extend(project_report.invalid);
-    }
-    Ok(report)
+        None => lillux::time::iso8601_now(),
+    };
+    let record = RemotePinRecord {
+        schema: REMOTE_PIN_SCHEMA.to_string(),
+        pin_source,
+        pinned_at,
+        request: request_digest,
+        remote: config.clone(),
+    };
+    let body = serde_yaml::to_string(&record).context("serialize remote pin record")?;
+    let signed = lillux::signature::sign_content(&body, node_key, "#", None);
+    lillux::atomic_write(&path, signed.as_bytes())
+        .with_context(|| format!("write remote pin record {}", path.display()))?;
+    Ok(path)
 }
 
-/// Save remotes config to disk.
-pub fn save_remotes(app_root: &Path, remotes: &HashMap<String, RemoteConfig>) -> Result<()> {
-    for (name, cfg) in remotes {
-        if name.trim().is_empty() {
-            anyhow::bail!("remote config key must not be empty");
-        }
-        if cfg.name != *name {
-            anyhow::bail!(
-                "remote map key '{}' does not match remote.name '{}'",
-                name,
-                cfg.name,
-            );
-        }
-        cfg.validate()
-            .with_context(|| format!("invalid remote '{}'", name))?;
-    }
-    let path = remotes_config_path(app_root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let content = serde_yaml::to_string(&serde_json::json!({ "remotes": remotes }))?;
-    std::fs::write(&path, content)
-        .with_context(|| format!("failed to write remotes config: {}", path.display()))?;
-    Ok(())
+/// Pin a remote from its signed descriptor without contacting it: the
+/// descriptor, verified under the node key it pins, is the trust anchor. An
+/// existing pin of the same name is replaced and keeps its project bindings.
+/// A descriptor without a URL pins an inbound-only remote. This is the one
+/// core behind `ryeos remote pin` and the offline operation `node.remote.pin`.
+pub fn pin_remote(
+    app_root: &Path,
+    node_key: &lillux::crypto::SigningKey,
+    name: &str,
+    descriptor_text: &str,
+    request_digest: Option<String>,
+) -> Result<serde_json::Value> {
+    let descriptor = RemoteDescriptor::parse_signed(descriptor_text)?;
+    validate_descriptor(&descriptor)?;
+    let existing = load_remotes_report(app_root)?.remotes.remove(name);
+    let (url, reachability) = match &descriptor.url {
+        Some(url) => (Some(url.clone()), Reachability::Outbound),
+        None => (None, Reachability::InboundOnly),
+    };
+    let config = RemoteConfig {
+        name: name.to_owned(),
+        url,
+        reachability,
+        principal_id: format!("fp:{}", descriptor.node.fingerprint),
+        signing_key: descriptor.node.public_key.clone(),
+        site_id: descriptor.site_id.clone(),
+        vault_fingerprint: descriptor.vault_fingerprint.clone(),
+        ingest_ignore: descriptor.ingest_ignore.clone(),
+        project_bindings: existing
+            .map(|loaded| loaded.config.project_bindings)
+            .unwrap_or_default(),
+    };
+    let path = write_remote_pin(
+        app_root,
+        node_key,
+        &config,
+        PinSource::DescriptorWithoutContact,
+        request_digest,
+    )?;
+    Ok(serde_json::json!({
+        "pinned": name,
+        "config_path": path,
+        "url": config.url,
+        "reachability": config.reachability,
+        "principal_id": config.principal_id,
+        "site_id": config.site_id,
+        "vault_fingerprint": config.vault_fingerprint,
+        "ingest_rules": config.ingest_ignore.is_some(),
+    }))
+}
+
+/// Replace the project bindings of an already pinned remote, keeping its
+/// pin source and pin time, and re-sign the record.
+pub fn rewrite_project_bindings(
+    app_root: &Path,
+    node_key: &lillux::crypto::SigningKey,
+    name: &str,
+    request_digest: Option<String>,
+    mutate: impl FnOnce(&mut HashMap<String, RemoteProjectBinding>),
+) -> Result<PathBuf> {
+    let report = load_remotes_report(app_root)?;
+    let loaded = get_loaded_remote(&report.remotes, name).map_err(|_| {
+        anyhow::anyhow!(
+            "remote '{name}' is not pinned on this node; run `ryeos remote configure {name} --url <url> --expect-fingerprint <fingerprint>` first"
+        )
+    })?;
+    let mut config = loaded.config;
+    mutate(&mut config.project_bindings);
+    write_remote_pin(
+        app_root,
+        node_key,
+        &config,
+        loaded.pin_source,
+        request_digest,
+    )
 }
 
 /// Get a named remote. Returns an error if not found.
@@ -724,53 +1018,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_descriptor_validates_key_fingerprint_binding() {
-        let descriptor = RemoteDescriptor::from_yaml_str(&format!(
-            r#"
-version: 1
-name: hosted-prod
-url: https://node.example.com
-node:
-  public_key: {}
-  fingerprint: {}
-capabilities:
-  remote_execute: true
-admission:
-  methods: [one_time_code]
-provider:
-  name: RyeOS Cloud
-"#,
-            test_signing_key(7),
-            test_fingerprint(7),
-        ))
-        .unwrap();
-
-        assert_eq!(descriptor.name.as_deref(), Some("hosted-prod"));
-        assert_eq!(descriptor.url, "https://node.example.com");
-    }
-
-    #[test]
-    fn remote_descriptor_rejects_mismatched_fingerprint() {
-        let err = RemoteDescriptor::from_yaml_str(&format!(
-            r#"
-version: 1
-url: https://node.example.com
-node:
-  public_key: {}
-  fingerprint: {}
-"#,
-            test_signing_key(7),
-            test_fingerprint(8),
-        ))
-        .unwrap_err();
-
-        assert!(
-            err.to_string().contains("fingerprint mismatch"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
     fn validate_rejects_plain_http() {
         assert!(validate_url("http://example.com").is_err());
     }
@@ -811,350 +1058,19 @@ node:
         assert!(validate_url("https://example.com/").is_err());
     }
 
-    #[test]
-    fn load_rejects_credential_url_without_retaining_it_in_diagnostics() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let path = remotes_config_path(tmpdir.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                r#"
-remotes:
-  unsafe:
-    name: unsafe
-    url: https://user:do-not-retain@example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:unsafe
-    vault_fingerprint: sha256:unsafe
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(11),
-                test_signing_key(11),
-            ),
-        )
-        .unwrap();
-
-        let report = load_remotes_at_report(&path, RemoteConfigScope::Operator).unwrap();
-        assert!(report.remotes.is_empty());
-        assert_eq!(report.invalid.len(), 1);
-        assert!(report.invalid[0].url.is_none());
-        assert!(!report.invalid[0].repair_hint.contains("do-not-retain"));
-        assert!(!report.invalid[0].error.contains("do-not-retain"));
-    }
-
-    #[test]
-    fn load_rejects_malformed_credential_url_without_retaining_it_in_diagnostics() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let path = remotes_config_path(tmpdir.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                r#"
-remotes:
-  unsafe:
-    name: unsafe
-    url: 'https://user:do-not-retain@['
-    principal_id: {}
-    signing_key: {}
-    site_id: site:unsafe
-    vault_fingerprint: sha256:unsafe
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(12),
-                test_signing_key(12),
-            ),
-        )
-        .unwrap();
-
-        let report = load_remotes_at_report(&path, RemoteConfigScope::Operator).unwrap();
-        assert!(report.remotes.is_empty());
-        assert_eq!(report.invalid.len(), 1);
-        assert!(report.invalid[0].url.is_none());
-        assert!(!report.invalid[0].repair_hint.contains("do-not-retain"));
-        assert!(!report.invalid[0].error.contains("do-not-retain"));
-    }
-
-    #[test]
-    fn roundtrip() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let mut remotes = HashMap::new();
-        remotes.insert(
-            "default".into(),
-            RemoteConfig {
-                name: "default".into(),
-                url: "https://example.com".into(),
-                principal_id: test_principal_id(1),
-                signing_key: test_signing_key(1),
-                site_id: "site:example".into(),
-                vault_fingerprint: "sha256:def456".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig {
-                    patterns: vec![".git/".into(), "target/".into()],
-                },
-                project_bindings: HashMap::new(),
-            },
-        );
-        save_remotes(tmpdir.path(), &remotes).unwrap();
-        let loaded = load_remotes(tmpdir.path()).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded["default"].url, "https://example.com");
-        assert_eq!(loaded["default"].site_id, "site:example");
-        assert_eq!(loaded["default"].vault_fingerprint, "sha256:def456");
-        assert_eq!(loaded["default"].ingest_ignore.patterns.len(), 2);
-    }
-
-    #[test]
-    fn roundtrip_with_project_bindings() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let local = tmpdir.path().join("project");
-        std::fs::create_dir_all(&local).unwrap();
-        let local_key = local.canonicalize().unwrap().to_string_lossy().to_string();
-
-        let mut bindings = HashMap::new();
-        bindings.insert(
-            local_key.clone(),
-            RemoteProjectBinding {
-                remote_project_path: "/data/projects/example".into(),
-                sync_scope: ProjectSyncScope::AiOnly,
-            },
-        );
-
-        let mut remotes = HashMap::new();
-        remotes.insert(
-            "example-remote".into(),
-            RemoteConfig {
-                name: "example-remote".into(),
-                url: "https://example.com".into(),
-                principal_id: test_principal_id(2),
-                signing_key: test_signing_key(2),
-                site_id: "site:example".into(),
-                vault_fingerprint: "sha256:def456".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig {
-                    patterns: vec![".git/".into()],
-                },
-                project_bindings: bindings,
-            },
-        );
-
-        save_remotes(tmpdir.path(), &remotes).unwrap();
-        let loaded = load_remotes(tmpdir.path()).unwrap();
-        let resolved = resolve_project_binding(&loaded["example-remote"], &local).unwrap();
-        assert_eq!(resolved.remote_project_path, "/data/projects/example");
-        assert_eq!(resolved.sync_scope, ProjectSyncScope::AiOnly);
-    }
-
-    #[test]
-    fn load_remotes_layered_accepts_project_remotes_with_category() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project_root.path().join(ryeos_engine::AI_DIR)).unwrap();
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
-                r#"
-category: remotes
-remotes:
-  example:
-    name: example
-    url: https://project-level.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:example
-    vault_fingerprint: sha256:example
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(2),
-                test_signing_key(2),
-            ),
-        )
-        .unwrap();
-
-        let report =
-            load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
-        assert_eq!(
-            report.remotes["example"].config.url,
-            "https://project-level.example.com"
-        );
-        assert!(matches!(
-            report.remotes["example"].scope,
-            RemoteConfigScope::Project { .. }
-        ));
-    }
-
-    #[test]
-    fn load_remotes_layered_preserves_operator_bindings_on_project_override() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project_root.path()).unwrap();
-        let project_root_path = project_root.path().canonicalize().unwrap();
-        let local_key = project_root_path.to_string_lossy().to_string();
-
-        let mut bindings = HashMap::new();
-        bindings.insert(
-            local_key.clone(),
-            RemoteProjectBinding {
-                remote_project_path: "/remote/project".into(),
-                sync_scope: ProjectSyncScope::FullProject,
-            },
-        );
-        let mut operator_remotes = HashMap::new();
-        operator_remotes.insert(
-            "example".into(),
-            RemoteConfig {
-                name: "example".into(),
-                url: "https://user.example.com".into(),
-                principal_id: test_principal_id(3),
-                signing_key: test_signing_key(3),
-                site_id: "site:user".into(),
-                vault_fingerprint: "sha256:user".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
-                project_bindings: bindings,
-            },
-        );
-        save_remotes(app_root.path(), &operator_remotes).unwrap();
-
-        let project_path = remotes_config_path(&project_root_path);
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
-                r#"
-remotes:
-  example:
-    name: example
-    url: https://project.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project
-    vault_fingerprint: sha256:project
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(4),
-                test_signing_key(4),
-            ),
-        )
-        .unwrap();
-
-        let report =
-            load_remotes_layered_report(app_root.path(), Some(&project_root_path)).unwrap();
-        let loaded = &report.remotes["example"];
-        assert_eq!(loaded.config.url, "https://project.example.com");
-        let binding = resolve_loaded_project_binding(loaded, &project_root_path).unwrap();
-        assert_eq!(binding.remote_project_path, "/remote/project");
-        assert_eq!(binding.sync_scope, ProjectSyncScope::FullProject);
-    }
-
-    #[test]
-    fn load_remotes_layered_rejects_project_sourced_bindings() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
-                r#"
-remotes:
-  example:
-    name: example
-    url: https://project.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project
-    vault_fingerprint: sha256:project
-    ingest_ignore:
-      patterns: []
-    project_bindings:
-      /tmp/local:
-        remote_project_path: /remote/project
-        sync_scope: full_project
-"#,
-                test_principal_id(5),
-                test_signing_key(5),
-            ),
-        )
-        .unwrap();
-
-        let report =
-            load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
-        assert!(!report.remotes.contains_key("example"));
-        assert_eq!(report.invalid.len(), 1);
-        assert!(report.invalid[0].error.contains("project_bindings"));
-    }
-
-    #[test]
-    fn save_remotes_rejects_invalid_map_key() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let mut remotes = HashMap::new();
-        remotes.insert(
-            "".into(),
-            RemoteConfig {
-                name: "example".into(),
-                url: "https://example.com".into(),
-                principal_id: test_principal_id(6),
-                signing_key: test_signing_key(6),
-                site_id: "site:example".into(),
-                vault_fingerprint: "sha256:example".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
-                project_bindings: HashMap::new(),
-            },
-        );
-        let err = save_remotes(tmpdir.path(), &remotes).unwrap_err();
-        assert!(err.to_string().contains("key must not be empty"));
-    }
-
-    #[test]
-    fn layered_report_includes_invalid_missing_signing_key() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project_root.path().join(ryeos_engine::AI_DIR)).unwrap();
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            r#"
-remotes:
-  default:
-    name: default
-    url: https://project-level.example.com
-    principal_id: fp:stale
-    site_id: site:stale
-    vault_fingerprint: sha256:stale
-    ingest_ignore:
-      patterns: []
-"#,
-        )
-        .unwrap();
-
-        let report =
-            load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
-        assert!(!report.remotes.contains_key("default"));
-        assert_eq!(report.invalid.len(), 1);
-        assert_eq!(report.invalid[0].name, "default");
-        assert!(report.invalid[0].error.contains("signing_key"));
-        assert!(report.invalid[0].repair_hint.contains("re-sign"));
-    }
-
     // ── resolve_remote_by_site_id tests ─────────────────────────
 
     fn make_remote(name: &str, site_id: &str) -> RemoteConfig {
         let seed = name.as_bytes().first().copied().unwrap_or(1);
         RemoteConfig {
             name: name.to_string(),
-            url: format!("https://{}.example.com", name),
+            url: Some(format!("https://{}.example.com", name)),
+            reachability: Default::default(),
             principal_id: test_principal_id(seed),
             signing_key: test_signing_key(seed),
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".to_string(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }
@@ -1217,188 +1133,423 @@ remotes:
         );
     }
 
-    #[test]
-    fn config_without_site_id_is_skipped_not_fatal() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let path = remotes_config_path(tmpdir.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                r#"
-remotes:
-  old_remote:
-    name: old_remote
-    url: https://example.com
-    principal_id: fp:old
-    vault_fingerprint: sha256:old
-    ingest_ignore:
-      patterns: []
-  good:
-    name: good
-    url: https://good.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:good
-    vault_fingerprint: sha256:good
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(4),
-                test_signing_key(4),
-            ),
+    fn node_fixture(app_root: &Path) -> lillux::crypto::SigningKey {
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+            &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).node_signing_key_path(),
         )
         .unwrap();
-        let loaded = load_remotes(tmpdir.path()).expect(
-            "load_remotes must not fail when one entry is malformed: \
-             stale entries must not block listing other valid remotes",
-        );
-        assert!(
-            !loaded.contains_key("old_remote"),
-            "malformed entry must be skipped, got: {loaded:?}"
-        );
-        assert!(
-            loaded.contains_key("good"),
-            "valid entry must remain loadable, got: {loaded:?}"
-        );
+        identity
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(app_root))
+            .unwrap();
+        identity.signing_key().clone()
+    }
+
+    fn pinned_remote(name: &str, seed: u8) -> RemoteConfig {
+        RemoteConfig {
+            name: name.into(),
+            url: Some("https://example.com".into()),
+            reachability: Default::default(),
+            principal_id: test_principal_id(seed),
+            signing_key: test_signing_key(seed),
+            site_id: "site:example".into(),
+            vault_fingerprint: "sha256:def456".into(),
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig {
+                patterns: vec![".git/".into(), "target/".into()],
+            }),
+            project_bindings: HashMap::new(),
+        }
+    }
+
+    fn signed_raw_record(key: &lillux::crypto::SigningKey, remote: RemoteConfig) -> String {
+        let record = RemotePinRecord {
+            schema: REMOTE_PIN_SCHEMA.to_string(),
+            pin_source: PinSource::ExpectedFingerprint,
+            pinned_at: "2026-01-01T00:00:00Z".into(),
+            request: None,
+            remote,
+        };
+        lillux::signature::sign_content(&serde_yaml::to_string(&record).unwrap(), key, "#", None)
     }
 
     #[test]
-    fn load_remotes_layered_merges_project_over_operator() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-
-        let operator_path = remotes_config_path(app_root.path());
-        std::fs::create_dir_all(operator_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &operator_path,
-            format!(
-                r#"
-remotes:
-  v2:
-    name: v2
-    url: https://user-level.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:user
-    vault_fingerprint: sha256:user
-    ingest_ignore:
-      patterns: []
-  user-only:
-    name: user-only
-    url: https://user-only.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:user-only
-    vault_fingerprint: sha256:user-only
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(5),
-                test_signing_key(5),
-                test_principal_id(6),
-                test_signing_key(6),
-            ),
+    fn remote_pin_record_signed_by_node_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let path = write_remote_pin(
+            tmp.path(),
+            &key,
+            &pinned_remote("default", 1),
+            PinSource::Descriptor,
+            Some("abc123".into()),
         )
         .unwrap();
-
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
-                r#"
-remotes:
-  v2:
-    name: v2
-    url: https://project-level.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project
-    vault_fingerprint: sha256:project
-    ingest_ignore:
-      patterns: []
-  project-only:
-    name: project-only
-    url: https://project-only.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project-only
-    vault_fingerprint: sha256:project-only
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(7),
-                test_signing_key(7),
-                test_principal_id(8),
-                test_signing_key(8),
-            ),
-        )
-        .unwrap();
-
-        let merged = load_remotes_layered(app_root.path(), Some(project_root.path())).unwrap();
+        assert_eq!(path, remote_pin_path(tmp.path(), "default"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# ryeos:signed:"), "{text}");
+        let report = load_remotes_report(tmp.path()).unwrap();
+        assert!(report.invalid.is_empty(), "{:?}", report.invalid);
+        let loaded = &report.remotes["default"];
+        assert_eq!(loaded.config.url.as_deref(), Some("https://example.com"));
+        assert_eq!(loaded.config.site_id, "site:example");
         assert_eq!(
-            merged["v2"].url, "https://project-level.example.com",
-            "project-level remotes must win on name collision"
+            loaded.config.ingest_ignore.as_ref().unwrap().patterns.len(),
+            2
         );
-        assert!(merged.contains_key("user-only"));
-        assert!(merged.contains_key("project-only"));
+        assert_eq!(loaded.pin_source, PinSource::Descriptor);
+        assert!(!loaded.pinned_at.is_empty());
+        assert_eq!(load_remotes(tmp.path()).unwrap().len(), 1);
     }
 
     #[test]
-    fn load_remotes_layered_survives_broken_operator_config() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-
-        let operator_path = remotes_config_path(app_root.path());
-        std::fs::create_dir_all(operator_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &operator_path,
-            r#"
-remotes:
-  broken:
-    name: broken
-    url: https://broken.example.com
-    principal_id: fp:broken
-    vault_fingerprint: sha256:broken
-    ingest_ignore:
-      patterns: []
-"#,
+    fn rewriting_a_pin_keeps_pin_time_and_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        write_remote_pin(
+            tmp.path(),
+            &key,
+            &pinned_remote("default", 1),
+            PinSource::ExpectedFingerprint,
+            None,
         )
         .unwrap();
+        let before = load_remotes_report(tmp.path()).unwrap().remotes["default"]
+            .pinned_at
+            .clone();
+        let canonical = canonical_local_project_path(&project).unwrap();
+        let identity = local_project_identity(&canonical).unwrap().to_owned();
+        rewrite_project_bindings(tmp.path(), &key, "default", None, |bindings| {
+            bindings.insert(
+                identity.clone(),
+                RemoteProjectBinding {
+                    remote_project_path: "/srv/project".into(),
+                    sync_scope: ProjectSyncScope::default(),
+                },
+            );
+        })
+        .unwrap();
+        let after = load_remotes_report(tmp.path()).unwrap();
+        let loaded = &after.remotes["default"];
+        assert_eq!(loaded.pinned_at, before);
+        assert_eq!(loaded.pin_source, PinSource::ExpectedFingerprint);
+        assert_eq!(
+            loaded.config.project_bindings[&identity].remote_project_path,
+            "/srv/project"
+        );
+    }
 
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
-                r#"
-remotes:
-  v2:
-    name: v2
-    url: https://project-level.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project
-    vault_fingerprint: sha256:project
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(9),
-                test_signing_key(9),
-            ),
+    #[test]
+    fn unsigned_remote_pin_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let path = write_remote_pin(
+            tmp.path(),
+            &key,
+            &pinned_remote("default", 1),
+            PinSource::Descriptor,
+            None,
         )
         .unwrap();
+        let signed = std::fs::read_to_string(&path).unwrap();
+        let unsigned: String = signed
+            .lines()
+            .filter(|line| !line.contains("ryeos:signed:"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(&path, unsigned).unwrap();
+        let report = load_remotes_report(tmp.path()).unwrap();
+        assert!(report.remotes.is_empty());
+        assert_eq!(report.invalid.len(), 1);
+        assert_eq!(report.invalid[0].code, "remote_pin_unsigned");
+        assert!(
+            report.invalid[0]
+                .repair_hint
+                .contains("ryeos remote configure default")
+        );
+    }
 
-        let merged = load_remotes_layered(app_root.path(), Some(project_root.path()))
-            .expect("layered load must not fail when only user-level config has a malformed entry");
+    #[test]
+    fn edited_signing_key_is_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let path = write_remote_pin(
+            tmp.path(),
+            &key,
+            &pinned_remote("default", 1),
+            PinSource::Descriptor,
+            None,
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(&path).unwrap();
+        let edited = signed.replace(&test_signing_key(1), &test_signing_key(2));
+        assert_ne!(edited, signed);
+        std::fs::write(&path, edited).unwrap();
+        let report = load_remotes_report(tmp.path()).unwrap();
+        assert!(report.remotes.is_empty());
+        assert_eq!(report.invalid[0].code, "remote_pin_tampered");
+    }
+
+    #[test]
+    fn pin_signed_by_another_key_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        node_fixture(tmp.path());
+        let other = lillux::crypto::SigningKey::from_bytes(&[9; 32]);
+        let dir = remote_pins_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yaml"),
+            signed_raw_record(&other, pinned_remote("default", 1)),
+        )
+        .unwrap();
+        let report = load_remotes_report(tmp.path()).unwrap();
+        assert!(report.remotes.is_empty());
+        assert_eq!(report.invalid[0].code, "remote_pin_wrong_signer");
+    }
+
+    #[test]
+    fn pin_named_for_another_remote_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let dir = remote_pins_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("alias.yaml"),
+            signed_raw_record(&key, pinned_remote("default", 1)),
+        )
+        .unwrap();
+        let report = load_remotes_report(tmp.path()).unwrap();
+        assert!(report.remotes.is_empty());
+        assert_eq!(report.invalid[0].code, "remote_pin_invalid");
+    }
+
+    #[test]
+    fn remote_names_are_safe_file_stems() {
+        for bad in ["", ".hidden", "a/b", "a b", "../x"] {
+            assert!(validate_remote_name(bad).is_err(), "{bad:?}");
+        }
+        for good in ["default", "gpu-1", "prod_eu.1"] {
+            assert!(validate_remote_name(good).is_ok(), "{good:?}");
+        }
+    }
+
+    fn assert_credential_url_not_retained(url: &str) {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let mut remote = pinned_remote("unsafe", 11);
+        remote.url = Some(url.to_string());
+        let dir = remote_pins_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("unsafe.yaml"), signed_raw_record(&key, remote)).unwrap();
+        let report = load_remotes_report(tmp.path()).unwrap();
+        assert!(report.remotes.is_empty());
+        assert_eq!(report.invalid.len(), 1);
+        assert!(report.invalid[0].url.is_none());
+        assert!(!report.invalid[0].repair_hint.contains("do-not-retain"));
+        assert!(!report.invalid[0].error.contains("do-not-retain"));
+    }
+
+    #[test]
+    fn load_rejects_credential_url_without_retaining_it_in_diagnostics() {
+        assert_credential_url_not_retained("https://user:do-not-retain@example.com");
+    }
+
+    #[test]
+    fn load_rejects_malformed_credential_url_without_retaining_it_in_diagnostics() {
+        assert_credential_url_not_retained("https://user:do-not-retain@[");
+    }
+
+    #[test]
+    fn descriptor_requires_canonical_bound_fields() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[7; 32]);
+        let mut descriptor = RemoteDescriptor {
+            version: 2,
+            name: "hosted-prod".into(),
+            url: Some("https://node.example.com".into()),
+            ingest_ignore: None,
+            site_id: format!("site:{}", test_fingerprint(7)),
+            vault_fingerprint: "sha256:abc".into(),
+            node: RemoteDescriptorNode {
+                public_key: test_signing_key(7),
+                fingerprint: test_fingerprint(7),
+            },
+            capabilities: vec![],
+            admission: None,
+            provider: None,
+        };
+        let signed = descriptor.render_signed(&key).unwrap();
+        let parsed = RemoteDescriptor::parse_signed(&signed).unwrap();
+        validate_descriptor(&parsed).unwrap();
+        descriptor.node.fingerprint = test_fingerprint(8);
+        let mismatch = descriptor.render_signed(&key).unwrap();
+        assert!(RemoteDescriptor::parse_signed(&mismatch).is_err());
+    }
+
+    /// A version 2 descriptor of the node whose key is `seed`, signed by that
+    /// node key.
+    fn signed_descriptor(seed: u8, url: Option<&str>, ingest: bool) -> String {
+        RemoteDescriptor {
+            version: 2,
+            name: "origin".into(),
+            url: url.map(str::to_owned),
+            ingest_ignore: ingest.then(|| ryeos_app::ignore::IgnoreConfig {
+                patterns: vec!["target/".into()],
+            }),
+            site_id: format!("site:{}", test_fingerprint(seed)),
+            vault_fingerprint: "sha256:origin-vault".into(),
+            node: RemoteDescriptorNode {
+                public_key: test_signing_key(seed),
+                fingerprint: test_fingerprint(seed),
+            },
+            capabilities: vec![],
+            admission: None,
+            provider: None,
+        }
+        .render_signed(&lillux::crypto::SigningKey::from_bytes(&[seed; 32]))
+        .unwrap()
+    }
+
+    #[test]
+    fn pinning_a_url_less_descriptor_writes_an_inbound_only_signed_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let report = pin_remote(
+            tmp.path(),
+            &key,
+            "origin",
+            &signed_descriptor(9, None, true),
+            None,
+        )
+        .unwrap();
+        assert_eq!(report["reachability"], "inbound_only");
+        let text = std::fs::read_to_string(remote_pin_path(tmp.path(), "origin")).unwrap();
+        assert!(text.starts_with("# ryeos:signed:"), "{text}");
+        assert!(text.contains("reachability: inbound_only"), "{text}");
+        assert!(!text.contains("url:"), "{text}");
+        let report = load_remotes_report(tmp.path()).unwrap();
+        assert!(report.invalid.is_empty(), "{:?}", report.invalid);
+        let loaded = &report.remotes["origin"];
+        assert_eq!(loaded.pin_source, PinSource::DescriptorWithoutContact);
+        assert_eq!(loaded.config.reachability, Reachability::InboundOnly);
+        assert!(loaded.config.url.is_none());
+    }
+
+    #[test]
+    fn outbound_calls_refuse_an_inbound_only_pin_with_a_typed_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        pin_remote(
+            tmp.path(),
+            &key,
+            "origin",
+            &signed_descriptor(9, None, true),
+            None,
+        )
+        .unwrap();
+        let remote = load_remotes(tmp.path()).unwrap().remove("origin").unwrap();
+        // Every dial path takes its URL from `outbound_url`.
+        let refusal = remote.outbound_url().unwrap_err();
+        assert_eq!(refusal.code(), REMOTE_INBOUND_ONLY);
+        assert!(refusal.to_string().contains("'origin'"), "{refusal}");
+        match crate::handler_error::HandlerError::from(refusal) {
+            crate::handler_error::HandlerError::Structured { code, status, .. } => {
+                assert_eq!(code, REMOTE_INBOUND_ONLY);
+                assert_eq!(status, 409);
+            }
+            other => panic!("expected a structured refusal, got {other:?}"),
+        }
+        // A pin with a URL dials as before.
+        pin_remote(
+            tmp.path(),
+            &key,
+            "origin",
+            &signed_descriptor(9, Some("https://origin.example.com"), true),
+            None,
+        )
+        .unwrap();
+        let remote = load_remotes(tmp.path()).unwrap().remove("origin").unwrap();
+        assert_eq!(remote.outbound_url().unwrap(), "https://origin.example.com");
+    }
+
+    #[test]
+    fn inbound_only_pin_holds_the_site_and_key_inbound_verification_sees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        pin_remote(
+            tmp.path(),
+            &key,
+            "origin",
+            &signed_descriptor(9, None, false),
+            None,
+        )
+        .unwrap();
+        let remotes = load_remotes(tmp.path()).unwrap();
+        let pinned = &remotes["origin"];
+        // The node key, principal, site and vault are the descriptor's own.
+        let expected_key = decode_signing_key(&test_signing_key(9)).unwrap();
+        assert_eq!(pinned.pinned_signing_key().unwrap(), expected_key);
+        assert_eq!(pinned.principal_id, test_principal_id(9));
+        assert_eq!(pinned.site_id, format!("site:{}", test_fingerprint(9)));
+        assert_eq!(pinned.vault_fingerprint, "sha256:origin-vault");
+        // Origin-site binding finds the pin by the site the peer calls in as.
+        let resolved = resolve_remote_by_site_id(&remotes, &pinned.site_id).unwrap();
+        assert_eq!(resolved.config_key, "origin");
+        assert_eq!(resolved.remote.signing_key, test_signing_key(9));
+        // No ingest rules: nothing is pushed to it.
+        match pinned.ingest_rules().unwrap_err() {
+            crate::handler_error::HandlerError::Structured { code, .. } => {
+                assert_eq!(code, REMOTE_PINNED_WITHOUT_INGEST_RULES)
+            }
+            other => panic!("expected a structured refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pinning_refuses_v1_and_foreign_signed_descriptors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let v1 = "version: 1\nname: origin\nurl: https://o.example.com\nnode:\n  public_key: a\n  fingerprint: b\n";
+        let error = pin_remote(tmp.path(), &key, "origin", v1, None).unwrap_err();
         assert!(
-            merged.contains_key("v2"),
-            "valid project-level remote must remain usable even when user-level entry is malformed: {merged:?}"
+            format!("{error:#}").contains("remote_descriptor_unsigned"),
+            "{error:#}"
         );
+        // Signed by a key other than the node it pins.
+        let forged = RemoteDescriptor::parse_signed(&signed_descriptor(9, None, true))
+            .unwrap()
+            .render_signed(&lillux::crypto::SigningKey::from_bytes(&[3; 32]))
+            .unwrap();
+        let error = pin_remote(tmp.path(), &key, "origin", &forged, None).unwrap_err();
         assert!(
-            !merged.contains_key("broken"),
-            "malformed user-level entry must be skipped"
+            format!("{error:#}").contains("remote_descriptor_wrong_signer"),
+            "{error:#}"
         );
+        assert!(load_remotes(tmp.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn repinning_keeps_project_bindings_and_converges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = node_fixture(tmp.path());
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let descriptor = signed_descriptor(9, None, true);
+        pin_remote(tmp.path(), &key, "origin", &descriptor, None).unwrap();
+        let canonical = canonical_local_project_path(&project).unwrap();
+        let identity = local_project_identity(&canonical).unwrap().to_owned();
+        rewrite_project_bindings(tmp.path(), &key, "origin", None, |bindings| {
+            bindings.insert(
+                identity.clone(),
+                RemoteProjectBinding {
+                    remote_project_path: "/srv/p".into(),
+                    sync_scope: ProjectSyncScope::default(),
+                },
+            );
+        })
+        .unwrap();
+        pin_remote(tmp.path(), &key, "origin", &descriptor, None).unwrap();
+        let remotes = load_remotes(tmp.path()).unwrap();
+        assert_eq!(remotes.len(), 1);
+        assert!(remotes["origin"].project_bindings.contains_key(&identity));
     }
 }

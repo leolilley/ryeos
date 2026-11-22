@@ -137,7 +137,7 @@ impl DefinitionIdentityScope {
             let wrapped = serde_json::json!({ "composed": view });
             let projected = ryeos_state::external_content::products::composition::project_resolution_product_selections_for_identity(&wrapped)
                 .map_err(|error| EffectiveDefinitionDigestError(format!(
-                    "project effective-definition product selections: {error}"
+                    "project effective-definition product selections: {error:#}"
                 )))?;
             return serde_json::from_value(projected["composed"].clone()).map_err(|error| {
                 EffectiveDefinitionDigestError(format!(
@@ -705,13 +705,13 @@ impl DefinitionDiffBuilder {
         if left == right || !self.visit() {
             return;
         }
-        let left = left.map(|value| self.public_string(value)).or_else(|| {
+        let left = left.map(|value| self.public_string(value)).or({
             Some(DefinitionValueSummary {
                 value_type: DefinitionValueType::Null,
                 public_scalar: None,
             })
         });
-        let right = right.map(|value| self.public_string(value)).or_else(|| {
+        let right = right.map(|value| self.public_string(value)).or({
             Some(DefinitionValueSummary {
                 value_type: DefinitionValueType::Null,
                 public_scalar: None,
@@ -814,7 +814,7 @@ impl DefinitionDiffBuilder {
                 .map(|set| set.unwrap_or_default())
                 .map_err(|error| {
                     EffectiveDefinitionDigestError(format!(
-                        "invalid external realization identity slot: {error}"
+                        "invalid external realization identity slot: {error:#}"
                     ))
                 })
         };
@@ -840,7 +840,7 @@ impl DefinitionDiffBuilder {
             }
             let left_value = left_by_id
                 .get(id)
-                .map(|entry| serde_json::to_value(entry))
+                .map(serde_json::to_value)
                 .transpose()
                 .map_err(|error| {
                     EffectiveDefinitionDigestError(format!(
@@ -849,7 +849,7 @@ impl DefinitionDiffBuilder {
                 })?;
             let right_value = right_by_id
                 .get(id)
-                .map(|entry| serde_json::to_value(entry))
+                .map(serde_json::to_value)
                 .transpose()
                 .map_err(|error| {
                     EffectiveDefinitionDigestError(format!(
@@ -879,7 +879,7 @@ impl DefinitionDiffBuilder {
                 .transpose()
                 .map_err(|error| {
                     EffectiveDefinitionDigestError(format!(
-                        "invalid effective source closure identity slot: {error}"
+                        "invalid effective source closure identity slot: {error:#}"
                     ))
                 })
         };
@@ -898,7 +898,6 @@ impl DefinitionDiffBuilder {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn diff_json(
         &mut self,
         category: DefinitionChangeCategory,
@@ -1034,9 +1033,9 @@ impl DefinitionDiffBuilder {
     }
 }
 
-fn group_contributors<'a>(
-    contributors: &'a [DefinitionContributor],
-) -> BTreeMap<(String, String), Vec<&'a DefinitionContributor>> {
+fn group_contributors(
+    contributors: &[DefinitionContributor],
+) -> BTreeMap<(String, String), Vec<&DefinitionContributor>> {
     let mut grouped = BTreeMap::new();
     for contributor in contributors {
         grouped
@@ -1050,9 +1049,9 @@ fn group_contributors<'a>(
     grouped
 }
 
-fn group_edges<'a>(
-    edges: &'a [DefinitionReferenceEdge],
-) -> BTreeMap<(String, String, String), Vec<&'a DefinitionReferenceEdge>> {
+fn group_edges(
+    edges: &[DefinitionReferenceEdge],
+) -> BTreeMap<(String, String, String), Vec<&DefinitionReferenceEdge>> {
     let mut grouped = BTreeMap::new();
     for edge in edges {
         grouped
@@ -1226,7 +1225,7 @@ mod tests {
             root_raw_content_digest: digest.to_string().repeat(64),
             source_space: ItemSpace::Bundle,
             source_root: ItemSourceRoot::Bundle {
-                name: "standard".to_string(),
+                name: "knowledge".to_string(),
             },
             trust_class: TrustClass::TrustedBundle,
             signer_fingerprint: Some("f".repeat(64)),

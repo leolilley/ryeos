@@ -5,7 +5,20 @@ edition = "2024"
 license.workspace = true
 description = "RyeOS UI/browser session handlers and session event substrate"
 
+[features]
+default = []
+scheduling = ["dep:ryeos-scheduler-service", "ryeos-api/scheduling"]
+# Exposes `ryeos_ui::test_support`, the shared state builder and presentation
+# fixtures used by this crate's tests.
+test-support = [
+  "dep:tempfile",
+  "ryeos-app/test-support",
+  "ryeos-engine/test-support",
+  "ryeos-node-runtime/test-support",
+]
+
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 axum = { workspace = true, features = ["default"] }
@@ -14,24 +27,34 @@ lillux = { workspace = true }
 rand = { workspace = true }
 ryeos-api = { workspace = true }
 ryeos-app = { workspace = true }
+ryeos-bundle = { workspace = true }
 ryeos-client-base = { workspace = true }
+ryeos-effect-contract = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-runtime = { workspace = true }
+ryeos-scheduler-service = { workspace = true, optional = true }
 ryeos-state = { workspace = true }
+ryeos-ui-presentation-contract = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tokio-stream = { workspace = true }
+tempfile = { workspace = true, optional = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+ryeos-ui = { workspace = true, features = ["test-support"] }
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 ryeos-accounting = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
 ryeos-scheduler = { workspace = true }
+
+[lints]
+workspace = true

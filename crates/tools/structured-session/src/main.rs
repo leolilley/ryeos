@@ -7,7 +7,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use lillux::time::{Duration, MonotonicDeadline};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use zeroize::Zeroizing;
 
+mod configuration_absence;
+#[cfg(test)]
+mod replay_tests;
 mod workload_client_broker;
 
 const WIRE_PROTOCOL: &str = "ryeos.structured-session";
@@ -17,6 +21,11 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_APP_SERVER_LINE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENTS: usize = 4_096;
 const MAX_PENDING_SERVER_REQUESTS: usize = 128;
+/// Expired approvals whose expiry RyeOS has not yet acknowledged are never
+/// forgotten. Each one has an unacknowledged expiry event, so they are bounded
+/// by the event queue plus one in-flight observation batch of at most 128
+/// events. Exceeding this is a broken invariant and fails the session.
+const MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS: usize = MAX_EVENTS + 128;
 /// HTTP routes and server-request replies share this finite executor.  A
 /// provider cannot turn a backlog of long requests into unbounded bridge
 /// threads, while several workers preserve full-duplex event handling.
@@ -165,6 +174,12 @@ struct EventQueue {
     events: VecDeque<Value>,
     bytes: usize,
     command_progress: Option<CommandProgressBarrier>,
+    /// Observation sequence of the last pushed event. Observation sequences
+    /// start at 1 and `take_batch` drains the queue in order with contiguous
+    /// sequences, so the n-th pushed event is carried at sequence n.
+    pushed_through: u64,
+    /// Highest observation sequence RyeOS has durably acknowledged.
+    acknowledged_through: u64,
 }
 
 struct CommandProgressBarrier {
@@ -242,6 +257,8 @@ struct HttpRequest {
 struct ExpiredServerRequest {
     id: String,
     request_digest: String,
+    /// Observation sequence of this request's `approval.expired` event.
+    event_sequence: u64,
 }
 
 struct PendingObservationBatch {
@@ -279,8 +296,13 @@ struct StructuredSessionProfile {
     baseline_destination: String,
     auxiliary_configs: Vec<ryeos_state::objects::SessionConfigurationFile>,
     runtime_configs: Vec<ryeos_state::objects::SessionRuntimeConfigurationFile>,
+    configuration_absence: ryeos_state::objects::ConfigurationAbsence,
     portable_state: Option<ryeos_state::objects::PortableSessionStateContract>,
     credential_subject: Option<ryeos_state::objects::CredentialSubjectProjectionContract>,
+    /// Placement requirements the admission compiler already checked. The
+    /// bridge runs after placement was admitted, so it carries them unread.
+    #[serde(default, rename = "requires")]
+    _requires: Option<Value>,
     initialization: Vec<InitializationStep>,
     recovery: Option<RecoveryRule>,
     route_sets: BTreeMap<String, Vec<String>>,
@@ -512,6 +534,21 @@ struct NotificationRule {
     observations: Vec<ObservationRule>,
     #[serde(default)]
     ceremony_clear: bool,
+    /// Marks the notification whose durable payload is the execution's
+    /// result. The pushed event carries the marker so the daemon can read the
+    /// result back from the retained observation batch.
+    #[serde(default)]
+    result: bool,
+    /// Where the result payload reports usage. The daemon applies it when
+    /// settling the execution; the bridge only accepts the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    result_cost: Option<serde_json::Value>,
+    /// Which result value marks a failed turn. The daemon applies it when
+    /// settling the execution; the bridge only accepts the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    result_status: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -544,7 +581,6 @@ struct ServerRequestCorrelation {
 #[serde(deny_unknown_fields)]
 struct ApprovalResponses {
     accept: ValueTemplate,
-    cancel: ValueTemplate,
     decline: ValueTemplate,
     expire: ValueTemplate,
 }
@@ -662,16 +698,15 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
             bail!("structured-session reply HTTP path contradicts its transport");
         }
     }
-    if let Some(workload_client) = &profile.workload_client {
-        if workload_client
+    if let Some(workload_client) = &profile.workload_client
+        && workload_client
             .cli_endpoint_env
             .as_deref()
             .is_some_and(|endpoint| {
                 endpoint != ryeos_runtime::workload_client::WORKLOAD_CLIENT_ENDPOINT_ENV
             })
-        {
-            bail!("structured-session workload-client endpoint environment is not current");
-        }
+    {
+        bail!("structured-session workload-client endpoint environment is not current");
     }
     if profile.configuration_authority != ConfigurationAuthority::ImmutableArgv {
         bail!("structured-session configuration authority is not immutable argv");
@@ -693,6 +728,9 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         &profile.auxiliary_configs,
     )?;
     ryeos_state::objects::validate_session_runtime_configs(&profile.runtime_configs)?;
+    profile
+        .configuration_absence
+        .validate_runtime_configs(&profile.runtime_configs)?;
     if let Some(requirement) = &profile.external_candidate {
         // The controller's exclusive-session start owner admits and prepares
         // the exact connector, configuration adapter, capability, and contact
@@ -949,6 +987,149 @@ fn reject_nonlocal_schema_refs(value: &Value, depth: usize) -> Result<()> {
     Ok(())
 }
 
+/// Why the bridge refused a workload message or a RyeOS control. It rides on
+/// the error as a context so the refusal can be reported by class without
+/// reading any message content.
+#[derive(Debug, Clone, Copy)]
+enum RefusalClass {
+    UnknownNotification,
+    UnknownServerRequest,
+    SchemaViolation,
+    UnrecordedApprovalDecision,
+}
+
+impl RefusalClass {
+    fn code(self) -> &'static str {
+        match self {
+            Self::UnknownNotification => "unknown_notification",
+            Self::UnknownServerRequest => "unknown_server_request",
+            Self::SchemaViolation => "schema_violation",
+            Self::UnrecordedApprovalDecision => "unrecorded_approval_decision",
+        }
+    }
+}
+
+impl std::fmt::Display for RefusalClass {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RefusalClass {}
+
+const MAX_REFUSED_METHOD_BYTES: usize = 128;
+
+/// The refused approval decision, only when it is a short plain identifier,
+/// so a refusal never echoes arbitrary control content.
+fn refused_decision_label(decision: &str) -> &str {
+    if !decision.is_empty()
+        && decision.len() <= 32
+        && decision
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        decision
+    } else {
+        "<non-identifier>"
+    }
+}
+
+/// The refused message's method name, only when it is a plain protocol
+/// identifier. Anything else is not reported, so a refusal event can never
+/// carry message content.
+fn refused_method_label(message: &Value) -> Option<String> {
+    let method = message.get("method")?.as_str()?;
+    (!method.is_empty()
+        && method.len() <= MAX_REFUSED_METHOD_BYTES
+        && method
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-./:".contains(&byte)))
+    .then(|| method.to_owned())
+}
+
+/// Bounded, non-secret observation of a refused workload message: a class
+/// and, when it is a plain identifier, the method name. Never a payload.
+fn bridge_refusal_event(class: &str, method: Option<&str>) -> Value {
+    json!({
+        "event_type":"bridge.refused",
+        "payload":{"class":class,"method":method}
+    })
+}
+
+/// Last best-effort delivery of queued observations before the bridge exits
+/// on a fatal refusal, so the daemon retains why the session ended. A missing
+/// or late acknowledgement is not an error: the bridge is already failing.
+fn flush_fatal_observations(
+    channel: &mut lillux::InheritedDuplexChannel,
+    events: &Mutex<EventQueue>,
+    incoming: &std::sync::mpsc::Receiver<std::result::Result<Frame, String>>,
+    next_sequence: &mut u64,
+    previous_digest: &mut Option<String>,
+    pending: &mut Option<PendingObservationBatch>,
+) {
+    const FLUSH_WAIT: Duration = Duration::from_secs(5);
+    let deadline = MonotonicDeadline::after(FLUSH_WAIT);
+    let await_ack = |incoming: &std::sync::mpsc::Receiver<std::result::Result<Frame, String>>,
+                     through: u64,
+                     digest: &str| {
+        while !deadline.has_elapsed() {
+            match incoming.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(frame))
+                    if matches!(frame.kind, FrameKind::ObservationAck)
+                        && frame.request_id.is_none()
+                        && frame
+                            .body
+                            .as_ref()
+                            .and_then(|body| body.get("through_sequence"))
+                            .and_then(Value::as_u64)
+                            == Some(through)
+                        && frame
+                            .body
+                            .as_ref()
+                            .and_then(|body| body.get("batch_digest"))
+                            .and_then(Value::as_str)
+                            == Some(digest) =>
+                {
+                    return true;
+                }
+                Ok(Ok(_)) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+        false
+    };
+    if let Some(in_flight) = pending.take() {
+        if !await_ack(incoming, in_flight.through_sequence, &in_flight.digest) {
+            return;
+        }
+        let Some(next) = in_flight.through_sequence.checked_add(1) else {
+            return;
+        };
+        *next_sequence = next;
+        *previous_digest = Some(in_flight.digest);
+    }
+    let Ok(mut queue) = events.lock() else { return };
+    let Ok(Some((body, through, digest))) =
+        queue.take_batch(128, *next_sequence, previous_digest.as_deref())
+    else {
+        return;
+    };
+    drop(queue);
+    let sent = write_frame(
+        channel,
+        &Frame {
+            protocol: WIRE_PROTOCOL.to_owned(),
+            version: WIRE_VERSION,
+            kind: FrameKind::ObservationBatch,
+            request_id: None,
+            body: Some(body),
+        },
+    );
+    if sent.is_ok() {
+        let _ = await_ack(incoming, through, &digest);
+    }
+}
+
 fn main() {
     // Panic payloads can include provider messages or configuration. The
     // executable reports only a category and never resumes protocol work.
@@ -975,6 +1156,12 @@ fn main() {
 
 fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
     lillux::disable_process_core_dumps().map_err(anyhow::Error::msg)?;
+    // Read and close the secret descriptor before anything else is started, so
+    // no later child can ever hold it. The descriptor number is consumed from
+    // the environment here and is never visible to the workload.
+    // SAFETY: the signed launch protocol gives this process unique ownership of
+    // the named descriptor; this runs during single-threaded startup.
+    let delivered_secrets = unsafe { read_delivered_session_secrets(SESSION_SECRET_FD_ENV)? };
     let workspace = required_env("RYEOS_WORKSPACE")?;
     let workload_home = required_env("RYEOS_WORKLOAD_HOME")?;
     let route_set = required_env("RYEOS_STRUCTURED_SESSION_ROUTE_SET")?;
@@ -1001,8 +1188,29 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         .map(std::path::PathBuf::from)
         .ok_or_else(|| anyhow!("structured-session bridge requires an admitted profile"))?;
     let profile_bytes = read_admitted_profile_bytes(&profile_path)?;
-    let profile: StructuredSessionProfile =
+    let profile_value: Value =
         serde_json::from_slice(&profile_bytes).context("decode structured-session profile")?;
+    // The version is checked before the typed decode, so an older profile is
+    // refused by its schema rather than by a field the current one dropped.
+    require_current_profile_schema(&profile_value)?;
+    let item_route_params =
+        match optional_env(ryeos_engine::route_fixed_params::ROUTE_FIXED_PARAMS_ENV)? {
+            None => Default::default(),
+            Some(encoded) => {
+                let decoded: Value =
+                    serde_json::from_str(&encoded).context("decode item route_fixed_params")?;
+                let params = ryeos_engine::route_fixed_params::parse_route_fixed_params(&decoded)?;
+                ryeos_engine::route_fixed_params::check_route_fixed_params_against_profile(
+                    &profile_value,
+                    &route_set,
+                    &params,
+                )?;
+                params
+            }
+        };
+    let mut profile: StructuredSessionProfile =
+        serde_json::from_value(profile_value).context("decode structured-session profile")?;
+    extend_route_fixed_params(&mut profile.routes, &item_route_params)?;
     if profile.schema_version
         != ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION
     {
@@ -1039,6 +1247,13 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         serde_json::from_str(&required_env("RYEOS_EXTERNAL_DELIVERY")?)
             .context("decode external realization delivery")?;
     require_absolute_normalized("external realization root", &external_root)?;
+    // The launch owner may hand a file realization over as its own inherited
+    // descriptor instead of placing it in the runtime view. Adopt those
+    // descriptors first, once, before anything else can name their numbers.
+    let retained_files = adopt_retained_realization_files(
+        optional_env(ryeos_state::objects::EXTERNAL_REALIZATION_DESCRIPTORS_ENV)?.as_deref(),
+        &external_realizations,
+    )?;
     let (executable, workload_argv0, mut workload_handles) =
         resolve_pinned_executable_with_delivery(
             std::path::Path::new(&external_root),
@@ -1046,6 +1261,7 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
             &profile.workload_realization_id,
             executable_name,
             external_delivery,
+            &retained_files,
         )?;
     let executable_search = optional_env("RYEOS_EXECUTABLE_SEARCH")?;
     let (executable_path, mut inherited_descriptors) =
@@ -1057,13 +1273,15 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         )?;
     let session_process_environment =
         optional_env(ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV)?;
-    let (mut session_process_environment, mut environment_descriptors) =
+    let (mut session_process_environment, mut environment_descriptors, secret_environment) =
         resolve_session_process_environment_with_delivery(
             std::path::Path::new(&workspace),
             std::path::Path::new(&external_root),
             &external_realizations,
             session_process_environment.as_deref(),
             external_delivery,
+            &retained_files,
+            delivered_secrets,
         )?;
     inherited_descriptors.append(&mut environment_descriptors);
     inherited_descriptors.append(&mut workload_handles);
@@ -1143,11 +1361,12 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
     let (workload_result_sender, workload_results) = sync_channel::<WorkloadCommandResult>(32);
     let (pending_control_sender, pending_controls) = sync_channel::<PendingControl>(32);
     for name in &profile.required_process_environment {
-        if !session_process_environment.contains_key(name) {
+        if !session_process_environment.contains_key(name) && !secret_environment.contains_key(name)
+        {
             bail!("required process environment `{name}` is absent from admitted session inputs");
         }
     }
-    let mut app = StructuredWorkload::start(
+    let mut app = StructuredWorkload::start_with_secrets(
         lifecycle,
         executable.to_str().ok_or_else(|| {
             anyhow!("pinned structured-session workload executable path is not UTF-8")
@@ -1167,6 +1386,7 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         executable_path.as_deref(),
         &session_process_environment,
         inherited_descriptors,
+        secret_environment,
     )?;
     // Retain the broker owner for the complete workload lifetime. Its worker
     // threads retain the listener and protected channel; this guard documents
@@ -1247,7 +1467,10 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                 bail!("{reason}");
             }
         }
-        if pending_workload_termination.is_some() {
+        if let Some(cancelled_request_id) = pending_workload_termination
+            .as_ref()
+            .map(|pending| pending.0.clone())
+        {
             match session_incoming.recv_timeout(Duration::from_millis(50)) {
                 Ok(Ok(frame)) => {
                     if validate_incoming_frame(&frame).is_ok()
@@ -1259,10 +1482,6 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                             );
                             continue;
                         };
-                        let cancelled_request_id = &pending_workload_termination
-                            .as_ref()
-                            .expect("checked pending workload termination")
-                            .0;
                         if request_id == cancelled_request_id
                             || pending_cancelled_responses.contains(request_id)
                         {
@@ -1342,8 +1561,21 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         }
         match app.try_lock() {
             Ok(mut app) => {
-                app.drain_incoming()?;
-                app.expire_server_requests()?;
+                let drained = app
+                    .drain_incoming()
+                    .and_then(|()| app.expire_server_requests());
+                if let Err(error) = drained {
+                    drop(app);
+                    flush_fatal_observations(
+                        &mut channel,
+                        &events,
+                        &session_incoming,
+                        &mut next_observation_sequence,
+                        &mut previous_observation_digest,
+                        &mut pending_observation,
+                    );
+                    return Err(error);
+                }
             }
             Err(std::sync::TryLockError::WouldBlock) => {}
             Err(std::sync::TryLockError::Poisoned(_)) => {
@@ -1461,7 +1693,7 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                             workload.command_progress = None;
                             result
                                 .map(WorkloadCommandOutput::Final)
-                                .map_err(|error| error.to_string())
+                                .map_err(|error| format!("{error:#}"))
                         });
                     let _ = sender.send((request_id, outcome));
                 })
@@ -1534,11 +1766,28 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                     .through_sequence
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("observation sequence overflow"))?;
+                events
+                    .lock()
+                    .map_err(|_| anyhow!("event queue is poisoned"))?
+                    .acknowledge_observations(pending.through_sequence)?;
                 previous_observation_digest = Some(pending.digest);
             }
             _ => bail!("daemon sent a non-request frame"),
         }
     }
+}
+
+fn require_current_profile_schema(profile: &Value) -> Result<()> {
+    use ryeos_engine::structured_session_profile::{
+        STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, StructuredSessionProfileSchemaRefusal,
+    };
+    let found = profile.get("schema_version").and_then(Value::as_u64);
+    if found != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION)) {
+        return Err(anyhow::Error::new(StructuredSessionProfileSchemaRefusal {
+            found,
+        }));
+    }
+    Ok(())
 }
 
 fn read_admitted_profile_bytes(path: &std::path::Path) -> Result<Vec<u8>> {
@@ -1602,11 +1851,63 @@ fn verify_runtime_configuration(
     Ok(())
 }
 
-fn external_realization_root<'a>(
-    external_root: &'a std::path::Path,
+/// File realizations the launch owner delivered as their own inherited
+/// descriptor, by realization id. Each holds the one file itself: nothing of
+/// it exists in the runtime view, so it has no root, mount or sibling.
+#[derive(Default)]
+struct RetainedRealizationFiles(BTreeMap<String, lillux::InheritedDescriptorAuthority>);
+
+impl RetainedRealizationFiles {
+    fn get(&self, realization_id: &str) -> Option<&lillux::InheritedDescriptorAuthority> {
+        self.0.get(realization_id)
+    }
+
+    #[cfg(test)]
+    fn from_authorities(
+        files: impl IntoIterator<Item = (String, lillux::InheritedDescriptorAuthority)>,
+    ) -> Self {
+        Self(files.into_iter().collect())
+    }
+}
+
+/// Decode the descriptor delivery document and adopt each descriptor it
+/// names. A document naming anything but a pinned file of the sealed set is
+/// refused, as is a descriptor that is not a regular file.
+fn adopt_retained_realization_files(
+    encoded: Option<&str>,
+    sealed_realizations: &str,
+) -> Result<RetainedRealizationFiles> {
+    let Some(encoded) = encoded else {
+        return Ok(RetainedRealizationFiles::default());
+    };
+    let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+        &serde_json::from_str(sealed_realizations)
+            .context("decode sealed external realizations for descriptor delivery")?,
+    )?;
+    let document =
+        ryeos_state::objects::ExternalRealizationDescriptors::decode(encoded, &realizations)
+            .context("decode external realization descriptor delivery")?;
+    let mut files = BTreeMap::new();
+    for (id, descriptor) in document.realizations {
+        // SAFETY: the launch owner inherited exactly this descriptor into
+        // this process for this delivery, and nothing here owns its number
+        // yet. Lillux takes sole ownership and prevents further inheritance
+        // until it is deliberately retained for the workload.
+        let authority = unsafe { lillux::take_inherited_descriptor_authority(descriptor) }
+            .map_err(anyhow::Error::msg)?;
+        if authority.mount_entry_kind()? != lillux::secure_fs::OpenMountEntryKind::Regular {
+            bail!("delivered realization descriptor is not a regular file");
+        }
+        files.insert(id, authority);
+    }
+    Ok(RetainedRealizationFiles(files))
+}
+
+fn external_realization_root(
+    external_root: &std::path::Path,
     mount_root: ryeos_state::objects::ExternalContentMountRoot,
     delivery: ryeos_state::objects::ExternalRealizationDelivery,
-) -> Result<&'a std::path::Path> {
+) -> Result<&std::path::Path> {
     match delivery {
         ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace => {
             Ok(mount_root.root(Some(external_root))?)
@@ -1642,6 +1943,7 @@ fn resolve_pinned_executable(
         realization_id,
         executable_name,
         ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+        &RetainedRealizationFiles::default(),
     )
 }
 
@@ -1651,6 +1953,7 @@ fn resolve_pinned_executable_with_delivery(
     realization_id: &str,
     executable_name: &std::path::Path,
     delivery: ryeos_state::objects::ExternalRealizationDelivery,
+    retained: &RetainedRealizationFiles,
 ) -> Result<(
     std::path::PathBuf,
     std::path::PathBuf,
@@ -1681,12 +1984,21 @@ fn resolve_pinned_executable_with_delivery(
     if matches.next().is_some() {
         bail!("workload realization id is ambiguous");
     }
-    if realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+    // A pinned closure (file or tree) is always admissible. The one other
+    // shape is a captured bundle binary: a single regular file whose
+    // manifest carries exactly one entry. A captured tree is never a
+    // workload executable.
+    let captured_single_file = realization.mode
+        == ryeos_state::objects::ExternalContentMode::Captured
+        && realization.kind == ryeos_state::objects::ExternalContentKind::File
+        && realization.entry_count == 1;
+    if (realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+        && !captured_single_file)
         || !lillux::valid_hash(&realization.manifest_hash)
         || realization.entry_count == 0
         || realization.total_bytes == 0
     {
-        bail!("workload realization is not a non-empty pinned closure");
+        bail!("workload realization is not a non-empty pinned closure or a captured single file");
     }
     let mount = std::path::Path::new(&realization.mount);
     if mount.as_os_str().is_empty()
@@ -1696,6 +2008,20 @@ fn resolve_pinned_executable_with_delivery(
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
         bail!("workload realization mount is not a safe relative path");
+    }
+    if let Some(file) = retained.get(&realization.id) {
+        // The realization is its own descriptor: there is no root, mount or
+        // directory to pin. The workload runs that exact file, and its argv[0]
+        // is the descriptor spelling it was started from.
+        if realization.kind != ryeos_state::objects::ExternalContentKind::File
+            || executable_name.components().count() != 1
+            || mount.file_name() != Some(executable_name.as_os_str())
+        {
+            bail!("delivered file realization does not match the workload executable");
+        }
+        file.require_executable_regular()?;
+        let path = file.path().to_path_buf();
+        return Ok((path.clone(), path, vec![file.clone()]));
     }
     let external_root = external_realization_root(external_root, realization.mount_root, delivery)?;
     // The executable and its argv[0] resource path must share one pinned root,
@@ -1821,6 +2147,103 @@ fn resolve_pinned_executable_search_with_delivery(
     Ok((Some(paths.join(":")), handles))
 }
 
+/// Environment slot holding the number of the sealed secret descriptor. It
+/// carries a descriptor number only, never a value.
+const SESSION_SECRET_FD_ENV: &str = "RYEOS_SESSION_SECRET_FD";
+const SESSION_SECRET_PAYLOAD_SCHEMA: u32 = 1;
+/// Largest sealed payload accepted: every admitted secret at the value bound
+/// with worst-case JSON escaping, plus generous room for names and framing.
+const MAX_SESSION_SECRET_PAYLOAD_BYTES: usize = ryeos_state::objects::MAX_SESSION_DELIVERED_SECRETS
+    * (ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES * 6 + 512)
+    + 256;
+
+/// Delivered secret values by secret name, in zeroizing buffers.
+type DeliveredSessionSecrets = BTreeMap<String, Zeroizing<String>>;
+/// Delivered secret values by environment variable name, in zeroizing buffers.
+type SessionSecretEnvironment = BTreeMap<String, Zeroizing<String>>;
+
+struct SessionSecretValue(Zeroizing<String>);
+
+impl<'de> Deserialize<'de> for SessionSecretValue {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct ValueVisitor;
+        impl serde::de::Visitor<'_> for ValueVisitor {
+            type Value = SessionSecretValue;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+            fn visit_str<E: serde::de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(SessionSecretValue(Zeroizing::new(value.to_owned())))
+            }
+            fn visit_string<E: serde::de::Error>(
+                self,
+                value: String,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(SessionSecretValue(Zeroizing::new(value)))
+            }
+        }
+        deserializer.deserialize_string(ValueVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionSecretPayload {
+    schema: u32,
+    values: BTreeMap<String, SessionSecretValue>,
+}
+
+/// Adopt, read and close the sealed secret descriptor named by the
+/// environment slot `slot`. An absent slot means nothing was delivered.
+///
+/// # Safety
+/// The trusted parent must have installed the descriptor exactly once for this
+/// process, and this must run during single-threaded startup.
+unsafe fn read_delivered_session_secrets(slot: &str) -> Result<Option<DeliveredSessionSecrets>> {
+    if std::env::var_os(slot).is_none() {
+        return Ok(None);
+    }
+    // SAFETY: upheld by this function's caller.
+    let payload = unsafe {
+        lillux::sealed_secret_descriptor::take_sealed_secret_payload_from_env(
+            slot,
+            MAX_SESSION_SECRET_PAYLOAD_BYTES,
+        )
+    }
+    .map_err(anyhow::Error::msg)
+    .context("read session secret descriptor")?;
+    decode_session_secret_payload(&payload).map(Some)
+}
+
+/// Decode and bound one sealed payload. Errors name secrets, never carry values.
+fn decode_session_secret_payload(payload: &[u8]) -> Result<DeliveredSessionSecrets> {
+    let decoded: SessionSecretPayload = serde_json::from_slice(payload)
+        .map_err(|_| anyhow!("session secret payload is malformed"))?;
+    if decoded.schema != SESSION_SECRET_PAYLOAD_SCHEMA {
+        bail!("session secret payload has an unsupported schema");
+    }
+    if decoded.values.len() > ryeos_state::objects::MAX_SESSION_DELIVERED_SECRETS {
+        bail!("session secret payload carries more secrets than a session may name");
+    }
+    let mut values = BTreeMap::new();
+    for (name, value) in decoded.values {
+        let text = value.0;
+        if text.len() > ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES {
+            bail!("delivered secret `{name}` exceeds its byte bound");
+        }
+        if text.chars().any(char::is_control) {
+            bail!("delivered secret `{name}` holds control characters");
+        }
+        values.insert(name, text);
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 fn resolve_session_process_environment(
     workspace: &std::path::Path,
@@ -1831,13 +2254,16 @@ fn resolve_session_process_environment(
     BTreeMap<String, String>,
     Vec<lillux::InheritedDescriptorAuthority>,
 )> {
-    resolve_session_process_environment_with_delivery(
+    let (environment, handles, _) = resolve_session_process_environment_with_delivery(
         workspace,
         external_root,
         sealed_realizations,
         encoded,
         ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
-    )
+        &RetainedRealizationFiles::default(),
+        None,
+    )?;
+    Ok((environment, handles))
 }
 
 fn resolve_session_process_environment_with_delivery(
@@ -1846,12 +2272,18 @@ fn resolve_session_process_environment_with_delivery(
     sealed_realizations: &str,
     encoded: Option<&str>,
     external_delivery: ryeos_state::objects::ExternalRealizationDelivery,
+    retained: &RetainedRealizationFiles,
+    delivered_secrets: Option<DeliveredSessionSecrets>,
 ) -> Result<(
     BTreeMap<String, String>,
     Vec<lillux::InheritedDescriptorAuthority>,
+    SessionSecretEnvironment,
 )> {
     let Some(encoded) = encoded else {
-        return Ok((BTreeMap::new(), Vec::new()));
+        if delivered_secrets.is_some() {
+            bail!("a session secret descriptor was supplied but no process environment names one");
+        }
+        return Ok((BTreeMap::new(), Vec::new(), BTreeMap::new()));
     };
     if encoded.len() > ryeos_state::objects::MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES {
         bail!("prepared session process environment exceeds its encoded byte bound");
@@ -1861,6 +2293,28 @@ fn resolve_session_process_environment_with_delivery(
     prepared.validate()?;
     let bindings = prepared.bindings;
     let delivery = prepared.runtime_view_delivery;
+    // The retained bindings name which secrets the session expects; the
+    // descriptor must carry exactly those, so a missing, extra or stray
+    // delivery fails before any workload exists.
+    let named_secrets =
+        ryeos_state::objects::session_process_environment_delivered_secret_names(&bindings);
+    match (&delivered_secrets, named_secrets.is_empty()) {
+        (None, false) => bail!(
+            "session process environment names delivered secrets but no session secret descriptor was supplied"
+        ),
+        (Some(_), true) => bail!(
+            "a session secret descriptor was supplied but no process environment names a delivered secret"
+        ),
+        (Some(delivered), false)
+            if !named_secrets
+                .iter()
+                .map(String::as_str)
+                .eq(delivered.keys().map(String::as_str)) =>
+        {
+            bail!("session secret descriptor names differ from the delivered secret bindings")
+        }
+        _ => {}
+    }
     let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
         &serde_json::from_str(sealed_realizations)
             .context("decode sealed external realizations for session process environment")?,
@@ -1898,10 +2352,25 @@ fn resolve_session_process_environment_with_delivery(
     };
 
     let mut resolved = BTreeMap::new();
+    let mut secret_environment = BTreeMap::new();
     let mut handles = Vec::new();
     for (name, binding) in bindings {
         let value = match binding {
             ryeos_state::objects::SessionProcessEnvironmentValue::Literal { value } => value,
+            ryeos_state::objects::SessionProcessEnvironmentValue::DeliveredSecret {
+                name: secret,
+            } => {
+                // The value stays in a zeroizing buffer and is kept out of the
+                // plain environment map; the workload spawn alone consumes it.
+                let value = delivered_secrets
+                    .as_ref()
+                    .and_then(|delivered| delivered.get(&secret))
+                    .ok_or_else(|| {
+                        anyhow!("delivered secret `{secret}` is absent from the session secret descriptor")
+                    })?;
+                secret_environment.insert(name, Zeroizing::new(value.as_str().to_owned()));
+                continue;
+            }
             ryeos_state::objects::SessionProcessEnvironmentValue::RuntimeViewDirectory {
                 relative_path,
             } => {
@@ -1937,11 +2406,10 @@ fn resolve_session_process_environment_with_delivery(
                         destinations,
                     } => directory.verified_writable_mount_namespace_path(&destinations[&name])?,
                 };
-                let value = path
-                    .to_str()
+
+                path.to_str()
                     .ok_or_else(|| anyhow!("runtime-view path is not UTF-8"))?
-                    .to_owned();
-                value
+                    .to_owned()
             }
             ryeos_state::objects::SessionProcessEnvironmentValue::RealizationPath {
                 realization_id,
@@ -1954,13 +2422,33 @@ fn resolve_session_process_environment_with_delivery(
                     .ok_or_else(|| {
                         anyhow!("session process environment names an absent realization")
                     })?;
-                if realization.kind != ryeos_state::objects::ExternalContentKind::Tree
-                    || realization.mode != ryeos_state::objects::ExternalContentMode::Pinned
+                if realization.mode != ryeos_state::objects::ExternalContentMode::Pinned {
+                    bail!("session process environment requires a pinned realization");
+                }
+                let is_file = realization.kind == ryeos_state::objects::ExternalContentKind::File;
+                if is_file
+                    && (relative_path != "."
+                        || path_kind
+                            != ryeos_state::objects::SessionProcessEnvironmentPathKind::File)
                 {
-                    bail!("session process environment requires a pinned tree realization");
+                    bail!(
+                        "session process environment addresses a file realization only as the file itself"
+                    );
+                }
+                if let Some(file) = retained.get(&realization.id) {
+                    // The file was delivered as its own descriptor: its path
+                    // is that descriptor, with no view or namespace spelling.
+                    let value = file
+                        .path()
+                        .to_str()
+                        .ok_or_else(|| anyhow!("delivered realization path is not UTF-8"))?
+                        .to_owned();
+                    handles.push(file.clone());
+                    resolved.insert(name, value);
+                    continue;
                 }
                 let mut relative = std::path::PathBuf::from(&realization.mount);
-                if relative_path != "." {
+                if !is_file && relative_path != "." {
                     relative.push(&relative_path);
                 }
                 let external_root = external_realization_root(
@@ -2006,7 +2494,7 @@ fn resolve_session_process_environment_with_delivery(
         };
         resolved.insert(name, value);
     }
-    Ok((resolved, handles))
+    Ok((resolved, handles, secret_environment))
 }
 
 fn open_pinned_directory(
@@ -2086,6 +2574,7 @@ fn protect_profile_home(root: &std::path::Path) -> Result<()> {
 }
 
 impl StructuredWorkload {
+    #[cfg(test)]
     fn start(
         lifecycle: &mut BridgeLifecycle,
         executable: &str,
@@ -2103,6 +2592,44 @@ impl StructuredWorkload {
         session_process_environment: &BTreeMap<String, String>,
         inherited_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
     ) -> Result<Self> {
+        Self::start_with_secrets(
+            lifecycle,
+            executable,
+            workspace,
+            workload_home,
+            profile,
+            route_set,
+            allowed_effect_classes,
+            schemas,
+            events,
+            pending_controls,
+            control_results,
+            workload_argv0,
+            executable_path,
+            session_process_environment,
+            inherited_descriptors,
+            BTreeMap::new(),
+        )
+    }
+
+    fn start_with_secrets(
+        lifecycle: &mut BridgeLifecycle,
+        executable: &str,
+        workspace: &str,
+        workload_home: &str,
+        profile: StructuredSessionProfile,
+        route_set: String,
+        allowed_effect_classes: HashSet<RouteEffectClass>,
+        schemas: HashMap<String, Value>,
+        events: Arc<Mutex<EventQueue>>,
+        pending_controls: Receiver<PendingControl>,
+        control_results: SyncSender<WorkloadCommandResult>,
+        workload_argv0: &str,
+        executable_path: Option<&str>,
+        session_process_environment: &BTreeMap<String, String>,
+        inherited_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
+        secret_environment: SessionSecretEnvironment,
+    ) -> Result<Self> {
         // The trusted app-server still starts in the controller's pinned B
         // workspace. Its signed route cwd must instead name the guest view
         // when the admitted session executes tools in an external candidate.
@@ -2111,6 +2638,13 @@ impl StructuredWorkload {
             .as_ref()
             .map(|requirement| requirement.runtime_recipe.cwd.clone())
             .unwrap_or_else(|| workspace.to_owned());
+        // Inspect the actual local startup and route filesystem before the
+        // workload can bootstrap or select a thread configuration loader.
+        configuration_absence::require_absent(
+            &profile.configuration_absence,
+            workspace,
+            &route_workspace,
+        )?;
         let mut process_environment = BTreeMap::from([
             ("LANG".to_owned(), "C".to_owned()),
             ("LC_ALL".to_owned(), "C".to_owned()),
@@ -2165,6 +2699,15 @@ impl StructuredWorkload {
         if lifecycle.process.is_some() || lifecycle.diagnostics.is_some() {
             bail!("structured workload lifecycle already owns a child or reader");
         }
+        for (name, value) in &secret_environment {
+            if process_environment.contains_key(name) {
+                bail!("delivered secret `{name}` collides with the workload environment");
+            }
+            process_environment.insert(name.clone(), value.as_str().to_owned());
+        }
+        // The zeroizing copies end here; the workload's own environment is the
+        // only place the values continue to live.
+        drop(secret_environment);
         lifecycle.executable_authorities = inherited_descriptors.clone();
         lifecycle.process = Some(
             lillux::SubordinateProcess::spawn(lillux::SubordinateProcessRequest {
@@ -2691,6 +3234,27 @@ impl StructuredWorkload {
             .get("requestId")
             .ok_or_else(|| anyhow!("approval has no requestId"))?;
         let key = canonical_id(request_id)?;
+        // The vocabulary is RyeOS's recorded decisions, not the upstream
+        // protocol's. It is checked before the pending request is looked up,
+        // so a refused decision never consumes the request.
+        let decision = request
+            .get("decision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("approval decision must be a string"))?;
+        if !matches!(decision, "accept" | "decline") {
+            return Err(
+                anyhow::Error::new(RefusalClass::UnrecordedApprovalDecision).context(format!(
+                    "approval decision `{}` is not a RyeOS-recorded decision",
+                    refused_decision_label(decision)
+                )),
+            );
+        }
+        let acknowledged_through = self
+            .events
+            .lock()
+            .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
+            .acknowledged_through;
+        prune_expired_server_requests(&mut self.expired_server_requests, acknowledged_through)?;
         let pending = match self.server_requests.get(&key) {
             Some(pending) if pending.request_digest == expected_request_digest => {
                 self.server_requests
@@ -2710,19 +3274,22 @@ impl StructuredWorkload {
                     "request_digest":expected_request_digest,
                 }));
             }
-            None => bail!("approval is absent, stale, or already resolved"),
+            // Typed so RyeOS can tell this from a delivery failure: nothing
+            // was delivered. It explains the absence only from its own
+            // acknowledged expiry of this exact request.
+            None => {
+                return Ok(json!({
+                    "resolved":false,
+                    "outcome":"absent",
+                    "request_id":request_id,
+                    "request_digest":expected_request_digest,
+                }));
+            }
         };
         let method = pending
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("pending server request has no method"))?;
-        let decision = request
-            .get("decision")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("approval decision must be a string"))?;
-        if !matches!(decision, "accept" | "decline" | "cancel") {
-            bail!("approval decision is outside the baseline vocabulary");
-        }
         let rule = self
             .profile
             .server_requests
@@ -2737,7 +3304,6 @@ impl StructuredWorkload {
         let response_template = match decision {
             "accept" => &rule.responses.accept,
             "decline" => &rule.responses.decline,
-            "cancel" => &rule.responses.cancel,
             _ => unreachable!("decision vocabulary checked above"),
         };
         let response = evaluate_template(response_template, &context)?;
@@ -2777,15 +3343,19 @@ impl StructuredWorkload {
             let expiry_event = approval_expired_event(&rule, &context)?;
             let response = evaluate_template(&rule.responses.expire, &context)?;
             self.deliver_server_request_response(&request_id, &rule, &response)?;
-            self.push_event(expiry_event)?;
+            let event_sequence = self.push_sequenced_event(expiry_event)?;
             self.expired_server_requests
                 .push_back(ExpiredServerRequest {
                     id,
                     request_digest: ryeos_state::objects::canonical_value_digest(&pending)?,
+                    event_sequence,
                 });
-            while self.expired_server_requests.len() > MAX_PENDING_SERVER_REQUESTS {
-                self.expired_server_requests.pop_front();
-            }
+            let acknowledged_through = self
+                .events
+                .lock()
+                .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
+                .acknowledged_through;
+            prune_expired_server_requests(&mut self.expired_server_requests, acknowledged_through)?;
         }
         Ok(())
     }
@@ -3037,6 +3607,20 @@ impl StructuredWorkload {
     }
 
     fn route(&mut self, message: Value) -> Result<()> {
+        let method = refused_method_label(&message);
+        let routed = self.route_message(message);
+        if let Err(error) = &routed {
+            let class = error
+                .downcast_ref::<RefusalClass>()
+                .map_or("message_refused", |class| class.code());
+            // Refusing is already the failure being reported; a full event
+            // queue must not replace it.
+            let _ = self.push_event(bridge_refusal_event(class, method.as_deref()));
+        }
+        routed
+    }
+
+    fn route_message(&mut self, message: Value) -> Result<()> {
         let object = message
             .as_object()
             .ok_or_else(|| anyhow!("structured workload emitted a non-object message"))?;
@@ -3061,7 +3645,9 @@ impl StructuredWorkload {
                     .find(|rule| rule.method == method)
                     .cloned()
                     .ok_or_else(|| {
-                        anyhow!("unknown structured-session server request `{method}`")
+                        anyhow::Error::new(RefusalClass::UnknownServerRequest).context(format!(
+                            "unknown structured-session server request `{method}`"
+                        ))
                     })?;
                 self.validate_schema(&rule.schema, message.get("params").unwrap_or(&Value::Null))?;
                 if self.server_requests.len() >= MAX_PENDING_SERVER_REQUESTS {
@@ -3162,7 +3748,11 @@ impl StructuredWorkload {
                     .iter()
                     .find(|rule| rule.method == method)
                     .cloned()
-                    .ok_or_else(|| anyhow!("unknown structured-session notification `{method}`"))?;
+                    .ok_or_else(|| {
+                        anyhow::Error::new(RefusalClass::UnknownNotification).context(format!(
+                            "unknown structured-session notification `{method}`"
+                        ))
+                    })?;
                 self.validate_schema(&rule.schema, message.get("params").unwrap_or(&Value::Null))?;
                 if !rule.durable {
                     return Ok(());
@@ -3188,7 +3778,7 @@ impl StructuredWorkload {
                     self.emit_command_progress(&observations)?;
                     // The notification's lifecycle authority is request-correlated,
                     // not duplicated in the independent pushed-observation stream.
-                    return self.push_event(json!({"event_type":rule.event_type,"payload":payload,"session_observations":[]}));
+                    return self.push_event(notification_event(&rule, payload, Vec::new()));
                 }
                 if self.profile.routes.iter().any(|route| {
                     route
@@ -3203,11 +3793,7 @@ impl StructuredWorkload {
                 if rule.ceremony_clear {
                     self.ceremony_active = false;
                 }
-                self.push_event(json!({
-                    "event_type":rule.event_type,
-                    "payload":payload,
-                    "session_observations":observations
-                }))
+                self.push_event(notification_event(&rule, payload, observations))
             }
             (None, None) => bail!("structured workload message has neither id nor method"),
         }
@@ -3425,11 +4011,31 @@ impl StructuredWorkload {
     }
 
     fn push_event(&mut self, event: Value) -> Result<()> {
+        self.push_sequenced_event(event).map(drop)
+    }
+
+    /// Queues one event and returns the observation sequence it will carry.
+    fn push_sequenced_event(&mut self, event: Value) -> Result<u64> {
         self.events
             .lock()
             .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
             .push(event)
     }
+}
+
+/// The pushed event for one durable notification. Only a result-marked
+/// notification carries the `result` flag, so every other event keeps its
+/// exact prior shape.
+fn notification_event(rule: &NotificationRule, payload: Value, observations: Vec<Value>) -> Value {
+    let mut event = json!({
+        "event_type":rule.event_type,
+        "payload":payload,
+        "session_observations":observations
+    });
+    if rule.result {
+        event["result"] = Value::Bool(true);
+    }
+    event
 }
 
 fn render_workload_invocation_result(
@@ -3469,6 +4075,28 @@ fn invocation_identity_matches(required: &BTreeMap<String, Value>, context: &Val
     required
         .iter()
         .all(|(pointer, expected)| context.pointer(pointer).unwrap_or(&Value::Null) == expected)
+}
+
+/// Forget an expired approval as soon as RyeOS has acknowledged the
+/// observation batch carrying its expiry event, and never before. Until then
+/// the daemon may still hold the approval as pending and deliver a late
+/// decision, which gets the typed `expired` outcome. After it, RyeOS has
+/// recorded the expiry: a decision it reserved earlier that arrives now gets
+/// the typed `absent` outcome, which RyeOS explains from that recorded expiry.
+fn prune_expired_server_requests(
+    expired: &mut VecDeque<ExpiredServerRequest>,
+    acknowledged_through: u64,
+) -> Result<()> {
+    while expired
+        .front()
+        .is_some_and(|entry| entry.event_sequence <= acknowledged_through)
+    {
+        expired.pop_front();
+    }
+    if expired.len() > MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS {
+        bail!("unacknowledged approval expiries exceed the observation backlog bound");
+    }
+    Ok(())
 }
 
 fn approval_expired_event(rule: &ServerRequestRule, context: &Value) -> Result<Value> {
@@ -3532,7 +4160,15 @@ impl EventQueue {
         pending.acknowledged = true;
         Ok(())
     }
-    fn push(&mut self, event: Value) -> Result<()> {
+    fn acknowledge_observations(&mut self, through_sequence: u64) -> Result<()> {
+        if through_sequence < self.acknowledged_through || through_sequence > self.pushed_through {
+            bail!("observation acknowledgement is outside the pushed event sequence");
+        }
+        self.acknowledged_through = through_sequence;
+        Ok(())
+    }
+
+    fn push(&mut self, event: Value) -> Result<u64> {
         if self.events.len() >= MAX_EVENTS {
             bail!("structured workload event backlog is exhausted");
         }
@@ -3544,8 +4180,13 @@ impl EventQueue {
         if self.bytes > 8 * 1024 * 1024 {
             bail!("structured-session event backlog byte ceiling is exhausted");
         }
+        let sequence = self
+            .pushed_through
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("observation sequence overflow"))?;
         self.events.push_back(event);
-        Ok(())
+        self.pushed_through = sequence;
+        Ok(sequence)
     }
 
     fn take_batch(
@@ -4017,9 +4658,11 @@ fn validate_schema_from_map(
         .map_err(|error| anyhow!("compile admitted JSON schema `{identity}`: {error}"))?;
     if validator.validate(value).is_err() {
         let instance_digest = ryeos_state::objects::canonical_value_digest(value)?;
-        bail!(
+        // The class rides beneath the message, so the refusal still reads as
+        // what was refused while the class stays reachable by downcast.
+        return Err(anyhow::Error::new(RefusalClass::SchemaViolation).context(format!(
             "structured-session value failed schema `{identity}` (instance digest {instance_digest})"
-        );
+        )));
     }
     Ok(())
 }
@@ -4165,6 +4808,30 @@ fn perform_http_request(
         return Ok(Value::Null);
     }
     serde_json::from_slice(&body).context("decode structured workload HTTP response")
+}
+
+/// Extend each named route's `fixed_params` with the signed item's pins, before
+/// any command is served. A pin that collides with a field the profile route
+/// already fixes or fills is refused, never overridden; per-command
+/// `apply_route_parameters` then refuses a caller that names a pinned field and
+/// the merged request still passes the route's request schema.
+fn extend_route_fixed_params(
+    routes: &mut [RouteRule],
+    item_params: &ryeos_engine::route_fixed_params::RouteFixedParams,
+) -> Result<()> {
+    for (route_id, fields) in item_params {
+        let route = routes
+            .iter_mut()
+            .find(|route| &route.id == route_id)
+            .ok_or_else(|| anyhow!("item route_fixed_params names undefined route `{route_id}`"))?;
+        for (field, value) in fields {
+            if route.fixed_params.contains_key(field) || route.workspace_fields.contains(field) {
+                bail!("item route_fixed_params cannot override profile field `{field}`");
+            }
+            route.fixed_params.insert(field.clone(), value.clone());
+        }
+    }
+    Ok(())
 }
 
 fn apply_route_parameters(route: &RouteRule, params: &mut Value, workspace: &str) -> Result<()> {
@@ -4455,6 +5122,408 @@ mod tests {
     use std::os::unix::process::CommandExt as _;
 
     #[test]
+    fn only_the_result_notification_event_carries_the_result_marker() {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../../../../bundles/claude-code/.ai/workers/claude-code/lib/hosted/structured-session.profile.json"
+        ))
+        .unwrap();
+        let rules: Vec<NotificationRule> =
+            serde_json::from_value(profile["notifications"].clone()).unwrap();
+        for rule in rules {
+            let event = notification_event(&rule, json!({"turn_id":"t1"}), Vec::new());
+            if rule.method == "turn/completed" {
+                assert!(rule.result);
+                assert_eq!(event["result"], json!(true));
+            } else {
+                assert!(!rule.result);
+                assert!(event.get("result").is_none(), "{}", rule.method);
+            }
+            assert_eq!(event["payload"], json!({"turn_id":"t1"}));
+            assert_eq!(event["event_type"], json!(rule.event_type));
+        }
+    }
+
+    fn external_request_contract(route_id: &str) -> (RouteRule, HashMap<String, Value>) {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../../../../bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json"
+        ))
+        .unwrap();
+        let route = serde_json::from_value(
+            profile["routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|route| route["id"] == route_id)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let schemas = [
+            (
+                "schema/ExternalThreadStartParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalThreadStartParams.json"),
+            ),
+            (
+                "schema/ExternalThreadResumeParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalThreadResumeParams.json"),
+            ),
+            (
+                "schema/ExternalTurnStartParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalTurnStartParams.json"),
+            ),
+            (
+                "schema/ExternalTurnSteerParams.json",
+                include_str!("../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/ExternalTurnSteerParams.json"),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name.to_owned(), serde_json::from_str(bytes).unwrap()))
+        .collect();
+        (route, schemas)
+    }
+
+    /// The real stdio route order immediately before call_raw; no process or
+    /// upstream request is created by these contract tests.
+    fn admit_external_request(
+        route_id: &str,
+        mut payload: Value,
+        bound_thread: Option<&str>,
+    ) -> Result<Value> {
+        let (route, schemas) = external_request_contract(route_id);
+        prepare_session_binding(
+            route.session_binding.as_ref(),
+            &bound_thread.map(str::to_owned),
+            &mut payload,
+            true,
+        )?;
+        // A local startup workspace is not the fixed external environment cwd.
+        apply_route_parameters(&route, &mut payload, "/owner/project")?;
+        validate_schema_from_map(&schemas, &route.request_schema, &payload)?;
+        Ok(payload)
+    }
+
+    #[test]
+    fn external_request_language_preserves_owner_injection_and_bound_plain_text() {
+        for payload in [
+            json!({}),
+            json!({"experimentalRawEvents":true}),
+            json!({"experimentalRawEvents":false,"model":null}),
+            json!({"experimentalRawEvents":true,"model":"gpt-5.3-codex"}),
+        ] {
+            let admitted = admit_external_request("session.start", payload, None).unwrap();
+            let (route, _) = external_request_contract("session.start");
+            assert_eq!(admitted["environments"], route.fixed_params["environments"]);
+            assert_eq!(admitted["cwd"], "/owner/project");
+            assert_eq!(admitted["approvalsReviewer"], "user");
+        }
+        let resumed =
+            admit_external_request("session.resume", json!({"threadId":"original"}), None).unwrap();
+        assert_eq!(resumed["threadId"], "original");
+        assert_eq!(resumed["cwd"], "/owner/project");
+        assert_eq!(resumed["approvalsReviewer"], "user");
+        for input in [
+            json!([{"type":"text","text":"Solve the retained task."}]),
+            json!([{"type":"text","text":"first","text_elements":[]},
+                   {"type":"text","text":"second"}]),
+        ] {
+            for (route, mut payload) in [
+                ("turn.start", json!({"input":input})),
+                (
+                    "turn.steer",
+                    json!({"input":input,"expectedTurnId":"active-turn"}),
+                ),
+            ] {
+                let admitted =
+                    admit_external_request(route, payload.clone(), Some("original")).unwrap();
+                assert_eq!(admitted["threadId"], "original");
+                assert_eq!(admitted["input"], input);
+                payload["threadId"] = json!("original");
+                assert!(admit_external_request(route, payload.clone(), Some("original")).is_ok());
+                payload["threadId"] = json!("different");
+                assert!(admit_external_request(route, payload, Some("original")).is_err());
+            }
+        }
+        assert!(admit_external_request("session.start", json!({}), Some("original")).is_err());
+        assert!(admit_external_request("session.resume", json!({}), None).is_err());
+        assert!(
+            admit_external_request(
+                "session.resume",
+                json!({"threadId":"original"}),
+                Some("original")
+            )
+            .is_err()
+        );
+        assert!(admit_external_request("turn.start", json!({"input":[]}), None).is_err());
+        assert!(
+            admit_external_request(
+                "turn.steer",
+                json!({"input":[{"type":"text","text":"x"}]}),
+                Some("original")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn external_request_language_refuses_unknown_null_and_sticky_overrides() {
+        for (route, baseline, bound) in [
+            ("session.start", json!({}), None),
+            ("session.resume", json!({"threadId":"original"}), None),
+            (
+                "turn.start",
+                json!({"input":[{"type":"text","text":"x"}]}),
+                Some("original"),
+            ),
+            (
+                "turn.steer",
+                json!({"input":[{"type":"text","text":"x"}],"expectedTurnId":"active"}),
+                Some("original"),
+            ),
+        ] {
+            assert!(admit_external_request(route, baseline.clone(), bound).is_ok());
+            for field in [
+                "config",
+                "baseInstructions",
+                "developerInstructions",
+                "permissions",
+                "collaborationMode",
+                "environments",
+                "runtimeWorkspaceRoots",
+                "cwd",
+                "approvalPolicy",
+                "approvalsReviewer",
+                "sandbox",
+                "sandboxPolicy",
+                "modelProvider",
+                "dynamicTools",
+                "selectedCapabilityRoots",
+                "serviceName",
+                "ephemeral",
+                "allowProviderModelFallback",
+                "historyMode",
+                "multiAgentMode",
+                "personality",
+                "serviceTier",
+                "sessionStartSource",
+                "threadSource",
+                "effort",
+                "summary",
+                "outputSchema",
+                "clientUserMessageId",
+                "responsesapiClientMetadata",
+                "additionalContext",
+                "mockExperimentalField",
+                "unknownFutureField",
+            ] {
+                for value in [Value::Null, json!({"enabled":true})] {
+                    let mut payload = baseline.clone();
+                    payload[field] = value;
+                    assert!(
+                        admit_external_request(route, payload, bound).is_err(),
+                        "{route}/{field}"
+                    );
+                }
+            }
+            if route != "session.start" {
+                for field in ["model", "experimentalRawEvents"] {
+                    for value in [Value::Null, json!("changed")] {
+                        let mut payload = baseline.clone();
+                        payload[field] = value;
+                        assert!(
+                            admit_external_request(route, payload, bound).is_err(),
+                            "{route}/{field}"
+                        );
+                    }
+                }
+            }
+        }
+        for model in [
+            json!(""),
+            json!(" spaced"),
+            json!("two models"),
+            json!("line\n"),
+            json!("é"),
+            json!("x".repeat(257)),
+            json!({}),
+        ] {
+            assert!(admit_external_request("session.start", json!({"model":model}), None).is_err());
+        }
+        assert!(
+            admit_external_request("session.start", json!({"model":"x".repeat(256)}), None).is_ok()
+        );
+        assert!(
+            admit_external_request("session.start", json!({"experimentalRawEvents":null}), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn external_request_language_refuses_nested_inputs_and_injected_environment_drift() {
+        let plain = json!({"type":"text","text":"retained task"});
+        let mut refused = vec![Value::Null, json!([]), json!([null]), json!([{}])];
+        for field in [
+            "path",
+            "url",
+            "permissions",
+            "environments",
+            "runtimeWorkspaceRoots",
+            "model",
+            "unknown",
+        ] {
+            for value in [Value::Null, json!({"enabled":true})] {
+                let mut item = plain.clone();
+                item[field] = value;
+                refused.push(json!([item]));
+            }
+        }
+        for spans in [
+            Value::Null,
+            json!([{}]),
+            json!([{"byteRange":{"start":0,"end":1},"placeholder":"x"}]),
+        ] {
+            let mut item = plain.clone();
+            item["text_elements"] = spans;
+            refused.push(json!([item]));
+        }
+        for kind in [
+            "image",
+            "localImage",
+            "audio",
+            "localAudio",
+            "skill",
+            "mention",
+        ] {
+            let mut item = plain.clone();
+            item["type"] = json!(kind);
+            refused.push(json!([item]));
+        }
+        for input in refused {
+            for (route, payload) in [
+                ("turn.start", json!({"input":input})),
+                (
+                    "turn.steer",
+                    json!({"input":input,"expectedTurnId":"active"}),
+                ),
+            ] {
+                assert!(
+                    admit_external_request(route, payload, Some("original")).is_err(),
+                    "{route}"
+                );
+            }
+        }
+        let admitted = admit_external_request("session.start", json!({}), None).unwrap();
+        let (route, schemas) = external_request_contract("session.start");
+        for (pointer, value) in [
+            ("/environments/0/environmentId", json!("local")),
+            ("/environments/0/cwd", json!("/controller")),
+            ("/environments/0/runtimeWorkspaceRoots", json!(["/"])),
+        ] {
+            let mut changed = admitted.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(validate_schema_from_map(&schemas, &route.request_schema, &changed).is_err());
+        }
+        let mut changed = admitted;
+        changed["environments"][0]["unknown"] = Value::Null;
+        assert!(validate_schema_from_map(&schemas, &route.request_schema, &changed).is_err());
+    }
+
+    fn original_configuration_schema_fixtures() -> (HashMap<String, Value>, Value) {
+        let schemas = HashMap::from([
+            (
+                "QNoManagedRequirements.json".to_owned(),
+                serde_json::from_str(include_str!(
+                    "../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/QNoManagedRequirements.json"
+                )).unwrap(),
+            ),
+            (
+                "QOriginalConfigGate.json".to_owned(),
+                serde_json::from_str(include_str!(
+                    "../../../../bundles/codex/.ai/workers/codex/lib/hosted/schema/QOriginalConfigGate.json"
+                )).unwrap(),
+            ),
+        ]);
+        let fixtures = serde_json::from_str(include_str!(
+            "../../../../bundles/codex/fixtures/external-original-config-responses.json"
+        ))
+        .unwrap();
+        (schemas, fixtures)
+    }
+
+    #[test]
+    fn original_configuration_responses_follow_the_admitted_schema_validator() {
+        let (schemas, fixtures) = original_configuration_schema_fixtures();
+        assert_eq!(fixtures["schema"], json!(1));
+        let cases = fixtures["cases"].as_array().unwrap();
+        assert_eq!(
+            cases.len(),
+            31,
+            "review the complete source-derived fixture inventory"
+        );
+        let mut ids = HashSet::new();
+        let mut accepted = 0;
+        for case in cases {
+            let id = case["id"].as_str().unwrap();
+            assert!(ids.insert(id), "duplicate fixture {id}");
+            let schema = case["schema"].as_str().unwrap();
+            assert!(
+                schemas.contains_key(schema),
+                "unadmitted fixture schema {schema}"
+            );
+            let expected = case["accept"].as_bool().unwrap();
+            let result = validate_schema_from_map(&schemas, schema, &case["response"]);
+            assert_eq!(result.is_ok(), expected, "fixture {id}: {result:?}");
+            accepted += usize::from(expected);
+        }
+        assert_eq!(accepted, 5);
+    }
+
+    #[test]
+    fn original_configuration_refusals_do_not_echo_private_mcp_or_endpoint_values() {
+        let (schemas, fixtures) = original_configuration_schema_fixtures();
+        let baseline = &fixtures["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"] == "pinned_baseline")
+            .unwrap()["response"];
+        validate_schema_from_map(&schemas, "QOriginalConfigGate.json", baseline).unwrap();
+        for (field, value, sensitive_values) in [
+            (
+                "mcp_servers",
+                json!({"private-service": {"url": "https://private-mcp.invalid/hidden-endpoint", "bearer_token": "private-mcp-token-marker"}}),
+                vec![
+                    "private-service",
+                    "https://private-mcp.invalid/hidden-endpoint",
+                    "private-mcp-token-marker",
+                ],
+            ),
+            (
+                "experimental_thread_config_endpoint",
+                json!("https://private-thread-config.invalid/secret-marker"),
+                vec!["https://private-thread-config.invalid/secret-marker"],
+            ),
+        ] {
+            let mut response = baseline.clone();
+            response["config"][field] = value;
+            let error = validate_schema_from_map(&schemas, "QOriginalConfigGate.json", &response)
+                .expect_err("unadmitted effect input must refuse");
+            let message = format!("{error:#}");
+            assert!(message.contains("value failed schema"));
+            assert!(message.contains("instance digest"));
+            assert!(
+                !message.contains(field),
+                "refusal exposed raw field {field}"
+            );
+            for sensitive in sensitive_values {
+                assert!(
+                    !message.contains(sensitive),
+                    "refusal exposed private input"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn admitted_profile_file_accepts_new_bound_and_refuses_oversize() {
         let root = tempfile::tempdir().unwrap();
         let profile = root.path().join("admitted-profile.json");
@@ -4493,13 +5562,15 @@ mod tests {
                 &json!({"message":{"params":params}})
             ));
         }
-        let mut queue = EventQueue::default();
-        queue.command_progress = Some(CommandProgressBarrier {
-            request_id: "command-one".to_owned(),
-            digest: "a".repeat(64),
-            acknowledged: false,
-            deadline: MonotonicDeadline::after(OBSERVATION_ACK_TIMEOUT),
-        });
+        let mut queue = EventQueue {
+            command_progress: Some(CommandProgressBarrier {
+                request_id: "command-one".to_owned(),
+                digest: "a".repeat(64),
+                acknowledged: false,
+                deadline: MonotonicDeadline::after(OBSERVATION_ACK_TIMEOUT),
+            }),
+            ..Default::default()
+        };
         assert!(
             queue
                 .acknowledge_command_progress("command-two", Some(&"a".repeat(64)))
@@ -4576,6 +5647,46 @@ mod tests {
     }
 
     #[test]
+    fn item_route_pins_extend_the_route_and_a_caller_cannot_override_them() {
+        let mut routes = vec![
+            serde_json::from_value::<RouteRule>(json!({
+                "id":"session.start",
+                "method":"thread/start",
+                "effect_class":"session_mutation",
+                "request_schema":"request.json",
+                "response_schema":"response.json",
+                "fixed_params":{"access":"read_write"},
+                "workspace_fields":["cwd"],
+                "result_retention":"ephemeral"
+            }))
+            .unwrap(),
+        ];
+        let pins = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+            &json!({"session.start": {"effort": "high"}}),
+        )
+        .unwrap();
+        extend_route_fixed_params(&mut routes, &pins).unwrap();
+        let mut admitted = json!({"prompt": "go"});
+        apply_route_parameters(&routes[0], &mut admitted, "/workspace").unwrap();
+        assert_eq!(admitted["effort"], "high");
+        assert_eq!(admitted["access"], "read_write");
+        let mut overridden = json!({"effort": "low"});
+        assert!(apply_route_parameters(&routes[0], &mut overridden, "/workspace").is_err());
+        for colliding in ["access", "cwd"] {
+            let pins = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+                &json!({"session.start": {colliding: "x"}}),
+            )
+            .unwrap();
+            assert!(extend_route_fixed_params(&mut routes.clone(), &pins).is_err());
+        }
+        let unknown = ryeos_engine::route_fixed_params::parse_route_fixed_params(
+            &json!({"missing.route": {"a": 1}}),
+        )
+        .unwrap();
+        assert!(extend_route_fixed_params(&mut routes, &unknown).is_err());
+    }
+
+    #[test]
     fn signed_environment_selection_is_injected_and_cannot_be_overridden() {
         let selection = json!([{
             "environmentId": "ryeos-external-candidate",
@@ -4608,6 +5719,75 @@ mod tests {
         }
     }
 
+    fn expired_requests(
+        sequences: std::ops::RangeInclusive<u64>,
+    ) -> VecDeque<ExpiredServerRequest> {
+        sequences
+            .map(|event_sequence| ExpiredServerRequest {
+                id: format!("approval-{event_sequence}"),
+                request_digest: "a".repeat(64),
+                event_sequence,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn expired_approval_remembered_until_acknowledged() {
+        let mut expired = expired_requests(1..=200);
+        prune_expired_server_requests(&mut expired, 0).unwrap();
+        assert_eq!(expired.len(), 200);
+        assert_eq!(expired.front().unwrap().event_sequence, 1);
+
+        // Only acknowledged entries are dropped: with expiries through 100
+        // acknowledged, the unacknowledged 101..=200 all stay.
+        prune_expired_server_requests(&mut expired, 100).unwrap();
+        assert_eq!(expired.len(), 100);
+        assert_eq!(expired.front().unwrap().event_sequence, 101);
+    }
+
+    #[test]
+    fn expired_approval_pruned_after_ack() {
+        // No retention cushion: every acknowledged expiry is dropped at once.
+        let mut expired = expired_requests(1..=200);
+        prune_expired_server_requests(&mut expired, 199).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired.front().unwrap().id, "approval-200");
+        prune_expired_server_requests(&mut expired, 200).unwrap();
+        assert!(expired.is_empty());
+    }
+
+    #[test]
+    fn unacknowledged_expired_approvals_beyond_the_backlog_bound_fail_closed() {
+        let bound = u64::try_from(MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS).unwrap();
+        let mut expired = expired_requests(1..=bound);
+        prune_expired_server_requests(&mut expired, 0).unwrap();
+        expired.push_back(ExpiredServerRequest {
+            id: "approval-overflow".to_owned(),
+            request_digest: "a".repeat(64),
+            event_sequence: bound + 1,
+        });
+        assert!(prune_expired_server_requests(&mut expired, 0).is_err());
+    }
+
+    #[test]
+    fn observation_acknowledgement_tracks_pushed_sequences() {
+        let mut queue = EventQueue::default();
+        for expected in 1..=3 {
+            assert_eq!(
+                queue
+                    .push(json!({"event_type":"delta","payload":{},"session_observations":[]}))
+                    .unwrap(),
+                expected
+            );
+        }
+        let (_, through, _) = queue.take_batch(128, 1, None).unwrap().unwrap();
+        assert_eq!(through, 3);
+        assert!(queue.acknowledge_observations(4).is_err());
+        queue.acknowledge_observations(through).unwrap();
+        assert_eq!(queue.acknowledged_through, 3);
+        assert!(queue.acknowledge_observations(2).is_err());
+    }
+
     #[test]
     fn observation_batches_respect_the_exact_serialized_byte_ceiling() {
         let mut queue = EventQueue::default();
@@ -4636,7 +5816,7 @@ mod tests {
         let mut profile = gating_approval_profile();
         profile.external_candidate = Some(
             ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                schema: 6,
+                schema: 7,
                 required_lifecycle_capabilities: Default::default(),
                 protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
                 connector_protocol:
@@ -4645,6 +5825,7 @@ mod tests {
                 provider_declaration_id: "codex-hosted".into(),
                 provider_configuration_destination: "environments.toml".into(),
                 runtime_product_declaration_id: "candidate_runtime".into(),
+                runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
                 runtime_recipe: ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
                     schema: 2,
                     runtime_mount_destination: "/runtime".into(),
@@ -4683,6 +5864,7 @@ mod tests {
             "baseline_destination":"config.toml",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
             "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
@@ -4717,7 +5899,6 @@ mod tests {
                 },
                 "responses":{
                     "accept":{"op":"literal","value":{"decision":"accept"}},
-                    "cancel":{"op":"literal","value":{"decision":"cancel"}},
                     "decline":{"op":"literal","value":{"decision":"decline"}},
                     "expire":{"op":"literal","value":{"decision":"decline"}}
                 },
@@ -4920,6 +6101,195 @@ mod tests {
         assert!(child.wait().unwrap().success());
     }
 
+    fn gating_approval_schemas() -> HashMap<String, Value> {
+        HashMap::from([
+            (
+                "request.json".to_owned(),
+                json!({"type":"object","additionalProperties":false}),
+            ),
+            (
+                "response.json".to_owned(),
+                json!({
+                    "type":"object",
+                    "required":["ok"],
+                    "properties":{"ok":{"const":true}},
+                    "additionalProperties":false
+                }),
+            ),
+            (
+                "approval.json".to_owned(),
+                json!({
+                    "type":"object",
+                    "required":["session","operation","command"],
+                    "properties":{
+                        "session":{"type":"string"},
+                        "operation":{"type":"string"},
+                        "command":{"type":"string"}
+                    },
+                    "additionalProperties":false
+                }),
+            ),
+        ])
+    }
+
+    /// Runs the gating-approval fixture and, once its approval is surfaced,
+    /// sends one approval control per decision in order. Returns the route
+    /// result, each control's outcome in order, and the workload.
+    fn run_gating_approval_decisions(
+        root: &tempfile::TempDir,
+        decisions: &[&str],
+    ) -> (Value, Vec<WorkloadCommandResult>, StructuredWorkload) {
+        let workload_home = root.path().join("home");
+        std::fs::create_dir(&workload_home).unwrap();
+        let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
+            "id":"approval-one",
+            "method":"approval/request",
+            "params":{"session":"session-one","operation":"operation-one","command":"true"}
+        }))
+        .unwrap();
+        let events = Arc::new(Mutex::new(EventQueue::default()));
+        let (control_sender, controls) = sync_channel(1);
+        let (result_sender, results) = sync_channel(decisions.len());
+        let observed_events = Arc::clone(&events);
+        let decisions = decisions
+            .iter()
+            .map(|decision| (*decision).to_owned())
+            .collect::<Vec<_>>();
+        let control_count = decisions.len();
+        let controller = std::thread::spawn(move || {
+            let deadline = MonotonicDeadline::after(Duration::from_secs(2));
+            while !observed_events
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event["event_type"] == "approval.requested")
+            {
+                assert!(!deadline.has_elapsed(), "approval event was not surfaced");
+                lillux::time::sleep(Duration::from_millis(1));
+            }
+            for (index, decision) in decisions.into_iter().enumerate() {
+                control_sender
+                    .send(PendingControl {
+                        request_id: format!("control-{index}"),
+                        body: json!({
+                            "kind":"approval_decision",
+                            "request_id":"approval-one",
+                            "request_digest":request_digest,
+                            "decision":decision,
+                            "reservation_token":format!("reservation-{index}")
+                        }),
+                    })
+                    .unwrap();
+            }
+        });
+        let mut lifecycle = BridgeLifecycle::default();
+        let mut workload = StructuredWorkload::start(
+            &mut lifecycle,
+            "/bin/sh",
+            root.path().to_str().unwrap(),
+            workload_home.to_str().unwrap(),
+            gating_approval_profile(),
+            "session".to_owned(),
+            HashSet::from([RouteEffectClass::SessionMutation]),
+            gating_approval_schemas(),
+            events,
+            controls,
+            result_sender,
+            "/bin/sh",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        workload.bound_session_id = Some("session-one".to_owned());
+        let result = workload
+            .handle(
+                json!({"route_id":"operation.run","payload":{}}),
+                root.path().to_str().unwrap(),
+            )
+            .unwrap();
+        controller.join().unwrap();
+        let outcomes = (0..control_count)
+            .map(|_| results.recv_timeout(Duration::from_secs(1)).unwrap())
+            .collect();
+        (result, outcomes, workload)
+    }
+
+    #[test]
+    fn approval_cancel_decision_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let (result, outcomes, mut workload) =
+            run_gating_approval_decisions(&root, &["cancel", "accept"]);
+        assert_eq!(result["response"]["result"], json!({"ok":true}));
+        let [(cancel_id, cancel), (accept_id, accept)] = <[_; 2]>::try_from(outcomes).unwrap();
+        assert_eq!(cancel_id, "control-0");
+        assert_eq!(
+            cancel.unwrap_err(),
+            "approval decision `cancel` is not a RyeOS-recorded decision"
+        );
+        // The refused decision left the request pending: the later accept
+        // still found and resolved it.
+        assert_eq!(accept_id, "control-1");
+        let WorkloadCommandOutput::Final(accepted) = accept.unwrap() else {
+            panic!("expected final control result")
+        };
+        assert_eq!(accepted, json!({"resolved":true}));
+
+        // The vocabulary is checked before the pending lookup and the refusal
+        // is typed.
+        let refused = workload
+            .handle_approval(
+                json!({"operation":"approval","requestId":"approval-absent","decision":"cancel"})
+                    .as_object()
+                    .unwrap(),
+                &"d".repeat(64),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            refused.downcast_ref::<RefusalClass>(),
+            Some(RefusalClass::UnrecordedApprovalDecision)
+        ));
+        assert!(
+            refused
+                .to_string()
+                .contains("approval decision `cancel` is not a RyeOS-recorded decision")
+        );
+    }
+
+    #[test]
+    fn retired_profile_schema_is_refused_before_decode() {
+        use ryeos_engine::structured_session_profile::StructuredSessionProfileSchemaRefusal;
+        let mut profile = json!({"schema_version":11,"server_requests":[{
+            "responses":{"cancel":{"op":"literal","value":null}}
+        }]});
+        let refusal = require_current_profile_schema(&profile).unwrap_err();
+        assert_eq!(
+            refusal.downcast_ref::<StructuredSessionProfileSchemaRefusal>(),
+            Some(&StructuredSessionProfileSchemaRefusal { found: Some(11) })
+        );
+        assert!(refusal.to_string().contains("Cure: migrate the profile"));
+        profile["schema_version"] = json!(
+            ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION
+        );
+        require_current_profile_schema(&profile).unwrap();
+    }
+
+    #[test]
+    fn approval_accept_and_decline_still_deliver() {
+        for decision in ["accept", "decline"] {
+            let root = tempfile::tempdir().unwrap();
+            let (result, outcomes, _workload) = run_gating_approval_decisions(&root, &[decision]);
+            assert_eq!(result["response"]["result"], json!({"ok":true}));
+            let [(control_id, outcome)] = <[_; 1]>::try_from(outcomes).unwrap();
+            assert_eq!(control_id, "control-0");
+            let WorkloadCommandOutput::Final(resolved) = outcome.unwrap() else {
+                panic!("expected final control result")
+            };
+            assert_eq!(resolved, json!({"resolved":true}), "decision {decision}");
+        }
+    }
+
     #[test]
     fn in_flight_upstream_call_services_a_gating_approval() {
         let root = tempfile::tempdir().unwrap();
@@ -5035,30 +6405,90 @@ mod tests {
         assert!(!schema_error.contains(sentinel));
         assert!(schema_error.contains("instance digest"));
 
+        // More expiries than the old 128-entry ring, none of them acknowledged
+        // yet: the first is still remembered as expired.
         let expired_digest = "a".repeat(64);
-        workload
-            .expired_server_requests
-            .push_back(ExpiredServerRequest {
-                id: canonical_id(&json!("approval-expired")).unwrap(),
-                request_digest: expired_digest.clone(),
-            });
-        let expired_request = json!({
-            "operation":"approval",
-            "requestId":"approval-expired",
-            "decision":"decline",
-        });
+        let mut expiry_sequences = Vec::new();
+        for index in 0..200 {
+            let event_sequence = workload
+                .push_sequenced_event(json!({"event_type":"approval.expired","payload":{}}))
+                .unwrap();
+            expiry_sequences.push(event_sequence);
+            workload
+                .expired_server_requests
+                .push_back(ExpiredServerRequest {
+                    id: canonical_id(&json!(format!("approval-expired-{index}"))).unwrap(),
+                    request_digest: expired_digest.clone(),
+                    event_sequence,
+                });
+            let acknowledged_through = workload.events.lock().unwrap().acknowledged_through;
+            prune_expired_server_requests(
+                &mut workload.expired_server_requests,
+                acknowledged_through,
+            )
+            .unwrap();
+        }
+        assert_eq!(workload.expired_server_requests.len(), 200);
+        let late_decision = |index: usize| {
+            json!({
+                "operation":"approval",
+                "requestId":format!("approval-expired-{index}"),
+                "decision":"decline",
+            })
+        };
         let expired = workload
-            .handle_approval(expired_request.as_object().unwrap(), &expired_digest)
+            .handle_approval(late_decision(0).as_object().unwrap(), &expired_digest)
             .unwrap();
         assert_eq!(
             expired,
             json!({
                 "resolved":false,
                 "outcome":"expired",
-                "request_id":"approval-expired",
+                "request_id":"approval-expired-0",
                 "request_digest":expired_digest,
             })
         );
+        // As soon as RyeOS acknowledges an expiry event, that entry is
+        // forgotten: a late decision for it gets the typed `absent` answer,
+        // while expiries not yet acknowledged still answer `expired`.
+        workload
+            .events
+            .lock()
+            .unwrap()
+            .acknowledge_observations(expiry_sequences[99])
+            .unwrap();
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(0).as_object().unwrap(), &expired_digest)
+                .unwrap(),
+            json!({
+                "resolved":false,
+                "outcome":"absent",
+                "request_id":"approval-expired-0",
+                "request_digest":expired_digest,
+            })
+        );
+        assert_eq!(workload.expired_server_requests.len(), 100);
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(100).as_object().unwrap(), &expired_digest)
+                .unwrap()["outcome"],
+            "expired"
+        );
+        let pushed_through = workload.events.lock().unwrap().pushed_through;
+        workload
+            .events
+            .lock()
+            .unwrap()
+            .acknowledge_observations(pushed_through)
+            .unwrap();
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(199).as_object().unwrap(), &expired_digest)
+                .unwrap()["outcome"],
+            "absent"
+        );
+        assert!(workload.expired_server_requests.is_empty());
 
         let reused_key = canonical_id(&json!("approval-reused")).unwrap();
         let old_digest = "b".repeat(64);
@@ -5179,6 +6609,7 @@ server.serve_forever()
             "baseline_destination":"fixture.conf",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
             "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
@@ -5250,6 +6681,45 @@ server.serve_forever()
     }
 
     #[test]
+    fn configuration_absence_refuses_before_any_workload_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let forbidden = root.path().join("ambient-config");
+        std::fs::write(&forbidden, b"private input must not be read").unwrap();
+        let mut profile = gating_approval_profile();
+        profile.configuration_absence.absolute_paths = vec![forbidden.to_str().unwrap().into()];
+        let (_, controls) = sync_channel(1);
+        let (results, _) = sync_channel(1);
+        let mut lifecycle = BridgeLifecycle::default();
+        let error = StructuredWorkload::start(
+            &mut lifecycle,
+            "/deliberately-absent-executable",
+            root.path().to_str().unwrap(),
+            root.path().to_str().unwrap(),
+            profile,
+            "session".into(),
+            HashSet::new(),
+            HashMap::new(),
+            Arc::new(Mutex::new(EventQueue::default())),
+            controls,
+            results,
+            "unused",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .err()
+        .expect("present ambient configuration must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("configuration absence requires an absent entry")
+        );
+        assert!(lifecycle.process.is_none());
+        assert!(lifecycle.diagnostics.is_none());
+        assert!(lifecycle.executable_authorities.is_empty());
+    }
+
+    #[test]
     fn startup_failure_retains_child_and_diagnostic_owners() {
         let root = tempfile::tempdir().unwrap();
         let mut profile = http_sse_profile();
@@ -5283,6 +6753,75 @@ server.serve_forever()
         assert!(lifecycle.diagnostics.is_some());
         let observed = lifecycle.shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE));
         assert!(observed.settled(), "{observed:?}");
+    }
+
+    #[test]
+    fn refused_workload_notification_leaves_a_bounded_method_only_event() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = gating_approval_profile();
+        profile.workload_args = vec![
+            "-c".to_owned(),
+            "printf '%s\\n' '{\"ready\":true}'; IFS= read -r value".to_owned(),
+        ];
+        let (_, controls) = sync_channel(1);
+        let (results, _) = sync_channel(1);
+        let events = Arc::new(Mutex::new(EventQueue::default()));
+        let mut lifecycle = BridgeLifecycle::default();
+        let mut workload = StructuredWorkload::start(
+            &mut lifecycle,
+            "/bin/sh",
+            root.path().to_str().unwrap(),
+            root.path().to_str().unwrap(),
+            profile,
+            "session".to_owned(),
+            HashSet::new(),
+            HashMap::new(),
+            Arc::clone(&events),
+            controls,
+            results,
+            "/bin/sh",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let error = workload
+            .route(json!({
+                "method":"turn/moderationMetadata",
+                "params":{"body":"credential-bearing-payload"}
+            }))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown structured-session notification `turn/moderationMetadata`")
+        );
+        assert!(error.downcast_ref::<RefusalClass>().is_some());
+        let (batch, _, _) = events
+            .lock()
+            .unwrap()
+            .take_batch(128, 1, None)
+            .unwrap()
+            .expect("refusal must be queued for the daemon");
+        let event = &batch["events"][0];
+        assert_eq!(event["event_type"], "bridge.refused");
+        assert_eq!(event["payload"]["class"], "unknown_notification");
+        assert_eq!(event["payload"]["method"], "turn/moderationMetadata");
+        let wire = serde_json::to_string(&batch).unwrap();
+        assert!(!wire.contains("credential-bearing-payload"));
+        assert!(wire.len() < 2_048);
+
+        // A method that is not a plain identifier is never echoed.
+        assert!(
+            refused_method_label(&json!({"method":"bad method with spaces and \"quotes\""}))
+                .is_none()
+        );
+        assert!(refused_method_label(&json!({"method":"x".repeat(129)})).is_none());
+        assert!(
+            lifecycle
+                .shutdown_until(MonotonicDeadline::after(BRIDGE_EXIT_GRACE))
+                .settled()
+        );
     }
 
     #[test]
@@ -5451,7 +6990,6 @@ server.serve_forever()
             },
             responses: ApprovalResponses {
                 accept: ValueTemplate::Literal { value: Value::Null },
-                cancel: ValueTemplate::Literal { value: Value::Null },
                 decline: ValueTemplate::Literal { value: Value::Null },
                 expire: ValueTemplate::Literal { value: Value::Null },
             },
@@ -5486,7 +7024,6 @@ server.serve_forever()
             },
             responses: ApprovalResponses {
                 accept: ValueTemplate::Literal { value: Value::Null },
-                cancel: ValueTemplate::Literal { value: Value::Null },
                 decline: ValueTemplate::Literal { value: Value::Null },
                 expire: ValueTemplate::Literal { value: Value::Null },
             },
@@ -5561,6 +7098,54 @@ server.serve_forever()
             .is_err(),
             "a file realization must not discard an executable-member prefix"
         );
+    }
+
+    #[test]
+    fn captured_single_file_is_a_workload_executable_and_nothing_else_captured_is() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("fixture-worker");
+        std::fs::write(&executable, b"fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let sealed = |kind: &str, mode: &str, entries: u64| {
+            serde_json::to_string(&json!([{
+                "id":"fixture",
+                "kind":kind,
+                "mode":mode,
+                "manifest_hash":"a".repeat(64),
+                "entry_count":entries,
+                "total_bytes":7,
+                "mount_root":"project",
+                "mount":"fixture-worker"
+            }]))
+            .unwrap()
+        };
+        let resolve = |sealed: &str| {
+            resolve_pinned_executable(
+                root.path(),
+                sealed,
+                "fixture",
+                std::path::Path::new("fixture-worker"),
+            )
+        };
+        let (descriptor, argv0, authorities) = resolve(&sealed("file", "captured", 1)).unwrap();
+        assert_eq!(std::fs::read(descriptor).unwrap(), b"fixture");
+        assert_eq!(argv0.file_name().unwrap(), "fixture-worker");
+        assert_eq!(authorities.len(), 2);
+        assert!(
+            resolve(&sealed("file", "captured", 2)).is_err(),
+            "a captured file manifest holds exactly one entry"
+        );
+        assert!(
+            resolve(&sealed("file", "captured", 0)).is_err(),
+            "an empty captured manifest is not an executable"
+        );
+        assert!(
+            resolve(&sealed("tree", "captured", 1)).is_err(),
+            "a captured tree is never a workload executable"
+        );
+        assert!(resolve(&sealed("file", "pinned", 1)).is_ok());
     }
 
     #[test]
@@ -5757,6 +7342,7 @@ server.serve_forever()
             "fixture",
             std::path::Path::new("worker"),
             delivery,
+            &RetainedRealizationFiles::default(),
         )
         .unwrap();
         let search = json!([{"realization_id":"fixture", "relative_directory":"bin"}]).to_string();
@@ -5771,14 +7357,17 @@ server.serve_forever()
             "kind":"realization_path", "realization_id":"fixture",
             "relative_path":"worker", "path_kind":"file"
         }}));
-        let (environment, environment_handles) = resolve_session_process_environment_with_delivery(
-            runtime.path(),
-            runtime.path(),
-            &sealed,
-            Some(&bindings),
-            delivery,
-        )
-        .unwrap();
+        let (environment, environment_handles, _) =
+            resolve_session_process_environment_with_delivery(
+                runtime.path(),
+                runtime.path(),
+                &sealed,
+                Some(&bindings),
+                delivery,
+                &RetainedRealizationFiles::default(),
+                None,
+            )
+            .unwrap();
 
         assert_eq!(std::fs::read(executable).unwrap(), b"worker");
         assert!(argv0.starts_with("/proc/self/fd"));
@@ -5795,6 +7384,134 @@ server.serve_forever()
             ),
             (2, 1, 1)
         );
+    }
+
+    fn delivered_file_authority(
+        directory: &std::path::Path,
+        mode: u32,
+    ) -> (lillux::InheritedDescriptorAuthority, std::path::PathBuf) {
+        let path = directory.join("harness");
+        std::fs::write(&path, b"worker").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        (
+            lillux::secure_fs::inherited_readable_duplicate_of_open_regular_file(&file).unwrap(),
+            path,
+        )
+    }
+
+    fn delivered_file_fixture() -> String {
+        json!([{
+            "id":"fixture", "kind":"file", "mode":"pinned",
+            "manifest_hash":"a".repeat(64), "entry_count":1, "total_bytes":6,
+            "mount_root":"project", "mount":"bin/worker"
+        }])
+        .to_string()
+    }
+
+    #[test]
+    fn a_realization_delivered_as_its_own_descriptor_needs_no_root_or_view() {
+        use std::os::unix::fs::MetadataExt as _;
+        let source = tempfile::tempdir().unwrap();
+        let (authority, source_path) = delivered_file_authority(source.path(), 0o500);
+        let retained =
+            RetainedRealizationFiles::from_authorities([("fixture".to_owned(), authority)]);
+        let sealed = delivered_file_fixture();
+        // No root exists anywhere: the descriptor is the whole realization.
+        let absent_root = source.path().join("no-such-root");
+        let delivery = ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot;
+        let (executable, argv0, handles) = resolve_pinned_executable_with_delivery(
+            &absent_root,
+            &sealed,
+            "fixture",
+            std::path::Path::new("worker"),
+            delivery,
+            &retained,
+        )
+        .unwrap();
+        assert!(executable.starts_with("/proc/self/fd"));
+        assert_eq!(argv0, executable);
+        assert_eq!(handles.len(), 1);
+        // Running the descriptor path runs the very inode of the source.
+        assert_eq!(
+            std::fs::metadata(&executable).unwrap().ino(),
+            std::fs::metadata(&source_path).unwrap().ino()
+        );
+        let bindings = descriptor_environment_fixture(json!({"FIXTURE_FILE":{
+            "kind":"realization_path", "realization_id":"fixture",
+            "relative_path":".", "path_kind":"file"
+        }}));
+        let (environment, environment_handles, _) =
+            resolve_session_process_environment_with_delivery(
+                source.path(),
+                &absent_root,
+                &sealed,
+                Some(&bindings),
+                delivery,
+                &retained,
+                None,
+            )
+            .unwrap();
+        assert_eq!(environment["FIXTURE_FILE"], executable.to_str().unwrap());
+        assert_eq!(environment_handles.len(), 1);
+        assert_eq!(
+            std::fs::read(&environment["FIXTURE_FILE"]).unwrap(),
+            b"worker"
+        );
+    }
+
+    #[test]
+    fn a_delivered_file_refuses_a_name_mismatch_a_non_executable_and_a_sub_path() {
+        let source = tempfile::tempdir().unwrap();
+        let (authority, _) = delivered_file_authority(source.path(), 0o500);
+        let retained =
+            RetainedRealizationFiles::from_authorities([("fixture".to_owned(), authority)]);
+        let sealed = delivered_file_fixture();
+        let delivery = ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot;
+        assert!(
+            resolve_pinned_executable_with_delivery(
+                source.path(),
+                &sealed,
+                "fixture",
+                std::path::Path::new("other"),
+                delivery,
+                &retained,
+            )
+            .is_err()
+        );
+        let plain = tempfile::tempdir().unwrap();
+        let (data_only, _) = delivered_file_authority(plain.path(), 0o400);
+        let retained =
+            RetainedRealizationFiles::from_authorities([("fixture".to_owned(), data_only)]);
+        assert!(
+            resolve_pinned_executable_with_delivery(
+                source.path(),
+                &sealed,
+                "fixture",
+                std::path::Path::new("worker"),
+                delivery,
+                &retained,
+            )
+            .is_err()
+        );
+        for (relative, kind) in [("sub", "file"), (".", "directory")] {
+            let bindings = descriptor_environment_fixture(json!({"FIXTURE_FILE":{
+                "kind":"realization_path", "realization_id":"fixture",
+                "relative_path":relative, "path_kind":kind
+            }}));
+            assert!(
+                resolve_session_process_environment_with_delivery(
+                    source.path(),
+                    source.path(),
+                    &sealed,
+                    Some(&bindings),
+                    delivery,
+                    &retained,
+                    None,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -6210,5 +7927,207 @@ server.serve_forever()
                 .is_err(),
             "raw authored bindings are not prepared launch delivery"
         );
+    }
+
+    fn secret_payload(values: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({"schema": 1, "values": values})).unwrap()
+    }
+
+    fn secret_bindings() -> String {
+        descriptor_environment_fixture(json!({
+            "API_KEY": {"kind": "delivered_secret", "name": "API_KEY"},
+            "PLAIN": {"kind": "literal", "value": "visible"}
+        }))
+    }
+
+    #[test]
+    fn session_secret_payload_decodes_within_its_bounds() {
+        let secrets =
+            decode_session_secret_payload(&secret_payload(json!({"API_KEY": "token-value"})))
+                .unwrap();
+        assert_eq!(secrets["API_KEY"].as_str(), "token-value");
+    }
+
+    #[test]
+    fn session_secret_payload_refuses_bad_values_without_echoing_them() {
+        let oversize =
+            "v".repeat(ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES + 1);
+        for (payload, expected) in [
+            (secret_payload(json!({"API_KEY": oversize})), "byte bound"),
+            (
+                secret_payload(json!({"API_KEY": "line\nbreak-secret"})),
+                "control characters",
+            ),
+            (
+                secret_payload(json!({"API_KEY": "nul\u{0}-secret"})),
+                "control characters",
+            ),
+            (
+                serde_json::to_vec(&json!({"schema": 2, "values": {"API_KEY": "x-secret"}}))
+                    .unwrap(),
+                "unsupported schema",
+            ),
+            (
+                serde_json::to_vec(&json!({"schema": 1, "values": {}, "extra": "extra-secret"}))
+                    .unwrap(),
+                "malformed",
+            ),
+        ] {
+            let error = decode_session_secret_payload(&payload)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            for token in [
+                "break-secret",
+                "nul-secret",
+                "x-secret",
+                "extra-secret",
+                "vvvv",
+            ] {
+                assert!(!error.contains(token), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn delivered_secret_binding_resolves_from_the_descriptor_only() {
+        let root = tempfile::tempdir().unwrap();
+        let delivered =
+            decode_session_secret_payload(&secret_payload(json!({"API_KEY": "token-value"})))
+                .unwrap();
+        let (environment, handles, secrets) = resolve_session_process_environment_with_delivery(
+            root.path(),
+            root.path(),
+            "[]",
+            Some(&secret_bindings()),
+            ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+            &RetainedRealizationFiles::default(),
+            Some(delivered),
+        )
+        .unwrap();
+        assert!(handles.is_empty());
+        assert_eq!(
+            environment.get("PLAIN").map(String::as_str),
+            Some("visible")
+        );
+        assert!(!environment.contains_key("API_KEY"));
+        assert_eq!(secrets["API_KEY"].as_str(), "token-value");
+    }
+
+    #[test]
+    fn delivered_secret_resolution_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let resolve = |encoded: &str, delivered: Option<DeliveredSessionSecrets>| {
+            resolve_session_process_environment_with_delivery(
+                root.path(),
+                root.path(),
+                "[]",
+                Some(encoded),
+                ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+                &RetainedRealizationFiles::default(),
+                delivered,
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        let delivered = |names: &[&str]| -> DeliveredSessionSecrets {
+            names
+                .iter()
+                .map(|name| ((*name).to_owned(), Zeroizing::new("value-text".to_owned())))
+                .collect()
+        };
+        // Bindings name a secret and no descriptor arrived.
+        let error = resolve(&secret_bindings(), None);
+        assert!(error.contains("no session secret descriptor"), "{error}");
+        // A descriptor arrived and no binding names a secret.
+        let plain = descriptor_environment_fixture(json!({
+            "PLAIN": {"kind": "literal", "value": "visible"}
+        }));
+        let error = resolve(&plain, Some(delivered(&["API_KEY"])));
+        assert!(error.contains("no process environment names"), "{error}");
+        // The descriptor misses a named secret, or carries an unnamed one.
+        for names in [&["OTHER"][..], &["API_KEY", "OTHER"][..], &[][..]] {
+            let error = resolve(&secret_bindings(), Some(delivered(names)));
+            assert!(error.contains("names differ"), "{error}");
+            assert!(!error.contains("value-text"), "{error}");
+        }
+        // No environment at all, with a descriptor present.
+        assert!(
+            resolve_session_process_environment_with_delivery(
+                root.path(),
+                root.path(),
+                "[]",
+                None,
+                ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+                &RetainedRealizationFiles::default(),
+                Some(delivered(&["API_KEY"])),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn secret_descriptor_is_consumed_from_the_environment_and_read_once() {
+        const SLOT: &str = "RYEOS_TEST_SESSION_SECRET_FD_SLOT";
+        let sealed = lillux::sealed_secret_descriptor::seal_secret_payload(&secret_payload(
+            json!({"API_KEY": "token-value"}),
+        ))
+        .unwrap();
+        // The reader adopts and closes its own descriptor, so hand it a
+        // duplicate and keep the original owner intact.
+        let original = sealed.inherited_descriptor().unwrap() as i32;
+        let duplicate = unsafe { libc::fcntl(original, libc::F_DUPFD_CLOEXEC, 3) };
+        assert!(duplicate >= 3);
+        // SAFETY: this test is the only user of the slot name.
+        unsafe { std::env::set_var(SLOT, duplicate.to_string()) };
+        // SAFETY: the duplicate is uniquely owned and adopted exactly once.
+        let secrets = unsafe { read_delivered_session_secrets(SLOT) }
+            .unwrap()
+            .unwrap();
+        assert_eq!(secrets["API_KEY"].as_str(), "token-value");
+        assert!(std::env::var_os(SLOT).is_none());
+        // An absent slot delivers nothing.
+        assert!(
+            unsafe { read_delivered_session_secrets(SLOT) }
+                .unwrap()
+                .is_none()
+        );
+        drop(sealed);
+    }
+
+    #[test]
+    fn workload_launch_does_not_inherit_the_secret_descriptor() {
+        let sealed =
+            lillux::sealed_secret_descriptor::seal_secret_payload(b"secret-bytes").unwrap();
+        let number = sealed.inherited_descriptor().unwrap();
+        let probe = |present: bool, inherited: Vec<lillux::InheritedDescriptorAuthority>| {
+            let check = if present { "" } else { "! " };
+            let mut process =
+                lillux::SubordinateProcess::spawn(lillux::SubordinateProcessRequest {
+                    cmd: "/bin/sh".to_owned(),
+                    argv0: None,
+                    args: vec![
+                        "-c".to_owned(),
+                        format!("test {check}-e /proc/self/fd/{number}"),
+                    ],
+                    cwd: "/".to_owned(),
+                    envs: Vec::new(),
+                    limits: None,
+                    inherited_fds: inherited,
+                })
+                .unwrap();
+            process
+                .wait_exact_child_until(MonotonicDeadline::after(Duration::from_secs(10)))
+                .unwrap()
+                .expect("probe exits")
+                .success
+        };
+        // The launch the bridge performs for its workload retains only the
+        // pinned executable authorities, never the secret descriptor.
+        assert!(probe(false, Vec::new()));
+        // Control: an explicitly retained descriptor is visible to the child,
+        // so the absence above is the close-on-exec protection and not a
+        // property of the probe.
+        assert!(probe(true, vec![sealed.clone()]));
     }
 }

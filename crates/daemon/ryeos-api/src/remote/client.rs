@@ -12,8 +12,10 @@ use lillux::crypto::Verifier;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-use ryeos_app::identity::NodeIdentity;
+use crate::objects_read_scope::ReadRoot;
 use ryeos_app::state::AppState;
+use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::remote_delegation::DelegationError;
 use ryeos_state::ignore::IgnoreConfig;
 
 const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
@@ -62,6 +64,15 @@ pub fn map_remote_call_error(
     let status = http.status.as_u16();
     let remote_body = serde_json::from_str::<Value>(&http.body)
         .unwrap_or_else(|_| Value::String(http.body.clone()));
+    // The remote's own typed refusal says whether reissuing can succeed; the
+    // wrapper follows it. Only a body that does not say falls back to the
+    // status class.
+    let retryable = remote_body
+        .get("retryable")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            http.status.is_server_error() || http.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        });
     crate::handler_error::HandlerError::Structured {
         code: "remote_http_error".to_owned(),
         status,
@@ -74,8 +85,7 @@ pub fn map_remote_call_error(
                 "status":status,
                 "body":remote_body,
             },
-            "retryable":http.status.is_server_error()
-                || http.status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "retryable":retryable,
         }),
     }
 }
@@ -85,6 +95,8 @@ pub fn map_remote_call_error(
 /// keep enough to diagnose without bloating logs and error chains.
 const ERROR_BODY_EXCERPT_MAX: usize = 16 * 1024;
 const DEFAULT_JSON_RESPONSE_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Product-transport service responses carry hash lists, not payload bytes.
+const DEFAULT_SERVICE_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 fn truncate_error_body(body: &str) -> String {
     if body.len() <= ERROR_BODY_EXCERPT_MAX {
@@ -192,6 +204,148 @@ async fn read_json_checked_with_limit(
         .with_context(|| format!("{method} {url}: failed to parse response as JSON"))
 }
 
+/// Bounded response reader for endpoints that must inspect per-entry raw JSON
+/// bytes before materializing their values.
+async fn read_raw_json_checked_with_limit(
+    method: &'static str,
+    url: &str,
+    mut resp: reqwest::Response,
+    maximum: usize,
+) -> Result<Vec<u8>> {
+    if maximum == 0 {
+        bail!("{method} {url}: response byte limit must be greater than zero");
+    }
+    let status = resp.status();
+    if status.is_success() && resp.content_length().is_some_and(|n| n > maximum as u64) {
+        bail!("{method} {url}: response Content-Length exceeds {maximum} byte limit");
+    }
+    let cap = if status.is_success() {
+        maximum
+    } else {
+        ERROR_BODY_EXCERPT_MAX
+    };
+    let mut body = Vec::with_capacity(
+        resp.content_length()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
+            .min(cap),
+    );
+    let mut truncated = false;
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .with_context(|| format!("{method} {url}: failed to read response body"))?
+    {
+        let remaining = cap.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            if status.is_success() {
+                bail!("{method} {url}: response body exceeds {maximum} byte limit");
+            }
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&body);
+        return Err(RemoteHttpError {
+            method,
+            url: url.to_owned(),
+            status,
+            body: if truncated {
+                format!("{text}… [truncated after {ERROR_BODY_EXCERPT_MAX} bytes]")
+            } else {
+                truncate_error_body(&text)
+            },
+        }
+        .into());
+    }
+    Ok(body)
+}
+
+fn decode_raw_object_value(
+    hash: &str,
+    raw: &serde_json::value::RawValue,
+) -> Result<(Value, Vec<u8>)> {
+    let bytes = raw.get().as_bytes();
+    if bytes.len() > 32 * 1024 * 1024 {
+        bail!("remote CAS object {hash} exceeds the 32 MiB raw object limit");
+    }
+    let capsule = lillux::cas::json_object_is_capsule_kind(bytes)
+        .context("object value must be a JSON object with unambiguous kind")?;
+    if capsule && bytes.len() > 16 * 1024 * 1024 {
+        bail!("remote capsule object {hash} exceeds the 16 MiB raw capsule limit");
+    }
+    if lillux::sha256_hex(bytes) != hash {
+        bail!("remote CAS object {hash} does not match its raw content address");
+    }
+    let value: Value = serde_json::from_slice(bytes)?;
+    if lillux::canonical_json_bounded(&value, bytes.len())?.as_slice() != bytes {
+        bail!("remote CAS object {hash} is not canonical JSON");
+    }
+    Ok((value, bytes.to_vec()))
+}
+
+fn base64_json_string_max_len(max_decoded_bytes: u64) -> Result<usize> {
+    let encoded = max_decoded_bytes
+        .checked_add(2)
+        .context("base64 byte ceiling overflow")?
+        .checked_div(3)
+        .context("base64 byte ceiling overflow")?
+        .checked_mul(4)
+        .context("base64 encoded ceiling overflow")?;
+    usize::try_from(encoded)
+        .context("base64 encoded ceiling exceeds this platform")?
+        .checked_add(2)
+        .context("base64 JSON string ceiling overflow")
+}
+
+fn decode_bounded_base64_json_string(
+    raw: &serde_json::value::RawValue,
+    max_decoded_bytes: u64,
+) -> Result<String> {
+    let encoded_max = base64_json_string_max_len(max_decoded_bytes)?;
+    let raw_text = raw.get();
+    if raw_text.len() > encoded_max {
+        bail!("remote base64 blob exceeds its admitted encoded byte ceiling");
+    }
+    let data: String =
+        serde_json::from_str(raw_text).context("remote blob data is not a JSON string")?;
+    if data.len() > encoded_max.saturating_sub(2) || raw_text.len() != data.len().saturating_add(2)
+    {
+        bail!("remote blob data exceeds its admitted encoded byte ceiling");
+    }
+    Ok(data)
+}
+
+fn base64_json_entries_max_len(max_decoded_bytes: u64, max_entries: usize) -> Result<usize> {
+    let entries = u64::try_from(max_entries).context("blob count exceeds u64")?;
+    let rounded_input = max_decoded_bytes
+        .checked_add(
+            entries
+                .checked_mul(2)
+                .context("blob count ceiling overflow")?,
+        )
+        .context("aggregate blob byte ceiling overflow")?;
+    let encoded = rounded_input
+        .checked_add(2)
+        .context("aggregate base64 ceiling overflow")?
+        .checked_div(3)
+        .context("aggregate base64 ceiling overflow")?
+        .checked_mul(4)
+        .context("aggregate base64 ceiling overflow")?;
+    let quotes = entries
+        .checked_mul(2)
+        .context("aggregate quote ceiling overflow")?;
+    usize::try_from(
+        encoded
+            .checked_add(quotes)
+            .context("aggregate base64 ceiling overflow")?,
+    )
+    .context("aggregate base64 ceiling exceeds this platform")
+}
+
 /// Cap on establishing a TCP/TLS connection to a remote. Applies to
 /// every request; without it a dead or filtered remote hangs callers
 /// for the OS connect timeout (minutes).
@@ -212,6 +366,60 @@ const CONTROL_PLANE_TIMEOUT: lillux::time::Duration = lillux::time::Duration::fr
 const BUNDLE_TRANSFER_REQUEST_TIMEOUT: lillux::time::Duration =
     lillux::time::Duration::from_secs(5 * 60);
 
+/// The fingerprint of the caller a delegated outbound call acts for. Only a
+/// verified local caller may delegate: a caller that itself arrived through a
+/// remote node has no delegation to this node to present onward.
+pub fn delegator_fingerprint(
+    context: &crate::handler_context::HandlerContext,
+) -> Result<String, DelegationError> {
+    if context.authenticated_origin_site_id.is_some() || context.delegated_via.is_some() {
+        return Err(DelegationError::NotTransitive);
+    }
+    context
+        .require_verified()
+        .map_err(|error| DelegationError::Malformed(error.to_string()))?;
+    let fingerprint = context
+        .fingerprint
+        .strip_prefix("fp:")
+        .filter(|value| lillux::valid_hash(value))
+        .ok_or_else(|| {
+            DelegationError::Malformed("the caller is not a fingerprinted principal".to_owned())
+        })?;
+    Ok(fingerprint.to_owned())
+}
+
+/// The delegation stored for `(delegator, remote)`, required to be exactly the
+/// one a durable operation retained.
+pub fn require_retained_delegation(
+    state: &AppState,
+    remote_name: &str,
+    delegator_fingerprint: &str,
+    delegation_digest: &str,
+) -> Result<ryeos_node_runtime::remote_delegation::SignedDelegation> {
+    let delegation = ryeos_node_runtime::remote_delegation::load_delegation(
+        &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).delegations_dir(),
+        delegator_fingerprint,
+        remote_name,
+        &state.identity,
+    )?
+    .ok_or_else(|| {
+        anyhow::Error::new(DelegationError::Missing {
+            delegator: format!("fp:{delegator_fingerprint}"),
+            remote: remote_name.to_owned(),
+        })
+    })?;
+    let current = delegation.digest()?;
+    if current != delegation_digest {
+        return Err(anyhow::Error::new(DelegationError::Replaced {
+            delegator: format!("fp:{delegator_fingerprint}"),
+            remote: remote_name.to_owned(),
+            current,
+            retained: delegation_digest.to_owned(),
+        }));
+    }
+    Ok(delegation)
+}
+
 /// Typed client for a remote ryEOS node.
 pub struct RemoteClient {
     /// Base URL (e.g. `https://ryeos.example.com`).
@@ -224,14 +432,17 @@ pub struct RemoteClient {
     identity: Arc<NodeIdentity>,
     /// Local site identity used by the self-signed node admission claim.
     origin_site_id: Option<String>,
-    /// Configured-operator forwarding requires the target grant to preserve
-    /// this source site. Ordinary node-key clients remain compatible with
-    /// existing direct grants and do not add this narrowing assertion.
+    /// Delegated forwarding requires the target to preserve this source site.
+    /// Ordinary node-key clients remain compatible with existing direct grants
+    /// and do not add this narrowing assertion.
     required_forwarding_origin_site_id: Option<String>,
-    /// Source RyeOS node identity that co-signs configured-operator requests.
-    /// The target admits this key independently as `remote_node`; its proof is
-    /// what turns the configured site constraint into transport provenance.
+    /// Source RyeOS node identity that co-signs delegated requests. The target
+    /// admits this key independently as `remote_node`; its proof is what turns
+    /// the source site into transport provenance.
     forwarding_identity: Option<Arc<NodeIdentity>>,
+    /// The principal-signed delegation this client presents with every
+    /// request, when it acts for a principal rather than for the node.
+    delegation: Option<ryeos_node_runtime::remote_delegation::SignedDelegation>,
 }
 
 impl RemoteClient {
@@ -253,6 +464,7 @@ impl RemoteClient {
             origin_site_id: None,
             required_forwarding_origin_site_id: None,
             forwarding_identity: None,
+            delegation: None,
         }
     }
 
@@ -263,93 +475,126 @@ impl RemoteClient {
 
     /// Build a client from a named remote config + app state.
     ///
-    /// Looks up `remote_name` in the layered remotes config
-    /// (project overrides user). Pass `Some(project_path)` when
-    /// the caller is acting in the context of a local project so
-    /// project-level remote definitions are honored.
-    pub fn from_named_remote(
-        state: &AppState,
-        remote_name: &str,
-        project_path: Option<&std::path::Path>,
-    ) -> Result<Self> {
-        let remotes = super::config::load_remotes_layered(&state.config.app_root, project_path)?;
+    /// Looks up `remote_name` among the node-signed remote pins. A project
+    /// never contributes remotes.
+    pub fn from_named_remote(state: &AppState, remote_name: &str) -> Result<Self> {
+        let remotes = super::config::load_remotes(&state.config.app_root)?;
         let remote = super::config::get_remote(&remotes, remote_name)?;
-        Ok(Self::from_remote_cfg(state, &remote))
+        Ok(Self::from_remote_cfg(state, &remote)?)
     }
 
     /// Build a client from an already-resolved `RemoteConfig`.
-    /// Callers that need project layering should resolve via
-    /// [`super::config::load_remotes_layered`] first.
-    pub fn from_remote_cfg(state: &AppState, remote: &super::config::RemoteConfig) -> Self {
-        let mut client = Self::new(&remote.url, &remote.principal_id, state.identity.clone());
+    /// Resolve it from [`super::config::load_remotes`] first.
+    ///
+    /// Refuses an inbound-only remote with `remote_inbound_only`: this node
+    /// never dials it.
+    pub fn from_remote_cfg(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+    ) -> Result<Self, super::config::RemotePinError> {
+        let mut client = Self::new(
+            remote.outbound_url()?,
+            &remote.principal_id,
+            state.identity.clone(),
+        );
         client.origin_site_id = Some(state.threads.site_id().to_string());
-        client
+        Ok(client)
     }
 
-    /// Build an outbound client that preserves the already-authenticated
-    /// configured-operator principal across a remote transport hop.
+    /// Build an outbound client that acts for the authenticated caller under
+    /// the delegation the caller signed for this remote.
     ///
-    /// Normal node-to-node operations use [`Self::from_remote_cfg`] and are
-    /// owned by the source node principal. Durable operator-owned workflows
-    /// must instead keep the same principal for project HEAD, credential, and
-    /// later control operations. Requiring the authenticated handler context
-    /// here prevents a merely delegated remote-service capability from turning
-    /// the daemon's operator key into a signing oracle.
-    pub fn from_remote_cfg_as_configured_operator(
+    /// The node key signs and co-signs the request; the caller's own signed
+    /// delegation rides in `x-ryeos-delegation`, and the remote admits the
+    /// caller from its own grants and caps the request to the delegation. The
+    /// daemon never holds the caller's key. A caller that arrived through a
+    /// delegation cannot delegate onward, and the node itself has no
+    /// delegation to present, so it uses [`Self::from_remote_cfg`].
+    pub fn from_remote_cfg_as_delegated(
         state: &AppState,
         remote: &super::config::RemoteConfig,
         context: &crate::handler_context::HandlerContext,
     ) -> Result<Self> {
-        ryeos_app::operator_authority::require_local_configured_operator(state, context)
-            .context("configured operator required for operator-owned remote execution")?;
-        let identity = Arc::new(
-            NodeIdentity::load(&state.config.operator_signing_key_path)
-                .context("load configured operator identity for remote execution")?,
-        );
-        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        let fingerprint = delegator_fingerprint(context)?;
+        let delegation = ryeos_node_runtime::remote_delegation::load_delegation(
+            &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).delegations_dir(),
+            &fingerprint,
+            &remote.name,
+            &state.identity,
+        )?
+        .ok_or_else(|| {
+            anyhow::Error::new(DelegationError::Missing {
+                delegator: format!("fp:{fingerprint}"),
+                remote: remote.name.clone(),
+            })
+        })?;
+        Self::with_delegation(state, remote, delegation)
+    }
+
+    /// Re-open the delegated transport for one already-authorized durable
+    /// operation.
+    ///
+    /// The operation retained the delegator and the exact delegation digest.
+    /// This constructor requires the stored delegation to still be that
+    /// delegation and still in force, so recovery cannot continue under a
+    /// replaced, lapsed or removed delegation, and cannot act for a principal
+    /// that never delegated.
+    pub fn from_remote_cfg_as_retained_delegated(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+        delegator_fingerprint: &str,
+        delegation_digest: &str,
+    ) -> Result<Self> {
+        let delegation = require_retained_delegation(
+            state,
+            &remote.name,
+            delegator_fingerprint,
+            delegation_digest,
+        )?;
+        Self::with_delegation(state, remote, delegation)
+    }
+
+    fn with_delegation(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+        delegation: ryeos_node_runtime::remote_delegation::SignedDelegation,
+    ) -> Result<Self> {
         let site_id = state.threads.site_id().to_string();
-        client.origin_site_id = Some(site_id.clone());
+        let node = state.identity.principal_id();
+        delegation
+            .validate_at(
+                lillux::time::unix_secs_now(),
+                ryeos_node_runtime::remote_delegation::DelegationParties {
+                    delegate_site: &site_id,
+                    delegate_node: &node,
+                    audience_site: &remote.site_id,
+                    audience_node: &remote.principal_id,
+                },
+            )
+            .map_err(|error| match error {
+                DelegationError::Expired {
+                    delegator,
+                    not_after,
+                    ..
+                } => DelegationError::Expired {
+                    delegator,
+                    remote: remote.name.clone(),
+                    not_after,
+                },
+                other => other,
+            })?;
+        let mut client = Self::from_remote_cfg(state, remote)?;
         client.required_forwarding_origin_site_id = Some(site_id);
         client.forwarding_identity = Some(state.identity.clone());
+        client.delegation = Some(delegation);
         Ok(client)
     }
 
-    /// Re-open the configured-operator transport for one already-authorized
-    /// durable operation.
-    ///
-    /// The caller must retain both the exact configured-operator fingerprint
-    /// and the node-signed grant digest in its immutable job operation. This
-    /// constructor revalidates those facts before loading the key, so daemon
-    /// recovery cannot survive grant replacement/revocation or use the
-    /// operator identity for a newly invented request.
-    pub fn from_remote_cfg_as_retained_configured_operator(
-        state: &AppState,
-        remote: &super::config::RemoteConfig,
-        operator_fingerprint: &str,
-        operator_authority_digest: &str,
-    ) -> Result<Self> {
-        let current = ryeos_app::operator_authority::admitted_operator_authority_digest(
-            state,
-            operator_fingerprint,
-        )?;
-        if current != operator_authority_digest {
-            anyhow::bail!(
-                "retained configured-operator operation no longer has its exact node-signed grant"
-            );
-        }
-        let identity = Arc::new(
-            NodeIdentity::load(&state.config.operator_signing_key_path)
-                .context("load configured operator identity for durable remote operation")?,
-        );
-        if identity.fingerprint() != operator_fingerprint {
-            anyhow::bail!("retained remote operation belongs to another configured operator");
-        }
-        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
-        let site_id = state.threads.site_id().to_string();
-        client.origin_site_id = Some(site_id.clone());
-        client.required_forwarding_origin_site_id = Some(site_id);
-        client.forwarding_identity = Some(state.identity.clone());
-        Ok(client)
+    /// The digest of the delegation this client presents, when it presents one.
+    pub fn delegation_digest(&self) -> Option<String> {
+        self.delegation
+            .as_ref()
+            .and_then(|delegation| delegation.digest().ok())
     }
 
     /// GET /public-key (no auth required).
@@ -425,6 +670,7 @@ impl RemoteClient {
     /// one namespace never satisfies a request for the other namespace.
     pub async fn objects_has(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsHasResponse> {
@@ -432,14 +678,16 @@ impl RemoteClient {
             && typed_hashes_request_body_size(object_hashes, blob_hashes)
                 <= HASH_REQUEST_BODY_BUDGET_BYTES
         {
-            return self.objects_has_once(object_hashes, blob_hashes).await;
+            return self
+                .objects_has_once(root, object_hashes, blob_hashes)
+                .await;
         }
 
         let mut response = ObjectsHasResponse::default();
         for chunk in
             chunk_typed_hashes_for_body_budget(object_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
         {
-            let part = self.objects_has_once(&chunk, &[]).await?;
+            let part = self.objects_has_once(root, &chunk, &[]).await?;
             response
                 .found_object_hashes
                 .extend(part.found_object_hashes);
@@ -449,7 +697,7 @@ impl RemoteClient {
         }
         for chunk in chunk_typed_hashes_for_body_budget(blob_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
         {
-            let part = self.objects_has_once(&[], &chunk).await?;
+            let part = self.objects_has_once(root, &[], &chunk).await?;
             response.found_blob_hashes.extend(part.found_blob_hashes);
             response
                 .missing_blob_hashes
@@ -461,10 +709,12 @@ impl RemoteClient {
 
     async fn objects_has_once(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsHasResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": object_hashes,
             "blob_hashes": blob_hashes,
         });
@@ -528,6 +778,79 @@ impl RemoteClient {
         })
     }
 
+    /// POST `/objects/put` while preserving already-validated canonical object
+    /// JSON bytes inside the signed request body.
+    pub async fn objects_put_raw(
+        &self,
+        staging_id: Option<&str>,
+        project_path: &str,
+        blobs: &[BlobUpload],
+        objects: &[RawObjectUpload],
+    ) -> Result<ObjectsPutResponse> {
+        #[derive(serde::Serialize)]
+        struct RawEntry<'a> {
+            value: &'a serde_json::value::RawValue,
+        }
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            staging_id: Option<&'a str>,
+            project_path: &'a str,
+            blobs: &'a [BlobUpload],
+            blob_chunks: &'static [BlobChunkUpload],
+            objects: Vec<RawEntry<'a>>,
+        }
+        let request = Request {
+            staging_id,
+            project_path,
+            blobs,
+            blob_chunks: &[],
+            objects: objects
+                .iter()
+                .map(|entry| RawEntry {
+                    value: &entry.value,
+                })
+                .collect(),
+        };
+        let resp = self
+            .signed_post_serializable_with_response_limit(
+                "/objects/put",
+                &request,
+                DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        Ok(ObjectsPutResponse {
+            staging_id: resp["staging_id"]
+                .as_str()
+                .context("objects/put response missing staging_id")?
+                .to_string(),
+            expected_previous_hash: match resp.get("expected_previous_hash") {
+                Some(Value::String(hash)) => Some(hash.clone()),
+                Some(Value::Null) => None,
+                _ => anyhow::bail!("objects/put response missing nullable expected_previous_hash"),
+            },
+            blob_hashes: resp["blob_hashes"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            object_hashes: resp["object_hashes"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
     pub async fn objects_put_blob_chunk(
         &self,
         staging_id: &str,
@@ -580,10 +903,12 @@ impl RemoteClient {
     /// Server returns `{ "entries": [{ "hash": "...", "kind": "blob"|"object"|"missing", ... }] }`.
     pub async fn objects_get(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit(
+            root,
             object_hashes,
             blob_hashes,
             DEFAULT_JSON_RESPONSE_MAX_BYTES,
@@ -593,11 +918,13 @@ impl RemoteClient {
 
     pub async fn objects_get_blob_chunk(
         &self,
+        root: &ReadRoot,
         hash: &str,
         offset: u64,
         length: usize,
     ) -> Result<BlobChunkResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": [],
             "blob_hashes": [],
             "blob_chunk": {"hash": hash, "offset": offset, "length": length},
@@ -624,6 +951,7 @@ impl RemoteClient {
     /// JSON body or heap allocation. Returns the verified byte count.
     pub async fn stream_blob<W: std::io::Write>(
         &self,
+        root: &ReadRoot,
         hash: &str,
         destination: &mut W,
     ) -> Result<u64> {
@@ -638,6 +966,7 @@ impl RemoteClient {
         loop {
             let chunk = self
                 .objects_get_blob_chunk(
+                    root,
                     hash,
                     offset,
                     crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
@@ -675,16 +1004,210 @@ impl RemoteClient {
         Ok(offset)
     }
 
+    /// Read one bounded range of a large object from the remote's
+    /// large-object store. The response is validated against the exact
+    /// requested range before it is returned.
+    pub async fn objects_get_large_object_chunk(
+        &self,
+        root: &ReadRoot,
+        hash: &str,
+        offset: u64,
+        length: usize,
+    ) -> Result<BlobChunkResponse> {
+        let body = serde_json::json!({
+            "root": root,
+            "object_hashes": [],
+            "blob_hashes": [],
+            "large_object_chunk": {"hash": hash, "offset": offset, "length": length},
+        });
+        let response = self
+            .signed_post_with_response_limit(
+                "/objects/get",
+                &body,
+                length.saturating_mul(2).saturating_add(4096),
+            )
+            .await?;
+        let chunk: BlobChunkResponse = serde_json::from_value(
+            response
+                .get("large_object_chunk")
+                .cloned()
+                .context("objects/get response missing large_object_chunk")?,
+        )?;
+        chunk.validate_kind("large_object_chunk", hash, offset, length)?;
+        Ok(chunk)
+    }
+
+    /// Stream one large object from byte zero through bounded authenticated
+    /// responses into `sink`. The sink receives each verified-in-order slice;
+    /// the whole-file digest is checked once the final chunk arrives, so a
+    /// sink must treat its output as provisional until this returns `Ok`.
+    /// Returns the byte count.
+    pub async fn stream_large_object<F>(
+        &self,
+        root: &ReadRoot,
+        hash: &str,
+        mut sink: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&[u8]) -> Result<()>,
+    {
+        use sha2::{Digest as _, Sha256};
+
+        if !is_canonical_hash(hash) {
+            anyhow::bail!("cannot stream an invalid large-object hash");
+        }
+        let mut offset = 0_u64;
+        let mut declared_total = None;
+        let mut digest = Sha256::new();
+        loop {
+            let chunk = self
+                .objects_get_large_object_chunk(
+                    root,
+                    hash,
+                    offset,
+                    crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
+                )
+                .await?;
+            if chunk.kind == "missing" {
+                anyhow::bail!("remote large object {hash} is absent");
+            }
+            let total = chunk
+                .total_size
+                .context("remote large-object chunk omitted total size")?;
+            if declared_total
+                .replace(total)
+                .is_some_and(|prior| prior != total)
+            {
+                anyhow::bail!("remote large object changed size during transfer");
+            }
+            let bytes = chunk.decoded_data()?;
+            sink(&bytes)?;
+            digest.update(&bytes);
+            offset = offset
+                .checked_add(u64::try_from(bytes.len())?)
+                .context("remote large-object transfer size overflow")?;
+            if chunk.eof == Some(true) {
+                if offset != total {
+                    anyhow::bail!("remote large-object EOF contradicts its total size");
+                }
+                break;
+            }
+        }
+        let actual = format!("{:x}", digest.finalize());
+        if actual != hash {
+            anyhow::bail!("remote large-object hash mismatch: expected {hash}, got {actual}");
+        }
+        Ok(offset)
+    }
+
+    /// POST /objects/stage-chunk (authenticated). Appends one bounded chunk
+    /// to a durable staging area on the remote, either a CAS blob or a
+    /// large object described by an already-staged manifest.
+    pub async fn objects_stage_chunk(
+        &self,
+        request: &StageChunkRequest<'_>,
+    ) -> Result<StageChunkResponse> {
+        if request.data.len() > crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES {
+            anyhow::bail!("stage chunk exceeds the bounded chunk length");
+        }
+        let body = serde_json::json!({
+            "staging_id": request.staging_id,
+            "namespace": request.namespace.as_str(),
+            "hash": request.hash,
+            "total_size": request.total_size,
+            "offset": request.offset,
+            "data": base64::engine::general_purpose::STANDARD.encode(request.data),
+            "manifest_hash": request.manifest_hash,
+        });
+        let response = self
+            .signed_post_with_response_limit(
+                "/objects/stage-chunk",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: StageChunkResponse = serde_json::from_value(response)
+            .context("objects/stage-chunk returned an invalid response shape")?;
+        parsed.validate(request)?;
+        Ok(parsed)
+    }
+
+    /// POST /external-content/product-offer (authenticated). Offers one
+    /// product witness closure to the remote; the response names exactly what
+    /// the remote still lacks.
+    pub async fn product_offer(
+        &self,
+        request: &ProductOfferRequest,
+    ) -> Result<ProductOfferResponse> {
+        let body = serde_json::to_value(request)?;
+        let response = self
+            .signed_post_with_response_limit(
+                "/external-content/product-offer",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: ProductOfferResponse = serde_json::from_value(response)
+            .context("product-offer returned an invalid response shape")?;
+        parsed.validate(request.staging_id.as_deref())?;
+        Ok(parsed)
+    }
+
+    /// POST /external-content/product-accept (authenticated). Asks the remote
+    /// to verify and accept the staged product; idempotent.
+    pub async fn product_accept(
+        &self,
+        request: &ProductAcceptRequest,
+    ) -> Result<ProductAcceptResponse> {
+        let body = serde_json::to_value(request)?;
+        let response = self
+            .signed_post_with_response_limit(
+                "/external-content/product-accept",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: ProductAcceptResponse = serde_json::from_value(response)
+            .context("product-accept returned an invalid response shape")?;
+        parsed.validate(request)?;
+        Ok(parsed)
+    }
+
+    /// POST /external-content/accept-qualification-testimony (authenticated).
+    /// One signed request carries the whole testimony; the answer is checked
+    /// against the testimony hash and coordinate the caller already holds.
+    pub async fn qualification_testimony_accept(
+        &self,
+        request: &QualificationTestimonyAcceptRequest,
+        expected_testimony_hash: &str,
+        expected_coordinate_id: &str,
+    ) -> Result<QualificationTestimonyAcceptResponse> {
+        let body = serde_json::to_value(request)?;
+        let response = self
+            .signed_post_with_response_limit(
+                "/external-content/accept-qualification-testimony",
+                &body,
+                DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        let parsed: QualificationTestimonyAcceptResponse = serde_json::from_value(response)
+            .context("accept-qualification-testimony returned an invalid response shape")?;
+        parsed.validate(expected_testimony_hash, expected_coordinate_id)?;
+        Ok(parsed)
+    }
+
     /// Fetch CAS entries while bounding each HTTP response body. Callers that
     /// know the declared object sizes should batch requests and choose a limit
     /// that includes base64/JSON overhead without allowing unbounded buffering.
     pub async fn objects_get_with_response_limit(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -698,12 +1221,14 @@ impl RemoteClient {
     /// the deliberately unbounded generic CAS request behavior.
     pub async fn objects_get_with_response_limit_and_total_timeout(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -719,11 +1244,13 @@ impl RemoteClient {
     /// smaller content limit for an already-admitted object type.
     pub async fn objects_get_with_total_timeout(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_and_total_timeout(
+            root,
             object_hashes,
             blob_hashes,
             DEFAULT_JSON_RESPONSE_MAX_BYTES,
@@ -737,10 +1264,12 @@ impl RemoteClient {
     /// wall-clock timeout; generic CAS callers retain their existing behavior.
     pub async fn objects_get_bundle_batch_with_response_limit(
         &self,
+        root: &ReadRoot,
         blob_hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             &[],
             blob_hashes,
             max_response_bytes,
@@ -751,6 +1280,7 @@ impl RemoteClient {
 
     async fn objects_get_with_response_limit_inner(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
@@ -764,7 +1294,7 @@ impl RemoteClient {
                 chunk_typed_hashes_for_body_budget(object_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
             {
                 entries.extend(
-                    self.objects_get_once(&chunk, &[], max_response_bytes, total_timeout)
+                    self.objects_get_once(root, &chunk, &[], max_response_bytes, total_timeout)
                         .await?
                         .entries,
                 );
@@ -773,7 +1303,7 @@ impl RemoteClient {
                 chunk_typed_hashes_for_body_budget(blob_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
             {
                 entries.extend(
-                    self.objects_get_once(&[], &chunk, max_response_bytes, total_timeout)
+                    self.objects_get_once(root, &[], &chunk, max_response_bytes, total_timeout)
                         .await?
                         .entries,
                 );
@@ -781,6 +1311,7 @@ impl RemoteClient {
             return Ok(ObjectsGetResponse { entries });
         }
         self.objects_get_once(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -791,61 +1322,61 @@ impl RemoteClient {
 
     async fn objects_get_once(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
         total_timeout: Option<lillux::time::Duration>,
     ) -> Result<ObjectsGetResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": object_hashes,
             "blob_hashes": blob_hashes,
         });
-        let resp = match total_timeout {
-            Some(timeout) => {
-                self.signed_post_with_response_limit_and_timeout(
-                    "/objects/get",
-                    &body,
-                    max_response_bytes,
-                    timeout,
-                )
-                .await?
-            }
-            None => {
-                self.signed_post_with_response_limit("/objects/get", &body, max_response_bytes)
-                    .await?
-            }
+        let request = async {
+            let path = "/objects/get";
+            let url = format!("{}{}", self.base_url, path);
+            let body_bytes = serde_json::to_vec(&body)?;
+            let headers = self.sign_request("POST", path, &body_bytes)?;
+            let mut request = self
+                .http
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("x-ryeos-key-id", &headers.key_id)
+                .header("x-ryeos-timestamp", &headers.timestamp)
+                .header("x-ryeos-nonce", &headers.nonce)
+                .header("x-ryeos-signature", &headers.signature)
+                .body(body_bytes);
+            request = headers.apply_forwarding(request);
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("POST {url} failed"))?;
+            read_raw_json_checked_with_limit("POST", &url, response, max_response_bytes).await
         };
-        let entries = resp
-            .get("entries")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|entry| {
-                let hash = entry.get("hash")?.as_str()?.to_string();
-                let kind = entry.get("kind")?.as_str()?.to_string();
-                Some(CasEntry {
-                    hash,
-                    kind,
-                    data: entry.get("data").and_then(|v| v.as_str()).map(String::from),
-                    value: entry.get("value").cloned(),
-                })
-            })
-            .collect();
-        let response = ObjectsGetResponse { entries };
-        response.validate_against_request(object_hashes, blob_hashes)?;
-        Ok(response)
+        let raw_body = match total_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, request).await.map_err(|_| {
+                anyhow::anyhow!(
+                    "POST {}/objects/get exceeded total timeout of {} seconds",
+                    self.base_url,
+                    timeout.as_secs()
+                )
+            })??,
+            None => request.await?,
+        };
+        parse_raw_objects_get_response(&raw_body, object_hashes, blob_hashes)
     }
 
     /// POST /objects/closure/describe (authenticated).
     pub async fn objects_closure_describe(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureDescribeResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
+        let body = closure_request_body(root, roots, &options);
         let resp = self
             .signed_post_with_response_limit("/objects/closure/describe", &body, response_limit)
             .await?;
@@ -858,17 +1389,17 @@ impl RemoteClient {
     /// POST /objects/closure/get (authenticated).
     pub async fn objects_closure_get(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureGetResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
-        let resp = self
-            .signed_post_with_response_limit("/objects/closure/get", &body, response_limit)
+        let body = closure_request_body(root, roots, &options);
+        let raw = self
+            .signed_post_raw_with_response_limit("/objects/closure/get", &body, response_limit)
             .await?;
-        let response: ObjectsClosureGetResponse =
-            serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
+        let response = parse_raw_objects_closure_get(&raw, roots, &options)?;
         response.validate_against_request(roots, &options)?;
         Ok(response)
     }
@@ -877,23 +1408,23 @@ impl RemoteClient {
     /// This is opt-in so generic large transfers retain their existing API.
     pub async fn objects_closure_get_with_total_timeout(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsClosureGetResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
-        let resp = self
-            .signed_post_with_response_limit_and_timeout(
+        let body = closure_request_body(root, roots, &options);
+        let raw = self
+            .signed_post_raw_with_response_limit_and_timeout(
                 "/objects/closure/get",
                 &body,
                 response_limit,
                 total_timeout,
             )
             .await?;
-        let response: ObjectsClosureGetResponse =
-            serde_json::from_value(resp).context("failed to parse objects/closure/get response")?;
+        let response = parse_raw_objects_closure_get(&raw, roots, &options)?;
         response.validate_against_request(roots, &options)?;
         Ok(response)
     }
@@ -1280,20 +1811,33 @@ impl RemoteClient {
         parameters: &Value,
         call: Option<&ryeos_engine::method_call::MethodCall>,
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
-    ) -> Result<Value> {
+    ) -> Result<RemoteExecuteResponse> {
         let mut body = serde_json::json!({
             "item_ref": item_ref,
             "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
             "execution_policy": execution_policy,
+            // The remote signs its result for this exact request; the
+            // caller refuses an unsigned result.
+            "attest_result": true,
         });
         // Forward the `call` block only when it carries intent.
         if let Some(call) = call.filter(|c| !c.is_empty()) {
             body["call"] = serde_json::to_value(call)
                 .map_err(|e| anyhow::anyhow!("failed to serialize call block: {e}"))?;
         }
-        self.signed_post("/execute", &body).await
+        let (body, request_digest) = self
+            .signed_post_serializable_with_request_digest(
+                "/execute",
+                &body,
+                DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        Ok(RemoteExecuteResponse {
+            body,
+            request_digest,
+        })
     }
 
     /// POST /authorize-key (authenticated).
@@ -1335,6 +1879,25 @@ impl RemoteClient {
         })
     }
 
+    /// Revoke a grant on the remote node. The remote decides whether the
+    /// caller may (its granter or its operator) and what live work stops;
+    /// its receipt is returned as sent.
+    pub async fn revoke_key(
+        &self,
+        fingerprint: &str,
+        reason: &str,
+        leave_running: bool,
+        keep_delegates: bool,
+    ) -> Result<Value> {
+        let body = serde_json::json!({
+            "fingerprint": fingerprint,
+            "reason": reason,
+            "leave_running": leave_running,
+            "keep_delegates": keep_delegates,
+        });
+        self.signed_post("/revoke-key", &body).await
+    }
+
     /// POST /admission/claim (unauthenticated route; claim is self-signed).
     pub async fn admission_claim(
         &self,
@@ -1354,11 +1917,12 @@ impl RemoteClient {
         let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
         let token_hash = admission_token_hash(token);
-        let claim = admission_claim_string(
+        let claim = crate::handlers::admission_claim::claim_string(
             &self.audience,
             &token_hash,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             public_key,
-            origin_site_id,
+            Some(origin_site_id),
             &scopes,
             signed_at,
             &nonce,
@@ -1367,7 +1931,8 @@ impl RemoteClient {
         let signature =
             lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
         let mut body = serde_json::json!({
-            "protocol_version": 2,
+            "protocol_version": 3,
+            "principal_class": "remote_node",
             "token": token,
             "public_key": public_key,
             "origin_site_id": origin_site_id,
@@ -1380,6 +1945,50 @@ impl RemoteClient {
             body["label"] = Value::String(label.to_string());
         }
         self.unsigned_post("/admission/claim", &body).await
+    }
+
+    /// POST /admission/claim with a claim body another party already signed
+    /// and co-signed. The caller owns every signature in the body.
+    pub async fn post_admission_claim(&self, body: &Value) -> Result<Value> {
+        self.unsigned_post("/admission/claim", body).await
+    }
+
+    /// POST /revoke-delegation (authenticated): ask the remote to tombstone one
+    /// delegation digest.
+    pub async fn revoke_delegation(
+        &self,
+        delegator: &str,
+        delegation_digest: &str,
+    ) -> Result<Value> {
+        let body = serde_json::json!({
+            "delegator": delegator,
+            "delegation_digest": delegation_digest,
+        });
+        self.signed_post("/revoke-delegation", &body).await
+    }
+
+    /// POST /offline-operations (authenticated): deliver a signed
+    /// offline-operation request and its inputs to the remote's inbox. `body`
+    /// is the remote route's request: `{request, inputs, stop?}`.
+    pub async fn offline_operations_submit(&self, body: &Value) -> Result<Value> {
+        self.signed_post_with_response_limit(
+            "/offline-operations",
+            body,
+            DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// GET /offline-operations/facts (authenticated): the facts a request for
+    /// the remote is signed against.
+    pub async fn offline_operations_facts(&self) -> Result<Value> {
+        self.signed_get("/offline-operations/facts").await
+    }
+
+    /// GET /offline-operations (authenticated): what the remote has queued,
+    /// applied and refused.
+    pub async fn offline_operations_status(&self) -> Result<Value> {
+        self.signed_get("/offline-operations").await
     }
 
     /// POST /vault/set (authenticated).
@@ -1425,8 +2034,8 @@ impl RemoteClient {
 
     async fn signed_get(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
-        // Sign with the full path+query — canonicalize_path inside
-        // sign_request will sort query params to match server-side.
+        // Sign with the full path+query — sign_request sorts the query
+        // params through the shared builder to match server-side.
         let headers = self.sign_request("GET", path, &[])?;
 
         let mut request = self
@@ -1437,12 +2046,7 @@ impl RemoteClient {
             .header("x-ryeos-timestamp", &headers.timestamp)
             .header("x-ryeos-nonce", &headers.nonce)
             .header("x-ryeos-signature", &headers.signature);
-        if let Some(forwarding) = headers.forwarding.as_ref() {
-            request = request
-                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
-                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
-                .header("x-ryeos-forwarding-signature", &forwarding.signature);
-        }
+        request = headers.apply_forwarding(request);
         let resp = request
             .send()
             .await
@@ -1462,6 +2066,29 @@ impl RemoteClient {
         body: &Value,
         max_response_bytes: usize,
     ) -> Result<Value> {
+        self.signed_post_serializable_with_response_limit(path, body, max_response_bytes)
+            .await
+    }
+
+    async fn signed_post_serializable_with_response_limit<T: serde::Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &T,
+        max_response_bytes: usize,
+    ) -> Result<Value> {
+        self.signed_post_serializable_with_request_digest(path, body, max_response_bytes)
+            .await
+            .map(|(value, _request_digest)| value)
+    }
+
+    /// Signed POST that also returns the request digest it signed, for
+    /// callers that verify a response bound to the exact request.
+    async fn signed_post_serializable_with_request_digest<T: serde::Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &T,
+        max_response_bytes: usize,
+    ) -> Result<(Value, String)> {
         let url = format!("{}{}", self.base_url, path);
         let body_bytes = serde_json::to_vec(body)?;
         let headers = self.sign_request("POST", path, &body_bytes)?;
@@ -1475,18 +2102,62 @@ impl RemoteClient {
             .header("x-ryeos-nonce", &headers.nonce)
             .header("x-ryeos-signature", &headers.signature)
             .body(body_bytes);
-        if let Some(forwarding) = headers.forwarding.as_ref() {
-            request = request
-                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
-                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
-                .header("x-ryeos-forwarding-signature", &forwarding.signature);
-        }
+        request = headers.apply_forwarding(request);
         let resp = request
             .send()
             .await
             .with_context(|| format!("POST {} failed", url))?;
 
-        read_json_checked_with_limit("POST", &url, resp, max_response_bytes).await
+        let value = read_json_checked_with_limit("POST", &url, resp, max_response_bytes).await?;
+        Ok((value, headers.request_digest))
+    }
+
+    async fn signed_post_raw_with_response_limit(
+        &self,
+        path: &str,
+        body: &Value,
+        maximum: usize,
+    ) -> Result<Vec<u8>> {
+        let url = format!("{}{}", self.base_url, path);
+        let body_bytes = serde_json::to_vec(body)?;
+        let headers = self.sign_request("POST", path, &body_bytes)?;
+        let mut request = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-ryeos-key-id", &headers.key_id)
+            .header("x-ryeos-timestamp", &headers.timestamp)
+            .header("x-ryeos-nonce", &headers.nonce)
+            .header("x-ryeos-signature", &headers.signature)
+            .body(body_bytes);
+        request = headers.apply_forwarding(request);
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("POST {url} failed"))?;
+        read_raw_json_checked_with_limit("POST", &url, response, maximum).await
+    }
+
+    async fn signed_post_raw_with_response_limit_and_timeout(
+        &self,
+        path: &str,
+        body: &Value,
+        maximum: usize,
+        timeout: lillux::time::Duration,
+    ) -> Result<Vec<u8>> {
+        tokio::time::timeout(
+            timeout,
+            self.signed_post_raw_with_response_limit(path, body, maximum),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "POST {}{} exceeded total timeout of {} seconds",
+                self.base_url,
+                path,
+                timeout.as_secs()
+            )
+        })?
     }
 
     /// Apply a total timeout around request signing, connect/send, and the
@@ -1552,19 +2223,16 @@ impl RemoteClient {
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
 
         let body_hash = lillux::cas::sha256_hex(body);
-        let canon_path = canonicalize_path(path_and_query);
+        let canon_path = ryeos_request_signing::canonical_path_and_query(path_and_query);
 
-        let string_to_sign = format!(
-            "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-            method.to_uppercase(),
-            canon_path,
-            body_hash,
-            timestamp,
-            nonce,
-            self.audience,
+        let content_hash = crate::auth::request_content_hash(
+            method,
+            &canon_path,
+            &body_hash,
+            &timestamp.to_string(),
+            &nonce,
+            &self.audience,
         );
-
-        let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
         let sig =
             lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
@@ -1600,10 +2268,16 @@ impl RemoteClient {
                 })
             }
             (None, None) => None,
-            _ => anyhow::bail!(
-                "configured-operator forwarding requires both a source-node identity and site"
-            ),
+            _ => anyhow::bail!("forwarding requires both a source-node identity and site"),
         };
+        let delegation = self
+            .delegation
+            .as_ref()
+            .map(ryeos_node_runtime::remote_delegation::SignedDelegation::to_header_value)
+            .transpose()?;
+        if delegation.is_some() && forwarding.is_none() {
+            anyhow::bail!("a delegated request requires the source-node forwarding proof");
+        }
 
         Ok(SignedHeaders {
             key_id,
@@ -1611,6 +2285,8 @@ impl RemoteClient {
             nonce,
             signature: sig_b64,
             forwarding,
+            delegation,
+            request_digest: content_hash,
         })
     }
 }
@@ -1684,7 +2360,7 @@ fn extract_remote_wait_result(response: Value) -> Result<Value> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("remote wait thread evidence omitted thread_id"))?;
     ryeos_executor::executor::validate_service_invocation_id(thread_id)
-        .map_err(|error| anyhow::anyhow!("remote wait service evidence: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("remote wait service evidence: {error:#}"))?;
     Ok(result)
 }
 
@@ -1736,7 +2412,7 @@ fn admission_token_hash(token: &str) -> String {
     lillux::cas::sha256_hex(token.as_bytes())
 }
 
-fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
+pub(crate) fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
     let mut normalized: Vec<String> = scopes
         .iter()
         .map(|s| s.trim().to_string())
@@ -1761,25 +2437,13 @@ fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
     Ok(normalized)
 }
 
-fn admission_claim_string(
-    audience: &str,
-    token_hash: &str,
-    public_key: &str,
-    origin_site_id: &str,
-    scopes: &[String],
-    signed_at: u64,
-    nonce: &str,
-) -> String {
-    format!(
-        "ryeos-admission-claim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        audience,
-        token_hash,
-        public_key,
-        origin_site_id,
-        scopes.join(","),
-        signed_at,
-        nonce,
-    )
+/// A remote `/execute` response with the digest of the request that asked
+/// for it.
+pub struct RemoteExecuteResponse {
+    /// The remote's JSON response, including its `result_attestation`.
+    pub body: Value,
+    /// `ryeos-request-v1` content hash of the request this node signed.
+    pub request_digest: String,
 }
 
 struct SignedHeaders {
@@ -1788,6 +2452,11 @@ struct SignedHeaders {
     nonce: String,
     signature: String,
     forwarding: Option<ForwardingHeaders>,
+    /// Base64 signed delegation, present when the request acts for a principal.
+    delegation: Option<String>,
+    /// `ryeos-request-v1` content hash of this exact request; a remote
+    /// result attestation binds it.
+    request_digest: String,
 }
 
 struct ForwardingHeaders {
@@ -1796,37 +2465,22 @@ struct ForwardingHeaders {
     signature: String,
 }
 
-/// Sort query parameters alphabetically and normalise the path.
-/// Matches `crates/bin/daemon/src/auth.rs::canonical_path` — uses a Vec to
-/// preserve repeated keys, matching server canonicalization exactly.
-fn canonicalize_path(path_and_query: &str) -> String {
-    if let Some((path, query)) = path_and_query.split_once('?') {
-        let mut params: Vec<(&str, &str)> = query
-            .split('&')
-            .filter_map(|pair| {
-                pair.split_once('=').or({
-                    if pair.is_empty() {
-                        None
-                    } else {
-                        Some((pair, ""))
-                    }
-                })
-            })
-            .collect();
-        params.sort();
-        let sorted: Vec<String> = params
-            .iter()
-            .map(|(k, v)| {
-                if v.is_empty() {
-                    k.to_string()
-                } else {
-                    format!("{k}={v}")
-                }
-            })
-            .collect();
-        format!("{}?{}", path, sorted.join("&"))
-    } else {
-        path_and_query.to_string()
+impl SignedHeaders {
+    /// Attach the forwarding co-signature and the delegation, when present.
+    fn apply_forwarding(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(forwarding) = self.forwarding.as_ref() {
+            request = request
+                .header("x-ryeos-forwarding-key-id", &forwarding.key_id)
+                .header("x-ryeos-forwarding-site-id", &forwarding.site_id)
+                .header("x-ryeos-forwarding-signature", &forwarding.signature);
+        }
+        if let Some(delegation) = self.delegation.as_ref() {
+            request = request.header(
+                ryeos_node_runtime::remote_delegation::DELEGATION_HEADER,
+                delegation,
+            );
+        }
+        request
     }
 }
 
@@ -1864,7 +2518,7 @@ impl PublicKeyResponse {
                 self.principal_id,
             );
         }
-        ryeos_app::identity::validate_canonical_site_id(&self.site_id)
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.site_id)
             .context("remote /public-key site_id is not canonical")?;
         if self.vault_fingerprint.trim().is_empty() {
             anyhow::bail!("remote /public-key vault_fingerprint must not be empty");
@@ -1992,6 +2646,10 @@ pub struct CasEntry {
     pub data: Option<String>,
     /// JSON value (present when kind == "object").
     pub value: Option<Value>,
+    /// Exact canonical JSON bytes as received, retained for byte-preserving
+    /// transfer import and persistence.
+    #[serde(skip)]
+    pub value_bytes: Option<Vec<u8>>,
 }
 
 /// Response from `objects/get`.
@@ -2017,46 +2675,59 @@ pub struct BlobChunkResponse {
 
 impl BlobChunkResponse {
     fn validate(&self, expected_hash: &str, expected_offset: u64, max_length: usize) -> Result<()> {
+        self.validate_kind("blob_chunk", expected_hash, expected_offset, max_length)
+    }
+
+    /// Validate one chunk response whose present-data kind is `data_kind`
+    /// (`blob_chunk` or `large_object_chunk`). A `missing` answer carries no
+    /// range metadata; a data answer must match the requested range exactly.
+    fn validate_kind(
+        &self,
+        data_kind: &str,
+        expected_hash: &str,
+        expected_offset: u64,
+        max_length: usize,
+    ) -> Result<()> {
         if self.hash != expected_hash {
-            anyhow::bail!("objects/get blob chunk changed the requested hash");
+            anyhow::bail!("objects/get {data_kind} changed the requested hash");
         }
-        match self.kind.as_str() {
-            "missing"
-                if self.offset.is_none()
-                    && self.total_size.is_none()
-                    && self.eof.is_none()
-                    && self.data.is_none() => {}
-            "blob_chunk" => {
-                if self.offset != Some(expected_offset)
-                    || self.total_size.is_none()
-                    || self.eof.is_none()
-                {
-                    anyhow::bail!("objects/get returned incomplete blob chunk metadata");
-                }
-                let encoded = self
-                    .data
-                    .as_deref()
-                    .context("objects/get blob chunk has no data")?;
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(encoded)
-                    .context("objects/get blob chunk is not valid base64")?;
-                if decoded.len() > max_length {
-                    anyhow::bail!("objects/get blob chunk exceeds requested length");
-                }
-                let total_size = self.total_size.expect("checked above");
-                if decoded.is_empty()
-                    && !(expected_offset == 0 && total_size == 0 && self.eof == Some(true))
-                {
-                    anyhow::bail!("objects/get blob chunk made no progress");
-                }
-                let end = expected_offset
-                    .checked_add(u64::try_from(decoded.len())?)
-                    .context("objects/get blob chunk range overflow")?;
-                if end > total_size || self.eof != Some(end == total_size) {
-                    anyhow::bail!("objects/get blob chunk has contradictory range/EOF metadata");
-                }
+        if self.kind == "missing" {
+            if self.offset.is_none()
+                && self.total_size.is_none()
+                && self.eof.is_none()
+                && self.data.is_none()
+            {
+                return Ok(());
             }
-            _ => anyhow::bail!("objects/get returned an invalid blob chunk shape"),
+            anyhow::bail!("objects/get returned an invalid {data_kind} shape");
+        }
+        if self.kind != data_kind {
+            anyhow::bail!("objects/get returned an invalid {data_kind} shape");
+        }
+        if self.offset != Some(expected_offset) || self.total_size.is_none() || self.eof.is_none() {
+            anyhow::bail!("objects/get returned incomplete {data_kind} metadata");
+        }
+        let encoded = self
+            .data
+            .as_deref()
+            .with_context(|| format!("objects/get {data_kind} has no data"))?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .with_context(|| format!("objects/get {data_kind} is not valid base64"))?;
+        if decoded.len() > max_length {
+            anyhow::bail!("objects/get {data_kind} exceeds requested length");
+        }
+        let total_size = self.total_size.expect("checked above");
+        if decoded.is_empty()
+            && !(expected_offset == 0 && total_size == 0 && self.eof == Some(true))
+        {
+            anyhow::bail!("objects/get {data_kind} made no progress");
+        }
+        let end = expected_offset
+            .checked_add(u64::try_from(decoded.len())?)
+            .with_context(|| format!("objects/get {data_kind} range overflow"))?;
+        if end > total_size || self.eof != Some(end == total_size) {
+            anyhow::bail!("objects/get {data_kind} has contradictory range/EOF metadata");
         }
         Ok(())
     }
@@ -2066,6 +2737,212 @@ impl BlobChunkResponse {
         base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .context("blob chunk is not valid base64")
+    }
+}
+
+/// Which durable staging namespace a `objects/stage-chunk` chunk targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageNamespace {
+    Blob,
+    LargeObject,
+}
+
+impl StageNamespace {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::LargeObject => "large_object",
+        }
+    }
+}
+
+/// One bounded sequential chunk for `objects/stage-chunk`. A large-object
+/// chunk names the staged manifest that declares its sidecar commitments.
+#[derive(Debug, Clone)]
+pub struct StageChunkRequest<'a> {
+    pub staging_id: &'a str,
+    pub namespace: StageNamespace,
+    pub hash: &'a str,
+    pub total_size: u64,
+    pub offset: u64,
+    pub data: &'a [u8],
+    pub manifest_hash: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageChunkResponse {
+    pub staging_id: String,
+    pub namespace: String,
+    pub hash: String,
+    pub staged_bytes: u64,
+    pub complete: bool,
+}
+
+impl StageChunkResponse {
+    fn validate(&self, request: &StageChunkRequest<'_>) -> Result<()> {
+        if self.staging_id != request.staging_id
+            || self.namespace != request.namespace.as_str()
+            || self.hash != request.hash
+        {
+            anyhow::bail!("objects/stage-chunk answered for a different staged object");
+        }
+        let accepted_through = request
+            .offset
+            .checked_add(u64::try_from(request.data.len())?)
+            .context("objects/stage-chunk range overflow")?;
+        if self.staged_bytes > request.total_size || self.staged_bytes < accepted_through {
+            anyhow::bail!(
+                "objects/stage-chunk reported {} staged bytes for a chunk ending at {accepted_through} of {}",
+                self.staged_bytes,
+                request.total_size
+            );
+        }
+        if self.complete != (self.staged_bytes == request.total_size) {
+            anyhow::bail!("objects/stage-chunk completion contradicts its staged byte count");
+        }
+        Ok(())
+    }
+}
+
+/// `external-content/product-offer` request. `origin_admission` is the
+/// origin node's complete admission attestation record for the witness, as
+/// served by its admission-attestations route.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProductOfferRequest {
+    pub witness_hash: String,
+    pub origin_admission_hash: String,
+    pub maximum_bytes: u64,
+    pub origin_admission: Value,
+    pub objects: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staging_id: Option<String>,
+}
+
+/// One large object the offered closure depends on, with the receiver's
+/// current residency and resumable staging progress.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductLargeObjectOffer {
+    pub file_sha256: String,
+    pub size: u64,
+    pub chunk_size: u64,
+    pub staged_bytes: u64,
+    pub resident: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductOfferResponse {
+    pub staging_id: String,
+    pub missing_objects: Vec<String>,
+    pub missing_blobs: Vec<String>,
+    pub large_objects: Vec<ProductLargeObjectOffer>,
+    pub ready: bool,
+}
+
+impl ProductOfferResponse {
+    fn validate(&self, requested_staging_id: Option<&str>) -> Result<()> {
+        if self.staging_id.is_empty()
+            || requested_staging_id.is_some_and(|requested| requested != self.staging_id)
+        {
+            anyhow::bail!("product-offer answered with a different staging capability");
+        }
+        for hash in self.missing_objects.iter().chain(&self.missing_blobs) {
+            if !is_canonical_hash(hash) {
+                anyhow::bail!("product-offer listed an invalid missing hash");
+            }
+        }
+        let mut pending_large = false;
+        for large in &self.large_objects {
+            if !is_canonical_hash(&large.file_sha256)
+                || large.size == 0
+                || large.chunk_size == 0
+                || large.staged_bytes > large.size
+            {
+                anyhow::bail!("product-offer listed an invalid large-object entry");
+            }
+            pending_large |= !large.resident;
+        }
+        let complete =
+            self.missing_objects.is_empty() && self.missing_blobs.is_empty() && !pending_large;
+        if self.ready != complete {
+            anyhow::bail!("product-offer readiness contradicts its missing lists");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProductAcceptRequest {
+    pub staging_id: String,
+    pub witness_hash: String,
+    pub origin_admission_hash: String,
+    pub maximum_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductAcceptResponse {
+    pub witness_hash: String,
+    pub origin_admission_hash: String,
+    pub acceptance_hash: String,
+    pub reused_existing: bool,
+    pub manifest_hash: String,
+}
+
+impl ProductAcceptResponse {
+    fn validate(&self, request: &ProductAcceptRequest) -> Result<()> {
+        if self.witness_hash != request.witness_hash
+            || self.origin_admission_hash != request.origin_admission_hash
+        {
+            anyhow::bail!("product-accept answered for a different product");
+        }
+        for hash in [&self.acceptance_hash, &self.manifest_hash] {
+            if !is_canonical_hash(hash) {
+                anyhow::bail!("product-accept returned an invalid hash");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QualificationTestimonyAcceptRequest {
+    pub testimony: Value,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationTestimonyAcceptResponse {
+    pub testimony_hash: String,
+    pub acceptance_hash: String,
+    pub coordinate_id: String,
+    pub reused_existing: bool,
+}
+
+impl QualificationTestimonyAcceptResponse {
+    pub fn validate(
+        &self,
+        expected_testimony_hash: &str,
+        expected_coordinate_id: &str,
+    ) -> Result<()> {
+        if self.testimony_hash != expected_testimony_hash {
+            anyhow::bail!("accept-qualification-testimony answered for a different testimony");
+        }
+        if self.coordinate_id != expected_coordinate_id {
+            anyhow::bail!("accept-qualification-testimony answered for a different coordinate");
+        }
+        for hash in [
+            &self.testimony_hash,
+            &self.acceptance_hash,
+            &self.coordinate_id,
+        ] {
+            if !is_canonical_hash(hash) {
+                anyhow::bail!("accept-qualification-testimony returned an invalid hash");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2172,6 +3049,14 @@ impl ObjectsGetResponse {
             .and_then(|e| e.value.clone())
     }
 
+    /// Borrow the exact canonical bytes received for an object entry.
+    pub fn find_object_bytes(&self, hash: &str) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find(|entry| entry.hash == hash && entry.kind == "object")
+            .and_then(|entry| entry.value_bytes.as_deref())
+    }
+
     /// Find a blob entry by hash, returning decoded bytes.
     pub fn find_blob(&self, hash: &str) -> Option<Vec<u8>> {
         use base64::Engine;
@@ -2201,6 +3086,257 @@ pub struct ObjectsClosureGetResponse {
     pub object_bytes: u64,
     pub blob_bytes: u64,
     pub entries: Vec<CasEntry>,
+}
+
+fn parse_raw_objects_get_response(
+    bytes: &[u8],
+    object_hashes: &[String],
+    blob_hashes: &[String],
+) -> Result<ObjectsGetResponse> {
+    #[derive(serde::Deserialize)]
+    struct RawEntry {
+        hash: String,
+        kind: String,
+        data: Option<Box<serde_json::value::RawValue>>,
+        value: Option<Box<serde_json::value::RawValue>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawResponse {
+        #[serde(default)]
+        entries: Vec<RawEntry>,
+    }
+    let raw: RawResponse =
+        serde_json::from_slice(bytes).context("failed to parse objects/get response envelope")?;
+    let requested_objects = unique_hashes(object_hashes, "objects/get requested objects")?;
+    let requested_blobs = unique_hashes(blob_hashes, "objects/get requested blobs")?;
+    let maximum_entries = object_hashes
+        .len()
+        .checked_add(blob_hashes.len())
+        .context("objects/get requested entry count overflow")?;
+    if raw.entries.len() > maximum_entries {
+        bail!("objects/get returned more entries than requested");
+    }
+    let mut raw_object_bytes = 0usize;
+    let mut seen_objects = BTreeSet::new();
+    let mut seen_blobs = BTreeSet::new();
+    for entry in &raw.entries {
+        if !is_canonical_hash(&entry.hash) {
+            bail!("objects/get returned an invalid hash");
+        }
+        match entry.kind.as_str() {
+            "object" | "missing_object" => {
+                if !requested_objects.contains(entry.hash.as_str())
+                    || !seen_objects.insert(entry.hash.as_str())
+                {
+                    bail!("objects/get returned an unexpected or duplicate object entry");
+                }
+                if (entry.kind == "object") != entry.value.is_some() || entry.data.is_some() {
+                    bail!("objects/get returned an invalid object entry shape");
+                }
+            }
+            "blob" | "missing_blob" => {
+                if !requested_blobs.contains(entry.hash.as_str())
+                    || !seen_blobs.insert(entry.hash.as_str())
+                {
+                    bail!("objects/get returned an unexpected or duplicate blob entry");
+                }
+                if (entry.kind == "blob") != entry.data.is_some() || entry.value.is_some() {
+                    bail!("objects/get returned an invalid blob entry shape");
+                }
+                if let Some(data) = &entry.data
+                    && data.get().len()
+                        > base64_json_string_max_len(
+                            crate::handlers::objects_get::MAX_INLINE_BLOB_BYTES,
+                        )?
+                {
+                    bail!("remote inline blob exceeds the endpoint byte ceiling");
+                }
+            }
+            _ => bail!("objects/get returned an unsupported entry kind"),
+        }
+        if let Some(value) = &entry.value {
+            let size = value.get().len();
+            if size > 32 * 1024 * 1024 {
+                bail!(
+                    "remote CAS object {} exceeds the 32 MiB raw object limit",
+                    entry.hash
+                );
+            }
+            raw_object_bytes = raw_object_bytes
+                .checked_add(size)
+                .context("remote raw object aggregate size overflow")?;
+            if raw_object_bytes > 512 * 1024 * 1024 {
+                bail!("remote CAS response exceeds the 512 MiB raw object aggregate limit");
+            }
+        }
+    }
+    let entries = raw
+        .entries
+        .into_iter()
+        .map(|entry| -> Result<CasEntry> {
+            let data = entry
+                .data
+                .map(|raw_data| {
+                    decode_bounded_base64_json_string(
+                        &raw_data,
+                        crate::handlers::objects_get::MAX_INLINE_BLOB_BYTES,
+                    )
+                })
+                .transpose()?;
+            let (value, value_bytes) = if let Some(raw_value) = entry.value {
+                let (value, bytes) = decode_raw_object_value(&entry.hash, &raw_value)?;
+                (Some(value), Some(bytes))
+            } else {
+                (None, None)
+            };
+            Ok(CasEntry {
+                hash: entry.hash,
+                kind: entry.kind,
+                data,
+                value,
+                value_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let response = ObjectsGetResponse { entries };
+    response.validate_against_request(object_hashes, blob_hashes)?;
+    Ok(response)
+}
+
+fn parse_raw_objects_closure_get(
+    bytes: &[u8],
+    requested_roots: &[String],
+    options: &NodeAdmittedObjectsClosureRequestOptions,
+) -> Result<ObjectsClosureGetResponse> {
+    #[derive(serde::Deserialize)]
+    struct RawEntry {
+        hash: String,
+        kind: String,
+        data: Option<Box<serde_json::value::RawValue>>,
+        value: Option<Box<serde_json::value::RawValue>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawResponse {
+        closure: ObjectsClosureSummary,
+        object_bytes: u64,
+        blob_bytes: u64,
+        entries: Vec<RawEntry>,
+    }
+    let raw: RawResponse =
+        serde_json::from_slice(bytes).context("failed to parse object closure envelope")?;
+    validate_closure_summary_against_request(&raw.closure, requested_roots)?;
+    let limits = options.limits();
+    if raw.closure.object_hashes.len() > limits.max_objects {
+        bail!("remote object closure exceeds admitted object count");
+    }
+    if raw.closure.blob_hashes.len() > limits.max_blobs {
+        bail!("remote object closure exceeds admitted blob count");
+    }
+    let object_hashes = unique_hashes(&raw.closure.object_hashes, "object closure")?;
+    let blob_hashes = unique_hashes(&raw.closure.blob_hashes, "blob closure")?;
+    let maximum_entries = raw
+        .closure
+        .object_hashes
+        .len()
+        .checked_add(raw.closure.blob_hashes.len())
+        .context("remote closure entry count overflow")?;
+    if raw.entries.len() > maximum_entries {
+        bail!("remote closure returned more entries than advertised");
+    }
+    let mut aggregate_objects = 0usize;
+    let mut aggregate_blob_json_bytes = 0usize;
+    let mut returned_objects = BTreeSet::new();
+    let mut returned_blobs = BTreeSet::new();
+    for entry in &raw.entries {
+        if !is_canonical_hash(&entry.hash) {
+            bail!("remote closure returned an invalid entry hash");
+        }
+        match entry.kind.as_str() {
+            "object" => {
+                if !object_hashes.contains(entry.hash.as_str())
+                    || !returned_objects.insert(entry.hash.as_str())
+                    || entry.value.is_none()
+                    || entry.data.is_some()
+                {
+                    bail!(
+                        "remote closure returned an unexpected, duplicate, or malformed object entry"
+                    );
+                }
+                let size = entry.value.as_ref().expect("checked above").get().len();
+                if u64::try_from(size).context("closure object size exceeds u64")?
+                    > limits.max_object_bytes
+                {
+                    bail!("closure object exceeds admitted per-object byte limit");
+                }
+                aggregate_objects = aggregate_objects
+                    .checked_add(size)
+                    .context("closure raw object aggregate overflow")?;
+                if u64::try_from(aggregate_objects)
+                    .context("closure object aggregate exceeds u64")?
+                    > limits.max_total_object_bytes
+                {
+                    bail!("closure objects exceed admitted aggregate byte limit");
+                }
+            }
+            "blob" => {
+                if !blob_hashes.contains(entry.hash.as_str())
+                    || !returned_blobs.insert(entry.hash.as_str())
+                    || entry.data.is_none()
+                    || entry.value.is_some()
+                {
+                    bail!(
+                        "remote closure returned an unexpected, duplicate, or malformed blob entry"
+                    );
+                }
+                let data = entry.data.as_ref().expect("checked above");
+                if data.get().len() > base64_json_string_max_len(limits.max_blob_bytes)? {
+                    bail!("closure blob exceeds admitted per-blob byte limit");
+                }
+                aggregate_blob_json_bytes = aggregate_blob_json_bytes
+                    .checked_add(data.get().len())
+                    .context("closure raw blob aggregate size overflow")?;
+                let aggregate_limit =
+                    base64_json_entries_max_len(limits.max_total_blob_bytes, limits.max_blobs)?;
+                if aggregate_blob_json_bytes > aggregate_limit {
+                    bail!("closure blobs exceed admitted aggregate byte limit");
+                }
+            }
+            "missing" if entry.value.is_none() && entry.data.is_none() => {
+                bail!("complete remote closure returned a missing entry");
+            }
+            _ => bail!("remote closure returned an invalid entry kind or shape"),
+        }
+    }
+    let entries = raw
+        .entries
+        .into_iter()
+        .map(|entry| -> Result<CasEntry> {
+            let data = entry
+                .data
+                .map(|raw_data| decode_bounded_base64_json_string(&raw_data, limits.max_blob_bytes))
+                .transpose()?;
+            let (value, value_bytes) = match entry.value {
+                Some(raw_value) => {
+                    let (value, bytes) = decode_raw_object_value(&entry.hash, &raw_value)?;
+                    (Some(value), Some(bytes))
+                }
+                None => (None, None),
+            };
+            Ok(CasEntry {
+                hash: entry.hash,
+                kind: entry.kind,
+                data,
+                value,
+                value_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ObjectsClosureGetResponse {
+        closure: raw.closure,
+        object_bytes: raw.object_bytes,
+        blob_bytes: raw.blob_bytes,
+        entries,
+    })
 }
 
 impl ObjectsClosureGetResponse {
@@ -2495,7 +3631,7 @@ pub struct ObjectsClosureRequestOptions {
 /// accidentally bypass node admission by constructing raw limits directly.
 #[derive(Debug, Clone)]
 pub struct NodeAdmittedObjectsClosureRequestOptions {
-    limits: ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits,
+    limits: ryeos_node_runtime::node_policy::sections::object_closure::AdmittedObjectTransferLimits,
     allow_incomplete: bool,
     allow_untransported_large_objects: bool,
 }
@@ -2505,16 +3641,16 @@ impl NodeAdmittedObjectsClosureRequestOptions {
         state: &ryeos_app::state::AppState,
         requested: ObjectsClosureRequestOptions,
     ) -> Result<Self> {
-        use ryeos_app::node_policy::TypedNodePolicy as _;
+        use ryeos_node_runtime::node_policy::TypedNodePolicy as _;
 
         let policy = state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
         )?;
         Self::for_policy(policy, requested).with_context(|| {
             format!(
                 "admit remote closure operation against `{}` node policy",
-                ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy::SECTION_NAME
+                ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy::SECTION_NAME
             )
         })
     }
@@ -2523,7 +3659,7 @@ impl NodeAdmittedObjectsClosureRequestOptions {
     /// node-policy section. Stopped-node CLI operations use this instead of
     /// constructing an online `AppState` solely to reach identical policy.
     pub fn for_policy(
-        policy: &ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy,
+        policy: &ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy,
         requested: ObjectsClosureRequestOptions,
     ) -> Result<Self> {
         Self::admit(requested, policy)
@@ -2531,10 +3667,10 @@ impl NodeAdmittedObjectsClosureRequestOptions {
 
     pub fn admit(
         requested: ObjectsClosureRequestOptions,
-        policy: &ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy,
+        policy: &ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy,
     ) -> Result<Self> {
         let limits = policy.admit(
-            ryeos_app::node_policy::sections::object_closure::RequestedObjectTransferLimits {
+            ryeos_node_runtime::node_policy::sections::object_closure::RequestedObjectTransferLimits {
                 max_objects: requested.max_objects,
                 max_blobs: requested.max_blobs,
                 max_object_bytes: requested.max_object_bytes,
@@ -2554,7 +3690,8 @@ impl NodeAdmittedObjectsClosureRequestOptions {
 
     pub fn limits(
         &self,
-    ) -> &ryeos_app::node_policy::sections::object_closure::AdmittedObjectTransferLimits {
+    ) -> &ryeos_node_runtime::node_policy::sections::object_closure::AdmittedObjectTransferLimits
+    {
         &self.limits
     }
 
@@ -2656,11 +3793,13 @@ fn closure_response_limit(options: &NodeAdmittedObjectsClosureRequestOptions) ->
 }
 
 fn closure_request_body(
+    root: &ReadRoot,
     roots: &[String],
     options: &NodeAdmittedObjectsClosureRequestOptions,
 ) -> Value {
     let limits = options.limits();
     let mut body = serde_json::json!({
+        "root": root,
         "roots": roots,
         "max_objects": limits.max_objects,
         "max_blobs": limits.max_blobs,
@@ -2963,7 +4102,7 @@ impl RemoteSignedRef {
             anyhow::bail!("invalid signed ref target hash: {}", self.target_hash);
         }
         ryeos_state::parse_canonical_timestamp(&self.updated_at)
-            .map_err(|error| anyhow::anyhow!("invalid signed ref updated_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid signed ref updated_at: {error:#}"))?;
         if !is_canonical_hash(&self.signer) {
             anyhow::bail!("invalid signed ref signer fingerprint: {}", self.signer);
         }
@@ -3457,9 +4596,285 @@ pub struct BlobChunkUpload {
     pub data: String,
 }
 
+#[derive(Debug)]
+pub struct RawObjectUpload {
+    pub hash: String,
+    pub value: Box<serde_json::value::RawValue>,
+}
+
+impl RawObjectUpload {
+    pub fn from_canonical_bytes(hash: String, bytes: Vec<u8>) -> Result<Self> {
+        let json = String::from_utf8(bytes).context("canonical CAS object is not UTF-8")?;
+        let value = serde_json::value::RawValue::from_string(json)
+            .context("canonical CAS object is not one JSON value")?;
+        Ok(Self { hash, value })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chunk_response(
+        kind: &str,
+        offset: u64,
+        total: u64,
+        eof: bool,
+        bytes: &[u8],
+    ) -> BlobChunkResponse {
+        BlobChunkResponse {
+            hash: "ab".repeat(32),
+            kind: kind.to_owned(),
+            offset: Some(offset),
+            total_size: Some(total),
+            eof: Some(eof),
+            data: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        }
+    }
+
+    #[test]
+    fn large_object_chunk_validates_only_its_own_kind() {
+        let hash = "ab".repeat(32);
+        let ok = chunk_response("large_object_chunk", 4, 8, true, b"wxyz");
+        ok.validate_kind("large_object_chunk", &hash, 4, 16)
+            .unwrap();
+        assert!(ok.validate_kind("blob_chunk", &hash, 4, 16).is_err());
+        let blob = chunk_response("blob_chunk", 4, 8, true, b"wxyz");
+        assert!(
+            blob.validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        blob.validate(&hash, 4, 16).unwrap();
+    }
+
+    #[test]
+    fn large_object_chunk_refuses_contradictory_ranges() {
+        let hash = "ab".repeat(32);
+        let wrong_offset = chunk_response("large_object_chunk", 0, 8, true, b"wxyz");
+        assert!(
+            wrong_offset
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        let false_eof = chunk_response("large_object_chunk", 4, 8, false, b"wxyz");
+        assert!(
+            false_eof
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        let past_total = chunk_response("large_object_chunk", 4, 6, true, b"wxyz");
+        assert!(
+            past_total
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        let oversized = chunk_response("large_object_chunk", 4, 8, true, b"wxyz");
+        assert!(
+            oversized
+                .validate_kind("large_object_chunk", &hash, 4, 3)
+                .is_err()
+        );
+        let no_progress = chunk_response("large_object_chunk", 4, 8, false, b"");
+        assert!(
+            no_progress
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+        let mut other_hash = chunk_response("large_object_chunk", 4, 8, true, b"wxyz");
+        other_hash.hash = "cd".repeat(32);
+        assert!(
+            other_hash
+                .validate_kind("large_object_chunk", &hash, 4, 16)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn large_object_missing_answer_carries_no_range() {
+        let hash = "ab".repeat(32);
+        let missing = BlobChunkResponse {
+            hash: hash.clone(),
+            kind: "missing".to_owned(),
+            offset: None,
+            total_size: None,
+            eof: None,
+            data: None,
+        };
+        missing
+            .validate_kind("large_object_chunk", &hash, 0, 16)
+            .unwrap();
+        let mut with_data = missing.clone();
+        with_data.data = Some(String::new());
+        assert!(
+            with_data
+                .validate_kind("large_object_chunk", &hash, 0, 16)
+                .is_err()
+        );
+    }
+
+    fn stage_request<'a>(data: &'a [u8], hash: &'a str) -> StageChunkRequest<'a> {
+        StageChunkRequest {
+            staging_id: "upload-1",
+            namespace: StageNamespace::LargeObject,
+            hash,
+            total_size: 10,
+            offset: 4,
+            data,
+            manifest_hash: Some(hash),
+        }
+    }
+
+    #[test]
+    fn stage_chunk_response_must_match_the_request_and_progress() {
+        let hash = "ab".repeat(32);
+        let request = stage_request(b"wxyz", &hash);
+        let response = |staged: u64, complete: bool, namespace: &str| StageChunkResponse {
+            staging_id: "upload-1".to_owned(),
+            namespace: namespace.to_owned(),
+            hash: hash.clone(),
+            staged_bytes: staged,
+            complete,
+        };
+        response(8, false, "large_object")
+            .validate(&request)
+            .unwrap();
+        response(10, true, "large_object")
+            .validate(&request)
+            .unwrap();
+        assert!(response(8, false, "blob").validate(&request).is_err());
+        assert!(
+            response(7, false, "large_object")
+                .validate(&request)
+                .is_err()
+        );
+        assert!(
+            response(11, false, "large_object")
+                .validate(&request)
+                .is_err()
+        );
+        assert!(
+            response(8, true, "large_object")
+                .validate(&request)
+                .is_err()
+        );
+        assert!(
+            response(10, false, "large_object")
+                .validate(&request)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<StageChunkResponse>(serde_json::json!({
+                "staging_id": "upload-1", "namespace": "blob", "hash": hash,
+                "staged_bytes": 1, "complete": false, "extra": true
+            }))
+            .is_err()
+        );
+    }
+
+    fn offer(ready: bool, missing: Vec<String>, resident: bool) -> ProductOfferResponse {
+        ProductOfferResponse {
+            staging_id: "upload-1".to_owned(),
+            missing_objects: missing,
+            missing_blobs: Vec::new(),
+            large_objects: vec![ProductLargeObjectOffer {
+                file_sha256: "cd".repeat(32),
+                size: 100,
+                chunk_size: 32,
+                staged_bytes: if resident { 100 } else { 64 },
+                resident,
+            }],
+            ready,
+        }
+    }
+
+    #[test]
+    fn product_offer_response_readiness_follows_the_missing_lists() {
+        offer(true, Vec::new(), true)
+            .validate(Some("upload-1"))
+            .unwrap();
+        offer(false, Vec::new(), false).validate(None).unwrap();
+        offer(false, vec!["ab".repeat(32)], true)
+            .validate(None)
+            .unwrap();
+        assert!(offer(true, Vec::new(), false).validate(None).is_err());
+        assert!(
+            offer(true, vec!["ab".repeat(32)], true)
+                .validate(None)
+                .is_err()
+        );
+        assert!(offer(false, Vec::new(), true).validate(None).is_err());
+        assert!(
+            offer(true, Vec::new(), true)
+                .validate(Some("upload-2"))
+                .is_err()
+        );
+        assert!(
+            offer(false, vec!["BAD".to_owned()], true)
+                .validate(None)
+                .is_err()
+        );
+        let mut oversized = offer(false, Vec::new(), false);
+        oversized.large_objects[0].staged_bytes = 101;
+        assert!(oversized.validate(None).is_err());
+    }
+
+    #[test]
+    fn product_accept_response_must_echo_the_requested_product() {
+        let request = ProductAcceptRequest {
+            staging_id: "upload-1".to_owned(),
+            witness_hash: "ab".repeat(32),
+            origin_admission_hash: "cd".repeat(32),
+            maximum_bytes: 1024,
+        };
+        let response = ProductAcceptResponse {
+            witness_hash: request.witness_hash.clone(),
+            origin_admission_hash: request.origin_admission_hash.clone(),
+            acceptance_hash: "ef".repeat(32),
+            reused_existing: false,
+            manifest_hash: "12".repeat(32),
+        };
+        response.validate(&request).unwrap();
+        let mut other = response.clone();
+        other.witness_hash = "00".repeat(32);
+        assert!(other.validate(&request).is_err());
+        let mut bad_hash = response;
+        bad_hash.acceptance_hash = "nope".to_owned();
+        assert!(bad_hash.validate(&request).is_err());
+    }
+
+    #[test]
+    fn testimony_accept_response_must_echo_the_exported_testimony() {
+        let testimony_hash = "ab".repeat(32);
+        let coordinate_id = "cd".repeat(32);
+        let response = QualificationTestimonyAcceptResponse {
+            testimony_hash: testimony_hash.clone(),
+            acceptance_hash: "ef".repeat(32),
+            coordinate_id: coordinate_id.clone(),
+            reused_existing: false,
+        };
+        response.validate(&testimony_hash, &coordinate_id).unwrap();
+        assert!(response.validate(&"00".repeat(32), &coordinate_id).is_err());
+        assert!(
+            response
+                .validate(&testimony_hash, &"00".repeat(32))
+                .is_err()
+        );
+        let mut bad_acceptance = response.clone();
+        bad_acceptance.acceptance_hash = "nope".to_owned();
+        assert!(
+            bad_acceptance
+                .validate(&testimony_hash, &coordinate_id)
+                .is_err()
+        );
+        let extra = serde_json::json!({
+            "testimony_hash": testimony_hash,
+            "acceptance_hash": "ef".repeat(32),
+            "coordinate_id": coordinate_id,
+            "reused_existing": false,
+            "unexpected": 1,
+        });
+        assert!(serde_json::from_value::<QualificationTestimonyAcceptResponse>(extra).is_err());
+    }
 
     #[tokio::test]
     async fn destination_product_selectors_reach_both_execute_wire_modes() {
@@ -3497,7 +4912,7 @@ mod tests {
                     "declaration_id": "authoring-runtime",
                     "witness_hash": "ab".repeat(32),
                     "witness_source": {"kind": "local_capture"},
-                    "qualification_hash": null
+                    "qualification_hash": null, "remote_testimony": null
                 }
             },
             {
@@ -3506,7 +4921,7 @@ mod tests {
                     "declaration_id": "authoring-tools",
                     "witness_hash": "cd".repeat(32),
                     "witness_source": {"kind": "local_capture"},
-                    "qualification_hash": "ef".repeat(32)
+                    "qualification_hash": "ef".repeat(32), "remote_testimony": null
                 }
             }
         ]))
@@ -3605,13 +5020,14 @@ mod tests {
         );
 
         let object_error = client
-            .objects_get_with_total_timeout(&["b".repeat(64)], &[], timeout)
+            .objects_get_with_total_timeout(&test_read_root(), &["b".repeat(64)], &[], timeout)
             .await
             .unwrap_err();
         assert!(object_error.to_string().contains("exceeded total timeout"));
 
         let closure_error = client
             .objects_closure_get_with_total_timeout(
+                &test_read_root(),
                 &["a".repeat(64)],
                 NodeAdmittedObjectsClosureRequestOptions::admit(
                     ObjectsClosureRequestOptions::default(),
@@ -3624,6 +5040,12 @@ mod tests {
             .unwrap_err();
         assert!(closure_error.to_string().contains("exceeded total timeout"));
         server.abort();
+    }
+
+    fn test_read_root() -> ReadRoot {
+        ReadRoot::ProjectHead {
+            project_path: "/project".to_owned(),
+        }
     }
 
     #[test]
@@ -3671,12 +5093,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_path_no_query() {
-        assert_eq!(canonicalize_path("/execute"), "/execute");
-    }
-
-    #[test]
-    fn configured_operator_request_is_cosigned_by_source_node() {
+    fn forwarded_request_is_cosigned_by_source_node() {
         let directory = tempfile::tempdir().unwrap();
         let operator =
             Arc::new(NodeIdentity::create(&directory.path().join("operator.pem")).unwrap());
@@ -3692,7 +5109,7 @@ mod tests {
         let proof = headers
             .forwarding
             .as_ref()
-            .expect("operator request must carry forwarding proof");
+            .expect("forwarded request must carry forwarding proof");
         assert_eq!(proof.key_id, forwarding.principal_id());
         assert_eq!(proof.site_id, "site:source");
         let content_hash = crate::auth::forwarding_request_content_hash(
@@ -3799,59 +5216,6 @@ mod tests {
         ] {
             assert!(extract_remote_wait_result(invalid).is_err());
         }
-    }
-
-    #[test]
-    fn canonicalize_path_sorted_query() {
-        assert_eq!(
-            canonicalize_path("/threads/abc/events/stream?after=42&limit=10"),
-            "/threads/abc/events/stream?after=42&limit=10"
-        );
-    }
-
-    #[test]
-    fn canonicalize_path_unsorted_query() {
-        assert_eq!(
-            canonicalize_path("/threads/abc?limit=10&after=42"),
-            "/threads/abc?after=42&limit=10"
-        );
-    }
-
-    #[test]
-    fn canonicalize_path_repeated_keys() {
-        // Repeated query keys must be preserved and sorted together.
-        // Key "tag" appears twice: tag=b sorts before tag=a only if
-        // the full pair (tag, b) < (tag, a), but since k is the same,
-        // the value is the tiebreaker.
-        assert_eq!(
-            canonicalize_path("/objects/get?hashes=abc&hashes=def"),
-            "/objects/get?hashes=abc&hashes=def"
-        );
-        assert_eq!(
-            canonicalize_path("/search?tag=b&limit=5&tag=a"),
-            "/search?limit=5&tag=a&tag=b"
-        );
-    }
-
-    #[test]
-    fn canonicalize_path_empty_value() {
-        assert_eq!(
-            canonicalize_path("/path?flag&other=val"),
-            "/path?flag&other=val"
-        );
-    }
-
-    #[test]
-    fn signed_get_canonicalization_matches_server_repeated_keys() {
-        // The canonicalization for signing must match the server's
-        // auth.rs canonicalization. This test verifies that repeated
-        // keys (like hashes=abc&hashes=def) are preserved in order
-        // but sorted as pairs, and the full canonical string is
-        // deterministic.
-        let path_with_repeats = "/objects/get?hashes=def&hashes=abc&hashes=ghi";
-        let canonical = canonicalize_path(path_with_repeats);
-        // Sorted by key, then value:
-        assert_eq!(canonical, "/objects/get?hashes=abc&hashes=def&hashes=ghi");
     }
 
     #[test]
@@ -4371,6 +5735,51 @@ mod tests {
         }
     }
 
+    fn wrapped_retryable(status: reqwest::StatusCode, body: serde_json::Value) -> Value {
+        let error = anyhow::Error::new(RemoteHttpError {
+            method: "POST",
+            url: "https://target.invalid/execute/launch".to_owned(),
+            status,
+            body: body.to_string(),
+        });
+        match map_remote_call_error(error, "target launch") {
+            crate::handler_error::HandlerError::Structured { body, .. } => {
+                body["retryable"].clone()
+            }
+            other => panic!("unexpected mapped error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapper_retryable_follows_the_remote_body_when_it_says() {
+        let server = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+        let client = reqwest::StatusCode::CONFLICT;
+        assert_eq!(
+            wrapped_retryable(server, serde_json::json!({"code":"x","retryable":false})),
+            false
+        );
+        assert_eq!(
+            wrapped_retryable(client, serde_json::json!({"code":"x","retryable":true})),
+            true
+        );
+        assert_eq!(
+            wrapped_retryable(
+                reqwest::StatusCode::FORBIDDEN,
+                serde_json::json!({"code":"qualification_policy_denied","retryable":false})
+            ),
+            false
+        );
+        // A body that does not say falls back to the status class.
+        assert_eq!(
+            wrapped_retryable(server, serde_json::json!({"code":"x"})),
+            true
+        );
+        assert_eq!(
+            wrapped_retryable(client, serde_json::json!({"code":"x"})),
+            false
+        );
+    }
+
     #[test]
     fn closure_transport_enforces_the_exact_signed_response_budget() {
         let policy = test_object_closure_policy();
@@ -4407,8 +5816,8 @@ mod tests {
     }
 
     fn test_object_closure_policy()
-    -> ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
-        ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+    -> ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+        ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
             schema: 1,
             max_roots: 256,
             max_objects: 32_768,
@@ -4521,11 +5930,13 @@ mod tests {
         )
         .unwrap();
         let (hash, value, canonical) = closure_test_object(serde_json::json!({}));
+        let canonical_len = canonical.len();
         let entry = CasEntry {
             hash: hash.clone(),
             kind: "object".to_string(),
             data: None,
             value: Some(value),
+            value_bytes: Some(canonical.into_bytes()),
         };
         let response = ObjectsClosureGetResponse {
             closure: ObjectsClosureSummary {
@@ -4534,7 +5945,7 @@ mod tests {
                 object_hashes: vec![hash.clone()],
                 ..ObjectsClosureSummary::default()
             },
-            object_bytes: u64::try_from(canonical.len() * 2).unwrap(),
+            object_bytes: u64::try_from(canonical_len * 2).unwrap(),
             blob_bytes: 0,
             entries: vec![entry.clone(), entry],
         };
@@ -4543,6 +5954,154 @@ mod tests {
                 .validate_against_request(&[hash], &options)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn raw_object_decode_rejects_duplicate_kind_before_capsule_materialization() {
+        let raw = serde_json::value::RawValue::from_string(
+            r#"{"kind":"example","kind":"admitted_launch_capsule"}"#.to_owned(),
+        )
+        .unwrap();
+        let error = decode_raw_object_value(&"00".repeat(32), &raw).unwrap_err();
+        assert!(error.to_string().contains("unambiguous kind"));
+    }
+
+    #[test]
+    fn objects_get_raw_envelope_rejects_duplicate_before_object_decode() {
+        let hash = "11".repeat(32);
+        let body = serde_json::json!({
+            "entries": [
+                {"hash": hash, "kind": "object", "value": {"kind":"not-addressed"}},
+                {"hash": hash, "kind": "object", "value": {"kind":"not-addressed"}}
+            ]
+        });
+        let requested = vec![hash.clone(), "22".repeat(32)];
+        let error =
+            parse_raw_objects_get_response(&serde_json::to_vec(&body).unwrap(), &requested, &[])
+                .unwrap_err();
+        assert!(error.to_string().contains("unexpected or duplicate object"));
+        assert!(!error.to_string().contains("content address"));
+    }
+
+    #[test]
+    fn objects_get_raw_envelope_rejects_unrequested_value_before_decode() {
+        let requested = "11".repeat(32);
+        let returned = "22".repeat(32);
+        let body = serde_json::json!({
+            "entries": [{
+                "hash": returned,
+                "kind": "object",
+                "value": {"kind":"not-addressed", "padding":"x".repeat(4096)}
+            }]
+        });
+        let error =
+            parse_raw_objects_get_response(&serde_json::to_vec(&body).unwrap(), &[requested], &[])
+                .unwrap_err();
+        assert!(error.to_string().contains("unexpected or duplicate object"));
+        assert!(!error.to_string().contains("content address"));
+    }
+
+    #[test]
+    fn objects_get_raw_envelope_rejects_excess_count_before_object_decode() {
+        let first = "11".repeat(32);
+        let second = "22".repeat(32);
+        let body = serde_json::json!({
+            "entries": [
+                {"hash": first, "kind":"object", "value":{"kind":"wrong-hash"}},
+                {"hash": second, "kind":"object", "value":{"kind":"wrong-hash"}}
+            ]
+        });
+        let error = parse_raw_objects_get_response(
+            &serde_json::to_vec(&body).unwrap(),
+            &["33".repeat(32)],
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("more entries than requested"));
+        assert!(!error.to_string().contains("content address"));
+    }
+
+    #[test]
+    fn closure_raw_envelope_rejects_duplicate_before_object_decode() {
+        let hash = "33".repeat(32);
+        let options = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &test_object_closure_policy(),
+        )
+        .unwrap();
+        let body = serde_json::json!({
+            "closure": {
+                "roots": [hash],
+                "complete": true,
+                "object_hashes": [hash, "44".repeat(32)],
+                "blob_hashes": [],
+                "large_object_hashes": [],
+                "missing_objects": [],
+                "missing_blobs": [],
+                "malformed_objects": [],
+                "unsupported_objects": []
+            },
+            "object_bytes": 0,
+            "blob_bytes": 0,
+            "entries": [
+                {"hash": hash, "kind":"object", "value":{"kind":"wrong-hash"}},
+                {"hash": hash, "kind":"object", "value":{"kind":"wrong-hash"}}
+            ]
+        });
+        let requested_roots = vec![hash];
+        let error = parse_raw_objects_closure_get(
+            &serde_json::to_vec(&body).unwrap(),
+            &requested_roots,
+            &options,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate"));
+        assert!(!error.to_string().contains("content address"));
+    }
+
+    #[test]
+    fn closure_raw_envelope_rejects_oversized_blob_before_string_decode() {
+        // Closure roots are objects; the oversized blob is one of the root's
+        // dependencies, advertised but not returned as an object entry.
+        let root = "55".repeat(32);
+        let blob = "66".repeat(32);
+        let mut policy = test_object_closure_policy();
+        policy.max_blobs = 1;
+        policy.max_blob_bytes = 3;
+        policy.max_total_blob_bytes = 3;
+        let options = NodeAdmittedObjectsClosureRequestOptions::admit(
+            ObjectsClosureRequestOptions::default(),
+            &policy,
+        )
+        .unwrap();
+        let body = serde_json::json!({
+            "closure": {
+                "roots": [root],
+                "complete": true,
+                "object_hashes": [root],
+                "blob_hashes": [blob],
+                "large_object_hashes": [],
+                "missing_objects": [],
+                "missing_blobs": [],
+                "malformed_objects": [],
+                "unsupported_objects": []
+            },
+            "object_bytes": 0,
+            "blob_bytes": 4,
+            "entries": [{"hash":blob, "kind":"blob", "data":"YWJjZA=="}]
+        });
+        let requested_roots = vec![root];
+        let error = parse_raw_objects_closure_get(
+            &serde_json::to_vec(&body).unwrap(),
+            &requested_roots,
+            &options,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("per-blob byte limit"),
+            "unexpected refusal: {error:#}"
+        );
+        assert!(!error.to_string().contains("invalid base64"));
     }
 
     #[test]
@@ -4590,6 +6149,7 @@ mod tests {
                 kind: "object".to_string(),
                 data: None,
                 value: Some(value),
+                value_bytes: Some(canonical.clone().into_bytes()),
             }],
         };
         assert!(
@@ -4597,5 +6157,164 @@ mod tests {
                 .validate_against_request(&[hash], &options)
                 .is_err()
         );
+    }
+
+    fn delegation_fixture() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        AppState,
+        super::super::config::RemoteConfig,
+        lillux::crypto::SigningKey,
+        crate::handler_context::HandlerContext,
+    ) {
+        let (tmp, store_owner, state) = crate::test_support::build_test_state();
+        let user_key = lillux::crypto::SigningKey::from_bytes(&[61u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&user_key.verifying_key());
+        let remote = super::super::config::RemoteConfig {
+            name: "hosted".into(),
+            url: Some("https://hosted.invalid".into()),
+            reachability: super::super::config::Reachability::Outbound,
+            principal_id: format!("fp:{}", "ab".repeat(32)),
+            signing_key: "ed25519:unused".into(),
+            site_id: "site:hosted".into(),
+            vault_fingerprint: "vault".into(),
+            ingest_ignore: None,
+            project_bindings: std::collections::HashMap::new(),
+        };
+        let context = crate::handler_context::HandlerContext::new(
+            format!("fp:{fingerprint}"),
+            vec!["*".to_owned()],
+            true,
+        );
+        (tmp, store_owner, state, remote, user_key, context)
+    }
+
+    fn store_delegation(
+        state: &AppState,
+        remote: &super::super::config::RemoteConfig,
+        user_key: &lillux::crypto::SigningKey,
+        not_after: u64,
+    ) -> ryeos_node_runtime::remote_delegation::SignedDelegation {
+        use ryeos_node_runtime::remote_delegation::{DelegationBody, DelegationParties};
+        let fingerprint = lillux::signature::compute_fingerprint(&user_key.verifying_key());
+        let body = DelegationBody::new(
+            &format!("fp:{fingerprint}"),
+            DelegationParties {
+                delegate_site: state.threads.site_id(),
+                delegate_node: &state.identity.principal_id(),
+                audience_site: &remote.site_id,
+                audience_node: &remote.principal_id,
+            },
+            &["ryeos.execute.service.remote/run".to_owned()],
+            not_after,
+        );
+        let signed =
+            ryeos_node_runtime::remote_delegation::SignedDelegation::sign(body, user_key).unwrap();
+        ryeos_node_runtime::remote_delegation::store_delegation(
+            &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).delegations_dir(),
+            &remote.name,
+            &signed,
+            &state.identity,
+            lillux::time::unix_secs_now(),
+        )
+        .unwrap();
+        signed
+    }
+
+    fn refusal(error: anyhow::Error) -> DelegationError {
+        error
+            .downcast::<DelegationError>()
+            .expect("typed delegation refusal")
+    }
+
+    #[test]
+    fn outbound_without_delegation_is_refused_with_fix() {
+        let (_tmp, _store, state, remote, _key, context) = delegation_fixture();
+        let error = refusal(
+            RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context)
+                .err()
+                .expect("no stored delegation"),
+        );
+        assert_eq!(error.code(), "remote_delegation_missing");
+        assert!(
+            error
+                .to_string()
+                .contains("ryeos remote delegate --remote hosted"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn outbound_with_expired_delegation_is_refused() {
+        let (_tmp, _store, state, remote, key, context) = delegation_fixture();
+        store_delegation(&state, &remote, &key, 1_000);
+        let error = refusal(
+            RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context)
+                .err()
+                .expect("expired delegation"),
+        );
+        assert_eq!(error.code(), "remote_delegation_expired");
+        assert!(
+            error
+                .to_string()
+                .contains("ryeos remote delegate --remote hosted"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn delegated_client_presents_the_delegation_and_the_cosignature() {
+        let (_tmp, _store, state, remote, key, context) = delegation_fixture();
+        let stored = store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 600);
+        let client = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context).unwrap();
+        assert_eq!(client.delegation_digest(), Some(stored.digest().unwrap()));
+        let headers = client.sign_request("POST", "/execute", b"{}").unwrap();
+        assert_eq!(headers.key_id, state.identity.principal_id());
+        let proof = headers.forwarding.as_ref().expect("co-signature");
+        assert_eq!(proof.key_id, headers.key_id);
+        let parsed = ryeos_node_runtime::remote_delegation::SignedDelegation::from_header_value(
+            headers.delegation.as_deref().expect("delegation header"),
+        )
+        .unwrap();
+        assert_eq!(parsed, stored);
+    }
+
+    #[test]
+    fn a_delegated_caller_cannot_delegate_onward() {
+        let (_tmp, _store, state, remote, key, mut context) = delegation_fixture();
+        store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 600);
+        context.authenticated_origin_site_id = Some("site:somewhere".to_owned());
+        let error = refusal(
+            RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context)
+                .err()
+                .expect("a forwarded caller has no delegation to this node"),
+        );
+        assert_eq!(error.code(), "remote_delegation_not_transitive");
+    }
+
+    #[test]
+    fn a_retained_operation_refuses_a_replaced_delegation() {
+        let (_tmp, _store, state, remote, key, context) = delegation_fixture();
+        let first = store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 600);
+        let fingerprint = context.fingerprint.strip_prefix("fp:").unwrap().to_owned();
+        RemoteClient::from_remote_cfg_as_retained_delegated(
+            &state,
+            &remote,
+            &fingerprint,
+            &first.digest().unwrap(),
+        )
+        .unwrap();
+        store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 900);
+        let error = refusal(
+            RemoteClient::from_remote_cfg_as_retained_delegated(
+                &state,
+                &remote,
+                &fingerprint,
+                &first.digest().unwrap(),
+            )
+            .err()
+            .expect("replaced delegation"),
+        );
+        assert_eq!(error.code(), "remote_delegation_replaced");
     }
 }

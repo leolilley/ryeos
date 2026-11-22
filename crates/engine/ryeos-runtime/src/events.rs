@@ -7,17 +7,22 @@
 //! either side. Adding a new event variant is a single-edit change
 //! that both sides see at compile time.
 //!
-//! `RuntimeEventType::storage_class()` is the canonical mapping from
-//! event type to durable-store strategy. High-frequency progressive
-//! events (token deltas, reasoning chunks, foreach progress) are
-//! ephemeral live-stream events; everything else is an `indexed`
-//! milestone unless a caller deliberately requests `journal_only`.
+//! The daemon stores every runtime-appended event under the node's signed
+//! `event_storage` policy. `RuntimeEventType::is_progressive()` is the code
+//! floor: only progressive events may be stored as `ephemeral` or
+//! `journal_only`; every lifecycle, audit, launch and terminal event is
+//! always `indexed`. Runtimes send no storage class. `RuntimeEventType::storage_class()`
+//! is the class the shipped init profiles assign.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+
+use ryeos_provider_contract::Part;
+
+use crate::cognition::{CognitionInput, TurnMarker, validate_token};
 
 // Wire strings live in `ryeos-state` (the lower shared layer the projection also
 // reads), so the enum and the projection reference one source of truth.
@@ -125,13 +130,22 @@ pub struct HookFailedPayload {
     pub failure_class: HookFailureClass,
 }
 
-/// Versioned payload used only when a rendered `cognition_in` stimulus cannot
+/// Versioned payload used only when a rendered `cognition_in` input cannot
 /// fit in one runtime event. The complete set is appended atomically and folds
-/// back into one provider message; individual chunks are never provider turns.
+/// back into one input; individual chunks are never provider turns. Every
+/// chunk of a set repeats the input's origin, kind, acknowledgement and pin,
+/// and the assembler refuses a set whose chunks disagree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CognitionInChunk {
     pub schema_version: u32,
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     pub content_hash: String,
     pub chunk_index: u32,
     pub chunk_count: u32,
@@ -139,18 +153,22 @@ pub struct CognitionInChunk {
 }
 
 /// Result of folding one `cognition_in` payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CognitionInAssembly {
-    /// A marker-only payload such as `{ "turn": 1 }`.
-    Marker,
-    /// A multipart stimulus is valid so far but is not complete.
+    /// A turn marker such as `{ "turn": 1 }`.
+    Marker(TurnMarker),
+    /// A multipart input is valid so far but is not complete.
     Pending,
-    /// One complete stimulus, either inline or reassembled from chunks.
-    Complete(String),
+    /// One complete input, either inline or reassembled from chunks.
+    Complete(CognitionInput),
 }
 
 #[derive(Debug)]
 struct PendingCognitionIn {
+    origin: String,
+    kind: Option<String>,
+    ack: Option<String>,
+    pinned: bool,
     content_hash: String,
     chunk_count: u32,
     next_chunk_index: u32,
@@ -160,9 +178,10 @@ struct PendingCognitionIn {
 
 /// Stateful validator/folder for the typed multipart `cognition_in` contract.
 ///
-/// Chunk groups must be contiguous, begin at zero, have one stable digest and
-/// count, stay within the runtime batch budgets, and finish with an exact
-/// content-hash match. Call [`Self::finish`] at the end of a batch or replay.
+/// Chunk groups must be contiguous, begin at zero, have one stable digest,
+/// count and origin, stay within the runtime batch budgets, and finish with an
+/// exact content-hash match. Call [`Self::finish`] at the end of a batch or
+/// replay.
 #[derive(Debug, Default)]
 pub struct CognitionInAssembler {
     pending: Option<PendingCognitionIn>,
@@ -190,9 +209,13 @@ impl CognitionInAssembler {
 
             if chunk.chunk_index == 0 {
                 if self.pending.is_some() {
-                    bail!("chunked cognition_in began before the prior stimulus completed");
+                    bail!("chunked cognition_in began before the prior input completed");
                 }
                 self.pending = Some(PendingCognitionIn {
+                    origin: chunk.origin.clone(),
+                    kind: chunk.kind.clone(),
+                    ack: chunk.ack.clone(),
+                    pinned: chunk.pinned,
                     content_hash: chunk.content_hash.clone(),
                     chunk_count: chunk.chunk_count,
                     next_chunk_index: 0,
@@ -208,10 +231,17 @@ impl CognitionInAssembler {
                 )
             })?;
             if chunk.content_hash != pending.content_hash {
-                bail!("chunked cognition_in content_hash changed within one stimulus");
+                bail!("chunked cognition_in content_hash changed within one input");
             }
             if chunk.chunk_count != pending.chunk_count {
-                bail!("chunked cognition_in chunk_count changed within one stimulus");
+                bail!("chunked cognition_in chunk_count changed within one input");
+            }
+            if chunk.origin != pending.origin
+                || chunk.kind != pending.kind
+                || chunk.ack != pending.ack
+                || chunk.pinned != pending.pinned
+            {
+                bail!("chunked cognition_in origin, kind, ack or pinned changed within one input");
             }
             if chunk.chunk_index != pending.next_chunk_index {
                 bail!(
@@ -247,7 +277,15 @@ impl CognitionInAssembler {
                         observed
                     );
                 }
-                return Ok(CognitionInAssembly::Complete(completed.content));
+                let input = CognitionInput {
+                    origin: completed.origin,
+                    parts: vec![Part::text(completed.content)],
+                    kind: completed.kind,
+                    ack: completed.ack,
+                    pinned: completed.pinned,
+                };
+                input.validate()?;
+                return Ok(CognitionInAssembly::Complete(input));
             }
             return Ok(CognitionInAssembly::Pending);
         }
@@ -255,15 +293,16 @@ impl CognitionInAssembler {
         if self.pending.is_some() {
             bail!("chunked cognition_in was interrupted before all chunks arrived");
         }
-        match payload.get("content") {
-            Some(content) => Ok(CognitionInAssembly::Complete(
-                content
-                    .as_str()
-                    .context("cognition_in content must be a string")?
-                    .to_string(),
-            )),
-            None => Ok(CognitionInAssembly::Marker),
+        if payload.get("turn").is_some() {
+            let marker: TurnMarker = serde_json::from_value(payload.clone())
+                .context("invalid cognition_in turn marker")?;
+            marker.validate()?;
+            return Ok(CognitionInAssembly::Marker(marker));
         }
+        let input: CognitionInput = serde_json::from_value(payload.clone())
+            .context("cognition_in is neither a turn marker nor an input with origin and parts")?;
+        input.validate()?;
+        Ok(CognitionInAssembly::Complete(input))
     }
 
     pub fn finish(&self) -> Result<()> {
@@ -284,6 +323,10 @@ fn validate_cognition_in_chunk(chunk: &CognitionInChunk) -> Result<()> {
             "unsupported chunked cognition_in schema_version {}",
             chunk.schema_version
         );
+    }
+    validate_token("chunked cognition_in origin", &chunk.origin)?;
+    if let Some(kind) = &chunk.kind {
+        validate_token("chunked cognition_in kind", kind)?;
     }
     if chunk.content_hash.len() != 64
         || !chunk
@@ -312,11 +355,13 @@ fn validate_cognition_in_chunk(chunk: &CognitionInChunk) -> Result<()> {
     Ok(())
 }
 
-/// Encode a rendered stimulus as one inline payload when possible, otherwise
-/// as an atomic, hash-bound multipart payload set under the runtime event
-/// admission ceilings.
-pub fn encode_cognition_in_payloads(content: &str) -> Result<Vec<Value>> {
-    let inline = json!({ "content": content });
+/// Encode an input as one inline payload when possible, otherwise as an
+/// atomic, hash-bound multipart payload set under the runtime event
+/// admission ceilings. Only an input that is exactly one text part can be
+/// split; an input with images never is.
+pub fn encode_cognition_in_payloads(input: &CognitionInput) -> Result<Vec<Value>> {
+    input.validate()?;
+    let inline = serde_json::to_value(input).context("serialize cognition_in payload")?;
     if serde_json::to_vec(&inline)
         .context("serialize cognition_in payload")?
         .len()
@@ -324,6 +369,14 @@ pub fn encode_cognition_in_payloads(content: &str) -> Result<Vec<Value>> {
     {
         return Ok(vec![inline]);
     }
+    let Some(content) = input.single_text() else {
+        bail!(
+            "cognition_in with {} parts exceeds the {} byte event payload ceiling and only a \
+             single text part can be split",
+            input.parts.len(),
+            MAX_RUNTIME_EVENT_PAYLOAD_BYTES
+        );
+    };
     if content.len() > MAX_RUNTIME_EVENT_BATCH_BYTES {
         bail!(
             "rendered cognition_in is {} UTF-8 bytes (atomic event-batch max {})",
@@ -334,27 +387,61 @@ pub fn encode_cognition_in_payloads(content: &str) -> Result<Vec<Value>> {
 
     let content_hash = lillux::signature::content_hash(content);
     let payloads = encode_bounded_text_payloads(content, |chunk_index, chunk_count, chunk| {
-        json!({
-            "schema_version": 1,
-            "content_hash": content_hash,
-            "chunk_index": chunk_index,
-            "chunk_count": chunk_count,
-            "content_chunk": chunk,
+        serde_json::to_value(CognitionInChunk {
+            schema_version: 1,
+            origin: input.origin.clone(),
+            kind: input.kind.clone(),
+            ack: input.ack.clone(),
+            pinned: input.pinned,
+            content_hash: content_hash.clone(),
+            chunk_index,
+            chunk_count,
+            content_chunk: chunk.to_string(),
         })
+        .expect("a cognition_in chunk serialises")
     })?;
 
     let mut assembler = CognitionInAssembler::default();
     let mut recovered = None;
     for payload in &payloads {
-        if let CognitionInAssembly::Complete(content) = assembler.push(payload)? {
-            recovered = Some(content);
+        if let CognitionInAssembly::Complete(complete) = assembler.push(payload)? {
+            recovered = Some(complete);
         }
     }
     assembler.finish()?;
-    if recovered.as_deref() != Some(content) {
+    if recovered.as_ref() != Some(input) {
         bail!("chunked cognition_in failed its local reassembly check");
     }
 
+    Ok(payloads)
+}
+
+/// Encodes several inputs as the payloads of one atomic batch under a single
+/// budget. `reserved_items` and `reserved_bytes` are what the batch's other
+/// events (a frame) already use. The batch may hold at most
+/// [`MAX_RUNTIME_EVENT_BATCH_ITEMS`] events and
+/// [`MAX_RUNTIME_EVENT_BATCH_BYTES`] bytes of payload in all; one that needs
+/// more fails here, before anything is appended.
+pub fn encode_cognition_in_batch(
+    reserved_items: usize,
+    reserved_bytes: usize,
+    inputs: &[CognitionInput],
+) -> Result<Vec<Value>> {
+    let mut payloads = Vec::new();
+    for input in inputs {
+        payloads.extend(encode_cognition_in_payloads(input)?);
+    }
+    let bytes = payloads.iter().try_fold(reserved_bytes, |total, payload| {
+        Ok::<_, anyhow::Error>(total + serde_json::to_vec(payload)?.len())
+    })?;
+    let items = reserved_items + payloads.len();
+    if items > MAX_RUNTIME_EVENT_BATCH_ITEMS || bytes > MAX_RUNTIME_EVENT_BATCH_BYTES {
+        bail!(
+            "launch records need {items} events and {bytes} payload bytes; one atomic batch \
+             holds at most {MAX_RUNTIME_EVENT_BATCH_ITEMS} events and \
+             {MAX_RUNTIME_EVENT_BATCH_BYTES} bytes"
+        );
+    }
     Ok(payloads)
 }
 
@@ -493,6 +580,8 @@ pub enum RuntimeEventType {
     // ── Spawning / continuation / commands ──────────────────────
     EdgeRecorded,
     ChildThreadSpawned,
+    ChildThreadSettled,
+    WorkerContinuationAdmitted,
     ContinuationRequested,
     ContinuationAccepted,
     CommandSubmitted,
@@ -526,19 +615,29 @@ pub enum RuntimeEventType {
     /// A launch augmentation reused a process-local projection instead of
     /// fabricating a child execution. Kept outside the composed launch input.
     LaunchAugmentationCacheHit,
+    /// Daemon-authored record of the root kind a launch attempt's process
+    /// inputs were laid out in (no paths).
+    ProcessInputRootSelected,
+    /// Daemon-authored record, in a rebound successor's birth batch, of the
+    /// ref bindings an operator replaced and the launch facts before and after.
+    LaunchBindingRebound,
     /// A `(key, value)` metadata tag stamped on a thread post-launch (cohort
     /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
     /// rebuild, unlike a bare facet-table write.
     ThreadFacetSet,
-    ThreadReconciled,
-    OrphanProcessKilled,
 
     // ── Cognition / replay transcript ───────────────────────────
-    SystemPrompt,
-    ContextInjected,
     CognitionIn,
     CognitionOut,
     CognitionReasoning,
+    /// What the model is given that is not a conversation message and is
+    /// stable across turns (system parts, tool inventory reference, request
+    /// options, provider configuration hash). Always indexed.
+    CognitionFrame,
+    /// Reserved record that a span of earlier turns is replaced by a summary.
+    /// Registered so the vocabulary is closed; nothing emits it yet. Always
+    /// indexed.
+    CognitionCompaction,
 
     // ── Tool dispatch ───────────────────────────────────────────
     ToolCallStart,
@@ -573,6 +672,9 @@ pub enum RuntimeEventType {
 
     // ── Usage settlement (O3) ───────────────────────────────────
     ThreadUsage,
+    /// Operator-authored triage record: one attention item was acknowledged.
+    /// Daemon-authored through the attention service; a runtime cannot append it.
+    AttentionAcknowledged,
 }
 
 impl RuntimeEventType {
@@ -588,6 +690,8 @@ impl RuntimeEventType {
             Self::ThreadContinued => wire::THREAD_CONTINUED,
             Self::EdgeRecorded => wire::EDGE_RECORDED,
             Self::ChildThreadSpawned => wire::CHILD_THREAD_SPAWNED,
+            Self::ChildThreadSettled => wire::CHILD_THREAD_SETTLED,
+            Self::WorkerContinuationAdmitted => wire::WORKER_CONTINUATION_ADMITTED,
             Self::ContinuationRequested => wire::CONTINUATION_REQUESTED,
             Self::ContinuationAccepted => wire::CONTINUATION_ACCEPTED,
             Self::CommandSubmitted => wire::COMMAND_SUBMITTED,
@@ -607,14 +711,14 @@ impl RuntimeEventType {
             Self::AsLaunchedRefBindings => wire::AS_LAUNCHED_REF_BINDINGS,
             Self::RuntimeLaunchFacts => wire::RUNTIME_LAUNCH_FACTS,
             Self::LaunchAugmentationCacheHit => wire::LAUNCH_AUGMENTATION_CACHE_HIT,
+            Self::ProcessInputRootSelected => wire::PROCESS_INPUT_ROOT_SELECTED,
+            Self::LaunchBindingRebound => wire::LAUNCH_BINDING_REBOUND,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
-            Self::ThreadReconciled => wire::THREAD_RECONCILED,
-            Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
-            Self::SystemPrompt => wire::SYSTEM_PROMPT,
-            Self::ContextInjected => wire::CONTEXT_INJECTED,
             Self::CognitionIn => wire::COGNITION_IN,
             Self::CognitionOut => wire::COGNITION_OUT,
             Self::CognitionReasoning => wire::COGNITION_REASONING,
+            Self::CognitionFrame => wire::COGNITION_FRAME,
+            Self::CognitionCompaction => wire::COGNITION_COMPACTION,
             Self::ToolCallStart => wire::TOOL_CALL_START,
             Self::ToolCallResult => wire::TOOL_CALL_RESULT,
             Self::GraphStarted => wire::GRAPH_STARTED,
@@ -631,6 +735,7 @@ impl RuntimeEventType {
             Self::CostUntracked => wire::COST_UNTRACKED,
             Self::Milestone => wire::MILESTONE,
             Self::ThreadUsage => wire::THREAD_USAGE,
+            Self::AttentionAcknowledged => wire::ATTENTION_ACKNOWLEDGED,
         }
     }
 
@@ -646,6 +751,8 @@ impl RuntimeEventType {
             wire::THREAD_CONTINUED => Ok(Self::ThreadContinued),
             wire::EDGE_RECORDED => Ok(Self::EdgeRecorded),
             wire::CHILD_THREAD_SPAWNED => Ok(Self::ChildThreadSpawned),
+            wire::CHILD_THREAD_SETTLED => Ok(Self::ChildThreadSettled),
+            wire::WORKER_CONTINUATION_ADMITTED => Ok(Self::WorkerContinuationAdmitted),
             wire::CONTINUATION_REQUESTED => Ok(Self::ContinuationRequested),
             wire::CONTINUATION_ACCEPTED => Ok(Self::ContinuationAccepted),
             wire::COMMAND_SUBMITTED => Ok(Self::CommandSubmitted),
@@ -665,14 +772,14 @@ impl RuntimeEventType {
             wire::AS_LAUNCHED_REF_BINDINGS => Ok(Self::AsLaunchedRefBindings),
             wire::RUNTIME_LAUNCH_FACTS => Ok(Self::RuntimeLaunchFacts),
             wire::LAUNCH_AUGMENTATION_CACHE_HIT => Ok(Self::LaunchAugmentationCacheHit),
+            wire::PROCESS_INPUT_ROOT_SELECTED => Ok(Self::ProcessInputRootSelected),
+            wire::LAUNCH_BINDING_REBOUND => Ok(Self::LaunchBindingRebound),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
-            wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
-            wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
-            wire::SYSTEM_PROMPT => Ok(Self::SystemPrompt),
-            wire::CONTEXT_INJECTED => Ok(Self::ContextInjected),
             wire::COGNITION_IN => Ok(Self::CognitionIn),
             wire::COGNITION_OUT => Ok(Self::CognitionOut),
             wire::COGNITION_REASONING => Ok(Self::CognitionReasoning),
+            wire::COGNITION_FRAME => Ok(Self::CognitionFrame),
+            wire::COGNITION_COMPACTION => Ok(Self::CognitionCompaction),
             wire::TOOL_CALL_START => Ok(Self::ToolCallStart),
             wire::TOOL_CALL_RESULT => Ok(Self::ToolCallResult),
             wire::GRAPH_STARTED => Ok(Self::GraphStarted),
@@ -691,6 +798,7 @@ impl RuntimeEventType {
             wire::COST_UNTRACKED => Ok(Self::CostUntracked),
             wire::MILESTONE => Ok(Self::Milestone),
             wire::THREAD_USAGE => Ok(Self::ThreadUsage),
+            wire::ATTENTION_ACKNOWLEDGED => Ok(Self::AttentionAcknowledged),
             other if other.trim().is_empty() => bail!("event_type must not be empty"),
             other => bail!("invalid event_type: {other}"),
         }
@@ -704,7 +812,12 @@ impl RuntimeEventType {
     pub fn is_transcript(self) -> bool {
         matches!(
             self,
-            Self::CognitionIn | Self::CognitionOut | Self::ToolCallStart | Self::ToolCallResult
+            Self::CognitionIn
+                | Self::CognitionOut
+                | Self::CognitionFrame
+                | Self::CognitionCompaction
+                | Self::ToolCallStart
+                | Self::ToolCallResult
         )
     }
 
@@ -728,23 +841,18 @@ impl RuntimeEventType {
         )
     }
 
-    /// Canonical storage class for this event type.
-    ///
-    /// High-frequency progressive events (token deltas, reasoning
-    /// chunks, foreach progress) are live-only `ephemeral`; everything
-    /// else is an indexed milestone. The mapping is intentionally
-    /// `match`-exhaustive so adding a new variant requires deciding
-    /// its storage class up front.
-    pub fn storage_class(self) -> StorageClass {
+    /// Whether the node's signed `event_storage` policy chooses this event's
+    /// storage class. Only these high-frequency progressive events may be
+    /// stored as `ephemeral` or `journal_only`; every other event (lifecycle,
+    /// audit, launch, terminal, transcript) is always `indexed`, whatever a
+    /// policy or a runtime says. Intentionally `match`-exhaustive.
+    pub fn is_progressive(self) -> bool {
         match self {
             Self::TokenDelta
             | Self::StreamSnapshot
             | Self::CognitionReasoning
             | Self::Observation
-            | Self::GraphForeachIteration => StorageClass::Ephemeral,
-            // Everything else: thread lifecycle, edges, commands,
-            // cognition turn boundaries, tool dispatch, graph
-            // lifecycle/step/branch milestones — indexed.
+            | Self::GraphForeachIteration => true,
             Self::ThreadCreated
             | Self::ThreadStarted
             | Self::ThreadCompleted
@@ -755,6 +863,8 @@ impl RuntimeEventType {
             | Self::ThreadContinued
             | Self::EdgeRecorded
             | Self::ChildThreadSpawned
+            | Self::ChildThreadSettled
+            | Self::WorkerContinuationAdmitted
             | Self::ContinuationRequested
             | Self::ContinuationAccepted
             | Self::CommandSubmitted
@@ -771,13 +881,13 @@ impl RuntimeEventType {
             | Self::AsLaunchedRefBindings
             | Self::RuntimeLaunchFacts
             | Self::LaunchAugmentationCacheHit
+            | Self::ProcessInputRootSelected
+            | Self::LaunchBindingRebound
             | Self::ThreadFacetSet
-            | Self::ThreadReconciled
-            | Self::OrphanProcessKilled
-            | Self::SystemPrompt
-            | Self::ContextInjected
             | Self::CognitionIn
             | Self::CognitionOut
+            | Self::CognitionFrame
+            | Self::CognitionCompaction
             | Self::ToolCallStart
             | Self::ToolCallResult
             | Self::GraphStarted
@@ -792,19 +902,115 @@ impl RuntimeEventType {
             | Self::ProviderAttemptBudgetTransitionV1
             | Self::CostUntracked
             | Self::Milestone
-            | Self::ThreadUsage => StorageClass::Indexed,
+            | Self::ThreadUsage
+            | Self::AttentionAcknowledged => false,
         }
     }
+
+    /// The storage class every shipped init profile assigns. Daemon-authored
+    /// events written straight to the state store (all on the indexed floor)
+    /// use it; a runtime-appended event carries no class and is stored under
+    /// the node's signed `event_storage` policy within the floor of
+    /// [`Self::is_progressive`].
+    ///
+    /// Token, stream-snapshot and reasoning deltas are live-only
+    /// `ephemeral`: the turn-complete `cognition_out` keeps their text, so
+    /// only timing is lost. `observation` and `graph_foreach_iteration`
+    /// carry information nothing else keeps, so they are `journal_only`:
+    /// stored in CAS, not indexed. Everything else is an indexed
+    /// milestone. The mapping is intentionally `match`-exhaustive so adding
+    /// a new variant requires deciding its storage class up front.
+    pub fn storage_class(self) -> StorageClass {
+        match self {
+            Self::TokenDelta | Self::StreamSnapshot | Self::CognitionReasoning => {
+                StorageClass::Ephemeral
+            }
+            Self::Observation | Self::GraphForeachIteration => StorageClass::JournalOnly,
+            // Everything else: thread lifecycle, edges, commands,
+            // cognition turn boundaries, tool dispatch, graph
+            // lifecycle/step/branch milestones — indexed.
+            Self::ThreadCreated
+            | Self::ThreadStarted
+            | Self::ThreadCompleted
+            | Self::ThreadFailed
+            | Self::ThreadCancelled
+            | Self::ThreadKilled
+            | Self::ThreadTimedOut
+            | Self::ThreadContinued
+            | Self::EdgeRecorded
+            | Self::ChildThreadSpawned
+            | Self::ChildThreadSettled
+            | Self::WorkerContinuationAdmitted
+            | Self::ContinuationRequested
+            | Self::ContinuationAccepted
+            | Self::CommandSubmitted
+            | Self::CommandClaimed
+            | Self::CommandCompleted
+            | Self::StreamOpened
+            | Self::StreamClosed
+            | Self::HookObservationRecorded
+            | Self::HookFailed
+            | Self::ProjectObservationRecorded
+            | Self::ProviderCallObservationRecorded
+            | Self::ArtifactPublished
+            | Self::AsLaunchedResolution
+            | Self::AsLaunchedRefBindings
+            | Self::RuntimeLaunchFacts
+            | Self::LaunchAugmentationCacheHit
+            | Self::ProcessInputRootSelected
+            | Self::LaunchBindingRebound
+            | Self::ThreadFacetSet
+            | Self::CognitionIn
+            | Self::CognitionOut
+            | Self::CognitionFrame
+            | Self::CognitionCompaction
+            | Self::ToolCallStart
+            | Self::ToolCallResult
+            | Self::GraphStarted
+            | Self::GraphCompleted
+            | Self::GraphStepStarted
+            | Self::GraphStepCompleted
+            | Self::GraphBranchTaken
+            | Self::GraphForeachStarted
+            | Self::GraphFollowSuspended
+            | Self::GraphNodeRetry
+            | Self::ProviderRetry
+            | Self::ProviderAttemptBudgetTransitionV1
+            | Self::CostUntracked
+            | Self::Milestone
+            | Self::ThreadUsage
+            | Self::AttentionAcknowledged => StorageClass::Indexed,
+        }
+    }
+}
+
+/// Whether a `cognition_out` payload is a progressive streaming fragment
+/// (a text `delta`, a `tool_use_partial`, or a mid-stream complete
+/// `tool_use`) rather than the turn-complete record. Fragments are live-only:
+/// the durable record of a turn, its tool calls included, is the
+/// turn-complete `cognition_out{tool_calls}`, and persisting the mid-stream
+/// `tool_use` too would fold a spurious extra assistant turn on resume.
+/// Runtime emitters and the daemon's storage decision share this rule.
+pub fn cognition_out_is_progressive(payload: &Value) -> bool {
+    payload.get("delta").is_some()
+        || payload.get("tool_use_partial").is_some()
+        || payload.get("tool_use").is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn launch_input(content: &str) -> CognitionInput {
+        CognitionInput::text("launch", content).pinned()
+    }
 
     #[test]
     fn large_cognition_input_round_trips_as_bounded_atomic_chunks() {
         let content = "ARC evidence \"quoted\"\n".repeat(16_000);
-        let payloads = encode_cognition_in_payloads(&content).unwrap();
+        let input = launch_input(&content);
+        let payloads = encode_cognition_in_payloads(&input).unwrap();
 
         assert!(payloads.len() > 1);
         assert!(payloads.len() <= MAX_RUNTIME_EVENT_BATCH_ITEMS);
@@ -826,13 +1032,13 @@ mod tests {
             }
         }
         assembler.finish().unwrap();
-        assert_eq!(recovered.as_deref(), Some(content.as_str()));
+        assert_eq!(recovered.as_ref(), Some(&input));
     }
 
     #[test]
     fn chunked_cognition_input_rejects_missing_or_tampered_parts() {
         let content = "x".repeat(MAX_RUNTIME_EVENT_PAYLOAD_BYTES + 1024);
-        let mut payloads = encode_cognition_in_payloads(&content).unwrap();
+        let mut payloads = encode_cognition_in_payloads(&launch_input(&content)).unwrap();
         assert!(payloads.len() > 1);
 
         let mut incomplete = CognitionInAssembler::default();
@@ -859,6 +1065,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_batch_of_inputs_shares_one_budget() {
+        let small = CognitionInput::text("context", "background");
+        let payloads =
+            encode_cognition_in_batch(1, 1_000, &[small.clone(), launch_input("go"), small])
+                .unwrap();
+        assert_eq!(payloads.len(), 3);
+
+        // Each input fits alone; together with the reserved frame they do not.
+        let big = launch_input(&"z".repeat(MAX_RUNTIME_EVENT_BATCH_BYTES - 512 * 1024));
+        let error = encode_cognition_in_batch(1, 3 * 1024 * 1024, &[big])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("one atomic batch holds at most"), "{error}");
+
+        let many: Vec<_> = (0..MAX_RUNTIME_EVENT_BATCH_ITEMS)
+            .map(|index| CognitionInput::text("context", format!("c{index}")))
+            .collect();
+        assert!(encode_cognition_in_batch(0, 0, &many).is_ok());
+        assert!(encode_cognition_in_batch(1, 0, &many).is_err());
+    }
+
+    #[test]
+    fn chunks_of_one_input_must_agree_on_origin_and_pin() {
+        let content = "y".repeat(MAX_RUNTIME_EVENT_PAYLOAD_BYTES + 1024);
+        let mut payloads = encode_cognition_in_payloads(&launch_input(&content)).unwrap();
+        payloads[1]["origin"] = json!("operator");
+        let mut assembler = CognitionInAssembler::default();
+        assembler.push(&payloads[0]).unwrap();
+        let error = assembler.push(&payloads[1]).unwrap_err().to_string();
+        assert!(error.contains("changed within one input"), "{error}");
+    }
+
+    #[test]
+    fn inline_input_marker_and_malformed_payloads_are_told_apart() {
+        let mut assembler = CognitionInAssembler::default();
+        assert_eq!(
+            assembler.push(&json!({"turn": 3})).unwrap(),
+            CognitionInAssembly::Marker(TurnMarker {
+                turn: 3,
+                tools_offered: None
+            })
+        );
+        assert!(matches!(
+            assembler
+                .push(&json!({"origin": "operator", "parts": [{"type": "text", "text": "hi"}]}))
+                .unwrap(),
+            CognitionInAssembly::Complete(_)
+        ));
+        // The old string-content shape and a payload with neither shape are
+        // refused rather than read as a marker.
+        assert!(assembler.push(&json!({"content": "hi"})).is_err());
+        assert!(assembler.push(&json!({})).is_err());
+        assert!(
+            assembler
+                .push(&json!({"origin": "operator", "parts": []}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn chunk_wire_shape_matches_the_shared_fixture() {
+        // The fixture is the wire contract for a chunked input; every reader
+        // of chunked inputs is tested against the same file.
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/cognition_in_chunk.json"))
+                .unwrap();
+        let chunk: CognitionInChunk = serde_json::from_value(fixture.clone()).unwrap();
+        assert_eq!(chunk.origin, "launch");
+        assert!(chunk.pinned);
+        assert_eq!(serde_json::to_value(&chunk).unwrap(), fixture);
+    }
+
     /// Every variant round-trips its `as_str` through `parse` to the
     /// same variant. Catches typos and missing arms.
     #[test]
@@ -874,6 +1153,8 @@ mod tests {
             RuntimeEventType::ThreadContinued,
             RuntimeEventType::EdgeRecorded,
             RuntimeEventType::ChildThreadSpawned,
+            RuntimeEventType::ChildThreadSettled,
+            RuntimeEventType::WorkerContinuationAdmitted,
             RuntimeEventType::ContinuationRequested,
             RuntimeEventType::ContinuationAccepted,
             RuntimeEventType::CommandSubmitted,
@@ -889,14 +1170,14 @@ mod tests {
             RuntimeEventType::AsLaunchedRefBindings,
             RuntimeEventType::RuntimeLaunchFacts,
             RuntimeEventType::LaunchAugmentationCacheHit,
+            RuntimeEventType::ProcessInputRootSelected,
+            RuntimeEventType::LaunchBindingRebound,
             RuntimeEventType::ThreadFacetSet,
-            RuntimeEventType::ThreadReconciled,
-            RuntimeEventType::OrphanProcessKilled,
-            RuntimeEventType::SystemPrompt,
-            RuntimeEventType::ContextInjected,
             RuntimeEventType::CognitionIn,
             RuntimeEventType::CognitionOut,
             RuntimeEventType::CognitionReasoning,
+            RuntimeEventType::CognitionFrame,
+            RuntimeEventType::CognitionCompaction,
             RuntimeEventType::ToolCallStart,
             RuntimeEventType::ToolCallResult,
             RuntimeEventType::GraphStarted,
@@ -913,6 +1194,7 @@ mod tests {
             RuntimeEventType::CostUntracked,
             RuntimeEventType::Milestone,
             RuntimeEventType::ThreadUsage,
+            RuntimeEventType::AttentionAcknowledged,
         ];
         for v in variants {
             let s = v.as_str();
@@ -976,30 +1258,107 @@ mod tests {
         assert!(RuntimeEventType::parse("not_a_real_event").is_err());
     }
 
+    /// Registered wire types the runtime enum deliberately does not carry:
+    /// they are authored by the daemon and never appended through the runtime.
+    const DAEMON_ONLY_WIRE_TYPES: &[&str] = &[
+        wire::SUBPROCESS_OUTPUT_OBSERVED,
+        wire::RESOURCE_BUDGET_TRANSITION_V1,
+        wire::RESOURCE_PRECONTACT_BUDGET_TRANSITION_V1,
+    ];
+
+    /// Every variant, for whole-vocabulary storage-class assertions: the single
+    /// registered list, minus the daemon-only types named above.
+    fn every_event_type() -> Vec<RuntimeEventType> {
+        wire::ALL
+            .iter()
+            .filter(|name| !DAEMON_ONLY_WIRE_TYPES.contains(name))
+            .map(|name| {
+                RuntimeEventType::parse(name).unwrap_or_else(|_| panic!("no variant for {name}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn daemon_only_wire_types_are_exactly_the_unparsed_registered_types() {
+        let unparsed: Vec<&str> = wire::ALL
+            .iter()
+            .copied()
+            .filter(|name| RuntimeEventType::parse(name).is_err())
+            .collect();
+        assert_eq!(unparsed, DAEMON_ONLY_WIRE_TYPES);
+    }
+
+    fn event_types_of_class(class: StorageClass) -> Vec<&'static str> {
+        every_event_type()
+            .into_iter()
+            .filter(|event_type| event_type.storage_class() == class)
+            .map(RuntimeEventType::as_str)
+            .collect()
+    }
+
     #[test]
     fn ephemeral_set_is_exactly_the_progressive_events() {
         // Tightening this list belongs in a deliberate change — the
         // assertion guards against silent storage-class drift.
-        let ephemeral: Vec<&'static str> = [
-            RuntimeEventType::TokenDelta,
-            RuntimeEventType::StreamSnapshot,
-            RuntimeEventType::CognitionReasoning,
-            RuntimeEventType::GraphForeachIteration,
-        ]
-        .iter()
-        .copied()
-        .filter(|v| v.storage_class() == StorageClass::Ephemeral)
-        .map(|v| v.as_str())
-        .collect();
         assert_eq!(
-            ephemeral,
+            event_types_of_class(StorageClass::Ephemeral),
+            vec!["token_delta", "stream_snapshot", "cognition_reasoning"]
+        );
+    }
+
+    #[test]
+    fn journal_set_is_exactly_observation_and_foreach() {
+        assert_eq!(
+            event_types_of_class(StorageClass::JournalOnly),
+            vec!["observation", "graph_foreach_iteration"]
+        );
+    }
+
+    #[test]
+    fn only_progressive_events_leave_the_indexed_floor() {
+        let progressive: Vec<&'static str> = every_event_type()
+            .into_iter()
+            .filter(|event_type| event_type.is_progressive())
+            .map(RuntimeEventType::as_str)
+            .collect();
+        assert_eq!(
+            progressive,
             vec![
                 "token_delta",
                 "stream_snapshot",
+                "observation",
                 "cognition_reasoning",
                 "graph_foreach_iteration"
             ]
         );
+        for event_type in every_event_type() {
+            if !event_type.is_progressive() {
+                assert_eq!(
+                    event_type.storage_class(),
+                    StorageClass::Indexed,
+                    "{} is below the indexed floor",
+                    event_type.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cognition_out_fragments_are_progressive() {
+        for payload in [
+            json!({"turn": 1, "delta": "hi"}),
+            json!({"turn": 1, "tool_use_partial": {"id": "c", "delta": "{}"}}),
+            json!({"turn": 1, "tool_use": {"id": "c", "name": "f", "arguments": {}}}),
+        ] {
+            assert!(cognition_out_is_progressive(&payload), "{payload}");
+        }
+        for payload in [
+            json!({"turn": 1}),
+            json!({"content": "done", "tool_calls": []}),
+            json!({"content": "partial", "interrupted": true}),
+        ] {
+            assert!(!cognition_out_is_progressive(&payload), "{payload}");
+        }
     }
 
     #[test]

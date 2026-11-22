@@ -13,3 +13,6 @@ anyhow.workspace = true
 lillux.workspace = true
 ryeos-runtime.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

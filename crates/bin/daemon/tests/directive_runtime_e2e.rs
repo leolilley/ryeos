@@ -1,7 +1,7 @@
 //! V5.4 Phase 3b — directive-runtime end-to-end with mock LLM provider.
 //!
 //! These tests spawn the real `ryeosd` binary, register the
-//! `bundles/standard` bundle (which ships
+//! `bundles/directive` bundle (which ships
 //! `runtime:directive-runtime` + the materializable
 //! `bin/<host_triple>/ryeos-directive-runtime` binary in its CAS),
 //! plant a directive + mock provider config, then exercise the full
@@ -12,12 +12,14 @@
 //! P3b.3 — root semantics pin re-asserted vs real spawn (this file).
 //! P3b.4 / P3b.5 — tool-call round-trip + cap-denial (follow-on).
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::fast_fixture::{
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
+};
 use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use lillux::crypto::SigningKey;
 
@@ -169,6 +171,7 @@ fn plant_python_echo_tool(root: &Path, rel: &str, signer: &SigningKey) -> anyhow
 #   category: "{dir_relative}"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "P3b echo tool — prints its single arg back"
 
 import json
@@ -196,7 +199,7 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
@@ -211,14 +214,14 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
         );
     })
     .await
-    .expect("start daemon with mock provider + standard bundle");
+    .expect("start daemon with mock provider + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(
         project.path(),
         "test/hello",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         &[],
         &fixture.publisher,
     )
@@ -228,36 +231,33 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
         project.path().to_str().unwrap(),
         serde_json::json!({"name": "World"}),
     );
-    let (status, body) =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
-            Err(_) => {
-                let stderr = h.drain_stderr_nonblocking().await;
-                // Probe state dir for runtime exit + thread events
-                let state = h.state_path.clone();
-                let projection = common::selected_projection_path(&state).ok();
-                let projection_dump = if projection.as_ref().is_some_and(|path| path.exists()) {
-                    let projection = projection.as_ref().expect("checked selected projection");
-                    match ryeos_state::projection::ProjectionDb::open(projection) {
-                        Ok(db) => format!(
-                            "threads = {:#?}",
-                            ryeos_state::queries::list_threads(&db, 10).ok()
-                        ),
-                        Err(e) => format!("projection open error: {e}"),
-                    }
-                } else {
-                    "no selected projection generation".into()
+    let (status, body) = match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut)
+        .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => panic!("post /execute failed: {e}"),
+        Err(_) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            // Probe state dir for runtime exit + thread events
+            let state = h.state_path.clone();
+            // Ask the daemon, bounded, rather than opening its projection.
+            let projection_dump =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), h.list_threads(10))
+                    .await
+                {
+                    Ok(Ok(threads)) => format!("threads = {threads:#?}"),
+                    Ok(Err(error)) => format!("threads/list error: {error:#}"),
+                    Err(_) => "threads/list timed out".into(),
                 };
-                panic!(
-                    "POST /execute timed out after 30s — directive-runtime hung.\n\
+            panic!(
+                "POST /execute timed out after 30s — directive-runtime hung.\n\
                  --- daemon stderr ---\n{stderr}\n\
                  --- projection ---\n{projection_dump}\n\
                  state_path={}",
-                    state.display()
-                );
-            }
-        };
+                state.display()
+            );
+        }
+    };
 
     if status != reqwest::StatusCode::OK {
         let stderr = h.drain_stderr_nonblocking().await;
@@ -299,6 +299,27 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
         "result envelope must surface `warnings` (extended in launch.rs for P3b); got: {body:#}"
     );
 
+    // The body template substitutes the input: the provider sees the
+    // rendered prompt, not the `${inputs.name}` expression or an appended
+    // inputs block.
+    let bodies = mock.captured_bodies().await;
+    assert_eq!(bodies.len(), 1, "exactly one provider request: {bodies:#?}");
+    let user_text = bodies[0]["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["role"] == "user")
+                .and_then(|message| message["content"].as_str())
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        user_text.trim_end(),
+        "Say hello to World.",
+        "the directive body must render its input; got request {:#}",
+        bodies[0]
+    );
+
     drop(project);
     drop(mock);
 }
@@ -319,7 +340,7 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
@@ -352,26 +373,20 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
         "expected 200 from successful spawn; got {status}: {body:#}"
     );
 
-    // Open the projection DB and confirm the thread row carries the
-    // SUBJECT identity (`directive_run` / `directive:p3b3/subject`),
-    // not the executor runtime's identity.
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
+    // Confirm, through `service:threads/list`, that the thread row carries
+    // the SUBJECT identity (`directive_run` / `directive:p3b3/subject`), not
+    // the executor runtime's identity. The test principal requested it.
+    let mut threads = Vec::new();
     for _ in 0..40 {
-        if projection_path.exists() {
+        threads = h.list_threads(100).await.expect("threads/list");
+        if threads
+            .iter()
+            .any(|t| t.item_ref == "directive:p3b3/subject")
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        projection_path.exists(),
-        "selected projection must exist at {}",
-        projection_path.display()
-    );
-
-    let db =
-        ryeos_state::projection::ProjectionDb::open(&projection_path).expect("open projection db");
-    let threads = ryeos_state::queries::list_threads(&db, 100).expect("list_threads");
 
     let subject = threads
         .iter()
@@ -392,10 +407,19 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
         subject.item_ref, "directive:p3b3/subject",
         "thread.item_ref must echo the user-typed directive ref; got: {subject:#?}"
     );
+    // The executor ref is not part of the list row; read the thread itself.
+    let subject_detail = h
+        .get_thread(&subject.thread_id)
+        .await
+        .expect("threads/get")
+        .expect("subject thread is visible to its requester");
+    let executor_ref = subject_detail["thread"]["executor_ref"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
-        subject.executor_ref.starts_with("native:"),
+        executor_ref.starts_with("native:"),
         "thread.executor_ref records the native runtime executor; got: {:?}",
-        subject.executor_ref
+        executor_ref
     );
 
     let runtime_rows: Vec<_> = threads
@@ -443,7 +467,7 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
@@ -455,7 +479,7 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
         );
     })
     .await
-    .expect("start daemon with mock + standard bundle + echo tool");
+    .expect("start daemon with mock + workflow bundles + echo tool");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
@@ -551,7 +575,7 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
@@ -642,27 +666,25 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
 // only prove the successor ROW is created; this e2e exercises the actual
 // successor spawn + run.
 
-/// Poll the projection for the first thread matching `pred`, optionally waiting
-/// until it reaches a terminal status. Returns `None` if it never appears.
+/// Poll `service:threads/list` for the first thread matching `pred`,
+/// optionally waiting until it reaches a terminal status. Returns `None` if it
+/// never appears. The test principal requests every thread these tests poll
+/// for, so the principal filter hides none of them.
 async fn poll_thread(
-    projection_path: &Path,
-    pred: impl Fn(&ryeos_state::queries::ThreadRow) -> bool,
+    h: &DaemonHarness,
+    pred: impl Fn(&common::ListedThread) -> bool,
     require_terminal: bool,
-) -> Option<ryeos_state::queries::ThreadRow> {
+) -> Option<common::ListedThread> {
     for _ in 0..120 {
-        if projection_path.exists() {
-            let database = ryeos_state::projection::ProjectionDb::open(projection_path);
-            if let Ok(db) = database
-                && let Ok(threads) = ryeos_state::queries::list_threads(&db, 200)
-                && let Some(t) = threads.into_iter().find(|t| pred(t))
-            {
-                let terminal = matches!(
-                    t.status.as_str(),
-                    "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-                );
-                if !require_terminal || terminal {
-                    return Some(t);
-                }
+        if let Ok(threads) = h.list_threads(200).await
+            && let Some(t) = threads.into_iter().find(|t| pred(t))
+        {
+            let terminal = matches!(
+                t.status.as_str(),
+                "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+            );
+            if !require_terminal || terminal {
+                return Some(t);
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -680,7 +702,7 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
@@ -691,7 +713,7 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
         );
     })
     .await
-    .expect("start daemon with mock provider + standard bundle");
+    .expect("start daemon with mock provider + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
@@ -699,7 +721,7 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     plant_directive(
         project.path(),
         "cont/dir",
-        "Answer {{ name }}.",
+        "Answer ${inputs.name}.",
         &[],
         &fixture.publisher,
     )
@@ -721,10 +743,8 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     );
 
     // The settled directive thread (no upstream).
-    let projection_path =
-        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
     let first = poll_thread(
-        &projection_path,
+        &h,
         |t| t.item_ref == "directive:cont/dir" && t.upstream_thread_id.is_none(),
         true,
     )
@@ -763,7 +783,7 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
 
     // The pin: the successor must actually launch and reach `completed` — its
     // runtime launch identity reconstructed from the captured resume context.
-    let successor = poll_thread(&projection_path, |t| t.thread_id == successor_id, true)
+    let successor = poll_thread(&h, |t| t.thread_id == successor_id, true)
         .await
         .unwrap_or_else(|| panic!("successor {successor_id} never reached a terminal status"));
     assert_eq!(
@@ -801,6 +821,1099 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
         detail.to_string().contains("turn two"),
         "successor result must surface the mock's second-turn text `turn two`: {detail:#}"
     );
+
+    drop(project);
+    drop(mock);
+}
+
+// ── Thread title: stamped with the thread by `threads/input` ───────────
+
+/// A directive whose single required input is the operator text a
+/// `threads/input` launch binds as `input`.
+fn plant_input_directive(root: &Path, rel_path: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    let path = root.join(format!(".ai/directives/{rel_path}.md"));
+    std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
+    let body = format!(
+        r#"---
+name: {rel_path}
+category: ""
+description: "thread title e2e fixture"
+inputs:
+  - name: input
+    type: string
+    required: true
+model:
+  tier: general
+---
+Respond to: ${{inputs.input}}
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+async fn input_post(
+    h: &DaemonHarness,
+    project_path: &str,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    h.post_execute("service:threads/input", project_path, body)
+        .await
+        .expect("post /execute (service:threads/input)")
+}
+
+async fn title_of(h: &DaemonHarness, thread_id: &str) -> Option<String> {
+    h.get_thread(thread_id)
+        .await
+        .expect("threads/get")
+        .expect("thread is known")
+        .pointer("/facets/title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_threads_input_stamps_a_title_with_the_thread() {
+    let mock = MockProvider::start(vec![
+        MockResponse::Text("one".into()),
+        MockResponse::Text("two".into()),
+        MockResponse::Text("three".into()),
+        MockResponse::Text("four".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, fixture)
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with mock provider + workflow bundles");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_input_directive(project.path(), "title/dir", &fixture.publisher)
+        .expect("plant directive");
+    let fresh = |input: &str, title: Option<&str>| {
+        let mut body = serde_json::json!({
+            "input": input,
+            "target": {
+                "kind": "fresh",
+                "item_ref": "directive:title/dir",
+                "project_path": project_path.clone(),
+                "ref_bindings": {},
+            },
+        });
+        if let Some(title) = title {
+            body["title"] = serde_json::json!(title);
+        }
+        body
+    };
+
+    // Refusals leave no thread behind: over-length, blank and control-character
+    // titles are bad requests.
+    for bad in ["x".repeat(161), "   ".to_string(), "a\nb".to_string()] {
+        let (status, body) = input_post(&h, &project_path, fresh("hello", Some(&bad))).await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST,
+            "title {bad:?} must be refused: {body:#}"
+        );
+    }
+    assert!(
+        h.list_threads(50)
+            .await
+            .expect("threads/list")
+            .iter()
+            .all(|t| t.item_ref != "directive:title/dir"),
+        "a refused title must not launch a thread"
+    );
+
+    // Fresh launch without a title: derived from the first non-empty line.
+    let (status, body) = input_post(
+        &h,
+        &project_path,
+        fresh("\n  Plan   the trip  \nsecond line", None),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body:#}");
+    let first = body
+        .pointer("/result/thread_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("no thread_id: {body:#}"))
+        .to_string();
+    assert_eq!(title_of(&h, &first).await.as_deref(), Some("Plan the trip"));
+    // The stamp is an event of the thread itself, so it survives a rebuild.
+    let events = h
+        .thread_events(&first)
+        .await
+        .expect("events/replay")
+        .expect("thread is known");
+    assert!(
+        events.iter().any(|(kind, payload)| {
+            kind == "thread_facet_set"
+                && payload["key"] == "title"
+                && payload["value"] == "Plan the trip"
+        }),
+        "the title must be a thread_facet_set event: {events:#?}"
+    );
+    // The list row carries it as `facets.title`.
+    let (_, listed) = h
+        .post_execute(
+            "service:threads/list",
+            ".",
+            serde_json::json!({ "limit": 50 }),
+        )
+        .await
+        .expect("threads/list");
+    let row = listed
+        .pointer("/result/threads")
+        .and_then(|v| v.as_array())
+        .and_then(|rows| rows.iter().find(|row| row["thread_id"] == first.as_str()))
+        .unwrap_or_else(|| panic!("first thread not listed: {listed:#}"));
+    assert_eq!(row["facets"]["title"], "Plan the trip");
+    poll_thread(&h, |t| t.thread_id == first, true)
+        .await
+        .expect("first thread settles");
+
+    // A continuation inherits its predecessor's title.
+    let (status, body) = input_post(
+        &h,
+        &project_path,
+        serde_json::json!({
+            "input": "and then what",
+            "target": {"kind": "thread", "thread_id": first.clone()},
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body:#}");
+    let second = completed_successor(&mut h, &body, &first).await;
+    assert_eq!(
+        title_of(&h, &second).await.as_deref(),
+        Some("Plan the trip")
+    );
+
+    // A supplied title wins over the inherited one, and is checked on this
+    // path too.
+    let (status, _) = input_post(
+        &h,
+        &project_path,
+        serde_json::json!({
+            "input": "rename",
+            "title": "y".repeat(161),
+            "target": {"kind": "thread", "thread_id": second.clone()},
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    let (status, body) = input_post(
+        &h,
+        &project_path,
+        serde_json::json!({
+            "input": "rename",
+            "title": "  Packing list ",
+            "target": {"kind": "thread", "thread_id": second.clone()},
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body:#}");
+    let third = completed_successor(&mut h, &body, &second).await;
+    assert_eq!(title_of(&h, &third).await.as_deref(), Some("Packing list"));
+    // The predecessors keep theirs.
+    assert_eq!(title_of(&h, &first).await.as_deref(), Some("Plan the trip"));
+
+    // An explicit title on a fresh launch overrides the derived one.
+    let (status, body) = input_post(&h, &project_path, fresh("ignored", Some("Chosen"))).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body:#}");
+    let fourth = body
+        .pointer("/result/thread_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("no thread_id: {body:#}"))
+        .to_string();
+    assert_eq!(title_of(&h, &fourth).await.as_deref(), Some("Chosen"));
+
+    drop(project);
+    drop(mock);
+}
+
+// ── Operator rebind: continue a thread on a different model binding ────
+//
+// The directive carries no model of its own; the launch binds one at the
+// `model` ref binding. An operator continuation may bind a different model
+// directive there. Two mock providers stand behind two bindings, so which
+// provider a turn reaches shows which binding its thread runs with.
+
+/// A priced mock provider under `model-providers/<id>.yaml`. The signed
+/// tariff makes every attempt a ledger row, which is how the test reads the
+/// budget scope each thread charges.
+fn plant_rebind_provider(
+    root: &Path,
+    id: &str,
+    base_url: &str,
+    auth: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let dir = root.join(".ai/config/ryeos-runtime/model-providers");
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        r#"family: chat_completions
+transport:
+  kind: remote_http
+  base_url: "{base_url}"
+body_template:
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
+auth: {auth}
+headers: {{}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+pricing:
+  input_per_million: "2"
+  output_per_million: "10"
+spend_authority:
+  billing_principal: e2e-{id}
+  credential_authority_generation: gen-1
+  pricing_contract_subject: e2e-{id}-2026-07
+  tariff:
+    schema_version: 1
+    currency: usd
+    pricing_generation: e2e-2026-07
+    input_per_million: "2"
+    output_per_million: "10"
+    covered_dimensions: [input_tokens, output_tokens]
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(dir.join(format!("{id}.yaml")), signed)?;
+    Ok(())
+}
+
+/// A model binding directive: nothing but an explicit model target.
+fn plant_model_binding(
+    root: &Path,
+    name: &str,
+    provider: &str,
+    model: &str,
+    context_window: u64,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let path = root.join(format!(".ai/directives/rebind/models/{name}.md"));
+    std::fs::create_dir_all(path.parent().expect("binding parent dir"))?;
+    let body = format!(
+        r#"---
+description: "rebind e2e model binding"
+version: "1.0.0"
+model:
+  provider: {provider}
+  name: {model}
+  context_window: {context_window}
+---
+Model binding fixture `{name}`.
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// The directive the threads run: no `model` block, so its model comes only
+/// from the `model` ref binding, and a hard spend limit so the ledger
+/// accounts every provider attempt against one execution budget.
+fn plant_unmodelled_directive(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let path = root.join(".ai/directives/rebind/turn.md");
+    std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
+    let body = r#"---
+name: turn
+category: "rebind"
+description: "rebind e2e directive"
+inputs:
+  - name: name
+    type: string
+    required: true
+limits:
+  spend_usd: "5"
+---
+Answer ${inputs.name}.
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "<!--", Some("-->"));
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// Every string a provider request body carries in its `messages`.
+fn request_message_text(body: &serde_json::Value) -> String {
+    body["messages"].to_string()
+}
+
+async fn rebind_input(
+    h: &DaemonHarness,
+    project_path: &str,
+    thread_id: &str,
+    input: &str,
+    rebind: Option<serde_json::Value>,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let mut target = serde_json::json!({"kind": "thread", "thread_id": thread_id});
+    if let Some(rebind) = rebind {
+        target["rebind"] = rebind;
+    }
+    h.post_execute(
+        "service:threads/input",
+        project_path,
+        serde_json::json!({"input": input, "target": target}),
+    )
+    .await
+    .expect("post /execute (service:threads/input)")
+}
+
+/// Threads continued from `source`, as the daemon lists them.
+async fn successors_of(h: &DaemonHarness, source: &str) -> Vec<String> {
+    h.list_threads(200)
+        .await
+        .expect("threads/list")
+        .into_iter()
+        .filter(|thread| thread.upstream_thread_id.as_deref() == Some(source))
+        .map(|thread| thread.thread_id)
+        .collect()
+}
+
+async fn completed_successor(
+    h: &mut DaemonHarness,
+    body: &serde_json::Value,
+    source: &str,
+) -> String {
+    assert_eq!(
+        body.pointer("/result/delivery").and_then(|v| v.as_str()),
+        Some("launched"),
+        "the continuation must launch a successor: {body:#}"
+    );
+    let successor_id = body
+        .pointer("/result/thread_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("threads.input result has no successor thread_id: {body:#}"))
+        .to_string();
+    let successor = poll_thread(h, |t| t.thread_id == successor_id, true)
+        .await
+        .unwrap_or_else(|| panic!("successor {successor_id} never reached a terminal status"));
+    if successor.status != "completed" {
+        let stderr = h.drain_stderr_nonblocking().await;
+        let detail = h.get_thread(&successor_id).await.ok();
+        panic!(
+            "successor must reach `completed`.\nrow={successor:#?}\ndetail={detail:#?}\n--- daemon stderr ---\n{stderr}"
+        );
+    }
+    assert_eq!(successor.upstream_thread_id.as_deref(), Some(source));
+    successor_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_directive_operator_rebind_continues_on_another_model() {
+    const FIRST: &str = "directive:rebind/models/first";
+    const SECOND: &str = "directive:rebind/models/second";
+
+    let mock_one =
+        MockProvider::start(vec![MockResponse::Text("answer from model one".into())]).await;
+    let mock_two = MockProvider::start(vec![
+        MockResponse::Text("answer from model two".into()),
+        MockResponse::Text("second answer from model two".into()),
+        MockResponse::Text("third answer from model two".into()),
+        MockResponse::Text("fourth answer from model two".into()),
+    ])
+    .await;
+    let url_one = mock_one.base_url.clone();
+    let url_two = mock_two.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-rebind-model-config",
+            fixture,
+            |bundle_root| {
+                plant_rebind_provider(bundle_root, "mockone", &url_one, "{}", &fixture.publisher)?;
+                plant_rebind_provider(bundle_root, "mocktwo", &url_two, "{}", &fixture.publisher)?;
+                // A provider whose credential this node does not hold.
+                plant_rebind_provider(
+                    bundle_root,
+                    "mockkeyed",
+                    &url_two,
+                    "{env_var: ZEN_API_KEY, header_name: Authorization}",
+                    &fixture.publisher,
+                )
+            },
+        )
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env_remove("ZEN_API_KEY");
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon with two mock providers");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+    let signer = &fixture.publisher;
+    plant_unmodelled_directive(project.path(), signer).expect("plant directive");
+    plant_model_binding(
+        project.path(),
+        "first",
+        "mockone",
+        "model-one",
+        200_000,
+        signer,
+    )
+    .expect("plant first binding");
+    plant_model_binding(
+        project.path(),
+        "second",
+        "mocktwo",
+        "model-two",
+        200_000,
+        signer,
+    )
+    .expect("plant second binding");
+    plant_model_binding(
+        project.path(),
+        "third",
+        "mocktwo",
+        "model-three",
+        200_000,
+        signer,
+    )
+    .expect("plant third binding");
+    // A project-space binding signed by a key this node does not trust.
+    plant_model_binding(
+        project.path(),
+        "rogue",
+        "mocktwo",
+        "model-rogue",
+        200_000,
+        &SigningKey::from_bytes(&[77; 32]),
+    )
+    .expect("plant rogue binding");
+    // Below the token budget a successor's conversation starts from.
+    plant_model_binding(
+        project.path(),
+        "tiny",
+        "mocktwo",
+        "model-tiny",
+        2_000,
+        signer,
+    )
+    .expect("plant tiny binding");
+    plant_model_binding(
+        project.path(),
+        "keyed",
+        "mockkeyed",
+        "model-keyed",
+        200_000,
+        signer,
+    )
+    .expect("plant keyed binding");
+
+    // Turn one: launch on the first model binding and run to completion.
+    let (status, body) = h
+        .post_json(
+            "/execute",
+            serde_json::json!({
+                "item_ref": "directive:rebind/turn",
+                "ref_bindings": {"model": FIRST},
+                "project_path": project_path,
+                "parameters": {"name": "World"},
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("post /execute (turn one)");
+    if status != reqwest::StatusCode::OK {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!("turn one must succeed: {status} {body:#}\n--- daemon stderr ---\n{stderr}");
+    }
+    let first = poll_thread(
+        &h,
+        |t| t.item_ref == "directive:rebind/turn" && t.upstream_thread_id.is_none(),
+        true,
+    )
+    .await
+    .expect("first thread reaches a terminal status");
+    assert_eq!(first.status, "completed", "turn one: {first:#?}");
+    let first_id = first.thread_id.clone();
+    assert_eq!(mock_one.captured_bodies().await.len(), 1);
+    assert!(mock_two.captured_bodies().await.is_empty());
+
+    // Refusals. Each is decided before any successor exists, so the thread
+    // stays continuable and no provider is contacted.
+    for (rebind, expected) in [
+        // The bound model's context window is below the runtime contract's
+        // signed minimum for a rebind.
+        (
+            serde_json::json!({"model": "directive:rebind/models/tiny"}),
+            "ref_binding_rebind_fact_below_minimum",
+        ),
+        // The admitted runtime contract declares no such rebindable binding.
+        (
+            serde_json::json!({"extra": SECOND}),
+            "ref_binding_rebind_not_permitted",
+        ),
+        // The new provider's credential is missing on this node.
+        (
+            serde_json::json!({"model": "directive:rebind/models/keyed"}),
+            "ZEN_API_KEY",
+        ),
+    ] {
+        let (status, body) = rebind_input(
+            &h,
+            &project_path,
+            &first_id,
+            "continue",
+            Some(rebind.clone()),
+        )
+        .await;
+        let text = format!("{status} {body}");
+        assert_ne!(
+            status,
+            reqwest::StatusCode::OK,
+            "rebind {rebind} must be refused: {text}"
+        );
+        assert!(
+            text.contains(expected),
+            "rebind {rebind} must be refused with `{expected}`: {text}"
+        );
+        assert!(
+            successors_of(&h, &first_id).await.is_empty(),
+            "a refused rebind {rebind} must not create a successor"
+        );
+    }
+    // A project-space binding whose signer is not trusted is refused.
+    let (status, body) = rebind_input(
+        &h,
+        &project_path,
+        &first_id,
+        "continue",
+        Some(serde_json::json!({"model": "directive:rebind/models/rogue"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        reqwest::StatusCode::OK,
+        "a binding signed by an untrusted key must be refused: {body:#}"
+    );
+    assert!(successors_of(&h, &first_id).await.is_empty());
+    // A binding that does not resolve is refused as well.
+    let (status, body) = rebind_input(
+        &h,
+        &project_path,
+        &first_id,
+        "continue",
+        Some(serde_json::json!({"model": "directive:rebind/models/absent"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        reqwest::StatusCode::OK,
+        "an unresolvable binding must be refused: {body:#}"
+    );
+    assert!(successors_of(&h, &first_id).await.is_empty());
+    assert_eq!(mock_one.captured_bodies().await.len(), 1);
+    assert!(mock_two.captured_bodies().await.is_empty());
+
+    // The operator continues the thread on the second model binding.
+    let (status, body) = rebind_input(
+        &h,
+        &project_path,
+        &first_id,
+        "continue on the second model",
+        Some(serde_json::json!({"model": SECOND})),
+    )
+    .await;
+    if status != reqwest::StatusCode::OK {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!("the rebind must be accepted: {status} {body:#}\n--- daemon stderr ---\n{stderr}");
+    }
+    assert_eq!(
+        body.pointer("/result/rebind"),
+        Some(&serde_json::json!({"applied": true, "names": ["model"]})),
+        "{body:#}"
+    );
+    let second_id = completed_successor(&mut h, &body, &first_id).await;
+
+    // The successor called the second provider, and only it.
+    assert_eq!(mock_one.captured_bodies().await.len(), 1);
+    let two = mock_two.captured_bodies().await;
+    assert_eq!(
+        two.len(),
+        1,
+        "the rebound successor calls model two: {two:#?}"
+    );
+    assert_eq!(two[0]["model"], "model-two", "{:#}", two[0]);
+    // The conversation is carried: model two sees turn one's input and
+    // answer as well as the new input.
+    let carried = request_message_text(&two[0]);
+    for expected in [
+        "Answer World.",
+        "answer from model one",
+        "continue on the second model",
+    ] {
+        assert!(
+            carried.contains(expected),
+            "model two's request must carry `{expected}`: {carried}"
+        );
+    }
+
+    // The daemon recorded the rebind in the successor's own events.
+    let events = h
+        .thread_events(&second_id)
+        .await
+        .expect("replay successor events")
+        .expect("successor events");
+    let rebound: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|(event_type, _)| event_type == "launch_binding_rebound")
+        .map(|(_, payload)| payload)
+        .collect();
+    assert_eq!(rebound.len(), 1, "one rebind record: {events:#?}");
+    let payload = rebound[0];
+    assert_eq!(
+        payload["source_thread_id"],
+        first_id.as_str(),
+        "{payload:#}"
+    );
+    assert_eq!(
+        payload["changes"],
+        serde_json::json!([{"input": "ref_binding", "name": "model", "from": FIRST, "to": SECOND}]),
+        "{payload:#}"
+    );
+    assert_eq!(
+        payload["from_facts"]["model_name"], "model-one",
+        "{payload:#}"
+    );
+    assert_eq!(
+        payload["to_facts"]["model_name"], "model-two",
+        "{payload:#}"
+    );
+    assert_eq!(payload["to_facts"]["provider_id"], "mocktwo", "{payload:#}");
+    // Only the facts the runtime contract marks for the record are written:
+    // no request URL and no configuration source reaches the thread's events.
+    for side in ["from_facts", "to_facts"] {
+        let recorded: Vec<&str> = payload[side]
+            .as_object()
+            .unwrap_or_else(|| panic!("{side} is an object: {payload:#}"))
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            recorded,
+            ["context_window", "model_name", "provider_id"],
+            "{side}: {payload:#}"
+        );
+    }
+
+    // The bound item is edited after the rebind: it now names model one.
+    // Nothing that follows may resolve it again.
+    plant_model_binding(
+        project.path(),
+        "second",
+        "mockone",
+        "model-edited",
+        200_000,
+        signer,
+    )
+    .expect("edit second binding");
+
+    // The same rebind submitted again returns the successor it already
+    // produced, without preparing anything.
+    let (status, body) = rebind_input(
+        &h,
+        &project_path,
+        &first_id,
+        "continue on the second model",
+        Some(serde_json::json!({"model": SECOND})),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "retried rebind: {body:#}");
+    assert_eq!(
+        body.pointer("/result/delivery").and_then(|v| v.as_str()),
+        Some("launched"),
+        "{body:#}"
+    );
+    assert_eq!(
+        body.pointer("/result/thread_id").and_then(|v| v.as_str()),
+        Some(second_id.as_str()),
+        "a retried rebind names the same successor: {body:#}"
+    );
+    assert_eq!(
+        body.pointer("/result/rebind"),
+        Some(&serde_json::json!({"applied": true, "names": ["model"]})),
+        "{body:#}"
+    );
+    assert_eq!(successors_of(&h, &first_id).await, vec![second_id.clone()]);
+    assert_eq!(mock_one.captured_bodies().await.len(), 1);
+    assert_eq!(mock_two.captured_bodies().await.len(), 1);
+
+    // A follow-up with no rebind stays on the new model.
+    let (status, body) = rebind_input(&h, &project_path, &second_id, "and once more", None).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "plain follow-up: {body:#}");
+    assert!(
+        body.pointer("/result/rebind").is_none(),
+        "a request with no rebind reports none: {body:#}"
+    );
+    let third_id = completed_successor(&mut h, &body, &second_id).await;
+    assert_eq!(mock_one.captured_bodies().await.len(), 1);
+    let two = mock_two.captured_bodies().await;
+    assert_eq!(two.len(), 2, "the plain follow-up stays on model two");
+    assert_eq!(two[1]["model"], "model-two");
+    assert!(request_message_text(&two[1]).contains("answer from model two"));
+    let third_events = h
+        .thread_events(&third_id)
+        .await
+        .expect("replay third events")
+        .expect("third events");
+    assert!(
+        third_events
+            .iter()
+            .all(|(event_type, _)| event_type != "launch_binding_rebound"),
+        "an inherited binding is not a rebind"
+    );
+
+    // Naming the binding the thread already runs with changes nothing: the
+    // ordinary continuation runs and reports the rebind as not applied.
+    let (status, body) = rebind_input(
+        &h,
+        &project_path,
+        &third_id,
+        "same model again",
+        Some(serde_json::json!({"model": SECOND})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "unchanged rebind: {body:#}"
+    );
+    assert_eq!(
+        body.pointer("/result/rebind"),
+        Some(&serde_json::json!({"applied": false, "reason": "unchanged"})),
+        "{body:#}"
+    );
+    let fourth_id = completed_successor(&mut h, &body, &third_id).await;
+    assert_eq!(mock_two.captured_bodies().await.len(), 3);
+    assert_eq!(mock_one.captured_bodies().await.len(), 1);
+
+    // The first thread already continued on model two. Continuing it again
+    // with another choice is refused and names the existing successor.
+    let (status, body) = rebind_input(
+        &h,
+        &project_path,
+        &first_id,
+        "continue on the second model",
+        Some(serde_json::json!({"model": "directive:rebind/models/third"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "a conflicting continuation is answered, not failed: {body:#}"
+    );
+    assert_eq!(
+        body.pointer("/result/delivery").and_then(|v| v.as_str()),
+        Some("refused"),
+        "a second continuation of the same thread with another choice is refused: {body:#}"
+    );
+    assert_eq!(
+        body.pointer("/result/thread_id").and_then(|v| v.as_str()),
+        Some(second_id.as_str()),
+        "{body:#}"
+    );
+    assert_eq!(
+        body.pointer("/result/rebind"),
+        Some(&serde_json::json!({"applied": false, "reason": "conflict"})),
+        "{body:#}"
+    );
+    assert_eq!(
+        successors_of(&h, &first_id).await,
+        vec![second_id.clone()],
+        "the first thread keeps its one successor"
+    );
+    assert_eq!(mock_two.captured_bodies().await.len(), 3);
+
+    // After a daemon restart the chain still runs from its rooted capsules:
+    // a plain follow-up stays on model two although the bound item on disk
+    // now names model one.
+    h.restart().await.expect("restart daemon");
+    let (status, body) =
+        rebind_input(&h, &project_path, &fourth_id, "after the restart", None).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "follow-up after restart: {body:#}"
+    );
+    let fifth_id = completed_successor(&mut h, &body, &fourth_id).await;
+    let two = mock_two.captured_bodies().await;
+    assert_eq!(two.len(), 4, "the restarted chain stays on model two");
+    assert_eq!(two[3]["model"], "model-two");
+    assert_eq!(mock_one.captured_bodies().await.len(), 1);
+
+    // Every segment charges the execution budget the first launch minted:
+    // a rebind does not reset the allowance.
+    let chain = [&first_id, &second_id, &third_id, &fourth_id, &fifth_id];
+    let mut rows = Vec::new();
+    for _ in 0..60 {
+        let (s, b) = h
+            .post_execute(
+                "service:threads/accounting/summary",
+                &project_path,
+                serde_json::json!({"detail": true, "limit": 200}),
+            )
+            .await
+            .expect("summary service reachable");
+        assert_eq!(s, reqwest::StatusCode::OK, "summary status: {b:#}");
+        let payload = b
+            .get("result")
+            .and_then(|r| {
+                if r.get("totals").is_some() {
+                    Some(r.clone())
+                } else {
+                    r.get("result").cloned()
+                }
+            })
+            .unwrap_or_default();
+        rows = payload
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let seen = |thread: &str| {
+            rows.iter()
+                .any(|row| row.get("thread_id").and_then(|v| v.as_str()) == Some(thread))
+        };
+        if chain.iter().all(|thread| seen(thread.as_str())) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let field = |row: &serde_json::Value, name: &str| {
+        row.get(name)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let chain_rows: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| {
+            chain
+                .iter()
+                .any(|thread| field(row, "thread_id") == **thread)
+        })
+        .collect();
+    for thread in chain {
+        assert!(
+            chain_rows
+                .iter()
+                .any(|row| field(row, "thread_id") == *thread),
+            "thread {thread} has no ledger row: {rows:#?}"
+        );
+    }
+    let budgets: std::collections::BTreeSet<(String, String)> = chain_rows
+        .iter()
+        .map(|row| {
+            (
+                field(row, "execution_budget_id"),
+                field(row, "directive_budget_id"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        budgets.len(),
+        1,
+        "every segment must charge one unchanged budget scope: {chain_rows:#?}"
+    );
+    assert!(
+        !budgets.iter().next().unwrap().0.is_empty(),
+        "the budget scope is named: {chain_rows:#?}"
+    );
+    for row in &chain_rows {
+        let expected = if field(row, "thread_id") == first_id {
+            "mockone"
+        } else {
+            "mocktwo"
+        };
+        assert_eq!(field(row, "provider_id"), expected, "{row:#}");
+    }
+
+    drop(project);
+    drop(mock_one);
+    drop(mock_two);
+}
+
+/// Input sent to a running thread folds into it live. A rebind carried with
+/// that input is validated, reported as not applied, and not kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_directive_rebind_on_a_running_thread_is_not_applied() {
+    const FIRST: &str = "directive:rebind/models/first";
+    const SECOND: &str = "directive:rebind/models/second";
+
+    let mock = MockProvider::start_blocked(vec![
+        MockResponse::Text("held answer".into()),
+        MockResponse::Text("answer after the folded input".into()),
+    ])
+    .await;
+    let url = mock.base_url.clone();
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-rebind-running-model-config",
+            fixture,
+            |bundle_root| {
+                plant_rebind_provider(bundle_root, "mockone", &url, "{}", &fixture.publisher)
+            },
+        )
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon with a held mock provider");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+    let signer = &fixture.publisher;
+    plant_unmodelled_directive(project.path(), signer).expect("plant directive");
+    plant_model_binding(
+        project.path(),
+        "first",
+        "mockone",
+        "model-one",
+        200_000,
+        signer,
+    )
+    .expect("plant first binding");
+    plant_model_binding(
+        project.path(),
+        "second",
+        "mockone",
+        "model-two",
+        200_000,
+        signer,
+    )
+    .expect("plant second binding");
+
+    // The launch waits for the thread to finish; the provider holds its
+    // answer, so the thread stays running while input is sent to it.
+    let launch = h.post_json(
+        "/execute",
+        serde_json::json!({
+            "item_ref": "directive:rebind/turn",
+            "ref_bindings": {"model": FIRST},
+            "project_path": project_path,
+            "parameters": {"name": "World"},
+            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+        }),
+    );
+    let steer = async {
+        let mut held = false;
+        for _ in 0..300 {
+            if mock.captured_bodies().await.len() == 1 {
+                held = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(held, "the provider must receive the first request");
+        let running = poll_thread(&h, |t| t.item_ref == "directive:rebind/turn", false)
+            .await
+            .expect("the launched thread is listed");
+        assert_eq!(running.status, "running", "{running:#?}");
+
+        // A malformed rebind is a bad request even though a running thread
+        // would not use it.
+        let (status, body) = rebind_input(
+            &h,
+            &project_path,
+            &running.thread_id,
+            "steer",
+            Some(serde_json::json!({"model": "not a ref"})),
+        )
+        .await;
+        assert_ne!(
+            status,
+            reqwest::StatusCode::OK,
+            "a malformed rebind must be refused: {body:#}"
+        );
+
+        let (status, body) = rebind_input(
+            &h,
+            &project_path,
+            &running.thread_id,
+            "steer the running thread",
+            Some(serde_json::json!({"model": SECOND})),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "live input: {body:#}");
+        assert_eq!(
+            body.pointer("/result/delivery").and_then(|v| v.as_str()),
+            Some("submitted"),
+            "{body:#}"
+        );
+        assert_eq!(
+            body.pointer("/result/thread_id").and_then(|v| v.as_str()),
+            Some(running.thread_id.as_str()),
+            "{body:#}"
+        );
+        assert_eq!(
+            body.pointer("/result/rebind"),
+            Some(&serde_json::json!({"applied": false, "reason": "thread_running"})),
+            "{body:#}"
+        );
+        mock.release_responses();
+        running.thread_id
+    };
+    let (launched, thread_id) = tokio::join!(launch, steer);
+    let (status, body) = launched.expect("post /execute");
+    if status != reqwest::StatusCode::OK {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!("the launch must complete: {status} {body:#}\n--- daemon stderr ---\n{stderr}");
+    }
+    let settled = poll_thread(&h, |t| t.thread_id == thread_id, true)
+        .await
+        .expect("the thread settles");
+    assert_eq!(settled.status, "completed", "{settled:#?}");
+
+    // Nothing was rebound and nothing was kept for later: no successor, no
+    // rebind record, and every request went out on the admitted model.
+    assert!(successors_of(&h, &thread_id).await.is_empty());
+    let events = h
+        .thread_events(&thread_id)
+        .await
+        .expect("replay events")
+        .expect("thread events");
+    assert!(
+        events
+            .iter()
+            .all(|(event_type, _)| event_type != "launch_binding_rebound"),
+        "{events:#?}"
+    );
+    let bodies = mock.captured_bodies().await;
+    assert!(!bodies.is_empty());
+    for body in &bodies {
+        assert_eq!(body["model"], "model-one", "{body:#}");
+    }
 
     drop(project);
     drop(mock);
@@ -905,7 +2018,7 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_config_fixture_bundle(
             state_path,
             "fixture-hard-budget-model-config",
@@ -934,7 +2047,7 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
     plant_directive_with_spend_limit(
         project.path(),
         "test/hard_ok",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         "1",
         &fixture.publisher,
     )
@@ -1044,7 +2157,7 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
     plant_directive_with_spend_limit(
         project.path(),
         "test/hard_denied",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         "0.5",
         &fixture.publisher,
     )
@@ -1098,6 +2211,7 @@ fn plant_sleepy_marker_tool(
 #   category: "{name}"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "concurrency e2e marker tool {index}"
 
 import json
@@ -1213,7 +2327,7 @@ async fn run_sleepy_batch(
     let mock_url = mock_url.to_string();
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(state_path, &mock_url, fixture)
         };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
@@ -1224,7 +2338,7 @@ async fn run_sleepy_batch(
         );
     })
     .await
-    .expect("start daemon with mock + standard bundle");
+    .expect("start daemon with mock + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
@@ -1458,7 +2572,7 @@ async fn e2e_resolution_cache_transparent_across_hit_and_edit() {
     let plant = {
         let mock_url = mock_url.clone();
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(state_path, &mock_url, fixture)
         }
     };

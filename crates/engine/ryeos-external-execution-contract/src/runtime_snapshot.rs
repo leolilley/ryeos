@@ -2,26 +2,301 @@
 //!
 //! The intent owns one provider-sequence attempt. A provider locator is
 //! only an attempt result; restored bytes and runtime behavior require an
-//! independent qualification rooted in the retained product witness.
+//! independent qualification rooted in the retained source testimony.
+
+use std::collections::BTreeSet;
 
 use anyhow::{Result, ensure};
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::canonical_json;
 
-pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 1;
+pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 5;
 pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
-pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v2";
+pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v6";
 pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-readiness.v1";
-pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 1;
+pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 2;
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL: &str =
-    "ryeos.runtime-snapshot-qualification-adapter.v1";
+    "ryeos.runtime-snapshot-qualification-adapter.v2";
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL: &str =
     "ryeos.runtime-snapshot-qualification-termination.v1";
+pub const RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL: &str =
+    "ryeos.runtime-snapshot-qualification-readiness.v1";
 pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
+pub const RUNTIME_SNAPSHOT_STAGE_SCHEMA: u32 = 1;
+pub const RUNTIME_SNAPSHOT_UPLOAD_RECEIPT_SCHEMA: u32 = 1;
+pub const RUNTIME_SNAPSHOT_UPLOAD_ADAPTER_PROTOCOL: &str =
+    "ryeos.runtime-snapshot-upload-adapter.v1";
+pub const RUNTIME_SNAPSHOT_CREATE_ADAPTER_PROTOCOL: &str =
+    "ryeos.runtime-snapshot-create-adapter.v1";
+pub const RUNTIME_SNAPSHOT_CREATE_RESULT_SCHEMA: u32 = 1;
+
+/// How the guest's controller connection is carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchControllerTransport {
+    Https,
+    Relay,
+}
+
+/// The network policy a provider sandbox is created under: deny-all, or an
+/// allow-list of exact egress hosts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LaunchSandboxNetworkPolicy {
+    DenyAll,
+    AllowList { hosts: BTreeSet<String> },
+}
+
+impl LaunchSandboxNetworkPolicy {
+    pub const MAX_ALLOW_LIST_HOSTS: usize = 8;
+
+    /// The policy kind, without its hosts.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::DenyAll => "deny_all",
+            Self::AllowList { .. } => "allow_list",
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Self::AllowList { hosts } = self {
+            ensure!(
+                (1..=Self::MAX_ALLOW_LIST_HOSTS).contains(&hosts.len())
+                    && hosts.iter().all(|host| {
+                        !host.is_empty()
+                            && host.len() <= 253
+                            && host.bytes().all(|byte| {
+                                byte.is_ascii_lowercase()
+                                    || byte.is_ascii_digit()
+                                    || matches!(byte, b'.' | b'-')
+                            })
+                    }),
+                "launch shape allow-list hosts are invalid"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// One target-local network-input file a launch captures, and its byte bound.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchNetworkInput {
+    pub source: String,
+    pub max_bytes: u64,
+    /// Whether the file must exist on the target; an optional input that is
+    /// missing is captured as absent.
+    pub required: bool,
+}
+
+impl LaunchNetworkInput {
+    pub const MAX_BYTES: u64 = 64 * 1024;
+
+    fn validate(&self, label: &str) -> Result<()> {
+        ensure!(
+            self.source.starts_with('/')
+                && self.source.len() <= 4096
+                && !self.source.contains('\0')
+                && self.source[1..]
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != ".."),
+            "launch shape {label} source is not a lexical absolute file path"
+        );
+        ensure!(
+            (1..=Self::MAX_BYTES).contains(&self.max_bytes),
+            "launch shape {label} byte bound is invalid"
+        );
+        Ok(())
+    }
+}
+
+/// The resolver and hosts sources a launch captures. The same two files a
+/// binding's network-input policy names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchNetworkInputs {
+    pub resolver: LaunchNetworkInput,
+    pub hosts: LaunchNetworkInput,
+}
+
+impl LaunchNetworkInputs {
+    /// The sources an operator binding captures, from the one definition both
+    /// binding composition and qualification declare.
+    pub fn operator() -> Self {
+        let sources = crate::operator_network_inputs();
+        Self {
+            resolver: LaunchNetworkInput {
+                source: sources.resolver_source.into(),
+                max_bytes: sources.resolver_max_bytes,
+                required: sources.resolver_required,
+            },
+            hosts: LaunchNetworkInput {
+                source: sources.hosts_source.into(),
+                max_bytes: sources.hosts_max_bytes,
+                required: sources.hosts_required,
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.resolver.validate("network_inputs.resolver")?;
+        self.hosts.validate("network_inputs.hosts")
+    }
+
+    /// The first differing field with both values (`self` is the qualified
+    /// side), or none.
+    pub fn first_difference(&self, other: &Self) -> Option<String> {
+        for (label, qualified, launch) in [
+            ("resolver", &self.resolver, &other.resolver),
+            ("hosts", &self.hosts, &other.hosts),
+        ] {
+            if qualified.source != launch.source {
+                return Some(format!(
+                    "launch_shape.network_inputs.{label}.source: {} versus {}",
+                    qualified.source, launch.source
+                ));
+            }
+            if qualified.max_bytes != launch.max_bytes {
+                return Some(format!(
+                    "launch_shape.network_inputs.{label}.max_bytes: {} versus {}",
+                    qualified.max_bytes, launch.max_bytes
+                ));
+            }
+            if qualified.required != launch.required {
+                return Some(format!(
+                    "launch_shape.network_inputs.{label}.required: {} versus {}",
+                    qualified.required, launch.required
+                ));
+            }
+        }
+        None
+    }
+}
+
+/// The launch shape a qualification occurrence is created under and a
+/// verifier runs under: how the controller is reached, what the sandbox may
+/// reach, and which network-input files are captured. Declared as signed
+/// data, retained in typed intents and proofs, and compared with the shape a
+/// lease will launch under. An https controller captures network inputs; a
+/// relay controller has none.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchShape {
+    pub controller_transport: LaunchControllerTransport,
+    pub sandbox_network_policy: LaunchSandboxNetworkPolicy,
+    pub network_inputs: Option<LaunchNetworkInputs>,
+}
+
+impl LaunchShape {
+    /// The consumer-relay shape: controller reached through the relay, sandbox
+    /// network denied, no network inputs.
+    pub fn relay_deny_all() -> Self {
+        Self {
+            controller_transport: LaunchControllerTransport::Relay,
+            sandbox_network_policy: LaunchSandboxNetworkPolicy::DenyAll,
+            network_inputs: None,
+        }
+    }
+
+    /// The lease shape: controller reached over https, sandbox allowed to
+    /// reach exactly `hosts`, capturing `network_inputs`.
+    pub fn https_allow_list(
+        hosts: impl IntoIterator<Item = String>,
+        network_inputs: LaunchNetworkInputs,
+    ) -> Self {
+        Self {
+            controller_transport: LaunchControllerTransport::Https,
+            sandbox_network_policy: LaunchSandboxNetworkPolicy::AllowList {
+                hosts: hosts.into_iter().collect(),
+            },
+            network_inputs: Some(network_inputs),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.sandbox_network_policy.validate()?;
+        match (self.controller_transport, &self.network_inputs) {
+            (LaunchControllerTransport::Https, Some(inputs)) => inputs.validate(),
+            (LaunchControllerTransport::Https, None) => {
+                anyhow::bail!("an https launch shape declares its network inputs")
+            }
+            (LaunchControllerTransport::Relay, None) => Ok(()),
+            (LaunchControllerTransport::Relay, Some(_)) => {
+                anyhow::bail!("a relay launch shape captures no network inputs")
+            }
+        }
+    }
+
+    /// The first field that differs from `other`, with both values, or none.
+    pub fn first_difference(&self, other: &Self) -> Option<String> {
+        if self.controller_transport != other.controller_transport {
+            return Some(format!(
+                "launch_shape.controller_transport: {:?} versus {:?}",
+                self.controller_transport, other.controller_transport
+            ));
+        }
+        if self.sandbox_network_policy != other.sandbox_network_policy {
+            return Some(format!(
+                "launch_shape.sandbox_network_policy: {:?} versus {:?}",
+                self.sandbox_network_policy, other.sandbox_network_policy
+            ));
+        }
+        match (&self.network_inputs, &other.network_inputs) {
+            (Some(left), Some(right)) => left.first_difference(right),
+            (None, None) => None,
+            (left, right) => Some(format!(
+                "launch_shape.network_inputs: {left:?} versus {right:?}"
+            )),
+        }
+    }
+}
+
+/// Provenance of an exact owner-runtime tree. Neither variant alone qualifies
+/// the restored provider snapshot or grants a worker execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeSnapshotSource {
+    CapturedProduct {
+        product_witness_hash: String,
+    },
+    BundleMaterialization {
+        materialization_attestation_hash: String,
+        source_coordinate_digest: String,
+        materialization_binding_digest: String,
+    },
+}
+
+impl RuntimeSnapshotSource {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::CapturedProduct {
+                product_witness_hash,
+            } => {
+                require_hash(product_witness_hash, "product witness")?;
+            }
+            Self::BundleMaterialization {
+                materialization_attestation_hash,
+                source_coordinate_digest,
+                materialization_binding_digest,
+            } => {
+                for (label, value) in [
+                    (
+                        "materialization attestation",
+                        materialization_attestation_hash,
+                    ),
+                    ("materialization coordinate", source_coordinate_digest),
+                    ("materialization binding", materialization_binding_digest),
+                ] {
+                    require_hash(value, label)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// One sealed invocation of the exact admitted snapshot producer. The upload
 /// descriptor is a process-local transport coordinate, not durable identity;
@@ -96,6 +371,15 @@ pub struct RuntimeSnapshotIntent {
     pub owner_principal: String,
     pub provider_id: String,
     pub source_occurrence_id: String,
+    /// Present only for a materialized source. This binds the provider
+    /// occurrence to the one-shot bootstrap journal across later replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bootstrap_operation_id: Option<String>,
+    /// Exact create-time identity checked again by the adapter's final GET.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_timeout_seconds: Option<u32>,
     pub provider_group_id: String,
     /// Signed producer authority, distinct from the later placement binding
     /// that will name the resulting snapshot ID.
@@ -103,10 +387,9 @@ pub struct RuntimeSnapshotIntent {
     pub adapter_artifact_hash: String,
     pub provider_spec_digest: String,
     pub settings_digest: String,
-    pub product_witness_hash: String,
+    pub source: RuntimeSnapshotSource,
     pub guest_runtime_manifest_hash: String,
     pub owner_executable_sha256: String,
-    pub controller_public_root: String,
     pub upload_sha256: String,
     pub upload_bytes: u64,
     pub attempt_deadline_ms: i64,
@@ -124,12 +407,40 @@ impl RuntimeSnapshotIntent {
             ("adapter", &self.adapter_artifact_hash),
             ("provider spec", &self.provider_spec_digest),
             ("settings", &self.settings_digest),
-            ("product witness", &self.product_witness_hash),
             ("guest runtime manifest", &self.guest_runtime_manifest_hash),
             ("owner executable", &self.owner_executable_sha256),
             ("upload", &self.upload_sha256),
         ] {
             require_hash(value, label)?;
+        }
+        self.source.validate()?;
+        let bootstrap_witness = [
+            self.source_bootstrap_operation_id.is_some(),
+            self.source_created_at.is_some(),
+            self.source_timeout_seconds.is_some(),
+        ];
+        match &self.source {
+            // A captured product is produced from a node-bootstrapped source
+            // (the complete creation witness) or, until the operator-named
+            // source path is retired, from an occurrence the operator names
+            // (no witness at all). Never a partial witness.
+            RuntimeSnapshotSource::CapturedProduct { .. }
+                if bootstrap_witness == [false, false, false] => {}
+            RuntimeSnapshotSource::CapturedProduct { .. }
+            | RuntimeSnapshotSource::BundleMaterialization { .. } => ensure!(
+                self.source_bootstrap_operation_id
+                    .as_deref()
+                    .is_some_and(|value| require_hash(value, "bootstrap operation").is_ok())
+                    && self.source_created_at.as_deref().is_some_and(|value| {
+                        !value.is_empty()
+                            && value.len() <= 128
+                            && value.bytes().all(|byte| byte.is_ascii_graphic())
+                    })
+                    && self
+                        .source_timeout_seconds
+                        .is_some_and(|value| (1..=86_400).contains(&value)),
+                "bootstrapped snapshot source lacks its exact bootstrap creation witness"
+            ),
         }
         let owner = self
             .owner_principal
@@ -139,18 +450,6 @@ impl RuntimeSnapshotIntent {
         require_bounded_text(&self.provider_id, 128, "provider")?;
         require_bounded_text(&self.source_occurrence_id, 256, "source occurrence")?;
         require_bounded_text(&self.provider_group_id, 256, "provider group")?;
-        let encoded = self
-            .controller_public_root
-            .strip_prefix("ed25519:")
-            .ok_or_else(|| {
-                anyhow::anyhow!("runtime snapshot controller root has no Ed25519 envelope")
-            })?;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-        ensure!(
-            decoded.len() == 32
-                && base64::engine::general_purpose::STANDARD.encode(&decoded) == encoded,
-            "runtime snapshot controller root is not canonical 32-byte base64"
-        );
         ensure!(
             (1..=MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES).contains(&self.upload_bytes)
                 && self.attempt_deadline_ms > 0,
@@ -168,19 +467,23 @@ impl RuntimeSnapshotIntent {
     /// attempt opportunity by choosing another operation ID.
     pub fn derived_operation_id(&self) -> Result<String> {
         let coordinates = (
-            "ryeos.runtime-snapshot-operation.v1",
+            "ryeos.runtime-snapshot-operation.v5",
             &self.owner_principal,
             &self.provider_id,
             &self.source_occurrence_id,
+            (
+                &self.source_bootstrap_operation_id,
+                &self.source_created_at,
+                &self.source_timeout_seconds,
+            ),
             &self.provider_group_id,
             &self.production_profile_digest,
             &self.adapter_artifact_hash,
             &self.provider_spec_digest,
             &self.settings_digest,
-            &self.product_witness_hash,
+            &self.source,
             &self.guest_runtime_manifest_hash,
             &self.owner_executable_sha256,
-            &self.controller_public_root,
             &self.upload_sha256,
             self.upload_bytes,
         );
@@ -190,6 +493,298 @@ impl RuntimeSnapshotIntent {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         Ok(hex::encode(Sha256::digest(canonical_json(self)?)))
+    }
+}
+
+/// One durable mutation stage beneath an immutable snapshot intent. A stage
+/// operation ID cannot be changed by extending its deadline or by changing a
+/// provider response. The journal must
+/// reserve and claim this exact intent before invoking its adapter; this type
+/// alone is not permission to make provider contact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSnapshotStage {
+    Upload,
+    Create,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotStageIntent {
+    pub schema: u32,
+    pub operation_id: String,
+    pub parent_operation_id: String,
+    pub parent_intent_digest: String,
+    pub stage: RuntimeSnapshotStage,
+    /// Required only for create. It names a fully accepted, immutable upload
+    /// receipt, not a minted token or a completed local socket write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_upload_receipt_digest: Option<String>,
+    pub attempt_deadline_ms: i64,
+}
+
+impl RuntimeSnapshotStageIntent {
+    pub fn validate_for(
+        &self,
+        parent: &RuntimeSnapshotIntent,
+        accepted_upload: Option<(&RuntimeSnapshotStageIntent, &RuntimeSnapshotUploadReceipt)>,
+    ) -> Result<()> {
+        parent.validate()?;
+        ensure!(
+            self.schema == RUNTIME_SNAPSHOT_STAGE_SCHEMA
+                && self.parent_operation_id == parent.operation_id
+                && self.parent_intent_digest == parent.digest()?
+                && self.attempt_deadline_ms > 0
+                && self.attempt_deadline_ms <= parent.attempt_deadline_ms,
+            "snapshot stage differs from its retained parent"
+        );
+        match self.stage {
+            RuntimeSnapshotStage::Upload => ensure!(
+                self.accepted_upload_receipt_digest.is_none() && accepted_upload.is_none(),
+                "snapshot upload cannot borrow an earlier receipt"
+            ),
+            RuntimeSnapshotStage::Create => {
+                let (upload_stage, receipt) = accepted_upload.ok_or_else(|| {
+                    anyhow::anyhow!("snapshot create lacks an accepted upload receipt")
+                })?;
+                receipt.validate_for_stage(parent, upload_stage)?;
+                ensure!(
+                    self.accepted_upload_receipt_digest.as_deref()
+                        == Some(receipt.digest()?.as_str()),
+                    "snapshot create changed its accepted upload receipt"
+                );
+            }
+        }
+        ensure!(
+            self.operation_id == self.derived_operation_id()?,
+            "snapshot stage operation changed its mutation identity"
+        );
+        Ok(())
+    }
+
+    pub fn derived_operation_id(&self) -> Result<String> {
+        require_hash(&self.parent_operation_id, "stage parent operation")?;
+        require_hash(&self.parent_intent_digest, "stage parent intent")?;
+        if let Some(digest) = &self.accepted_upload_receipt_digest {
+            require_hash(digest, "stage upload receipt")?;
+        }
+        let coordinates = (
+            "ryeos.runtime-snapshot-stage-operation.v1",
+            &self.parent_operation_id,
+            self.stage,
+        );
+        Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        Ok(hex::encode(Sha256::digest(canonical_json(self)?)))
+    }
+}
+
+/// The adapter's bounded observation of an accepted proxy upload. This is
+/// protocol evidence for a later create claim, not independent proof of the
+/// bytes restored from a provider snapshot or remote writer settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotUploadReceipt {
+    pub schema: u32,
+    pub upload_operation_id: String,
+    pub upload_intent_digest: String,
+    pub parent_operation_id: String,
+    pub parent_intent_digest: String,
+    pub source_occurrence_id: String,
+    pub provider_group_id: String,
+    pub upload_path: String,
+    pub content_type: String,
+    pub upload_sha256: String,
+    pub upload_bytes: u64,
+    pub source_response_sha256: String,
+    pub provider_response_sha256: String,
+    pub provider_status: u16,
+    pub completed_at_ms: i64,
+}
+
+impl RuntimeSnapshotUploadReceipt {
+    pub fn validate_for(&self, parent: &RuntimeSnapshotIntent) -> Result<()> {
+        parent.validate()?;
+        ensure!(
+            self.schema == RUNTIME_SNAPSHOT_UPLOAD_RECEIPT_SCHEMA
+                && self.parent_operation_id == parent.operation_id
+                && self.parent_intent_digest == parent.digest()?
+                && self.source_occurrence_id == parent.source_occurrence_id
+                && self.provider_group_id == parent.provider_group_id
+                && self.upload_sha256 == parent.upload_sha256
+                && self.upload_bytes == parent.upload_bytes
+                && (200..300).contains(&self.provider_status)
+                && self.completed_at_ms > 0,
+            "snapshot upload receipt does not acknowledge its exact parent"
+        );
+        require_hash(&self.source_response_sha256, "source response")?;
+        require_hash(&self.provider_response_sha256, "upload response")?;
+        ensure!(
+            self.upload_path.starts_with('/')
+                && self.upload_path.len() <= 512
+                && !self.upload_path.contains("..")
+                && !self.upload_path.contains("//")
+                && self.upload_path.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.')
+                }),
+            "snapshot upload receipt path is invalid"
+        );
+        ensure!(
+            !self.content_type.is_empty()
+                && self.content_type.len() <= 128
+                && self.content_type.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'+')
+                }),
+            "snapshot upload receipt content type is invalid"
+        );
+        let upload_stage = RuntimeSnapshotStageIntent {
+            schema: RUNTIME_SNAPSHOT_STAGE_SCHEMA,
+            operation_id: self.upload_operation_id.clone(),
+            parent_operation_id: self.parent_operation_id.clone(),
+            parent_intent_digest: self.parent_intent_digest.clone(),
+            stage: RuntimeSnapshotStage::Upload,
+            accepted_upload_receipt_digest: None,
+            attempt_deadline_ms: 1,
+        };
+        ensure!(
+            self.upload_operation_id == upload_stage.derived_operation_id()?,
+            "snapshot upload receipt changed its stage operation"
+        );
+        require_hash(&self.upload_intent_digest, "upload stage intent")?;
+        Ok(())
+    }
+
+    pub fn validate_for_stage(
+        &self,
+        parent: &RuntimeSnapshotIntent,
+        stage: &RuntimeSnapshotStageIntent,
+    ) -> Result<()> {
+        self.validate_observation_for_stage(parent, stage)?;
+        ensure!(
+            self.completed_at_ms <= stage.attempt_deadline_ms,
+            "snapshot upload receipt completed after its stage deadline"
+        );
+        Ok(())
+    }
+
+    /// Exact attempt attribution remains valid for a late response. Only the
+    /// timely variant may authorize the subsequent create mutation.
+    pub fn validate_observation_for_stage(
+        &self,
+        parent: &RuntimeSnapshotIntent,
+        stage: &RuntimeSnapshotStageIntent,
+    ) -> Result<()> {
+        self.validate_for(parent)?;
+        stage.validate_for(parent, None)?;
+        ensure!(
+            stage.stage == RuntimeSnapshotStage::Upload
+                && self.upload_operation_id == stage.operation_id
+                && self.upload_intent_digest == stage.digest()?,
+            "snapshot upload receipt belongs to another attempt"
+        );
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        Ok(hex::encode(Sha256::digest(canonical_json(self)?)))
+    }
+}
+
+/// The upload invocation carries a sealed byte descriptor and can make only
+/// the token and proxy-upload mutations. It cannot request snapshot creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotUploadAdapterRequest {
+    pub protocol: String,
+    pub intent: RuntimeSnapshotIntent,
+    pub stage: RuntimeSnapshotStageIntent,
+    pub provider_spec_digest: String,
+    pub upload_descriptor: u32,
+    pub upload_bytes: u64,
+    pub upload_sha256: String,
+}
+
+impl RuntimeSnapshotUploadAdapterRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.stage.validate_for(&self.intent, None)?;
+        ensure!(
+            self.protocol == RUNTIME_SNAPSHOT_UPLOAD_ADAPTER_PROTOCOL
+                && self.stage.stage == RuntimeSnapshotStage::Upload
+                && self.provider_spec_digest == self.intent.provider_spec_digest
+                && self.upload_descriptor > 2
+                && self.upload_bytes == self.intent.upload_bytes
+                && self.upload_sha256 == self.intent.upload_sha256,
+            "snapshot upload adapter handoff differs from its retained stage"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "snapshot upload adapter request exceeds bound"
+        );
+        Ok(())
+    }
+}
+
+/// The create invocation has no upload descriptor and is authorized only by
+/// the exact receipt already accepted by the durable upload journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotCreateAdapterRequest {
+    pub protocol: String,
+    pub intent: RuntimeSnapshotIntent,
+    pub upload_stage: RuntimeSnapshotStageIntent,
+    pub accepted_upload: RuntimeSnapshotUploadReceipt,
+    pub create_stage: RuntimeSnapshotStageIntent,
+    pub provider_spec_digest: String,
+}
+
+impl RuntimeSnapshotCreateAdapterRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.accepted_upload
+            .validate_for_stage(&self.intent, &self.upload_stage)?;
+        self.create_stage.validate_for(
+            &self.intent,
+            Some((&self.upload_stage, &self.accepted_upload)),
+        )?;
+        ensure!(
+            self.protocol == RUNTIME_SNAPSHOT_CREATE_ADAPTER_PROTOCOL
+                && self.create_stage.stage == RuntimeSnapshotStage::Create
+                && self.provider_spec_digest == self.intent.provider_spec_digest,
+            "snapshot create adapter handoff differs from its retained stages"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "snapshot create adapter request exceeds bound"
+        );
+        Ok(())
+    }
+}
+
+/// An adapter response binds a provider locator to the one admitted create
+/// stage and its accepted upload. It remains only a creation observation;
+/// independent restored-content qualification is still required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotCreateResult {
+    pub schema: u32,
+    pub create_operation_id: String,
+    pub create_intent_digest: String,
+    pub accepted_upload_receipt_digest: String,
+    pub locator: RuntimeSnapshotLocator,
+}
+
+impl RuntimeSnapshotCreateResult {
+    pub fn validate_for(&self, request: &RuntimeSnapshotCreateAdapterRequest) -> Result<()> {
+        request.validate()?;
+        ensure!(
+            self.schema == RUNTIME_SNAPSHOT_CREATE_RESULT_SCHEMA
+                && self.create_operation_id == request.create_stage.operation_id
+                && self.create_intent_digest == request.create_stage.digest()?
+                && self.accepted_upload_receipt_digest == request.accepted_upload.digest()?,
+            "snapshot create result changed its durable stage or accepted upload"
+        );
+        self.locator.validate_for(&request.intent)
     }
 }
 
@@ -230,6 +825,9 @@ pub struct RuntimeSnapshotQualificationIntent {
     pub settings_digest: String,
     pub verifier_artifact_hash: String,
     pub maximum_lifetime_seconds: u32,
+    /// The shape the sandbox is created under, copied from the signed
+    /// qualification binding.
+    pub launch_shape: LaunchShape,
     pub attempt_deadline_ms: i64,
 }
 
@@ -252,6 +850,7 @@ impl RuntimeSnapshotQualificationIntent {
                 && (1..=3600).contains(&self.maximum_lifetime_seconds),
             "snapshot qualification intent differs from retained snapshot authority"
         );
+        self.launch_shape.validate()?;
         for (label, hash) in [
             ("qualification profile", &self.qualification_profile_digest),
             ("qualification adapter", &self.adapter_artifact_hash),
@@ -275,7 +874,7 @@ impl RuntimeSnapshotQualificationIntent {
     /// Deadline changes cannot mint a fresh non-idempotent create opportunity.
     pub fn derived_operation_id(&self) -> Result<String> {
         let coordinates = (
-            "ryeos.runtime-snapshot-qualification.v1",
+            "ryeos.runtime-snapshot-qualification.v2",
             &self.owner_principal,
             &self.snapshot_operation_id,
             &self.snapshot_intent_digest,
@@ -288,6 +887,7 @@ impl RuntimeSnapshotQualificationIntent {
             &self.settings_digest,
             &self.verifier_artifact_hash,
             self.maximum_lifetime_seconds,
+            &self.launch_shape,
         );
         Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
     }
@@ -464,6 +1064,91 @@ impl RuntimeSnapshotQualificationTerminationAdapterResponse {
     }
 }
 
+/// A read-only observation of a bound restored qualification occurrence, made
+/// before the one verifier attempt is claimed: a verifier run against a
+/// sandbox that is still being created would spend that attempt. It carries
+/// no create, verify or terminate authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationReadinessRequest {
+    pub protocol: String,
+    pub qualification_intent: RuntimeSnapshotQualificationIntent,
+    pub occurrence: RuntimeSnapshotQualificationOccurrence,
+    pub provider_spec_digest: String,
+}
+
+impl RuntimeSnapshotQualificationReadinessRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.occurrence.validate_for(&self.qualification_intent)?;
+        ensure!(
+            self.protocol == RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL
+                && self.provider_spec_digest == self.qualification_intent.provider_spec_digest
+                && !self.occurrence.contact_deadline_exceeded
+                && canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "qualification readiness differs from a timely bound occurrence"
+        );
+        Ok(())
+    }
+}
+
+/// What the provider reports of the exact restored occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeSnapshotQualificationReadinessAdapterResponse {
+    Running {
+        operation_id: String,
+        occurrence_id: String,
+        provider_response_sha256: String,
+    },
+    /// Not running yet, or no longer: `status` is the provider's bounded
+    /// status word, or `absent` when the provider has no such occurrence.
+    NotRunning {
+        operation_id: String,
+        occurrence_id: String,
+        status: String,
+    },
+}
+
+impl RuntimeSnapshotQualificationReadinessAdapterResponse {
+    pub fn validate_for(
+        &self,
+        request: &RuntimeSnapshotQualificationReadinessRequest,
+    ) -> Result<()> {
+        request.validate()?;
+        let (operation_id, occurrence_id) = match self {
+            Self::Running {
+                operation_id,
+                occurrence_id,
+                provider_response_sha256,
+            } => {
+                require_hash(provider_response_sha256, "qualification readiness response")?;
+                (operation_id, occurrence_id)
+            }
+            Self::NotRunning {
+                operation_id,
+                occurrence_id,
+                status,
+            } => {
+                ensure!(
+                    !status.is_empty()
+                        && status.len() <= 64
+                        && status
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+                    "qualification readiness status is not a bounded word"
+                );
+                (operation_id, occurrence_id)
+            }
+        };
+        ensure!(
+            operation_id == &request.qualification_intent.operation_id
+                && occurrence_id == &request.occurrence.occurrence_id,
+            "qualification readiness changed the exact occurrence"
+        );
+        Ok(())
+    }
+}
+
 /// Sealed create-only handoff. The selected snapshot ID is a retained provider
 /// result, not a mutable setting or a value inferred from the adapter's own
 /// environment. This grants no verifier run or qualification claim.
@@ -510,6 +1195,9 @@ pub enum RuntimeSnapshotQualificationAdapterResponse {
     },
     Uncertain {
         operation_id: String,
+        /// Diagnostic only; never alters the uncertain outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::UncertaintyReason>,
     },
 }
 
@@ -518,10 +1206,18 @@ impl RuntimeSnapshotQualificationAdapterResponse {
         request.validate()?;
         match self {
             Self::OccurrenceBound { occurrence } => occurrence.validate_for(&request.intent)?,
-            Self::Uncertain { operation_id } => ensure!(
-                operation_id == &request.intent.operation_id,
-                "uncertain qualification result changed durable attempt"
-            ),
+            Self::Uncertain {
+                operation_id,
+                reason,
+            } => {
+                ensure!(
+                    operation_id == &request.intent.operation_id,
+                    "uncertain qualification result changed durable attempt"
+                );
+                if let Some(reason) = reason {
+                    reason.validate()?;
+                }
+            }
         }
         Ok(())
     }
@@ -658,28 +1354,100 @@ fn require_bounded_text(value: &str, maximum: usize, label: &str) -> Result<()> 
 mod tests {
     use super::*;
 
+    fn test_launch_shape() -> LaunchShape {
+        LaunchShape {
+            controller_transport: LaunchControllerTransport::Https,
+            sandbox_network_policy: LaunchSandboxNetworkPolicy::AllowList {
+                hosts: BTreeSet::from(["controller.invalid".to_owned()]),
+            },
+            network_inputs: Some(LaunchNetworkInputs::operator()),
+        }
+    }
+
+    #[test]
+    fn launch_shape_is_bounded_and_names_its_first_difference() {
+        let shape = test_launch_shape();
+        shape.validate().unwrap();
+        assert!(shape.first_difference(&shape).is_none());
+        let relay = LaunchShape {
+            controller_transport: LaunchControllerTransport::Relay,
+            sandbox_network_policy: LaunchSandboxNetworkPolicy::DenyAll,
+            network_inputs: None,
+        };
+        let text = shape.first_difference(&relay).unwrap();
+        assert!(
+            text.contains("controller_transport")
+                && text.contains("Https")
+                && text.contains("Relay")
+        );
+        let mut other = shape.clone();
+        other.sandbox_network_policy = LaunchSandboxNetworkPolicy::DenyAll;
+        let text = shape.first_difference(&other).unwrap();
+        assert!(text.contains("sandbox_network_policy") && text.contains("DenyAll"));
+        let mut moved = shape.clone();
+        moved.network_inputs.as_mut().unwrap().hosts.source = "/etc/other-hosts".into();
+        let text = shape.first_difference(&moved).unwrap();
+        assert!(
+            text.contains("network_inputs.hosts.source")
+                && text.contains("/etc/hosts")
+                && text.contains("/etc/other-hosts"),
+            "{text}"
+        );
+        let mut flipped = shape.clone();
+        let declared = shape.network_inputs.as_ref().unwrap().hosts.required;
+        flipped.network_inputs.as_mut().unwrap().hosts.required = !declared;
+        let text = shape.first_difference(&flipped).unwrap();
+        assert!(
+            text.contains("network_inputs.hosts.required")
+                && text.contains(&format!("{declared} versus {}", !declared)),
+            "{text}"
+        );
+        let mut shapeless = shape.clone();
+        shapeless.network_inputs = None;
+        assert!(shapeless.validate().is_err());
+        for hosts in [
+            BTreeSet::new(),
+            BTreeSet::from(["Upper.example".to_owned()]),
+        ] {
+            assert!(
+                LaunchSandboxNetworkPolicy::AllowList { hosts }
+                    .validate()
+                    .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<LaunchShape>(serde_json::json!({
+                "controller_transport": "https",
+                "sandbox_network_policy": {"kind": "deny_all"},
+                "extra": 1
+            }))
+            .is_err()
+        );
+    }
+
     fn intent() -> RuntimeSnapshotIntent {
         let mut intent = RuntimeSnapshotIntent {
-            schema: 1,
+            schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "2".repeat(64)),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             source_occurrence_id: "sbox-fixture-1".into(),
+            source_bootstrap_operation_id: None,
+            source_created_at: None,
+            source_timeout_seconds: None,
             provider_group_id: "sbg-fixture-1".into(),
             production_profile_digest: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
             provider_spec_digest: "d".repeat(64),
             settings_digest: "5".repeat(64),
-            product_witness_hash: "6".repeat(64),
+            source: RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "6".repeat(64),
+            },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode([3u8; 32])
-            ),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
-            attempt_deadline_ms: 42,
+            attempt_deadline_ms: 1_000,
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
         intent
@@ -689,10 +1457,32 @@ mod tests {
     fn source_and_delivery_changes_move_intent_identity() {
         let baseline = intent();
         let digest = baseline.digest().unwrap();
+        let mut materialized = baseline.clone();
+        materialized.source = RuntimeSnapshotSource::BundleMaterialization {
+            materialization_attestation_hash: "a".repeat(64),
+            source_coordinate_digest: "b".repeat(64),
+            materialization_binding_digest: "c".repeat(64),
+        };
+        materialized.source_bootstrap_operation_id = Some("d".repeat(64));
+        assert!(materialized.validate().is_err());
+        materialized.source_created_at = Some("2026-09-29T00:00:00Z".into());
+        materialized.source_timeout_seconds = Some(900);
+        materialized.operation_id = materialized.derived_operation_id().unwrap();
+        materialized.validate().unwrap();
+        assert_ne!(materialized.operation_id, baseline.operation_id);
+        assert_ne!(materialized.digest().unwrap(), digest);
+        let mut changed_creation = materialized.clone();
+        changed_creation.source_created_at = Some("2026-09-30T00:00:00Z".into());
+        assert!(changed_creation.validate().is_err());
+        changed_creation.operation_id = changed_creation.derived_operation_id().unwrap();
+        assert_ne!(changed_creation.operation_id, materialized.operation_id);
+        let mut changed_timeout = materialized.clone();
+        changed_timeout.source_timeout_seconds = Some(901);
+        assert!(changed_timeout.validate().is_err());
+        changed_timeout.operation_id = changed_timeout.derived_operation_id().unwrap();
+        assert_ne!(changed_timeout.operation_id, materialized.operation_id);
         for field in [
-            "product_witness_hash",
             "guest_runtime_manifest_hash",
-            "controller_public_root",
             "upload_sha256",
             "adapter_artifact_hash",
             "provider_spec_digest",
@@ -702,12 +1492,7 @@ mod tests {
             "provider_group_id",
         ] {
             let mut changed = serde_json::to_value(&baseline).unwrap();
-            changed[field] = serde_json::json!(if field == "controller_public_root" {
-                format!(
-                    "ed25519:{}",
-                    base64::engine::general_purpose::STANDARD.encode([4u8; 32])
-                )
-            } else if field == "source_occurrence_id" {
+            changed[field] = serde_json::json!(if field == "source_occurrence_id" {
                 "sbox-fixture-2".to_owned()
             } else if field == "provider_group_id" {
                 "sbg-fixture-2".to_owned()
@@ -725,6 +1510,25 @@ mod tests {
     }
 
     #[test]
+    fn captured_product_takes_a_complete_bootstrap_witness_or_none() {
+        let baseline = intent();
+        assert!(matches!(
+            baseline.source,
+            RuntimeSnapshotSource::CapturedProduct { .. }
+        ));
+        baseline.validate().unwrap();
+        let mut bootstrapped = baseline.clone();
+        bootstrapped.source_bootstrap_operation_id = Some("d".repeat(64));
+        bootstrapped.operation_id = bootstrapped.derived_operation_id().unwrap();
+        assert!(bootstrapped.validate().is_err(), "partial witness refused");
+        bootstrapped.source_created_at = Some("2026-09-29T00:00:00Z".into());
+        bootstrapped.source_timeout_seconds = Some(900);
+        bootstrapped.operation_id = bootstrapped.derived_operation_id().unwrap();
+        bootstrapped.validate().unwrap();
+        assert_ne!(bootstrapped.operation_id, baseline.operation_id);
+    }
+
+    #[test]
     fn deadline_change_cannot_mint_another_attempt_opportunity() {
         let baseline = intent();
         let mut retried = baseline.clone();
@@ -736,6 +1540,208 @@ mod tests {
         assert_ne!(retried.digest().unwrap(), baseline.digest().unwrap());
         retried.operation_id = "f".repeat(64);
         assert!(retried.validate().is_err());
+    }
+
+    fn upload_stage(parent: &RuntimeSnapshotIntent) -> RuntimeSnapshotStageIntent {
+        let mut stage = RuntimeSnapshotStageIntent {
+            schema: RUNTIME_SNAPSHOT_STAGE_SCHEMA,
+            operation_id: String::new(),
+            parent_operation_id: parent.operation_id.clone(),
+            parent_intent_digest: parent.digest().unwrap(),
+            stage: RuntimeSnapshotStage::Upload,
+            accepted_upload_receipt_digest: None,
+            attempt_deadline_ms: 100,
+        };
+        stage.operation_id = stage.derived_operation_id().unwrap();
+        stage
+    }
+
+    fn upload_receipt(
+        parent: &RuntimeSnapshotIntent,
+        stage: &RuntimeSnapshotStageIntent,
+    ) -> RuntimeSnapshotUploadReceipt {
+        RuntimeSnapshotUploadReceipt {
+            schema: RUNTIME_SNAPSHOT_UPLOAD_RECEIPT_SCHEMA,
+            upload_operation_id: stage.operation_id.clone(),
+            upload_intent_digest: stage.digest().unwrap(),
+            parent_operation_id: parent.operation_id.clone(),
+            parent_intent_digest: parent.digest().unwrap(),
+            source_occurrence_id: parent.source_occurrence_id.clone(),
+            provider_group_id: parent.provider_group_id.clone(),
+            upload_path: "/runtime/owner.tar".into(),
+            content_type: "application/octet-stream".into(),
+            upload_sha256: parent.upload_sha256.clone(),
+            upload_bytes: parent.upload_bytes,
+            source_response_sha256: "a".repeat(64),
+            provider_response_sha256: "b".repeat(64),
+            provider_status: 204,
+            completed_at_ms: 99,
+        }
+    }
+
+    #[test]
+    fn create_stage_requires_exact_accepted_upload() {
+        let parent = intent();
+        let upload = upload_stage(&parent);
+        upload.validate_for(&parent, None).unwrap();
+        let receipt = upload_receipt(&parent, &upload);
+        receipt.validate_for_stage(&parent, &upload).unwrap();
+        let mut create = RuntimeSnapshotStageIntent {
+            schema: RUNTIME_SNAPSHOT_STAGE_SCHEMA,
+            operation_id: String::new(),
+            parent_operation_id: parent.operation_id.clone(),
+            parent_intent_digest: parent.digest().unwrap(),
+            stage: RuntimeSnapshotStage::Create,
+            accepted_upload_receipt_digest: Some(receipt.digest().unwrap()),
+            attempt_deadline_ms: 200,
+        };
+        create.operation_id = create.derived_operation_id().unwrap();
+        create
+            .validate_for(&parent, Some((&upload, &receipt)))
+            .unwrap();
+        assert!(create.validate_for(&parent, None).is_err());
+        let mut changed = receipt.clone();
+        changed.provider_response_sha256 = "c".repeat(64);
+        assert!(
+            create
+                .validate_for(&parent, Some((&upload, &changed)))
+                .is_err()
+        );
+        changed = receipt.clone();
+        changed.provider_status = 500;
+        assert!(
+            create
+                .validate_for(&parent, Some((&upload, &changed)))
+                .is_err()
+        );
+        changed = receipt.clone();
+        changed.upload_sha256 = "c".repeat(64);
+        assert!(
+            create
+                .validate_for(&parent, Some((&upload, &changed)))
+                .is_err()
+        );
+        let mut changed = create.clone();
+        changed.accepted_upload_receipt_digest = None;
+        assert!(
+            changed
+                .validate_for(&parent, Some((&upload, &receipt)))
+                .is_err()
+        );
+        let mut changed = create.clone();
+        changed.attempt_deadline_ms += 100;
+        assert_eq!(changed.derived_operation_id().unwrap(), create.operation_id);
+        assert_ne!(changed.digest().unwrap(), create.digest().unwrap());
+        let mut changed_receipt = receipt.clone();
+        changed_receipt.provider_response_sha256 = "c".repeat(64);
+        let mut another_create = create.clone();
+        another_create.accepted_upload_receipt_digest = Some(changed_receipt.digest().unwrap());
+        assert_eq!(
+            another_create.derived_operation_id().unwrap(),
+            create.operation_id
+        );
+        let mut extended_parent = parent.clone();
+        extended_parent.attempt_deadline_ms += 100;
+        let mut extended_upload = upload.clone();
+        extended_upload.parent_intent_digest = extended_parent.digest().unwrap();
+        assert_eq!(
+            extended_upload.derived_operation_id().unwrap(),
+            upload.operation_id
+        );
+        extended_upload
+            .validate_for(&extended_parent, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn upload_acknowledgment_is_bounded_by_exact_stage_and_deadline() {
+        let parent = intent();
+        let upload = upload_stage(&parent);
+        let receipt = upload_receipt(&parent, &upload);
+        receipt.validate_for_stage(&parent, &upload).unwrap();
+        let mut changed = receipt.clone();
+        changed.completed_at_ms = 101;
+        changed
+            .validate_observation_for_stage(&parent, &upload)
+            .unwrap();
+        assert!(changed.validate_for_stage(&parent, &upload).is_err());
+        let mut changed = receipt.clone();
+        changed.upload_intent_digest = "c".repeat(64);
+        assert!(
+            changed
+                .validate_observation_for_stage(&parent, &upload)
+                .is_err()
+        );
+        assert!(changed.validate_for_stage(&parent, &upload).is_err());
+        let mut changed = receipt.clone();
+        changed.upload_path = "/runtime/../other".into();
+        assert!(changed.validate_for_stage(&parent, &upload).is_err());
+        let mut changed = receipt;
+        changed.source_occurrence_id = "sbox-other".into();
+        assert!(changed.validate_for_stage(&parent, &upload).is_err());
+    }
+
+    #[test]
+    fn staged_adapter_handoffs_bind_create_to_accepted_upload() {
+        let parent = intent();
+        let upload = upload_stage(&parent);
+        let receipt = upload_receipt(&parent, &upload);
+        let upload_request = RuntimeSnapshotUploadAdapterRequest {
+            protocol: RUNTIME_SNAPSHOT_UPLOAD_ADAPTER_PROTOCOL.into(),
+            intent: parent.clone(),
+            stage: upload.clone(),
+            provider_spec_digest: parent.provider_spec_digest.clone(),
+            upload_descriptor: 11,
+            upload_bytes: parent.upload_bytes,
+            upload_sha256: parent.upload_sha256.clone(),
+        };
+        upload_request.validate().unwrap();
+        let mut over_parent = upload_request.clone();
+        over_parent.stage.attempt_deadline_ms = parent.attempt_deadline_ms + 1;
+        assert!(over_parent.validate().is_err());
+        let mut create_stage = RuntimeSnapshotStageIntent {
+            schema: RUNTIME_SNAPSHOT_STAGE_SCHEMA,
+            operation_id: String::new(),
+            parent_operation_id: parent.operation_id.clone(),
+            parent_intent_digest: parent.digest().unwrap(),
+            stage: RuntimeSnapshotStage::Create,
+            accepted_upload_receipt_digest: Some(receipt.digest().unwrap()),
+            attempt_deadline_ms: 200,
+        };
+        create_stage.operation_id = create_stage.derived_operation_id().unwrap();
+        let create_request = RuntimeSnapshotCreateAdapterRequest {
+            protocol: RUNTIME_SNAPSHOT_CREATE_ADAPTER_PROTOCOL.into(),
+            intent: parent.clone(),
+            upload_stage: upload,
+            accepted_upload: receipt.clone(),
+            create_stage: create_stage.clone(),
+            provider_spec_digest: parent.provider_spec_digest.clone(),
+        };
+        create_request.validate().unwrap();
+        let result = RuntimeSnapshotCreateResult {
+            schema: RUNTIME_SNAPSHOT_CREATE_RESULT_SCHEMA,
+            create_operation_id: create_stage.operation_id.clone(),
+            create_intent_digest: create_stage.digest().unwrap(),
+            accepted_upload_receipt_digest: receipt.digest().unwrap(),
+            locator: RuntimeSnapshotLocator {
+                schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+                operation_id: parent.operation_id.clone(),
+                intent_digest: parent.digest().unwrap(),
+                source_occurrence_id: parent.source_occurrence_id.clone(),
+                provider_group_id: parent.provider_group_id.clone(),
+                snapshot_id: "snp-staged".into(),
+                provider_response_sha256: "a".repeat(64),
+                provider_creation_observation: serde_json::json!({"schema": 1}),
+                adapter_observation_sha256: hex::encode(Sha256::digest(br#"{"schema":1}"#)),
+            },
+        };
+        result.validate_for(&create_request).unwrap();
+        let mut substituted = result.clone();
+        substituted.accepted_upload_receipt_digest = "f".repeat(64);
+        assert!(substituted.validate_for(&create_request).is_err());
+        let mut substituted = result;
+        substituted.create_intent_digest = "f".repeat(64);
+        assert!(substituted.validate_for(&create_request).is_err());
     }
 
     #[test]
@@ -858,6 +1864,7 @@ mod tests {
             settings_digest: "4".repeat(64),
             verifier_artifact_hash: "5".repeat(64),
             maximum_lifetime_seconds: 900,
+            launch_shape: test_launch_shape(),
             attempt_deadline_ms: source.attempt_deadline_ms + 1,
         };
         qualification.operation_id = qualification.derived_operation_id().unwrap();

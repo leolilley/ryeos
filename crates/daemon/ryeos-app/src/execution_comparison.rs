@@ -139,7 +139,7 @@ fn project_cost_sample(
     let Some(cost) = final_cost else {
         return Ok(RunCostSample::without_values(CostSampleStatus::Unavailable));
     };
-    crate::state_store::validate_final_cost_for_settlement(&cost)?;
+    crate::state_store::validate_final_cost_for_settlement(cost)?;
     let basis = match cost.basis.as_deref() {
         None => CostBasis::Direct,
         Some(ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP) => CostBasis::Rollup,

@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-17T11:24:47Z:4fd3935ed8d3fa5e178193f5315de6dac3b88cd0aed29d0ec9e89564ea98ff41:x7XujDiDBontzEWLdN3u6rteUvEXfr5C5dTEAMkoR1wswnTxlEqa9i7QNzk8Qtv7GPxpnnWXD28dyBLvQbJ4Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "directive-runtime"
+defaults:
+  # 0 means unlimited. By default RyeOS applies no hard execution limits; runaways
+  # are an operator/project policy via this config, directive-authored `limits:`,
+  # execution policy, or caller overrides.
+  turns: 0
+  tool_calls: 0
+  tokens: 0
+  provider_request_body_bytes: 0
+  spend_usd: "0"
+  spawns: 0
+  depth: 0
+  duration_seconds: 0
+  # Applies only to a run that has a deadline (caller `run_timeout`). `reserve`
+  # is the time an execution keeps to settle after its work is stopped; it is
+  # also what a parent keeps back from its children. `wrap_up_seconds` is how
+  # long before the hard stop the model is told time is short (0 = never).
+  wrap_up_seconds: 60
+  deadline:
+    reserve_seconds: 30
+caps: {}

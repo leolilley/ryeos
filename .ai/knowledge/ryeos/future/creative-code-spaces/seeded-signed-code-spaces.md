@@ -1,14 +1,13 @@
-<!-- ryeos:signed:2026-06-21T03:45:13Z:80fd59effc9e8f10dd1515d434e3e69b05f65bb8abb6ab56d1db27889e4e4500:yojHSetupgQZHGbfLdjlEmOdpf5+tDi6IEIGH8XAKQV+kLyQ1e42pwdob5ltozFt3w9cDhqv3BaJk49V+OmYCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
-<!-- rye:signed:2026-06-03T03:31:14Z:3bc8749c6c939f390692f5d28b3656ab191417c20e225e730cce1ccb177ca5ab:3RVJUiuhhVGyT5saPSvgWlxZ4_qi9wdBStJJGqsLEALpLzy4N6ppGVOltzRv_C2GblaROaVdPAivwdl6_C6CCA:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:12fa2d3231320b1ad20c25c4fef0baede38d867b5c3ed694cf56968ac600710f:MBAp1WUHGU57DDhMOsF7PpIRzfBqG9nLI4+tLmOX2+qMDBrq5E6/oK5hh+5A5X17JSqzoxqhbWlxXdEKpk35Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future/creative-code-spaces
 name: seeded-signed-code-spaces
 title: Seeded Portal Realms and First Signed Spaces
 entry_type: concept-note
-version: "0.2.0"
+version: "0.2.1"
 author: amp
 created_at: 2026-05-28T00:00:00Z
-updated_at: 2026-06-03T00:00:00Z
+updated_at: 2026-10-06T00:00:00Z
 description: Future product seeds and creation ladders for RyeOS portal realms where users create not only objects inside worlds, but reusable engines, renderers, frames, rules, and games that others can build on.
 tags:
   - creative-code-spaces
@@ -21,6 +20,17 @@ tags:
 ```
 
 # Seeded Portal Realms and First Signed Spaces
+
+## Place in the platform direction
+
+This is a deferred application-family proposal under the
+[platform direction and delivery](../platform-direction-and-delivery.md).
+Its examples, object names and sequencing are prospective domain designs, not
+new core kinds, current API guarantees or the project-wide delivery order.
+Choose a concrete creative application before scheduling this branch; begin
+with one persisted object, an admitted action, a view and a reusable application
+edit. Richer simulation, open frame authoring and federation follow their own
+requirements. Re-audit the historical baseline below against current owners.
 
 ## Purpose
 
@@ -84,7 +94,7 @@ The first run should proceed in this order:
 
 Home/Cockpit is the through-line of the experience. It plays the same role that a coding-agent interface plays for vibe coding today: start from intent, draft files/layers, preview or enter the result, inspect the generated stack, and iterate. For this first broad experience, Home should be implemented in the web RyeOS UI surface first. The terminal client can continue toward an OpenCode-style build loop and remain aligned through the same RyeOS daemon/actions/model contracts, but a TUI alone will not provide enough visual/spatial range to make the curated portal and stack reveal feel real. Later, the same Home role can also appear in native apps or richer terminal surfaces.
 
-This matches the current UI direction: Rust owns the semantic RyeOS UI model and scene model, the browser renders Home/ambient/workspace, and browser effects call daemon services. The first Memory Moth wedge should therefore prefer adding semantic world/portal/layer state to the RyeOS UI model and rendering it in the web Home surface, rather than building an unrelated web app or hardcoding daemon fetches directly into animation code.
+Shared RyeOS UI contracts should preserve platform operation, authority and view-binding semantics. The selected application should own world, portal and layer meaning in its admitted content and implementation, presenting that meaning through supported views and operations. Its renderer must not gain authority through animation code. Add a native UI or execution extension only when a concrete missing shared capability requires it; a new creative domain should not require application-specific Rust state by default.
 
 Only after this curated seed should RyeOS widen the surface toward gardens, fiction rooms, scene engines, codebase worlds, and arbitrary user-built frames.
 

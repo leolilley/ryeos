@@ -6,6 +6,7 @@
 //! testimony to the exact release input before it can cross the release API.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -28,7 +29,7 @@ use super::{
     },
 };
 
-const RELEASE_INPUT_SCHEMA: &str = "ryeos.bundle_release_input_plan.v1";
+const RELEASE_INPUT_SCHEMA: &str = "ryeos.bundle_release_input_plan.v2";
 pub const PAYLOAD_OWNERSHIP_ITEM_REF: &str = "config:bundle-release/payload-ownership";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,7 +48,7 @@ impl PayloadOwnershipConfigItem {
             "wrong payload ownership category"
         );
         anyhow::ensure!(
-            self.version == "1.0.0",
+            self.version == "2.0.0",
             "unsupported payload ownership config version"
         );
         anyhow::ensure!(
@@ -59,6 +60,54 @@ impl PayloadOwnershipConfigItem {
     }
 }
 
+/// Path of the payload ownership Config inside an installed `bundle-release`
+/// bundle tree.
+pub const PAYLOAD_OWNERSHIP_INSTALLED_PATH: &str =
+    ".ai/config/bundle-release/payload-ownership.yaml";
+
+const MAX_PAYLOAD_OWNERSHIP_BYTES: u64 = 1024 * 1024;
+
+/// Load the payload ownership Config from an installed `bundle-release`
+/// bundle tree. The signature must verify under `trust`; an unsigned or
+/// untrusted ownership file is never authority over payload features.
+pub fn load_installed_payload_ownership(
+    bundle_root: &Path,
+    trust: &ryeos_engine::trust::TrustStore,
+) -> anyhow::Result<BundlePayloadOwnership> {
+    let path = bundle_root.join(PAYLOAD_OWNERSHIP_INSTALLED_PATH);
+    let bytes = lillux::read_regular_file_bounded_no_follow(&path, MAX_PAYLOAD_OWNERSHIP_BYTES)
+        .with_context(|| format!("read payload ownership {}", path.display()))?;
+    let raw = String::from_utf8(bytes).context("payload ownership is not UTF-8")?;
+    let (body, canonical_header) =
+        lillux::signature::strip_canonical_signature_with_envelope(&raw, "#", None, false)
+            .map_err(|error| anyhow::anyhow!("noncanonical signature envelope: {error:#}"))?;
+    anyhow::ensure!(
+        canonical_header.is_some(),
+        "payload ownership requires a trusted signature"
+    );
+    let envelope = ryeos_engine::contracts::SignatureEnvelope {
+        prefix: "#".to_owned(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let header = ryeos_engine::item_resolution::parse_signature_header(&raw, &envelope)
+        .context("payload ownership has no valid signature envelope")?;
+    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
+        &raw,
+        &header,
+        &envelope,
+        trust,
+        &ryeos_engine::trust::SignerContext::bundle("config"),
+    )?;
+    anyhow::ensure!(
+        trust_class == ryeos_engine::contracts::TrustClass::Trusted,
+        "payload ownership signer is not trusted"
+    );
+    let value: Value = serde_yaml::from_str(&body).context("decode payload ownership")?;
+    let item: PayloadOwnershipConfigItem = serde_json::from_value(value)?;
+    item.into_current()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnedPayload {
@@ -67,6 +116,14 @@ pub struct OwnedPayload {
     pub cargo_package: String,
     pub build_class: String,
     pub bundle_sets: Vec<String>,
+    pub required_features: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CargoFeatureSelection {
+    pub cargo_package: String,
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +141,7 @@ pub struct AdmittedReleaseInput {
     pub payload_ownership_content_hash: String,
     pub payloads: Vec<OwnedPayload>,
     pub cargo_packages: Vec<String>,
+    pub cargo_feature_selections: Vec<CargoFeatureSelection>,
     pub build_classes: Vec<String>,
     pub requires_binary_build: bool,
     pub clean_output_required: bool,
@@ -91,12 +149,38 @@ pub struct AdmittedReleaseInput {
 }
 
 impl AdmittedReleaseInput {
+    /// Structural admission only. The result is not tied to the signed
+    /// payload ownership, so its payloads and Cargo features are as trusted
+    /// as the value it was parsed from; use `from_value_with_ownership`
+    /// wherever ownership is available.
     pub fn from_value(value: &Value) -> anyhow::Result<Self> {
         Self::from_value_for_purpose(value, false)
     }
 
+    /// Structural Core seed admission; see `from_value`.
     pub fn from_core_seed_value(value: &Value) -> anyhow::Result<Self> {
         Self::from_value_for_purpose(value, true)
+    }
+
+    /// Admit a release input only when it is exactly the selection the signed
+    /// payload ownership makes for its bundle, payload features included.
+    pub fn from_value_with_ownership(
+        value: &Value,
+        ownership: &BundlePayloadOwnership,
+    ) -> anyhow::Result<Self> {
+        let input = Self::from_value(value)?;
+        require_exact_ownership_selection(ownership, &input)?;
+        Ok(input)
+    }
+
+    /// Core seed counterpart of `from_value_with_ownership`.
+    pub fn from_core_seed_value_with_ownership(
+        value: &Value,
+        ownership: &BundlePayloadOwnership,
+    ) -> anyhow::Result<Self> {
+        let input = Self::from_core_seed_value(value)?;
+        require_exact_ownership_selection(ownership, &input)?;
+        Ok(input)
     }
 
     fn from_value_for_purpose(value: &Value, core_seed: bool) -> anyhow::Result<Self> {
@@ -154,6 +238,29 @@ impl AdmittedReleaseInput {
             "owned payloads must be sorted and unique"
         );
         anyhow::ensure!(
+            input
+                .payloads
+                .iter()
+                .all(|payload| payload.required_features.windows(2).all(|f| f[0] < f[1])),
+            "owned payload Cargo features must be sorted and unique"
+        );
+        anyhow::ensure!(
+            input
+                .cargo_feature_selections
+                .iter()
+                .all(|selection| { selection.features.windows(2).all(|f| f[0] < f[1]) })
+                && input
+                    .cargo_feature_selections
+                    .iter()
+                    .map(|selection| selection.cargo_package.as_str())
+                    .eq(input
+                        .payloads
+                        .iter()
+                        .map(|p| p.cargo_package.as_str())
+                        .collect::<BTreeSet<_>>()),
+            "Cargo feature selections disagree with owned payloads"
+        );
+        anyhow::ensure!(
             input.payloads.is_empty() == matches!(&input.target, BundleTarget::Portable),
             "data-only bundles require the portable target and native bundles require an exact triple"
         );
@@ -176,7 +283,7 @@ impl AdmittedReleaseInput {
             "release input projections disagree with owned payloads"
         );
         anyhow::ensure!(
-            input.requires_binary_build == !input.payloads.is_empty(),
+            input.requires_binary_build != input.payloads.is_empty(),
             "binary-build flag disagrees with owned payloads"
         );
         Ok(input)
@@ -324,7 +431,10 @@ impl AdmittedNativeBundleAuthorities {
     }
 
     fn build_exact(&self, request: GenerationBuildRequest) -> anyhow::Result<Value> {
-        let input = AdmittedReleaseInput::from_value(&request.release_input)?;
+        let input = AdmittedReleaseInput::from_value_with_ownership(
+            &request.release_input,
+            &self.ownership,
+        )?;
         let project_identity = Path::new(&input.project_path);
         self.source
             .verify_project_snapshot(project_identity, &input.source_snapshot_hash)?;
@@ -337,7 +447,6 @@ impl AdmittedNativeBundleAuthorities {
             input.payload_ownership_item_ref == PAYLOAD_OWNERSHIP_ITEM_REF,
             "release input names an unsupported payload ownership item"
         );
-        require_exact_ownership_selection(&self.ownership, &input)?;
         let digest = input.digest()?;
         let receipt = self.build.build(&AdmittedBuildCoordinate {
             release_input: input,
@@ -347,7 +456,10 @@ impl AdmittedNativeBundleAuthorities {
     }
 
     fn qualify_exact(&self, request: GenerationQualifyRequest) -> anyhow::Result<Value> {
-        let input = AdmittedReleaseInput::from_value(&request.release_input)?;
+        let input = AdmittedReleaseInput::from_value_with_ownership(
+            &request.release_input,
+            &self.ownership,
+        )?;
         let digest = input.digest()?;
         let coordinate = QualificationCoordinate {
             release_input: input,
@@ -373,8 +485,13 @@ pub fn require_exact_ownership_selection(
         "payload ownership config changed after inspection"
     );
     anyhow::ensure!(
-        owned_payloads_for_bundle(ownership, &input.bundle_name) == input.payloads,
+        owned_payloads_for_bundle(ownership, &input.bundle_name)? == input.payloads,
         "release input is not the exact signed payload ownership selection"
+    );
+    anyhow::ensure!(
+        cargo_feature_selections(&input.payloads, &ownership.feature_implications)
+            == input.cargo_feature_selections,
+        "Cargo feature selections disagree with the signed payload ownership"
     );
     Ok(())
 }
@@ -382,27 +499,61 @@ pub fn require_exact_ownership_selection(
 fn owned_payloads_for_bundle(
     ownership: &BundlePayloadOwnership,
     bundle_name: &str,
-) -> Vec<OwnedPayload> {
-    ownership
-        .owner(bundle_name)
-        .map(|owner| {
-            owner
-                .payloads
-                .iter()
-                .map(|payload| OwnedPayload {
-                    bundle: owner.bundle_name.clone(),
-                    binary: payload.binary.clone(),
-                    cargo_package: payload.cargo_package.clone(),
-                    build_class: serde_json::to_value(payload.build_class)
-                        .expect("payload build class serializes")
-                        .as_str()
-                        .expect("payload build class is a string")
-                        .to_owned(),
-                    bundle_sets: owner.bundle_sets.clone(),
-                })
-                .collect::<Vec<_>>()
+) -> anyhow::Result<Vec<OwnedPayload>> {
+    let Some(owner) = ownership.owner(bundle_name) else {
+        return Ok(Vec::new());
+    };
+    owner
+        .payloads
+        .iter()
+        .map(|payload| -> anyhow::Result<OwnedPayload> {
+            Ok(OwnedPayload {
+                bundle: owner.bundle_name.clone(),
+                binary: payload.binary.clone(),
+                cargo_package: payload.cargo_package.clone(),
+                build_class: serde_json::to_value(payload.build_class)
+                    .expect("payload build class serializes")
+                    .as_str()
+                    .expect("payload build class is a string")
+                    .to_owned(),
+                bundle_sets: owner.bundle_sets.clone(),
+                required_features: payload.cargo_features.clone(),
+            })
         })
-        .unwrap_or_default()
+        .collect::<anyhow::Result<Vec<_>>>()
+}
+
+/// Per-package feature selection. A feature implied by another selected
+/// feature of the same package, per the ownership document, is dropped.
+fn cargo_feature_selections(
+    payloads: &[OwnedPayload],
+    implications: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+) -> Vec<CargoFeatureSelection> {
+    let mut by_package = BTreeMap::<String, BTreeSet<String>>::new();
+    for payload in payloads {
+        by_package
+            .entry(payload.cargo_package.clone())
+            .or_default()
+            .extend(payload.required_features.iter().cloned());
+    }
+    by_package
+        .into_iter()
+        .map(|(cargo_package, mut features)| {
+            if let Some(table) = implications.get(&cargo_package) {
+                let implied: BTreeSet<&String> = features
+                    .iter()
+                    .filter_map(|feature| table.get(feature))
+                    .flatten()
+                    .collect();
+                let implied: BTreeSet<String> = implied.into_iter().cloned().collect();
+                features.retain(|feature| !implied.contains(feature));
+            }
+            CargoFeatureSelection {
+                cargo_package,
+                features: features.into_iter().collect(),
+            }
+        })
+        .collect()
 }
 
 /// Resolve the only admitted build inputs after proving the requested source
@@ -516,7 +667,7 @@ fn inspect_release_input_for_purpose(
     source.verify_project_snapshot(&project_identity, &source_snapshot_hash)?;
     let project = source.authoritative_project_root();
     ownership.validate()?;
-    let payloads = owned_payloads_for_bundle(ownership, &bundle_name);
+    let payloads = owned_payloads_for_bundle(ownership, &bundle_name)?;
     let mut packages: Vec<_> = payloads.iter().map(|p| p.cargo_package.clone()).collect();
     packages.sort();
     packages.dedup();
@@ -527,10 +678,11 @@ fn inspect_release_input_for_purpose(
     if !payloads.is_empty() && matches!(target, BundleTarget::Portable) {
         bail!("a native-payload bundle requires an exact target triple");
     }
+    let feature_selections = cargo_feature_selections(&payloads, &ownership.feature_implications);
     let input = AdmittedReleaseInput {
         schema: RELEASE_INPUT_SCHEMA.to_owned(),
         project_path,
-        authored_manifest: materialize_release_manifest(&project, &bundle_name)?,
+        authored_manifest: materialize_release_manifest(project, &bundle_name)?,
         bundle_name,
         source_snapshot_hash,
         predecessor_generation_hash: None,
@@ -538,6 +690,7 @@ fn inspect_release_input_for_purpose(
         build_profile,
         payload_ownership_item_ref: PAYLOAD_OWNERSHIP_ITEM_REF.to_owned(),
         payload_ownership_content_hash: ownership.content_hash()?,
+        cargo_feature_selections: feature_selections,
         requires_binary_build: !payloads.is_empty(),
         clean_output_required: true,
         ambient_target_reuse_allowed: false,
@@ -693,6 +846,56 @@ mod input_contract_tests {
     use super::*;
 
     #[test]
+    fn handler_payloads_select_explicit_finite_compositions() {
+        let parser = OwnedPayload {
+            bundle: "core".into(),
+            binary: "rye-parser-yaml-document".into(),
+            cargo_package: "ryeos-parser-bins".into(),
+            build_class: "release".into(),
+            bundle_sets: vec!["standard".into()],
+            required_features: Vec::new(),
+        };
+        let full = OwnedPayload {
+            binary: "ryeos-direct-execution-evidence".into(),
+            cargo_package: "ryeos-handler-bins".into(),
+            required_features: vec!["core-handlers".into()],
+            ..parser.clone()
+        };
+        let graph = OwnedPayload {
+            binary: "ryeos-graph-launch-preparer".into(),
+            required_features: vec!["graph-handlers".into()],
+            ..full.clone()
+        };
+        let implications = BTreeMap::from([(
+            "ryeos-handler-bins".to_owned(),
+            BTreeMap::from([(
+                "graph-handlers".to_owned(),
+                vec!["core-handlers".to_owned()],
+            )]),
+        )]);
+        assert_eq!(
+            cargo_feature_selections(&[parser.clone(), full.clone()], &implications),
+            vec![
+                CargoFeatureSelection {
+                    cargo_package: "ryeos-handler-bins".into(),
+                    features: vec!["core-handlers".into()],
+                },
+                CargoFeatureSelection {
+                    cargo_package: "ryeos-parser-bins".into(),
+                    features: Vec::new(),
+                },
+            ]
+        );
+        assert_eq!(
+            cargo_feature_selections(&[full, graph], &implications),
+            vec![CargoFeatureSelection {
+                cargo_package: "ryeos-handler-bins".into(),
+                features: vec!["graph-handlers".into()],
+            }]
+        );
+    }
+
+    #[test]
     fn pinned_source_authority_rejects_project_relabelling_and_snapshot_substitution() {
         let source = tempfile::tempdir().unwrap();
         let bytes = b"immutable release source";
@@ -774,7 +977,7 @@ mod input_contract_tests {
             "build_profile": "release",
             "payload_ownership_item_ref": PAYLOAD_OWNERSHIP_ITEM_REF,
             "payload_ownership_content_hash": "b".repeat(64),
-            "payloads": [], "cargo_packages": [], "build_classes": [],
+            "payloads": [], "cargo_packages": [], "cargo_feature_selections": [], "build_classes": [],
             "requires_binary_build": false,
             "clean_output_required": true,
             "ambient_target_reuse_allowed": false,
@@ -789,6 +992,14 @@ mod input_contract_tests {
             polluted[field] = serde_json::json!(1);
             assert!(AdmittedReleaseInput::from_value(&polluted).is_err());
         }
+        let mut stale_features = input.clone();
+        stale_features["cargo_feature_selections"] = serde_json::json!([
+            {"cargo_package":"ryeos-handler-bins", "features":["core-handlers"]}
+        ]);
+        assert!(AdmittedReleaseInput::from_value(&stale_features).is_err());
+        let mut old_schema = input.clone();
+        old_schema["schema"] = serde_json::json!("ryeos.bundle_release_input_plan.v1");
+        assert!(AdmittedReleaseInput::from_value(&old_schema).is_err());
     }
 
     #[test]
@@ -796,13 +1007,20 @@ mod input_contract_tests {
         let ownership = BundlePayloadOwnership::from_current_value(&serde_json::json!({
             "schema": ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_SCHEMA,
             "kind": ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
+            "host_packages": [],
+            "no_default_features_packages": [],
+            "feature_implications": {},
+            "data_only_bundles": [],
+            "host_only_bundles": [],
             "bundles": [{
                 "bundle_name": "web",
                 "bundle_sets": ["release-authority"],
+                "host_features": [],
                 "payloads": [{
                     "binary": "ryeos-web-tools",
                     "cargo_package": "ryeos-web-tools",
-                    "build_class": "release"
+                    "build_class": "release",
+                    "cargo_features": []
                 }]
             }]
         }))
@@ -823,9 +1041,11 @@ mod input_contract_tests {
                 "binary": "ryeos-unowned",
                 "cargo_package": "ryeos-unowned",
                 "build_class": "release",
-                "bundle_sets": ["release-authority"]
+                "bundle_sets": ["release-authority"],
+                "required_features": []
             }],
             "cargo_packages": ["ryeos-unowned"],
+            "cargo_feature_selections": [{"cargo_package":"ryeos-unowned", "features":[]}],
             "build_classes": ["release"],
             "requires_binary_build": true,
             "clean_output_required": true,
@@ -838,7 +1058,104 @@ mod input_contract_tests {
         exact["payloads"][0]["binary"] = serde_json::json!("ryeos-web-tools");
         exact["payloads"][0]["cargo_package"] = serde_json::json!("ryeos-web-tools");
         exact["cargo_packages"] = serde_json::json!(["ryeos-web-tools"]);
+        exact["cargo_feature_selections"] =
+            serde_json::json!([{"cargo_package": "ryeos-web-tools", "features": []}]);
         let exact = AdmittedReleaseInput::from_value(&exact).unwrap();
         require_exact_ownership_selection(&ownership, &exact).unwrap();
+    }
+
+    struct PanicSource;
+    impl BundleSourceSnapshotAuthority for PanicSource {
+        fn authoritative_project_root(&self) -> &Path {
+            Path::new("/source")
+        }
+        fn verify_project_snapshot(&self, _: &Path, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    struct PanicBuild;
+    impl NativeBundleBuildExecutor for PanicBuild {
+        fn build(&self, _: &AdmittedBuildCoordinate) -> anyhow::Result<AdmittedBuildReceipt> {
+            panic!("a forged release input reached the build executor")
+        }
+    }
+    struct PanicQualification;
+    impl NativeBundleQualificationExecutor for PanicQualification {
+        fn qualify(&self, _: &QualificationCoordinate) -> anyhow::Result<QualificationReceipt> {
+            panic!("a forged release input reached the qualification executor")
+        }
+    }
+
+    #[test]
+    fn qualify_boundary_rejects_forged_payload_features() {
+        let ownership = BundlePayloadOwnership::from_current_value(&serde_json::json!({
+            "schema": ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_SCHEMA,
+            "kind": ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
+            "host_packages": [],
+            "no_default_features_packages": [],
+            "feature_implications": {},
+            "data_only_bundles": [],
+            "host_only_bundles": [],
+            "bundles": [{
+                "bundle_name": "web",
+                "bundle_sets": ["release-authority"],
+                "host_features": [],
+                "payloads": [{
+                    "binary": "ryeos-web-tools",
+                    "cargo_package": "ryeos-web-tools",
+                    "build_class": "release",
+                    "cargo_features": []
+                }]
+            }]
+        }))
+        .unwrap();
+        let forged_input = serde_json::json!({
+            "schema": RELEASE_INPUT_SCHEMA,
+            "project_path": "/source",
+            "bundle_name": "web",
+            "authored_manifest": {"name": "web", "version": "0.1.0", "provides_kinds": [], "requires_kinds": []},
+            "source_snapshot_hash": "a".repeat(64),
+            "predecessor_generation_hash": null,
+            "target": {"kind": "triple", "triple": "x86_64-unknown-linux-gnu"},
+            "build_profile": "release",
+            "payload_ownership_item_ref": PAYLOAD_OWNERSHIP_ITEM_REF,
+            "payload_ownership_content_hash": ownership.content_hash().unwrap(),
+            "payloads": [{
+                "bundle": "web",
+                "binary": "ryeos-web-tools",
+                "cargo_package": "ryeos-web-tools",
+                "build_class": "release",
+                "bundle_sets": ["release-authority"],
+                "required_features": ["forged-feature"]
+            }],
+            "cargo_packages": ["ryeos-web-tools"],
+            "cargo_feature_selections": [{"cargo_package":"ryeos-web-tools", "features":["forged-feature"]}],
+            "build_classes": ["release"],
+            "requires_binary_build": true,
+            "clean_output_required": true,
+            "ambient_target_reuse_allowed": false,
+        });
+        let objects = tempfile::tempdir().unwrap();
+        let authorities = AdmittedNativeBundleAuthorities::new(
+            ownership,
+            lillux::CasStore::new(objects.path().to_path_buf()),
+            Arc::new(PanicSource),
+            Arc::new(PanicBuild),
+            Arc::new(PanicQualification),
+        )
+        .unwrap();
+        let request: GenerationQualifyRequest = serde_json::from_value(serde_json::json!({
+            "release_input": forged_input,
+            "catalog_namespace": "releases",
+            "captured_tree_manifest_hash": "c".repeat(64),
+            "manifest_item_hash": "d".repeat(64),
+            "signed_product_witness": "e".repeat(64),
+            "build_recipe_signed_config": "",
+            "capture_recipe_signed_config": "",
+            "capture_recipe_raw_digest": "f".repeat(64),
+        }))
+        .unwrap();
+        let error = authorities.qualify_exact(request).unwrap_err().to_string();
+        assert!(error.contains("signed payload ownership"), "{error}");
     }
 }

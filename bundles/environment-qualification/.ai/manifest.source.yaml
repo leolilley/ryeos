@@ -1,0 +1,8 @@
+name: environment-qualification
+version: "0.1.0"
+description: "Qualification of release and development environment products: policies, verifier tools, authoring"
+requires_kinds:
+  - config
+  - tool
+  - protocol
+uses_kinds: []

@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 
 use ryeos_bundle::manifest::{
     BundleEventOperation, BundleManifest, BundleManifestSource, ProjectSnapshotOperation,
-    RuntimeVaultOperation,
+    RuntimeVaultOperation, StateHomeNamespaces,
 };
 
 /// Relative risk of a single authority change. Ordered highest-to-lowest so a
@@ -249,6 +249,70 @@ pub fn diff_authority(old: &BundleManifest, new: &BundleManifest) -> Vec<AuditFi
         &mut findings,
     );
 
+    // ── state_home (node-owned bundle state) ──
+    let state_home_names = |manifest: &BundleManifest| -> Vec<String> {
+        match manifest
+            .runtime_authority
+            .state_home
+            .as_ref()
+            .map(|decl| &decl.namespaces)
+        {
+            Some(StateHomeNamespaces::Fixed { names }) => names.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let state_home_open = |manifest: &BundleManifest| {
+        matches!(
+            manifest
+                .runtime_authority
+                .state_home
+                .as_ref()
+                .map(|decl| &decl.namespaces),
+            Some(StateHomeNamespaces::LaunchParam)
+        )
+    };
+    diff_kind_list(
+        &state_home_names(old),
+        &state_home_names(new),
+        "state_home fixed namespaces",
+        &mut findings,
+    );
+    match (state_home_open(old), state_home_open(new)) {
+        (false, true) => findings.push(AuditFinding {
+            risk: Risk::NewWildcard,
+            message: "state_home: +[any launch-chosen namespace]".to_string(),
+        }),
+        (true, false) => findings.push(AuditFinding {
+            risk: Risk::Removed,
+            message: "state_home: -[any launch-chosen namespace]".to_string(),
+        }),
+        _ => {}
+    }
+
+    // ── operator_vault (handler-route bound) ──
+    match (
+        old.runtime_authority.operator_vault,
+        new.runtime_authority.operator_vault,
+    ) {
+        (false, true) => findings.push(AuditFinding {
+            risk: Risk::Added,
+            message: "operator_vault: +[handler routes]".to_string(),
+        }),
+        (true, false) => findings.push(AuditFinding {
+            risk: Risk::Removed,
+            message: "operator_vault: -[handler routes]".to_string(),
+        }),
+        _ => {}
+    }
+
+    // ── route_capabilities (route-principal bound) ──
+    diff_kind_list(
+        &old.runtime_authority.route_capabilities,
+        &new.runtime_authority.route_capabilities,
+        "route_capabilities",
+        &mut findings,
+    );
+
     // ── provides / requires / uses kinds ──
     diff_kind_list(
         &old.provides_kinds,
@@ -399,6 +463,8 @@ pub fn load_audit_manifest(path: &Path) -> Result<BundleManifest> {
         runtime_authority: src.runtime_authority,
         smoke: src.smoke,
         shadows: src.shadows,
+        owns_namespaces: src.owns_namespaces,
+        sync_include: src.sync_include,
         isolation_backends: src.isolation_backends,
         external_providers: src.external_providers,
         external_lifecycle_adapters: src.external_lifecycle_adapters,
@@ -436,6 +502,8 @@ mod tests {
             runtime_authority: ra,
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -606,6 +674,84 @@ mod tests {
             finding.risk == Risk::Removed
                 && finding.message == "project_snapshots: -[create, status]"
         }));
+    }
+
+    #[test]
+    fn state_home_declaration_is_audited() {
+        use ryeos_bundle::manifest::StateHomeDecl;
+        let none = manifest("arc", RuntimeAuthorityDecls::default());
+        let fixed = manifest(
+            "arc",
+            RuntimeAuthorityDecls {
+                state_home: Some(StateHomeDecl {
+                    namespaces: StateHomeNamespaces::Fixed {
+                        names: vec!["realm-a".into()],
+                    },
+                }),
+                ..Default::default()
+            },
+        );
+        let open = manifest(
+            "arc",
+            RuntimeAuthorityDecls {
+                state_home: Some(StateHomeDecl {
+                    namespaces: StateHomeNamespaces::LaunchParam,
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(diff_authority(&none, &fixed).iter().any(|finding| {
+            finding.risk == Risk::Added
+                && finding.message == "state_home fixed namespaces: +realm-a"
+        }));
+        assert!(diff_authority(&none, &open).iter().any(|finding| {
+            finding.risk == Risk::NewWildcard
+                && finding.message == "state_home: +[any launch-chosen namespace]"
+        }));
+        assert!(diff_authority(&open, &none).iter().any(|finding| {
+            finding.risk == Risk::Removed
+                && finding.message == "state_home: -[any launch-chosen namespace]"
+        }));
+    }
+
+    #[test]
+    fn operator_vault_bound_is_audited() {
+        let old = manifest("arc", RuntimeAuthorityDecls::default());
+        let new = manifest(
+            "arc",
+            RuntimeAuthorityDecls {
+                operator_vault: true,
+                ..Default::default()
+            },
+        );
+        assert!(diff_authority(&old, &new).iter().any(|finding| {
+            finding.risk == Risk::Added && finding.message == "operator_vault: +[handler routes]"
+        }));
+        assert!(diff_authority(&new, &old).iter().any(|finding| {
+            finding.risk == Risk::Removed && finding.message == "operator_vault: -[handler routes]"
+        }));
+        assert!(diff_authority(&new, &new).is_empty());
+    }
+
+    #[test]
+    fn route_capabilities_bound_is_audited() {
+        let old = manifest("arc", RuntimeAuthorityDecls::default());
+        let new = manifest(
+            "arc",
+            RuntimeAuthorityDecls {
+                route_capabilities: vec!["ryeos.execute.tool.*".to_string()],
+                ..Default::default()
+            },
+        );
+        assert!(diff_authority(&old, &new).iter().any(|finding| {
+            finding.risk == Risk::Added
+                && finding.message == "route_capabilities: +ryeos.execute.tool.*"
+        }));
+        assert!(diff_authority(&new, &old).iter().any(|finding| {
+            finding.risk == Risk::Removed
+                && finding.message == "route_capabilities: -ryeos.execute.tool.*"
+        }));
+        assert!(diff_authority(&new, &new).is_empty());
     }
 
     #[test]

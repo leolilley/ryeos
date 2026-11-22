@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-13T21:32:28Z:43664a5f9a49028e5765fb7f89a0b622c6a08a6affccca3056ddb2ce613cb602:269Ro3bcF5AvonH1BNDJZnwOmlEgWJ6FjP2bzmxLWyjhQiTZ4FZYXzeSLCw84NOkqOJAdh/POVqBFbBiFBiYAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.offline-operations-facts
+required_caps: ["ryeos.execute.service.remote/offline-operations-facts"]
+schema:
+  remote: string
+description: "Read a remote's offline-operation facts under the caller's stored delegation for that remote, for signing a request with `ryeos node offline-operation sign --facts`. The delegation must lend ryeos.execute.service.offline-operations/facts"

@@ -8,12 +8,13 @@
 //! Layout of this module mirrors the renderer's planes: `theme` is the
 //! only color authority (tone → palette; draw sites never invent
 //! colors); `text` is width-aware string shaping; `primitives` are raw
-//! surface ops; `chrome` is bars/frames/docks; `widgets/*` is one file
-//! per widget primitive (incl. the generic `scene` renderer);
-//! `overlay`/`input` are compositions. This file orchestrates: layout
-//! traversal, the empty-center backdrop, view dispatch.
+//! surface ops; `chrome` is bars/frames; `widgets/*` is one file
+//! per widget primitive;
+//! `dialog`/`input` are compositions. This file orchestrates: layout
+//! traversal, view dispatch.
 
 mod chrome;
+mod dialog;
 mod input;
 mod overlay;
 mod primitives;
@@ -24,7 +25,7 @@ mod widgets;
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 use ryeos_client_base::ui::view_model::{
-    RyeOsLayoutNodeVm, RyeOsSplitAxisVm, RyeOsTextLineVm, RyeOsViewModel, RyeOsViewVm,
+    RyeOsEdgeVm, RyeOsLayoutNodeVm, RyeOsSplitAxisVm, RyeOsTextLineVm, RyeOsViewModel, RyeOsViewVm,
 };
 
 use crate::render_text;
@@ -62,66 +63,81 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     let mut surface = TextSurface::new(width, height);
     surface.fill(Style::new().fg(FG).bg(BG));
 
-    // There is no "home" mode. Bars, ordinary docks and overlays render in
-    // every state. A maximized tile is the one deliberate exception: the
-    // shared presentation layout projects it as the sole root and all clients
-    // give it the complete body rather than retaining supporting docks.
-    let top_h = if vm.presentation.chrome.top_bar.visible && height >= 3 {
-        chrome::draw_top_bar(&mut surface, vm);
-        1
-    } else {
-        0
-    };
-    let bottom_h = if vm.presentation.chrome.status_bar.visible && height >= 3 {
-        chrome::draw_status_bar(&mut surface, vm);
+    // There is no "home" mode. Bars and dialogs render in every state.
+    // The switcher is the top line (under the status line when the Surface
+    // puts that on top); the tabs, when shown, the line beneath. A Surface can
+    // hide either bar. On a very short terminal the switcher gives its line to
+    // the body first.
+    let chrome = &vm.presentation.chrome;
+    let status_shown =
+        chrome.status_bar.visible && chrome.status_bar.edge != RyeOsEdgeVm::Hidden && height >= 3;
+    let status_top = status_shown && chrome.status_bar.edge == RyeOsEdgeVm::Top;
+    let switcher_shown = chrome.switcher.edge != RyeOsEdgeVm::Hidden && height >= 4;
+    let mut top_h = 0;
+    if status_top {
+        chrome::draw_status_bar(&mut surface, 0, vm);
+        top_h += 1;
+    }
+    if switcher_shown {
+        chrome::draw_switcher(&mut surface, top_h, vm);
+        top_h += 1;
+    }
+    if chrome.top_bar.visible && height >= 3 + top_h {
+        chrome::draw_tab_band(&mut surface, top_h, vm);
+        top_h += 1;
+    }
+    let bottom_h = if status_shown && !status_top {
+        chrome::draw_status_bar(&mut surface, height - 1, vm);
         1
     } else {
         0
     };
     let body_h = height.saturating_sub(top_h + bottom_h).max(1);
     let body = Rect::new(0, top_h as u16, width as u16, body_h as u16);
-    let maximized = matches!(
-        vm.view_set.root.as_ref(),
-        Some(RyeOsLayoutNodeVm::Tile {
-            maximized: true,
-            ..
-        })
-    );
-    let center = if maximized {
-        body
-    } else {
-        chrome::draw_docks(&mut surface, body, vm)
-    };
-    let draw_backdrop_underlay = vm.view_set.root.is_some()
-        && vm.session.ambient.show_background
-        && vm
-            .session
-            .ambient
-            .opacity
-            .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0);
-    if let Some(root) = &vm.view_set.root {
-        if draw_backdrop_underlay && let Some(backdrop) = &vm.view_set.backdrop {
-            widgets::scene::draw_scene(&mut surface, center, backdrop);
-        }
+    if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
         let border = theme::border_for(&vm.presentation.chrome.border);
-        draw_layout_node(
-            &mut surface,
-            center,
-            root,
-            border,
-            vm.now_ms,
-            draw_backdrop_underlay,
-        );
-    } else if let Some(backdrop) = &vm.view_set.backdrop {
-        // Empty center: the backdrop is content — the ONE generic scene
-        // renderer draws it (particles twinkle by generation). No
-        // per-art code, no background enum.
-        widgets::scene::draw_scene(&mut surface, center, backdrop);
+        draw_layout_node(&mut surface, body, root, border, vm.now_ms);
     }
 
-    if let Some(active_overlay) = vm.overlays.first() {
+    // With neither bar drawn, the node's health keeps a dot in the bottom-right
+    // corner, as the Rune client's does.
+    if !status_shown && !switcher_shown && width >= 2 && height >= 2 {
+        surface.draw_text(
+            width - 2,
+            height - 1,
+            "●",
+            tone_style(chrome::node_tone(vm)),
+        );
+    }
+
+    // The overlay takes the whole screen, over any dialog.
+    if vm.overlay.open {
+        overlay::draw_overlay(&mut surface, vm);
+        return surface;
+    }
+
+    if let Some(active_dialog) = vm.dialogs.first() {
         primitives::dim_surface(&mut surface);
-        overlay::draw_overlay(&mut surface, active_overlay);
+        dialog::draw_dialog(&mut surface, active_dialog, vm.now_ms);
+    }
+
+    // A requested rename is edited on the last line, over whatever is there.
+    if let Some(rename) = &vm.rename {
+        let style = theme::style_selected();
+        let y = height - 1;
+        primitives::fill_line(&mut surface, 0, y, width, style);
+        let field = format!("rename \u{203a} {}", rename.title);
+        let field = truncate(&field, width.saturating_sub(1));
+        surface.draw_text(0, y, &field, style);
+        let cursor_x = display_width(&field);
+        if cursor_x < width {
+            surface.draw_char(cursor_x, y, ' ', Style::new().fg(BG).bg(FG));
+        }
+        let hint = "enter save \u{b7} esc cancel";
+        let hint_x = width.saturating_sub(display_width(hint) + 1);
+        if hint_x > cursor_x + 1 {
+            surface.draw_text(hint_x, y, hint, style);
+        }
     }
 
     surface
@@ -133,7 +149,6 @@ fn draw_layout_node(
     node: &RyeOsLayoutNodeVm,
     border: Option<Border>,
     now_ms: u64,
-    preserve_background: bool,
 ) {
     if rect.w == 0 || rect.h == 0 {
         return;
@@ -152,6 +167,7 @@ fn draw_layout_node(
             background_transparent,
             input,
             tabs,
+            authorship,
             ..
         } => {
             let rect = if tabs.len() > 1 && rect.h > 1 {
@@ -188,6 +204,15 @@ fn draw_layout_node(
                     }
                     None => group_label.as_deref().unwrap_or(title).to_string(),
                 };
+                // A project-authored view says so after its title. The title is
+                // one unstyled string drawn in the border, so the mark takes
+                // the title's style rather than a dim one. The word `project`
+                // is the plain key: no vocabulary mechanism reaches this draw
+                // site. Drawn whenever authorship is present.
+                let title = match authorship {
+                    Some(authorship) => format!("{title} [project: {}]", authorship.mark_tail()),
+                    None => title,
+                };
                 chrome::draw_tile(
                     surface,
                     rect,
@@ -200,7 +225,6 @@ fn draw_layout_node(
                     input.as_ref(),
                     border,
                     now_ms,
-                    preserve_background && *background_transparent,
                 );
             }
         }
@@ -211,23 +235,9 @@ fn draw_layout_node(
             second,
         } => {
             let (first_rect, second_rect) = split_rect(rect, *axis, *ratio);
-            draw_layout_node(
-                surface,
-                first_rect,
-                first,
-                border,
-                now_ms,
-                preserve_background,
-            );
+            draw_layout_node(surface, first_rect, first, border, now_ms);
             if let Some(second_rect) = second_rect {
-                draw_layout_node(
-                    surface,
-                    second_rect,
-                    second,
-                    border,
-                    now_ms,
-                    preserve_background,
-                );
+                draw_layout_node(surface, second_rect, second, border, now_ms);
             }
         }
     }
@@ -266,13 +276,36 @@ fn split_rect(rect: Rect, axis: RyeOsSplitAxisVm, ratio: f32) -> (Rect, Option<R
     }
 }
 
-fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: u64) {
+fn draw_view(surface: &mut TextSurface, mut rect: Rect, view: &RyeOsViewVm, now_ms: u64) {
+    let status = match view {
+        RyeOsViewVm::Rows { source_status, .. }
+        | RyeOsViewVm::Timeline { source_status, .. }
+        | RyeOsViewVm::Table { source_status, .. }
+        | RyeOsViewVm::Document { source_status, .. } => source_status.as_ref(),
+        _ => None,
+    };
+    if let Some(status) = status {
+        if rect.h == 0 {
+            return;
+        }
+        let prefix = if status.stale {
+            "Last observation (stale) · "
+        } else {
+            ""
+        };
+        let message = format!("{prefix}{}: {}", status.state, status.message);
+        draw_lines(surface, Rect { h: 1, ..rect }, &[message]);
+        rect.y += 1;
+        rect.h -= 1;
+    }
     if let RyeOsViewVm::Field { field } = view {
         widgets::field::draw_field(surface, rect, field);
         return;
     }
     if let RyeOsViewVm::Timeline {
         entries,
+        lane,
+        dock,
         entry_indents,
         entry_arrived_at_ms,
         selected,
@@ -282,6 +315,20 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         ..
     } = view
     {
+        // The status lane and the docked asks close the feed; the lane's row
+        // is reserved whether or not it has text.
+        let foot = widgets::timeline::foot_rows(rect.h, dock.len());
+        widgets::timeline::draw_foot(
+            surface,
+            Rect {
+                y: rect.y + (rect.h - foot),
+                h: foot,
+                ..rect
+            },
+            lane.as_ref(),
+            dock,
+        );
+        rect.h -= foot;
         widgets::timeline::draw_timeline(
             surface,
             rect,
@@ -302,18 +349,27 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         widgets::rows::draw_rows(surface, rect, columns, rows, now_ms);
         return;
     }
-    // Scenes (map/atlas) draw through the ONE generic scene renderer —
-    // the same renderer the backdrop uses. No widget-specific scene code.
-    if let RyeOsViewVm::Map { scene } | RyeOsViewVm::Atlas { scene } = view {
-        widgets::scene::draw_scene(surface, rect, scene);
-        return;
-    }
     if let RyeOsViewVm::Sections { sections, .. } = view {
         widgets::sections::draw_sections(surface, rect, sections, now_ms);
         return;
     }
-    if let RyeOsViewVm::Table { columns, rows, .. } = view {
-        widgets::table::draw_table(surface, rect, columns, rows, now_ms);
+    if let RyeOsViewVm::Table {
+        columns,
+        column_roles,
+        rows,
+        coverage,
+        ..
+    } = view
+    {
+        widgets::table::draw_table_with_roles(
+            surface,
+            rect,
+            columns,
+            column_roles,
+            rows,
+            coverage.as_ref(),
+            now_ms,
+        );
         return;
     }
     if let RyeOsViewVm::Text {
@@ -345,9 +401,6 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         RyeOsViewVm::Document { .. } => unreachable!("document views return above"),
         RyeOsViewVm::Rows { .. } => unreachable!("rows views return above"),
         RyeOsViewVm::Timeline { .. } => unreachable!("timeline views return above"),
-        RyeOsViewVm::Map { .. } | RyeOsViewVm::Atlas { .. } => {
-            unreachable!("scene views return above")
-        }
         RyeOsViewVm::Sections { .. } => unreachable!("sections views return above"),
         RyeOsViewVm::Table { .. } => unreachable!("table views return above"),
         RyeOsViewVm::Placeholder { title, message } => {
@@ -362,7 +415,14 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         } => {
             lines.push(title.clone());
             lines.push(format!("{input}: {}", facets.join(", ")));
-            lines.extend(actions.iter().map(|action| format!("• {}", action.label)));
+            if !actions.is_empty() {
+                lines.push("Ctrl+K: choose a source for this subject".into());
+                lines.extend(
+                    actions
+                        .iter()
+                        .map(|action| format!("  in launcher · {}", action.label)),
+                );
+            }
         }
     }
     draw_lines(surface, rect, &lines);
@@ -400,6 +460,7 @@ fn draw_text_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_client_base::text_surface::Attr;
     use ryeos_client_base::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
     use ryeos_client_base::ui::view_model::build_view_model;
     use serde_json::json;
@@ -463,115 +524,575 @@ mod tests {
         out
     }
 
-    /// A surface whose empty center declares a backdrop scene and a
-    /// bottom input slot — the post-cut shape (no home mode).
+    #[test]
+    fn unresolved_subject_labels_actions_as_launcher_only() {
+        let mut surface = TextSurface::new(80, 8);
+        let view = RyeOsViewVm::RequiredSubject {
+            title: "Subject required".into(),
+            input: "thread".into(),
+            facets: vec!["thread_id".into()],
+            actions: vec![ryeos_client_base::ui::view_model::RyeOsTileIntentVm {
+                label: "Use selection in Development".into(),
+                title: "Exact selected subject".into(),
+                intent: ryeos_client_base::ui::RyeOsUiIntent::OpenLauncher,
+            }],
+        };
+        draw_view(&mut surface, Rect::new(0, 0, 80, 8), &view, 0);
+        let text = surface_text(&surface);
+        assert!(text.contains("Ctrl+K: choose a source for this subject"));
+        assert!(text.contains("in launcher · Use selection in Development"));
+    }
+
+    #[test]
+    fn the_tab_band_shows_words_with_the_current_one_reversed_and_kept_in_view() {
+        let mut vm = build_view_model(&empty_center_core());
+        let mut development = vm.presentation.chrome.top_bar.tabs[0].clone();
+        development.number = 1;
+        development.title = "Development".into();
+        development.active = false;
+        let mut review = development.clone();
+        review.view_set_id = ryeos_client_base::ids::ViewSetId::new(999);
+        review.number = 2;
+        review.title = "Review".into();
+        review.active = true;
+        vm.presentation.chrome.top_bar.tabs = vec![development, review];
+
+        let mut wide = TextSurface::new(90, 1);
+        chrome::draw_tab_band(&mut wide, 0, &vm);
+        let text = surface_text(&wide);
+        assert!(text.contains("Development"));
+        assert!(text.contains("Review"));
+        assert!(!text.contains("01"), "tabs are bare words: {text}");
+        assert!(text.find("Development") < text.find("Review"));
+        assert!(text.trim_end().ends_with('+'), "the plus follows: {text}");
+        let review_at = text.find("Review").unwrap();
+        assert!(
+            wide.get(review_at, 0).attr.contains(Attr::REVERSE),
+            "the current tab is reversed"
+        );
+
+        for width in [1, 4, 9, 14] {
+            let mut narrow = TextSurface::new(width, 1);
+            chrome::draw_tab_band(&mut narrow, 0, &vm);
+            assert_eq!(narrow.cells.len(), width);
+            if width == 14 {
+                assert!(
+                    surface_text(&narrow).contains("Review"),
+                    "the current tab stays in view"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_switcher_line_numbers_the_open_surfaces_and_reverses_the_current_one() {
+        let vm = build_view_model(&empty_center_core());
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_switcher(&mut line, 0, &vm);
+        let text = surface_text(&line);
+        if let Some(current) = vm.session.surfaces.iter().find(|choice| choice.active) {
+            let label = format!("{} {}", current.ordinal, current.title);
+            let at = text.find(&label).expect("the current Surface is listed");
+            assert!(line.get(at, 0).attr.contains(Attr::REVERSE));
+            assert!(text.trim_end().ends_with('+'));
+        } else {
+            assert!(text.contains(&vm.session.title));
+        }
+    }
+
+    #[test]
+    fn the_status_line_keeps_the_keys_and_the_node_and_names_no_product() {
+        let mut vm = build_view_model(&empty_center_core());
+        vm.chrome.health_label = "rye".into();
+        vm.presentation.chrome.status_bar.segments =
+            vec![ryeos_client_base::ui::view_model::RyeOsStatusSegmentVm {
+                id: "long".into(),
+                label: None,
+                value: "X".repeat(100),
+                tone: ryeos_client_base::ui::view_model::RyeOsTone::Neutral,
+                grow: false,
+            }];
+        vm.presentation.chrome.status_bar.key_hints =
+            vec![ryeos_client_base::ui::view_model::RyeOsKeyHintVm {
+                keys: "KEY".into(),
+                word: String::new(),
+            }];
+        let mut long = TextSurface::new(40, 1);
+        chrome::draw_status_bar(&mut long, 0, &vm);
+        let text = surface_text(&long);
+        assert!(text.contains("KEY"), "{text}");
+        assert!(text.contains("● rye"), "{text}");
+        assert!(!text.contains("RyeOS"), "{text}");
+
+        vm.presentation.chrome.status_bar.segments[0].value = "3".into();
+        vm.presentation.chrome.status_bar.segments[0].label = Some("need you".into());
+        let mut wide = TextSurface::new(80, 1);
+        chrome::draw_status_bar(&mut wide, 0, &vm);
+        let text = surface_text(&wide);
+        assert!(text.contains("need you 3 | ● rye"), "{text}");
+
+        // A long node label is cut at half the line; the keys keep their room.
+        vm.chrome.health_label = "H".repeat(200);
+        let mut long_health = TextSurface::new(40, 1);
+        chrome::draw_status_bar(&mut long_health, 0, &vm);
+        let text = surface_text(&long_health);
+        assert!(text.contains("KEY"), "{text}");
+        assert!(text.contains('…'), "{text}");
+    }
+
+    #[test]
+    fn work_dots_project_marks_and_key_hints_read_on_the_bars() {
+        use ryeos_client_base::ui::view_model::RyeOsKeyHintVm;
+        let mut vm = build_view_model(&empty_center_core());
+        vm.presentation.chrome.status_bar.key_hints = vec![
+            RyeOsKeyHintVm {
+                keys: "ctrl+k".into(),
+                word: "open".into(),
+            },
+            RyeOsKeyHintVm {
+                keys: "alt+t/b".into(),
+                word: "bars".into(),
+            },
+        ];
+        let mut status = TextSurface::new(80, 1);
+        chrome::draw_status_bar(&mut status, 0, &vm);
+        assert!(
+            surface_text(&status).contains("[ctrl+k] open  [alt+t/b] bars"),
+            "{}",
+            surface_text(&status)
+        );
+
+        {
+            let template = vm
+                .session
+                .surfaces
+                .first()
+                .cloned()
+                .expect("the test core has an open Surface");
+            let mut home = template.clone();
+            home.title = "Home".into();
+            home.active = false;
+            home.needs_you = Some(2);
+            home.running = Some(1);
+            let mut project = template;
+            project.title = "ryeos".into();
+            project.active = true;
+            project.chip.authored_in_project = true;
+            project.running = Some(0);
+            vm.session.surfaces = vec![home, project];
+            let mut line = TextSurface::new(80, 1);
+            chrome::draw_switcher(&mut line, 0, &vm);
+            let text = surface_text(&line);
+            assert!(text.contains("Home ●"), "{text}");
+            assert!(text.contains("ryeos·"), "{text}");
+            assert!(
+                !text.contains("ryeos· ●"),
+                "a zero count draws no dot: {text}"
+            );
+            let dot = text.find('●').expect("a dot");
+            let column = text[..dot].chars().count();
+            assert_eq!(
+                line.get(column, 0).fg,
+                super::theme::WARN,
+                "needing you wins"
+            );
+        }
+
+        {
+            let tab = vm
+                .presentation
+                .chrome
+                .top_bar
+                .tabs
+                .first_mut()
+                .expect("the test core has a view set");
+            tab.running = Some(true);
+            let title = tab.title.clone();
+            let mut line = TextSurface::new(80, 1);
+            chrome::draw_tab_band(&mut line, 0, &vm);
+            assert!(surface_text(&line).contains(&format!("{title} ●")));
+        }
+    }
+
+    #[test]
+    fn a_surface_without_add_tab_has_no_plus_on_its_tab_line() {
+        let mut vm = build_view_model(&empty_center_core());
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_tab_band(&mut line, 0, &vm);
+        assert!(surface_text(&line).trim_end().ends_with('+'));
+        vm.presentation.chrome.top_bar.add_tab = false;
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_tab_band(&mut line, 0, &vm);
+        assert!(!surface_text(&line).contains('+'));
+    }
+
+    #[test]
+    fn the_overlay_lists_its_sections_and_the_selected_rows_actions() {
+        use ryeos_client_base::ui::event::RyeOsUiIntent;
+        use ryeos_client_base::ui::view_model::{RyeOsOverlayActionVm, RyeOsOverlayRowVm};
+        let mut vm = build_view_model(&empty_center_core());
+        let now = i64::try_from(vm.now_ms).unwrap_or(i64::MAX);
+        let row = |title: &str, minutes: i64| RyeOsOverlayRowVm {
+            id: title.into(),
+            title: title.into(),
+            where_: "ryeos".into(),
+            tone: ryeos_client_base::ui::view_model::RyeOsTone::Warn,
+            since_ms: now - minutes * 60_000,
+            actions: vec![RyeOsOverlayActionVm {
+                keys: "a".into(),
+                word: "acknowledge".into(),
+                intent: RyeOsUiIntent::ToggleTopStatusBar,
+            }],
+        };
+        vm.overlay.open = true;
+        vm.overlay.needs_you = vec![row("Approve the deploy", 4), row("Build failed", 130)];
+        vm.overlay.needs_you_count = Some(2);
+        vm.overlay.running_count = None;
+        vm.overlay.selected = Some(0);
+        let surface = build_surface(&vm, 80, 20);
+        let text = surface_text(&surface);
+        assert!(text.contains("OPEN SURFACES"), "{text}");
+        assert!(text.contains("> ● Approve the deploy — ryeos"), "{text}");
+        assert!(text.contains("[a] acknowledge"), "{text}");
+        assert!(text.contains("Build failed — ryeos"), "{text}");
+        assert!(text.contains("2h"), "{text}");
+        assert!(
+            !text.contains("4m"),
+            "the selected row shows its actions: {text}"
+        );
+        assert!(text.contains("RUNNING"), "{text}");
+        assert!(text.contains("unavailable"), "an unknown count: {text}");
+        for hint in &vm.overlay.key_hints {
+            assert!(
+                text.contains(&format!("[{}] {}", hint.keys, hint.word)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hidden_status_line_leaves_the_node_health_dot_on_the_switcher_line() {
+        let mut vm = build_view_model(&empty_center_core());
+        vm.presentation.chrome.status_bar.visible = false;
+        for width in [4, 9, 20, 80] {
+            let mut line = TextSurface::new(width, 1);
+            chrome::draw_switcher(&mut line, 0, &vm);
+            assert_eq!(line.get(width - 2, 0).rune, '●', "width {width}");
+        }
+        vm.presentation.chrome.status_bar.visible = true;
+        let mut line = TextSurface::new(80, 1);
+        chrome::draw_switcher(&mut line, 0, &vm);
+        assert!(!surface_text(&line).contains('●'));
+    }
+
+    #[test]
+    fn the_bars_fit_any_width_and_the_plus_survives_an_exact_fill() {
+        let mut vm = build_view_model(&empty_center_core());
+        vm.presentation.chrome.status_bar.key_hints =
+            vec![ryeos_client_base::ui::view_model::RyeOsKeyHintVm {
+                keys: "ctrl+k".into(),
+                word: "open".into(),
+            }];
+        for width in [1, 2, 4, 9, 20, 40] {
+            for draw in [
+                chrome::draw_switcher as fn(&mut TextSurface, usize, &RyeOsViewModel),
+                chrome::draw_tab_band,
+            ] {
+                let mut line = TextSurface::new(width, 1);
+                draw(&mut line, 0, &vm);
+                assert_eq!(line.cells.len(), width);
+            }
+            let mut status = TextSurface::new(width, 1);
+            chrome::draw_status_bar(&mut status, 0, &vm);
+            assert_eq!(status.cells.len(), width);
+        }
+        // One current tab, in widths around where it exactly fills the line.
+        let mut only = vm.presentation.chrome.top_bar.tabs[0].clone();
+        only.title = "Review".into();
+        only.active = true;
+        vm.presentation.chrome.top_bar.tabs = vec![only];
+        for width in 8..16 {
+            let mut line = TextSurface::new(width, 1);
+            chrome::draw_tab_band(&mut line, 0, &vm);
+            let text = surface_text(&line);
+            assert!(text.trim_end().ends_with('+'), "width {width}: {text:?}");
+        }
+    }
+
+    /// An admitted Surface with an empty center; a separate Shared Config
+    /// owns the bottom input. Neither tab geometry nor focus grants a binding.
     fn empty_center_core() -> RyeOsCore {
         let session = BrowserSession {
-            session_id: "S-backdrop".to_string(),
+            session_id: "S-empty-center".to_string(),
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
-            surface_attachment_id: "backdrop-attachment".into(),
+            root_attachment_id: "shared-attachment".into(),
             binding_attachments: vec![ryeos_client_base::ui::UiBindingAttachment {
-                binding_attachment_id: "backdrop-attachment".into(),
+                binding_attachment_id: "centre-attachment".into(),
                 binding_generation: 1,
-                binding_digest: "backdrop-binding".into(),
-                surface_ref: "surface:ryeos/ryeos/base".to_string(),
-                surface_generation: "backdrop-generation".into(),
+                binding_digest: "surface-binding".into(),
+                root_ref: "surface:ryeos/ryeos/base".to_string(),
+                root_generation: "surface-generation".into(),
                 project_path: None,
+                subject: ryeos_client_base::ui::UiBindingSubject::Projectless,
                 posture: Default::default(),
                 binding_request_bounds: ryeos_client_base::ui::UiBindingRequestBounds {
                     max_request_bytes: 4096,
                     max_input_bytes: 1024,
-                },
-                effective_surface: json!({
+max_seat_append_bytes:64*1024,
+},
+                presentation: ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(json!({
                 "name": "ryeos-base",
                 "version": "1.0.0",
-                "backdrop": "view:test/backdrop",
-                "slots": {
-                    "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 }
-                },
-                "views": {
-                    "view:ryeos/input": {
-                        "widget": "text",
-                        "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
-                    },
-                    "view:test/backdrop": {
-                        "widget": "scene",
-                        "body": { "objects": [
-                            { "kind": "particle", "position": [0.0, 6.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
-                            { "kind": "particle", "position": [-9.0, -3.5], "scale": 0.6, "color": "#8ec07c", "tone": "good" },
-                            { "kind": "particle", "position": [10.0, 3.4], "scale": 0.5, "color": "#a89984", "tone": "neutral" },
-                            { "kind": "text", "position": [0.0, -8.2], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
-                        ] }
-                    }
-                }
-                }),
+                "views": {}
+                })).unwrap(),
             }],
             ..Default::default()
         };
-        RyeOsCore::new(session, BrowserViewport::default(), 0)
-    }
-
-    #[test]
-    fn empty_center_draws_backdrop_scene_and_bottom_input() {
-        let vm = build_view_model(&empty_center_core());
-        // The backdrop scene resolved on an empty center.
-        assert!(vm.view_set.center_is_empty);
-        assert!(vm.view_set.backdrop.is_some());
-
-        let rendered = surface_text(&build_surface(&vm, 96, 28));
-        // The backdrop scene draws its text objects + particles.
-        assert!(rendered.contains("RYE OS"), "backdrop brand text renders");
-        assert!(
-            rendered.contains('·') || rendered.contains('•') || rendered.contains('●'),
-            "backdrop particles render as dots"
-        );
-        // The real bottom input slot renders in this state (the bug fix) as
-        // a minimal bordered box — no prompt sigil, route strip, or hint;
-        // the border + cursor are the whole signal. The bottom rows carry
-        // the box border.
-        let lines: Vec<&str> = rendered.lines().collect();
-        let tail = lines[lines.len().saturating_sub(8)..].join("\n");
-        assert!(
-            tail.contains('│') || tail.contains('┃'),
-            "the bottom input slot renders its bordered box"
-        );
-        assert!(
-            !rendered.contains("$ ") && !rendered.contains("Shift+Enter"),
-            "the minimal input box drops the prompt sigil and hint"
-        );
-    }
-
-    #[test]
-    fn bottom_slot_is_the_active_input_on_empty_center() {
-        // The bug's regression: on an empty center, the bottom slot is the
-        // focused/active input instance carrying the prompt VM.
-        let vm = build_view_model(&empty_center_core());
-        let bottom = vm.view_set.docks.bottom.expect("bottom input slot present");
-        let input = bottom.input.expect("bottom slot declares input");
-        assert_eq!(input.placeholder, "Ask or run a command");
-    }
-
-    #[test]
-    fn backdrop_twinkle_differs_across_generations() {
-        // End-to-end animation proof: stepping `generation` repaints the
-        // backdrop with different particle cells. The breathe is primarily
-        // a colour blend, so cells compare as (glyph, fg) pairs — text
-        // alone may coincide between adjacent frames.
-        let styled = |surface: &ryeos_client_base::text_surface::TextSurface| {
-            let mut cells = Vec::new();
-            for y in 0..surface.height {
-                for x in 0..surface.width {
-                    let cell = surface.get(x, y);
-                    cells.push((cell.rune, cell.fg));
-                }
-            }
-            cells
+        let mut session = session;
+        let surface_binding = ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate {
+            binding_attachment_id: "centre-attachment".into(),
+            binding_generation: 1,
+            binding_digest: "surface-binding".into(),
         };
-        let mut core = empty_center_core();
-        core.runtime.now_ms = 0;
-        let a = styled(&build_surface(&build_view_model(&core), 96, 28));
-        core.runtime.now_ms = ryeos_client_base::ui::scene_model::SCENE_FRAME_MS;
-        let b = styled(&build_surface(&build_view_model(&core), 96, 28));
-        assert_ne!(a, b, "the backdrop renders differently across generations");
+        let shared = serde_json::from_value(json!({
+            "binding_attachment_id":"shared-attachment", "binding_generation":2,
+            "binding_digest":"shared-binding", "root_ref":"config:test/presentation",
+            "root_generation":"shared-generation", "project_path":null, "subject":{"kind":"projectless"},
+            "posture":"observation_only", "binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},
+            "presentation":{"definition":{"kind":"shared_presentation","config":{
+                "category":"ui","shared_presentation":{"schema":2,"title":"Fixture","launcher":"launch",
+                    "dialogs":[{"id":"launch","title":"Launch","view":"view:test/launch"}],
+                    "capabilities":{"sources":[],"affordances":[]}}
+            }}, "views":{
+                "view:test/launch":{"widget":"text","body":"Fixture only"},
+                "view:ryeos/input":{"widget":"text","input":{"id":"line","placeholder":"Ask or run a command","submit":"route"}}
+            }}
+        })).expect("actual Config descriptor fixture");
+        session.binding_attachments.push(shared);
+        let presentation_id = "11111111-1111-4111-8111-111111111111";
+        let surface_instance_id = "22222222-2222-4222-8222-222222222222";
+        let surface = session.binding_attachments[0]
+            .presentation
+            .definition
+            .surface()
+            .unwrap();
+        let mount_manifest =
+            ryeos_client_base::ui::composition_identity::UiSurfaceMountManifest::allocate(
+                ryeos_client_base::ids::PresentationId::try_new(presentation_id).unwrap(),
+                ryeos_client_base::ids::SurfaceInstanceId::try_new(surface_instance_id).unwrap(),
+                1,
+                surface
+                    .to_mount_seeds()
+                    .unwrap()
+                    .into_iter()
+                    .map(|seed| (seed, surface_binding.clone()))
+                    .collect(),
+                surface
+                    .to_mount_seeds()
+                    .unwrap()
+                    .first()
+                    .map(|seed| seed.id.as_str()),
+            )
+            .unwrap();
+        session.presentations = vec![ryeos_client_base::ui::binding::UiPresentationMembership {
+            presentation_id: presentation_id.into(),
+            next_mount_id: mount_manifest.next_mount_id,
+            initialization_digest: "a".repeat(64),
+            root_binding: ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate {
+                binding_attachment_id: "shared-attachment".into(),
+                binding_generation: 2,
+                binding_digest: "shared-binding".into(),
+            },
+            thread_id: Some("fixture-seat".into()),
+            chain_root_id: Some("fixture-chain".into()),
+            surfaces: vec![ryeos_client_base::ui::binding::UiSurfaceMembership {
+                saved_surface: None,
+                surface_instance_id: surface_instance_id.into(),
+                ordinal: 1,
+                title: "ryeos-base".into(),
+                binding: surface_binding,
+                mount_manifest,
+            }],
+        }];
+        let membership = &mut session.presentations[0];
+        let initialization = ryeos_client_base::ui::presentation_initialization::UiPresentationInitialization {
+            schema: 2,
+            selection: ryeos_client_base::ui::presentation_initialization::UiPresentationInitialSelection::ConfiguredDefaults,
+            presentation_id: presentation_id.into(),
+            creation_request_id: "33333333-3333-4333-8333-333333333333".into(),
+            root_binding: membership.root_binding.clone(),
+            next_mount_id: membership.next_mount_id,
+            surfaces: membership.surfaces.clone(),
+            binding_attachments: session.binding_attachments.clone(),
+        };
+        initialization
+            .validate()
+            .expect("exact authored fixture initialization");
+        membership.initialization_digest = initialization.digest().unwrap();
+        let mut core = RyeOsCore::new(session, presentation_id, BrowserViewport::default(), 0);
+        core.replay_seat_events([ryeos_client_base::ui::seat::SeatEvent {
+            producer_engine_seq: None,
+            seq: 0,
+            kind: ryeos_client_base::ui::seat::SeatEventKind::PresentationInitialized(
+                ryeos_client_base::ui::presentation_initialization::UiPresentationInitializationRecord {
+                    operation_id: initialization.creation_request_id.clone(),
+                    initialization,
+                },
+            ),
+        }]);
+        core.require_replayed_initialization()
+            .expect("fixture initialization replay");
+        core.dispatch(ryeos_client_base::ui::RyeOsEvent::Ui {
+            event: ryeos_client_base::ui::RyeOsUiEvent::FocusInput,
+        });
+        core
+    }
+
+    fn launcher_row(
+        id: &str,
+        primary: &str,
+        secondary: &str,
+        meta: Option<&str>,
+        launch: ryeos_client_base::ui::view_model::RyeOsLaunchRowVm,
+    ) -> ryeos_client_base::ui::view_model::RyeOsRowVm {
+        ryeos_client_base::ui::view_model::RyeOsRowVm {
+            id: id.into(),
+            primary: primary.into(),
+            secondary: Some(secondary.into()).filter(|text: &String| !text.is_empty()),
+            meta: meta.map(Into::into),
+            launch: Some(launch),
+            ..Default::default()
+        }
+    }
+
+    fn launch(
+        group: &str,
+        reason: Option<&str>,
+        place: bool,
+    ) -> ryeos_client_base::ui::view_model::RyeOsLaunchRowVm {
+        ryeos_client_base::ui::view_model::RyeOsLaunchRowVm {
+            group: group.into(),
+            reason: reason.map(Into::into),
+            place,
+            staged: false,
+        }
+    }
+
+    fn launcher_vm(places: bool) -> RyeOsViewModel {
+        use ryeos_client_base::ui::view_model::RyeOsDialogVm;
+        let mut vm = build_view_model(&empty_center_core());
+        let presentation =
+            ryeos_client_base::ids::PresentationId::try_new("11111111-1111-4111-8111-111111111111")
+                .unwrap();
+        let mut rows = vec![
+            launcher_row(
+                "files",
+                "Files",
+                "The project's file tree",
+                Some("rows"),
+                launch("Project", None, false),
+            ),
+            launcher_row(
+                "activity",
+                "Activity",
+                "The activity of one chain",
+                None,
+                launch("Project", Some("needs a selected thread"), false),
+            ),
+        ];
+        rows[0].selected = !places;
+        rows[1].kind = Some("unavailable".into());
+        if places {
+            let mut here = launcher_row(
+                "here",
+                "In this tile, as a tab",
+                "",
+                Some("\u{21b5}"),
+                launch("Project", None, true),
+            );
+            here.selected = true;
+            rows.push(here);
+            rows.push(launcher_row(
+                "tab",
+                "New tab",
+                "",
+                Some("T"),
+                launch("Project", None, true),
+            ));
+        }
+        vm.dialogs = vec![RyeOsDialogVm {
+            instance_key: ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dialog(
+                &presentation,
+                "launch",
+            )
+            .unwrap(),
+            title: "Launch".into(),
+            description: None,
+            note: None,
+            launcher: true,
+            view: RyeOsViewVm::Rows {
+                title: "Launch".into(),
+                source_status: None,
+                columns: Vec::new(),
+                total_rows: rows.len(),
+                provenance: None,
+                affordance_hints: Vec::new(),
+                rows,
+            },
+            input: None,
+        }];
+        vm
+    }
+
+    #[test]
+    fn the_launcher_lists_titles_descriptions_and_reasons() {
+        let text = surface_text(&build_surface(&launcher_vm(false), 100, 30));
+        assert!(
+            text.contains("Files  The project's file tree"),
+            "title then its own description: {text}"
+        );
+        assert!(
+            text.contains("Activity  needs a selected thread"),
+            "an unavailable view says why, not what it shows: {text}"
+        );
+        assert!(!text.contains("Unavailable"), "{text}");
+        assert!(
+            !text.contains("New tab"),
+            "no places before a choice: {text}"
+        );
+    }
+
+    #[test]
+    fn the_places_of_a_chosen_view_are_one_line_under_the_list() {
+        let text = surface_text(&build_surface(&launcher_vm(true), 100, 30));
+        let line = text
+            .lines()
+            .find(|line| line.contains("In this tile, as a tab"))
+            .expect("the places line");
+        assert!(
+            line.contains("\u{21b5} In this tile, as a tab  T New tab"),
+            "{line}"
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|other| other != line && other.contains("New tab")),
+            "the places are not also list rows: {text}"
+        );
+    }
+
+    #[test]
+    fn a_requested_rename_is_edited_on_the_last_line() {
+        let mut vm = build_view_model(&empty_center_core());
+        vm.rename = Some(ryeos_client_base::ui::view_model::RyeOsRenameVm {
+            target: ryeos_client_base::ui::RyeOsRenameTarget::ViewSet {
+                view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
+            },
+            title: "Work".into(),
+        });
+        let text = surface_text(&build_surface(&vm, 60, 10));
+        let last = text.lines().nth(9).expect("the last line");
+        assert!(last.starts_with("rename \u{203a} Work"), "{last}");
+        assert!(last.contains("enter save"), "{last}");
     }
 }

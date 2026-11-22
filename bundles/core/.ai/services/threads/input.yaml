@@ -1,0 +1,12 @@
+# ryeos:signed:2026-11-20T01:44:48Z:3897508721d558c1f6974e5f7cd1dc697baf825df3bad9cbbddc8bb70ca08069:E6tepDQA0uMHu13kRZg13Dpf8K6r8VWatnHLzh8VK5moyPGsaniGYC+rR60jficHhO2D5u8RCEgXFmd2e2oCAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "threads"
+name: "input"
+kind: service
+endpoint: threads.input
+required_caps: ["ryeos.execute.service.threads/input"]
+schema:
+  input: string
+  target: object
+  intent: string?
+  title: string?
+description: "Deliver operator input to a fresh execution identity or an existing thread target"

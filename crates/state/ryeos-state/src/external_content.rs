@@ -5,10 +5,19 @@ use std::ffi::OsStr;
 
 use anyhow::Context as _;
 
+pub mod payload;
 pub mod products;
+pub mod qualification_allowance;
+pub mod qualification_consumer_record;
+pub mod qualification_evidence;
+pub mod qualification_execution;
+pub mod qualification_publication;
+pub mod qualification_purpose;
+pub mod qualification_subject;
 pub mod realization_verification;
 pub mod retained_project;
 pub mod retained_workspace_output;
+pub mod runtime_member;
 
 use crate::objects::{
     ExternalContentManifestEntryKind, ExternalContentManifestObject,
@@ -296,14 +305,14 @@ pub struct DigestOnlyExternalContentSink;
 impl ExternalContentBlobSink for DigestOnlyExternalContentSink {
     fn store_file(
         &mut self,
-        mut file: std::fs::File,
+        file: std::fs::File,
         path: &str,
         expected_size: u64,
     ) -> anyhow::Result<(String, u64)> {
         if expected_size > MAX_CAPTURE_FILE_BYTES {
             anyhow::bail!("external content file {path} exceeds {MAX_CAPTURE_FILE_BYTES} bytes");
         }
-        let (digest, _) = lillux::digest_open_regular_file_stable_exact(&mut file, expected_size)
+        let (digest, _) = lillux::digest_open_regular_file_stable_exact(&file, expected_size)
             .with_context(|| format!("digest exact external content file {path}"))?;
         Ok((digest, expected_size))
     }
@@ -455,14 +464,13 @@ pub fn capture_large_tree_optional(
     policy: &LargeContentCapturePolicy<'_>,
     sink: &mut dyn ExternalLargeContentSink,
 ) -> anyhow::Result<Option<crate::objects::ExternalLargeContentManifestObject>> {
-    let (root_device, _) = root.device_inode()?;
     let mut state = LargeCaptureState {
         observed_entries: 0,
         remaining_namespace_entries: policy.bounds.max_entries,
         total_bytes: 0,
         entries: Vec::new(),
     };
-    capture_large_directory(root, "", 0, root_device, policy, sink, &mut state)?;
+    capture_large_directory(root, "", 0, policy, sink, &mut state)?;
     if state.entries.is_empty() {
         root.ensure_path_binding()?;
         return Ok(None);
@@ -559,12 +567,10 @@ struct LargeCaptureState {
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn capture_large_directory(
     directory: &lillux::PinnedDirectory,
     prefix: &str,
     depth: usize,
-    root_device: u64,
     policy: &LargeContentCapturePolicy<'_>,
     sink: &mut dyn ExternalLargeContentSink,
     state: &mut LargeCaptureState,
@@ -601,9 +607,9 @@ fn capture_large_directory(
         if state.observed_entries > policy.bounds.max_entries {
             anyhow::bail!("large-content capture exceeds its entry bound");
         }
-        if entry.containing_device != root_device {
-            anyhow::bail!("large-content entry {path} crosses the admitted filesystem boundary");
-        }
+        directory
+            .ensure_entry_same_mount(entry)
+            .with_context(|| format!("large-content entry {path} crosses the admitted mount"))?;
         match entry.entry_type {
             lillux::PinnedEntryType::Directory => {
                 state
@@ -622,23 +628,17 @@ fn capture_large_directory(
                 let child = directory
                     .open_child_directory(OsStr::new(&name))?
                     .ok_or_else(|| anyhow::anyhow!("large-content directory {path} vanished"))?;
-                capture_large_directory(
-                    &child,
-                    &path,
-                    depth + 1,
-                    root_device,
-                    policy,
-                    sink,
-                    state,
-                )?;
+                directory.ensure_open_child_same_mount(&child)?;
+                capture_large_directory(&child, &path, depth + 1, policy, sink, state)?;
             }
             lillux::PinnedEntryType::Regular => {
                 let file = directory
                     .open_regular(OsStr::new(&name), false)?
                     .ok_or_else(|| anyhow::anyhow!("large-content file {path} vanished"))?;
+                directory.ensure_open_regular_same_mount(&file)?;
                 let before = lillux::observe_open_regular_file(&file)
                     .with_context(|| format!("inspect large-content file {path}"))?;
-                if !before.matches_directory_entry(&entry) {
+                if !before.matches_directory_entry(entry) {
                     anyhow::bail!("large-content file {path} changed identity during traversal");
                 }
                 let size = before.size();
@@ -674,8 +674,7 @@ fn capture_large_directory(
                     let ingested = sink.store_large_file(
                         file.try_clone()?,
                         crate::large_object_store::PinnedLargeObjectSourceIdentity {
-                            containing_device: entry.containing_device,
-                            inode: entry.inode,
+                            file: lillux::pinned_regular_file_identity(&file)?,
                             size,
                         },
                         &path,
@@ -698,13 +697,9 @@ fn capture_large_directory(
                 };
                 lillux::ensure_open_regular_file_unchanged(&file, &before)
                     .with_context(|| format!("large-content file {path} changed during capture"))?;
-                directory
-                    .ensure_entry_observation(&entry)
-                    .with_context(|| {
-                        format!(
-                            "large-content file {path} changed namespace binding during capture"
-                        )
-                    })?;
+                directory.ensure_entry_observation(entry).with_context(|| {
+                    format!("large-content file {path} changed namespace binding during capture")
+                })?;
                 state.entries.push(manifest_entry);
             }
             lillux::PinnedEntryType::Symlink => {
@@ -791,6 +786,20 @@ pub fn capture_tree(
     capture_tree_selected(root, Some((authored_excludes, policy)), budget, sink)
 }
 
+/// Capture an already-exact private realization into a caller-owned sink.
+/// No authored or policy exclusions apply: every ambient entry affects the
+/// result, and the caller supplies an explicit aggregate bound. A durable
+/// publisher must protect the resulting CAS closure before using it as source
+/// authority; this function alone does not publish testimony.
+#[cfg(unix)]
+pub fn capture_tree_exact(
+    root: &lillux::PinnedDirectory,
+    budget: &mut LaunchCaptureBudget,
+    sink: &mut dyn ExternalContentBlobSink,
+) -> anyhow::Result<ExternalContentManifestObject> {
+    capture_tree_selected(root, None, budget, sink)
+}
+
 /// Observe every entry beneath an already-pinned exact realization. Unlike
 /// source capture, this applies no authored, policy, or publisher exclusions:
 /// an ambient entry in a supposedly exact realization must change its identity
@@ -801,7 +810,7 @@ pub fn observe_external_content_tree_exact(
 ) -> anyhow::Result<ExternalContentManifestObject> {
     let mut budget = LaunchCaptureBudget::default();
     let mut sink = DigestOnlyExternalContentSink;
-    capture_tree_selected(root, None, &mut budget, &mut sink)
+    capture_tree_exact(root, &mut budget, &mut sink)
 }
 
 #[cfg(unix)]
@@ -811,7 +820,6 @@ fn capture_tree_selected(
     budget: &mut LaunchCaptureBudget,
     sink: &mut dyn ExternalContentBlobSink,
 ) -> anyhow::Result<ExternalContentManifestObject> {
-    let (root_device, _) = root.device_inode()?;
     let mut entries = Vec::new();
     let mut declaration_entries = 0usize;
     let mut declaration_bytes = 0u64;
@@ -820,7 +828,6 @@ fn capture_tree_selected(
         root,
         "",
         0,
-        root_device,
         selection,
         budget,
         sink,
@@ -858,6 +865,7 @@ pub fn capture_file_at(
     let file = parent
         .open_regular(name, false)?
         .ok_or_else(|| anyhow::anyhow!("external content file {display_path} is unavailable"))?;
+    parent.ensure_open_regular_same_mount(&file)?;
     let before = lillux::observe_open_regular_file(&file)
         .with_context(|| format!("inspect external content file {display_path}"))?;
     if !before.matches_directory_entry(&entry) {
@@ -881,12 +889,10 @@ pub fn capture_file_at(
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn capture_directory(
     directory: &lillux::PinnedDirectory,
     prefix: &str,
     depth: usize,
-    root_device: u64,
     selection: Option<(&[String], &ExternalCapturePolicy<'_>)>,
     budget: &mut LaunchCaptureBudget,
     sink: &mut dyn ExternalContentBlobSink,
@@ -917,11 +923,9 @@ fn capture_directory(
             format!("{prefix}/{name}")
         };
         crate::objects::validate_canonical_project_relative_path(&path)?;
-        if entry.containing_device != root_device {
-            anyhow::bail!(
-                "external content entry {path} is on a different filesystem from its declared root"
-            );
-        }
+        directory
+            .ensure_entry_same_mount(entry)
+            .with_context(|| format!("external content entry {path} crosses the declared mount"))?;
         *declaration_entries = declaration_entries
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("external content entry count overflow"))?;
@@ -942,15 +946,14 @@ fn capture_directory(
                 let child = directory
                     .open_child_directory(OsStr::new(&name))?
                     .ok_or_else(|| anyhow::anyhow!("external content directory {path} vanished"))?;
-                let (child_device, child_inode) = child.device_inode()?;
-                if child_device != entry.containing_device || child_inode != entry.inode {
+                directory.ensure_open_child_same_mount(&child)?;
+                if !child.matches_entry_metadata(entry)? {
                     anyhow::bail!("external content directory {path} changed during capture");
                 }
                 capture_directory(
                     &child,
                     &path,
                     depth + 1,
-                    root_device,
                     selection,
                     budget,
                     sink,
@@ -964,9 +967,10 @@ fn capture_directory(
                 let file = directory
                     .open_regular(OsStr::new(&name), false)?
                     .ok_or_else(|| anyhow::anyhow!("external content file {path} vanished"))?;
+                directory.ensure_open_regular_same_mount(&file)?;
                 let before = lillux::observe_open_regular_file(&file)
                     .with_context(|| format!("inspect external content file {path}"))?;
-                if !before.matches_directory_entry(&entry) {
+                if !before.matches_directory_entry(entry) {
                     anyhow::bail!("external content file {path} changed inode during capture");
                 }
                 let size = before.size();
@@ -1406,6 +1410,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn bounded_exact_capture_matches_observation_and_refuses_ambient_overflow() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("owner"), b"exact").unwrap();
+        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let expected = observe_external_content_tree_exact(&pinned).unwrap();
+        let mut budget = LaunchCaptureBudget::bounded(3, 2, 16, 16).unwrap();
+        let mut sink = DigestOnlyExternalContentSink;
+        let captured = capture_tree_exact(&pinned, &mut budget, &mut sink).unwrap();
+        assert_eq!(captured, expected);
+
+        std::fs::write(root.path().join("ambient"), b"entry").unwrap();
+        std::fs::write(root.path().join("overflow"), b"entry").unwrap();
+        let mut budget = LaunchCaptureBudget::bounded(3, 2, 16, 16).unwrap();
+        assert!(capture_tree_exact(&pinned, &mut budget, &mut sink).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ignored_entries_still_consume_the_raw_namespace_budget() {
         let root = tempfile::tempdir().unwrap();
         for name in ["one.tmp", "two.tmp", "three.tmp"] {
@@ -1485,8 +1507,7 @@ mod tests {
                 "content capture admitted {path}"
             );
             assert!(
-                LargeContentCapturePolicy::new(path.to_owned(), &configured, bounds.clone())
-                    .is_err(),
+                LargeContentCapturePolicy::new(path.to_owned(), &configured, bounds).is_err(),
                 "large-content capture admitted {path}"
             );
         }

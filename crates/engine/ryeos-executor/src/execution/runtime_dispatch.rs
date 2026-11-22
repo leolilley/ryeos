@@ -293,6 +293,7 @@ fn callback_execution_context(
     current_site_id: &str,
     origin_site_id: &str,
     child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
 ) -> Result<(
     crate::executor::ExecutionContext,
     Option<ryeos_app::handler_context::HandlerContext>,
@@ -327,6 +328,10 @@ fn callback_execution_context(
     // capsule. Parent selection controls are not forwarded as child inputs.
     let scheduled_fire = parent_resume.scheduled_fire;
     let plan_ctx = PlanContext {
+        // The project this callback's pinned generation stands for. Its
+        // checkout is temporary, so a project-scoped signer is matched on the
+        // logical project, as for every direct launch.
+        logical_project_root: child_provenance.logical_project_root(current_site_id),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: thread_auth.acting_principal.clone(),
             scopes: dispatch_caps.to_vec(),
@@ -339,11 +344,13 @@ fn callback_execution_context(
         scheduled_fire,
         validate_only: false,
     };
-    let handler_context = thread_auth.narrowed_handler_context(
-        dispatch_caps.to_vec(),
-        current_site_id,
-        origin_site_id,
-    )?;
+    let handler_context = thread_auth
+        .narrowed_handler_context(dispatch_caps.to_vec(), current_site_id, origin_site_id)?
+        .map(|context| context.with_original_execution_budget(original_budget.cloned()))
+        .transpose()?;
+    if original_budget.is_some() && handler_context.is_none() {
+        anyhow::bail!("callback preparation lost its original budget handler context");
+    }
     Ok((
         crate::executor::ExecutionContext {
             principal_fingerprint: thread_auth.acting_principal.clone(),
@@ -365,6 +372,7 @@ async fn prepare_callback_dispatch(
     current_site_id: &str,
     origin_site_id: &str,
     child_provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    original_budget: Option<&ryeos_app::handler_context::OriginalExecutionBudget>,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     authorization: Option<ryeos_effect_contract::AdmittedEffectAuthorization>,
 ) -> Result<PreparedCallbackDispatch> {
@@ -381,6 +389,7 @@ async fn prepare_callback_dispatch(
         current_site_id,
         origin_site_id,
         child_provenance,
+        original_budget,
     )?;
     let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
         &context.engine,
@@ -593,7 +602,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         anyhow::bail!("product-selected callbacks require an inline action");
     }
 
-    let child_provenance = cap.provenance.clone_for_borrowed_child();
+    let mut child_provenance = cap.provenance.clone_for_borrowed_child();
 
     let thread_auth = state
         .thread_auth
@@ -644,6 +653,48 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         )?;
     }
 
+    // A child that declares host authority is judged before its exact
+    // preflight seals a root admission: the node lane, the operator's grant
+    // (origin graph_child, through this caller thread) and the operator as
+    // the acting principal. A granted child is sealed as what runs, unconfined
+    // on the host; its parent keeps its own confinement.
+    if let Ok(item) = ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
+        && let Some(converted) =
+            crate::execution::host_access_gate::host_direct_provenance_before_admission(
+                state,
+                &item,
+                &child_provenance,
+                &ryeos_app::host_access::HostAccessCaller {
+                    acting_principal: thread_auth.acting_principal.as_str(),
+                    handler_context: None,
+                    target_site_id: None,
+                    current_site_id: state.threads.site_id(),
+                    origin_site_id: &caller_thread.origin_site_id,
+                    parent_thread_id: Some(params.thread_id.as_str()),
+                    scheduled: false,
+                },
+            )
+            .map_err(anyhow::Error::new)?
+    {
+        child_provenance = converted;
+    }
+
+    // Actual capability, ThreadAuth, launch-owner and item/binding capability
+    // checks precede the opaque clock mint. Deny-all method/augmentation
+    // callbacks keep their existing refusal before any new budget lookup.
+    // Initial and reparsed inline preparation retain this
+    // same owner and expiry; no service audit root can restart the budget.
+    let original_budget = if params.action.thread == "inline" {
+        ryeos_app::handler_context::HandlerContext::budget_from_verified_callback(
+            state,
+            &params.callback_token,
+            &params.thread_auth_token,
+            &params.thread_id,
+        )?
+    } else {
+        None
+    };
+
     // Note: DispatchActionParams has `deny_unknown_fields` and no
     // `principal` field — the request body cannot supply (and so
     // cannot spoof) a principal. The principal logged here is read
@@ -682,6 +733,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 &caller_thread.current_site_id,
                 &caller_thread.origin_site_id,
                 &child_provenance,
+                original_budget.as_ref(),
                 lifecycle_authority,
                 selected_effect_authorization,
             )
@@ -1506,6 +1558,29 @@ async fn handle_execute(
             )?,
         };
         if state.threads.get_thread(&child_thread_id)?.is_some() {
+            // The child outlived an earlier drive that may have crashed between
+            // linking it and recording its lineage event. The append is
+            // idempotent; a settled parent or a failed append must not fail
+            // the recovery of the child's result.
+            match state
+                .threads
+                .record_dispatch_child_lineage(&child_thread_id)
+            {
+                Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+                    ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+                )) => tracing::warn!(
+                    operation_id,
+                    child_thread_id,
+                    "parent settled before the retained child's lineage event was recovered"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    operation_id,
+                    child_thread_id,
+                    error = %error,
+                    "failed to recover the retained child's lineage event"
+                ),
+            }
             if prepared_workspace_operation.is_some() {
                 let retained = state
                     .state_store
@@ -1608,6 +1683,11 @@ async fn handle_execute(
             }
         }
         if let Some(partition) = awaited_partition.as_ref() {
+            let original_budget = prepared
+                .handler_context
+                .as_ref()
+                .and_then(ryeos_app::handler_context::HandlerContext::original_execution_budget)
+                .cloned();
             let initial_subject = &prepared.preflight.requested_subject;
             let expected_subject_identity = (
                 initial_subject.resolved.canonical_ref.to_string(),
@@ -1636,6 +1716,7 @@ async fn handle_execute(
                 authoritative_current_site_id,
                 authoritative_origin_site_id,
                 &child_provenance,
+                original_budget.as_ref(),
                 lifecycle_authority,
                 Some(expected_effect_authority.authorization.clone()),
             )
@@ -1896,6 +1977,7 @@ async fn handle_execute(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        initial_facets: Default::default(),
         root_admission: prepared_admission,
         root_dispatch_evidence: prepared_dispatch_evidence,
         parent_execution_context: Some(parent_execution_context_from_capability(cap)),
@@ -2488,7 +2570,6 @@ fn known_hook_dispatch_integrity_response(message: String, action_digest: &str) 
     .expect("hook dispatch integrity response is infallibly serializable")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn hook_dispatch_ledger_seed(
     identity: &ryeos_runtime::callback::HookDispatchIdentity,
     action: &ryeos_runtime::callback::ActionPayload,
@@ -2588,7 +2669,6 @@ fn runtime_action_request_product_selections(
     Ok(serde_json::to_value(&action.product_selections)?)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn runtime_action_request_hash(
     action_digest: &str,
     action: &ryeos_runtime::callback::ActionPayload,
@@ -2767,7 +2847,7 @@ mod tests {
                     "declaration_id":"runtime",
                     "witness_hash":"a".repeat(64),
                     "witness_source":{"kind":"local_capture"},
-                    "qualification_hash":null
+                    "qualification_hash":null, "remote_testimony": null
                 }
             }]))
             .unwrap(),
@@ -2857,7 +2937,11 @@ mod tests {
         std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR)).unwrap();
         let authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
             project.path(),
-            vec![ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+            vec![
+                ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY.to_string(),
+                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+            ],
+            "fp:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap()
@@ -3005,12 +3089,11 @@ mod tests {
     fn inline_thread_run_gate_consumes_the_exact_preflight_class() {
         use crate::dispatch::RootDispatchClass;
 
-        for class in [RootDispatchClass::ManagedSubprocess] {
-            let error = enforce_inline_dispatch_class("alias:test/run", class, false).unwrap_err();
-            assert!(error.to_string().contains("exact admitted route"));
-            assert!(error.to_string().contains("managed thread run"));
-            enforce_inline_dispatch_class("graph:test/producer", class, true).unwrap();
-        }
+        let class = RootDispatchClass::ManagedSubprocess;
+        let error = enforce_inline_dispatch_class("alias:test/run", class, false).unwrap_err();
+        assert!(error.to_string().contains("exact admitted route"));
+        assert!(error.to_string().contains("managed thread run"));
+        enforce_inline_dispatch_class("graph:test/producer", class, true).unwrap();
         for class in [
             RootDispatchClass::TerminalSubprocess,
             RootDispatchClass::MethodDispatch,
@@ -3369,6 +3452,7 @@ mod tests {
             accounting_scope: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
+            remote_consumer_grant: None,
         };
 
         let ctx = parent_execution_context_from_capability(&cap);
@@ -3721,7 +3805,7 @@ mod tests {
             let item = format!("{kind}:test/subject");
             let required = format!("ryeos.execute.{kind}.test/subject");
             assert!(
-                enforce_test_callback_caps(&item, &[required.clone()], &auth).is_ok(),
+                enforce_test_callback_caps(&item, std::slice::from_ref(&required), &auth).is_ok(),
                 "{kind}"
             );
             assert!(

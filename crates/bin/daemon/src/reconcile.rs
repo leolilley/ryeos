@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -237,6 +237,26 @@ pub enum ResumeDecision {
     /// Spec declared `native_resume` and a `ResumeContext` is present,
     /// but the retry budget is exhausted — finalize.
     Exhausted { attempts: u32, max: u32 },
+    /// The thread would resume, but its run deadline has already passed (it
+    /// elapsed while the node was down). Settle it as a deadline stop; a
+    /// resumed process could only be killed at once.
+    DeadlineReached { end_at_ms: i64 },
+}
+
+use ryeos_app::dedicated_session_service::{
+    DEDICATED_SESSION_HOLDS_CANDIDATE, SessionRootResume, session_root_resume,
+};
+
+/// What a restart does with the root of the dedicated session `thread_id`
+/// names, if any, keyed by the session's state through the one policy table.
+fn dedicated_session_root_resume(state: &AppState, thread_id: &str) -> Result<SessionRootResume> {
+    Ok(session_root_resume(
+        state
+            .state_store
+            .dedicated_session(thread_id)?
+            .as_ref()
+            .map(|session| session.state.as_str()),
+    ))
 }
 
 /// Pure mapping from `(launch_metadata, current_attempts)` to a
@@ -245,6 +265,8 @@ pub enum ResumeDecision {
 pub fn decide_resume(
     metadata: Option<&RuntimeLaunchMetadata>,
     current_attempts: u32,
+    run_end_at_ms: Option<i64>,
+    now_ms: i64,
 ) -> ResumeDecision {
     let m = match metadata {
         Some(m) if m.declares_native_resume() => m,
@@ -264,6 +286,9 @@ pub fn decide_resume(
             attempts: current_attempts,
             max: policy.max_auto_resume_attempts,
         };
+    }
+    if let Some(end_at_ms) = run_end_at_ms.filter(|end| now_ms >= *end) {
+        return ResumeDecision::DeadlineReached { end_at_ms };
     }
     ResumeDecision::Resume {
         next_attempt: current_attempts + 1,
@@ -323,6 +348,10 @@ pub struct ResumeIntent {
 pub struct ActiveThreadReconcileReport {
     pub active_thread_ids: BTreeSet<String>,
     pub resume_intents: Vec<ResumeIntent>,
+    /// Roots left exactly as they are because their dedicated session holds
+    /// or builds a candidate, keyed by thread id with the stable typed reason
+    /// ([`DEDICATED_SESSION_HOLDS_CANDIDATE`]).
+    pub held_roots: BTreeMap<String, &'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,7 +392,7 @@ fn reconcile_accounting(state: &AppState) -> Result<()> {
         if is_terminal(&thread_id)? {
             let confirmation = ledger.confirm_terminal_publication(&thread_id, &generation);
             if let Err(error) = confirmation {
-                tracing::warn!(thread_id, %error, "terminal publication repair failed");
+                tracing::warn!(thread_id, error = %format!("{error:#}"), "terminal publication repair failed");
             }
         }
     }
@@ -385,11 +414,55 @@ fn reconcile_accounting(state: &AppState) -> Result<()> {
                     .unwrap_or(0),
             );
             if let Err(error) = fence_result {
-                tracing::error!(thread_id, attempt_id, %error, "accounting fence failed");
+                tracing::error!(thread_id, attempt_id, error = %format!("{error:#}"), "accounting fence failed");
             }
         }
     }
     Ok(())
+}
+
+/// Why a non-terminal thread with no attached process group is dead.
+///
+/// A thread is marked `running` only after its process attached, and a
+/// graceful stop kills each attached group and clears its pid/pgid, leaving a
+/// non-resumable thread `running` with no group. A thread that never left
+/// `created` never had a process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoProcessCause {
+    /// Outcome code `interrupted_spawn`: the spawn never attached.
+    InterruptedSpawn,
+    /// Outcome code `interrupted_by_restart`: the process attached and the
+    /// daemon's stop ended it.
+    InterruptedByRestart,
+}
+
+impl NoProcessCause {
+    fn outcome_code(self) -> &'static str {
+        match self {
+            Self::InterruptedSpawn => "interrupted_spawn",
+            Self::InterruptedByRestart => "interrupted_by_restart",
+        }
+    }
+
+    fn details(self) -> serde_json::Value {
+        match self {
+            Self::InterruptedSpawn => json!({"reason": "no pid/pgid attached"}),
+            Self::InterruptedByRestart => {
+                json!({"reason": "the daemon stopped while the process was running"})
+            }
+        }
+    }
+}
+
+fn no_process_cause(pgid: Option<i64>, status: &str) -> Option<NoProcessCause> {
+    if pgid.is_some() {
+        return None;
+    }
+    Some(if status == "created" {
+        NoProcessCause::InterruptedSpawn
+    } else {
+        NoProcessCause::InterruptedByRestart
+    })
 }
 
 /// Finalize a dead thread as failed. Centralized so the `Finalize` /
@@ -432,6 +505,39 @@ fn finalize_dead(
         None,
         ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
     )?;
+    // A run interrupted after its fold-back froze and bound a generation,
+    // but before it advanced HEAD, is never published by recovery: it fails
+    // with the typed head-advance outcome, and the retained generation joins
+    // the failed terminal so it stays reachable after the workspace closes.
+    // If HEAD already names the generation, the advance applied before the
+    // interruption: the thread fails `head_advanced_before_interruption`,
+    // recording the publication although the run never confirmed completion.
+    if let Some((outcome_code, payload, generation)) = interrupted_head_advance(state, thread_id) {
+        let mut error = payload;
+        error["recovery"] = error_obj;
+        tracing::warn!(
+            thread_id,
+            outcome_code,
+            snapshot_hash = %generation.snapshot_hash,
+            "interrupted advance-head run settled from its recovered generation"
+        );
+        state.threads.finalize_thread_retaining_generation(
+            &ThreadFinalizeParams {
+                thread_id: thread_id.to_string(),
+                status: "failed".to_string(),
+                outcome_code: Some(outcome_code.to_string()),
+                result: None,
+                error: Some(error),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            },
+            &generation,
+        )?;
+        *reconciled += 1;
+        return Ok(());
+    }
     state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: "failed".to_string(),
@@ -445,6 +551,138 @@ fn finalize_dead(
     })?;
     *reconciled += 1;
     Ok(())
+}
+
+/// How a thread stopped by its run deadline settles: plainly, or keeping the
+/// frozen result generation of an advance-head run that never advanced HEAD,
+/// exactly as `finalize_dead` keeps it for a failed one.
+#[derive(Debug, PartialEq, Eq)]
+enum DeadlineSettlement {
+    Plain,
+    RetainGeneration(ryeos_state::objects::WorkspaceGenerationPair),
+}
+
+fn plan_deadline_settlement(
+    interrupted: Option<(
+        &'static str,
+        serde_json::Value,
+        ryeos_state::objects::WorkspaceGenerationPair,
+    )>,
+) -> DeadlineSettlement {
+    match interrupted {
+        Some((_, _, generation)) => DeadlineSettlement::RetainGeneration(generation),
+        None => DeadlineSettlement::Plain,
+    }
+}
+
+/// Settle a dead thread whose run deadline passed while the node was down as
+/// a typed deadline stop (`timed_out`, outcome `deadline`). Accounting is
+/// fenced exactly as for any dead thread, and a frozen advance-head generation
+/// stays reachable from the terminal.
+fn finalize_deadline_elapsed(
+    state: &AppState,
+    thread_id: &str,
+    end_at_ms: i64,
+    now_ms: i64,
+) -> Result<()> {
+    crate::accounting_terminal::fence_accounting_for_terminal(
+        state,
+        thread_id,
+        None,
+        ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
+    )?;
+    let params = ryeos_app::run_deadline::elapsed_finalize_params(
+        thread_id,
+        ryeos_app::run_deadline::REASON_ELAPSED_WHILE_DOWN,
+        end_at_ms,
+        now_ms,
+    );
+    match plan_deadline_settlement(interrupted_head_advance(state, thread_id)) {
+        DeadlineSettlement::RetainGeneration(generation) => {
+            tracing::warn!(
+                thread_id,
+                snapshot_hash = %generation.snapshot_hash,
+                "interrupted advance-head run stopped by its deadline keeps its generation"
+            );
+            state
+                .threads
+                .finalize_thread_retaining_generation(&params, &generation)?;
+        }
+        DeadlineSettlement::Plain => {
+            state.threads.finalize_thread(&params)?;
+        }
+    }
+    Ok(())
+}
+
+/// The outcome code, payload and retained generation of a dead thread whose
+/// admitted terminal publication advances HEAD and whose workspace froze and
+/// bound a result generation. `None` for every other thread, which keeps its
+/// ordinary recovery failure.
+fn interrupted_head_advance(
+    state: &AppState,
+    thread_id: &str,
+) -> Option<(
+    &'static str,
+    serde_json::Value,
+    ryeos_state::objects::WorkspaceGenerationPair,
+)> {
+    let thread = state.state_store.get_thread(thread_id).ok().flatten()?;
+    let resume = thread
+        .runtime
+        .launch_metadata
+        .as_ref()?
+        .resume_context
+        .as_ref()?;
+    let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
+        head_ref,
+        expected_hash,
+    } = resume.project_authority.terminal_publication()?
+    else {
+        return None;
+    };
+    let workspace = match state.state_store.execution_workspace_for_thread(thread_id) {
+        Ok(workspace) => workspace?,
+        Err(error) => {
+            tracing::warn!(thread_id, error = %format!("{error:#}"),
+                "cannot read the workspace of a dead advance-head thread; ordinary recovery failure");
+            return None;
+        }
+    };
+    let generation = ryeos_state::objects::WorkspaceGenerationPair {
+        snapshot_hash: workspace.frozen_snapshot_hash?,
+        output_capture_hash: workspace.frozen_output_capture_hash,
+    };
+    let observed = advance_head_ref_coordinates(head_ref).and_then(|(principal, project)| {
+        state
+            .state_store
+            .with_state_db(|db| db.read_project_head(principal, project))
+            .ok()
+            .flatten()
+    });
+    let (outcome_code, payload) = ryeos_executor::execution::interrupted_head_advance_outcome(
+        expected_hash,
+        observed.as_deref(),
+        &generation,
+    );
+    Some((outcome_code, payload, generation))
+}
+
+/// The principal and project of a canonical `projects/<principal>/<project>/head`.
+fn advance_head_ref_coordinates(head_ref: &str) -> Option<(&str, &str)> {
+    let mut components = head_ref.split('/');
+    match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (Some("projects"), Some(principal), Some(project), Some("head"), None) => {
+            Some((principal, project))
+        }
+        _ => None,
+    }
 }
 
 fn has_in_process_handler_driver(thread: &ThreadDetail) -> bool {
@@ -605,7 +843,7 @@ fn in_process_reservation_race_converged(
         .in_process_handler_reservation(thread_id)?;
     let authoritative = state
         .state_store
-        .get_authoritative_root_thread_snapshot(thread_id)?;
+        .get_authoritative_in_process_handler_snapshot(thread_id)?;
     let race_state = classify_in_process_reservation_race(
         reservation.as_ref().map(|reservation| reservation.phase),
         authoritative.as_ref().map(|snapshot| snapshot.status),
@@ -699,7 +937,7 @@ fn fail_ownerless_in_process_reservation(
         })) => {
             let snapshot = state
                 .state_store
-                .get_authoritative_root_thread_snapshot(thread_id)?
+                .get_authoritative_in_process_handler_snapshot(thread_id)?
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "ownerless in-process handler {thread_id} lost its authoritative terminal"
@@ -719,7 +957,7 @@ fn fail_ownerless_in_process_reservation(
             // handler or overwrite a committed outcome.
             let Some(snapshot) = state
                 .state_store
-                .get_authoritative_root_thread_snapshot(thread_id)?
+                .get_authoritative_in_process_handler_snapshot(thread_id)?
             else {
                 return Err(error);
             };
@@ -764,7 +1002,7 @@ fn reconcile_in_process_handler_reservations(
                     .is_in_process_handler_active(&reservation.thread_id)?;
             let authoritative = state
                 .state_store
-                .get_authoritative_root_thread_snapshot(&reservation.thread_id)?;
+                .get_authoritative_in_process_handler_snapshot(&reservation.thread_id)?;
             match (reservation.phase, authoritative) {
                 (InProcessHandlerReservationPhase::Pending, None) if active => {
                     // The registered owner is between its atomic RuntimeDb
@@ -803,13 +1041,13 @@ fn reconcile_in_process_handler_reservations(
                 }
                 (InProcessHandlerReservationPhase::Running, None) => {
                     anyhow::bail!(
-                        "running in-process reservation {} has no authoritative root",
+                        "running in-process reservation {} has no authoritative thread",
                         reservation.thread_id
                     );
                 }
                 (InProcessHandlerReservationPhase::TerminalConfirmed, None) => {
                     anyhow::bail!(
-                        "terminal-confirmed in-process reservation {} has no authoritative root",
+                        "terminal-confirmed in-process reservation {} has no authoritative thread",
                         reservation.thread_id
                     );
                 }
@@ -903,10 +1141,10 @@ fn reconcile_in_process_handler(
     }
     let authoritative = state
         .state_store
-        .get_authoritative_root_thread_snapshot(&thread.thread_id)?
+        .get_authoritative_in_process_handler_snapshot(&thread.thread_id)?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "recorded in-process handler {} has no authoritative root snapshot",
+                "recorded in-process handler {} has no authoritative snapshot",
                 thread.thread_id
             )
         })?;
@@ -1027,7 +1265,7 @@ fn finalize_recovered_stop(
         summary_json: None,
     }) {
         Err(error) => {
-            tracing::warn!(thread_id, error = %error, "failed to finalize recovered stop request");
+            tracing::warn!(thread_id, error = %format!("{error:#}"), "failed to finalize recovered stop request");
         }
         Ok(_) => {
             *reconciled += 1;
@@ -1035,34 +1273,50 @@ fn finalize_recovered_stop(
     }
 }
 
+/// Whether a dead target's identity may be cleared. When it may not, the
+/// identity is quarantined: it is neither cleared nor signalled, and the
+/// decision is recorded on the thread's runtime row (when that row still
+/// carries this exact identity) so thread status and `node doctor` show it.
 fn dead_identity_safe_to_clear(
+    state: &AppState,
     identity: &ryeos_app::process::ExecutionProcessIdentity,
     thread_id: &str,
 ) -> bool {
-    match execution_identity_is_current_boot(identity) {
-        Ok(false) => true,
+    let reason = match execution_identity_is_current_boot(identity) {
+        Ok(false) => return true,
         Ok(true)
             if ryeos_app::process::process_group_presence(identity.pgid())
                 == IdentityLiveness::DeadOrStale =>
         {
-            true
+            return true;
         }
         Ok(true) => {
             tracing::warn!(
                 thread_id,
                 "dead same-boot group leader still has a present or unprovable process group; quarantining"
             );
-            false
+            ryeos_app::state_store::ProcessQuarantineReason::SameBootGroupPresent
         }
         Err(error) => {
             tracing::warn!(
                 thread_id,
-                error = %error,
+                error = %format!("{error:#}"),
                 "cannot compare process-identity boot; quarantining"
             );
-            false
+            ryeos_app::state_store::ProcessQuarantineReason::BootComparisonUnavailable
         }
+    };
+    if let Err(error) = state
+        .state_store
+        .record_process_quarantine(thread_id, identity, reason)
+    {
+        tracing::warn!(
+            thread_id,
+            error = %format!("{error:#}"),
+            "failed to record process quarantine; the identity stays retained"
+        );
     }
+    false
 }
 
 /// Reconcile daemon state after restart.
@@ -1079,13 +1333,51 @@ fn dead_identity_safe_to_clear(
 /// callback before the UDS / HTTP server is bound would fail.
 #[tracing::instrument(name = "state:reconcile", skip(state))]
 pub async fn reconcile_active_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
-    reconcile_active_threads_inner(state, ActiveReconcileMode::Startup).await
+    reconcile_active_threads_inner(state, ActiveReconcileMode::Startup, None).await
+}
+
+/// Startup reconciliation that also applies the latched-drain facts of the
+/// previous incarnation's stop, already bound to this start. A listed thread
+/// whose row still holds exactly the identity that stop proved dead has its
+/// resume budget re-armed (reset to zero) before the ordinary resume
+/// decision, as the stop itself would have done had service SQL been
+/// admitted. Durable rows stay authoritative; the facts only select a reset.
+pub async fn reconcile_active_threads_after_latched_stop(
+    state: &AppState,
+    latched: Option<&ryeos_node::lifecycle_marker::LatchedDrainFacts>,
+) -> Result<ActiveThreadReconcileReport> {
+    let report = reconcile_active_threads_inner(state, ActiveReconcileMode::Startup, latched).await;
+    mirror_process_quarantine_report(state);
+    report
 }
 
 /// Mid-life counterpart used by the supervised periodic recovery task. It
 /// never clears claims or stops a verified live process owned by this daemon.
 pub async fn reconcile_live_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
-    reconcile_active_threads_inner(state, ActiveReconcileMode::Live).await
+    let report = reconcile_active_threads_inner(state, ActiveReconcileMode::Live, None).await;
+    mirror_process_quarantine_report(state);
+    report
+}
+
+/// Mirror the quarantined runtime rows into the report `ryeos node doctor`
+/// reads offline. Best effort: the rows stay the authority, and a failed
+/// mirror only leaves the doctor's view stale.
+fn mirror_process_quarantine_report(state: &AppState) {
+    let mirrored = state
+        .state_store
+        .list_process_quarantines()
+        .and_then(|threads| {
+            ryeos_app::process_quarantine_report::write_report(
+                &state.config.runtime_root().state(),
+                threads,
+            )
+        });
+    if let Err(error) = mirrored {
+        tracing::warn!(
+            error = %format!("{error:#}"),
+            "failed to mirror the process quarantine report for node doctor"
+        );
+    }
 }
 
 /// Retire every predecessor qualification child before root recovery can
@@ -1168,6 +1460,7 @@ fn reconcile_predecessor_scoped_children(state: &AppState) -> Result<usize> {
 async fn reconcile_active_threads_inner(
     state: &AppState,
     mode: ActiveReconcileMode,
+    latched: Option<&ryeos_node::lifecycle_marker::LatchedDrainFacts>,
 ) -> Result<ActiveThreadReconcileReport> {
     // The startup half of the launch-claim contract: claims never expire by
     // wall clock, so every claim surviving from a previous daemon generation
@@ -1287,6 +1580,7 @@ async fn reconcile_active_threads_inner(
         return Ok(ActiveThreadReconcileReport {
             active_thread_ids,
             resume_intents: Vec::new(),
+            held_roots: BTreeMap::new(),
         });
     }
 
@@ -1296,6 +1590,7 @@ async fn reconcile_active_threads_inner(
     );
 
     let mut intents: Vec<ResumeIntent> = Vec::new();
+    let mut held_roots: BTreeMap<String, &'static str> = BTreeMap::new();
 
     for thread in &running_threads {
         if let Some((job, operation)) = state
@@ -1514,7 +1809,7 @@ async fn reconcile_active_threads_inner(
                         "durable stop process liveness is unavailable; failing closed"
                     );
                     continue;
-                } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
+                } else if !dead_identity_safe_to_clear(state, identity, &thread.thread_id) {
                     continue;
                 }
                 let cleared = settle_reconciled_process(state, &thread.thread_id, identity);
@@ -1530,7 +1825,7 @@ async fn reconcile_active_threads_inner(
                     Err(error) => {
                         tracing::warn!(
                             thread_id = %thread.thread_id,
-                            error = %error,
+                            error = %format!("{error:#}"),
                             "failed to clear durable stop identity"
                         );
                         continue;
@@ -1580,7 +1875,7 @@ async fn reconcile_active_threads_inner(
                         "terminal process liveness is unavailable; failing closed"
                     );
                     continue;
-                } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
+                } else if !dead_identity_safe_to_clear(state, identity, &thread.thread_id) {
                     continue;
                 }
                 if !settle_reconciled_process(state, &thread.thread_id, identity)? {
@@ -1627,7 +1922,7 @@ async fn reconcile_active_threads_inner(
                 }
                 IdentityLiveness::DeadOrStale => {
                     if target_liveness != IdentityLiveness::DeadOrStale
-                        || !dead_identity_safe_to_clear(identity, &thread.thread_id)
+                        || !dead_identity_safe_to_clear(state, identity, &thread.thread_id)
                     {
                         continue;
                     }
@@ -1655,7 +1950,7 @@ async fn reconcile_active_threads_inner(
                 Err(error) => {
                     tracing::warn!(
                         thread_id = %thread.thread_id,
-                        error = %error,
+                        error = %format!("{error:#}"),
                         "failed to clear terminated process identity before reconcile"
                     );
                     continue;
@@ -1683,34 +1978,7 @@ async fn reconcile_active_threads_inner(
             &thread.thread_id,
         )?;
 
-        // Unsupported launch authority is history, not current recovery
-        // authority. The runtime DB inspected only its outer wire fields and
-        // deliberately did not deserialize the predecessor payload. Settle
-        // this thread alone after proving that no live owner remains; never
-        // let one old capsule abort reconciliation for unrelated threads.
-        if let Some(incompatible) = &thread.runtime.incompatible_launch_metadata {
-            state.state_store.clear_recovery_wait(&thread.thread_id)?;
-            finalize_dead(
-                state,
-                mode,
-                &thread.thread_id,
-                pgid,
-                &thread.status,
-                Some((
-                    "incompatible_admitted_launch_capsule_schema",
-                    json!({
-                        "stored_launch_metadata_schema": incompatible.schema_version,
-                        "stored_capsule_schema": incompatible.admitted_launch_capsule_schema,
-                        "current_launch_metadata_schema": ryeos_app::launch_metadata::LAUNCH_METADATA_SCHEMA_VERSION,
-                        "current_capsule_schema": ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
-                    }),
-                )),
-                &mut reconciled,
-            )?;
-            continue;
-        }
-
-        let interrupted_spawn = pgid.is_none();
+        let no_process_cause = no_process_cause(pgid, &thread.status);
 
         if let Some(resume) = thread
             .runtime
@@ -1964,6 +2232,39 @@ async fn reconcile_active_threads_inner(
                         && metadata.launch_driver.is_some()
                 })
         {
+            // The same predicate as the native-resume path: a root whose
+            // dedicated session is not running is never relaunched.
+            match dedicated_session_root_resume(state, &thread.thread_id)? {
+                SessionRootResume::Resume => {}
+                SessionRootResume::Hold => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        reason = DEDICATED_SESSION_HOLDS_CANDIDATE,
+                        "dedicated session is not running — holding its unlaunched root on restart"
+                    );
+                    held_roots.insert(thread.thread_id.clone(), DEDICATED_SESSION_HOLDS_CANDIDATE);
+                    continue;
+                }
+                SessionRootResume::Finalise => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        "dedicated session already settled terminal — not launching its root; finalizing failed"
+                    );
+                    finalize_dead(
+                        state,
+                        mode,
+                        &thread.thread_id,
+                        thread.runtime.pgid,
+                        &thread.status,
+                        Some((
+                            "dedicated_session_settled",
+                            json!({"reason": "the dedicated session is already terminal"}),
+                        )),
+                        &mut reconciled,
+                    )?;
+                    continue;
+                }
+            }
             let launch_metadata = thread
                 .runtime
                 .launch_metadata
@@ -2009,12 +2310,37 @@ async fn reconcile_active_threads_inner(
             continue;
         }
 
+        // A previous latched stop proved this exact group dead but could not
+        // re-arm its resume budget. Re-arm it only while the row still holds
+        // exactly the identity that stop proved, which this pass has just
+        // cleared; any other identity means a later attachment, and the
+        // ordinary crash accounting applies.
+        if let Some(proved) =
+            latched.and_then(|facts| facts.resume_attempts_reset_deferred.get(&thread.thread_id))
+        {
+            if identity == Some(proved) {
+                state
+                    .state_store
+                    .reset_resume_attempts(&thread.thread_id)
+                    .with_context(|| {
+                        format!(
+                            "re-arm resume budget after latched stop for {}",
+                            thread.thread_id
+                        )
+                    })?;
+            } else {
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    "latched-stop resume re-arm ignored: attachment identity changed"
+                );
+            }
+        }
         let attempts = match state.state_store.get_resume_attempts(&thread.thread_id) {
             Ok(n) => n,
             Err(err) => {
                 tracing::error!(
                     thread_id = %thread.thread_id,
-                    error = %err,
+                    error = %format!("{err:#}"),
                     "failed to read resume_attempts; finalizing as failed instead of resuming"
                 );
                 finalize_dead(
@@ -2023,30 +2349,46 @@ async fn reconcile_active_threads_inner(
                     &thread.thread_id,
                     pgid,
                     &thread.status,
-                    Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
+                    Some((
+                        "resume_counter_io_error",
+                        json!({"error": format!("{err:#}")}),
+                    )),
                     &mut reconciled,
                 )?;
                 continue;
             }
         };
-        let decision = decide_resume(thread.runtime.launch_metadata.as_ref(), attempts);
+        let now_ms = lillux::time::timestamp_millis();
+        let run_end_at_ms = match ryeos_app::run_deadline::thread_end_at_ms(
+            state.accounting.as_deref(),
+            thread.runtime.launch_metadata.as_ref(),
+        ) {
+            Ok(end) => end,
+            Err(err) => {
+                tracing::error!(
+                    thread_id = %thread.thread_id,
+                    error = %format!("{err:#}"),
+                    "failed to read the run deadline; recovering without it"
+                );
+                None
+            }
+        };
+        let decision = decide_resume(
+            thread.runtime.launch_metadata.as_ref(),
+            attempts,
+            run_end_at_ms,
+            now_ms,
+        );
 
         match decision {
             ResumeDecision::NoResumePolicy => {
-                let extra = if interrupted_spawn {
-                    Some((
-                        "interrupted_spawn",
-                        json!({"reason": "no pid/pgid attached"}),
-                    ))
-                } else {
-                    None
-                };
+                let extra = no_process_cause.map(|cause| (cause.outcome_code(), cause.details()));
                 tracing::info!(
                     thread_id = %thread.thread_id,
                     kind = %thread.kind,
                     status = %thread.status,
                     pgid = ?pgid,
-                    interrupted_spawn,
+                    no_process_cause = ?no_process_cause,
                     "dead process, no native_resume policy — finalizing failed"
                 );
                 finalize_dead(
@@ -2081,6 +2423,16 @@ async fn reconcile_active_threads_inner(
                     &mut reconciled,
                 )?;
             }
+            ResumeDecision::DeadlineReached { end_at_ms } => {
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    end_at_ms,
+                    now_ms,
+                    "run deadline elapsed while the node was down — settling as a deadline stop"
+                );
+                finalize_deadline_elapsed(state, &thread.thread_id, end_at_ms, now_ms)?;
+                reconciled += 1;
+            }
             ResumeDecision::Exhausted { attempts, max } => {
                 tracing::warn!(
                     thread_id = %thread.thread_id,
@@ -2101,6 +2453,44 @@ async fn reconcile_active_threads_inner(
                     &mut reconciled,
                 )?;
             }
+            ResumeDecision::Resume { .. }
+                if dedicated_session_root_resume(state, &thread.thread_id)?
+                    == SessionRootResume::Hold =>
+            {
+                // The session holds or builds a candidate: its root is left
+                // exactly as it is. No resume budget is spent and the chain
+                // head does not move.
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    reason = DEDICATED_SESSION_HOLDS_CANDIDATE,
+                    "dedicated session is not running — holding its root on restart"
+                );
+                held_roots.insert(thread.thread_id.clone(), DEDICATED_SESSION_HOLDS_CANDIDATE);
+            }
+            ResumeDecision::Resume { .. }
+                if dedicated_session_root_resume(state, &thread.thread_id)?
+                    == SessionRootResume::Finalise =>
+            {
+                // The root of a dedicated session whose session already
+                // settled terminal has nothing to resume: the resume would
+                // only fail in launch preparation and spend the one attempt.
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    "dedicated session already settled terminal — not resuming its root; finalizing failed"
+                );
+                finalize_dead(
+                    state,
+                    mode,
+                    &thread.thread_id,
+                    pgid,
+                    &thread.status,
+                    Some((
+                        "dedicated_session_settled",
+                        json!({"reason": "the dedicated session is already terminal"}),
+                    )),
+                    &mut reconciled,
+                )?;
+            }
             ResumeDecision::Resume { next_attempt, max } => {
                 // Persist the bumped counter BEFORE scheduling the
                 // re-spawn so a crash mid-resume does not grant an
@@ -2109,7 +2499,7 @@ async fn reconcile_active_threads_inner(
                 if let Err(err) = state.state_store.bump_resume_attempts(&thread.thread_id) {
                     tracing::warn!(
                         thread_id = %thread.thread_id,
-                        error = %err,
+                        error = %format!("{err:#}"),
                         "failed to persist resume_attempts; finalizing instead of resuming"
                     );
                     finalize_dead(
@@ -2118,7 +2508,10 @@ async fn reconcile_active_threads_inner(
                         &thread.thread_id,
                         pgid,
                         &thread.status,
-                        Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
+                        Some((
+                            "resume_counter_io_error",
+                            json!({"error": format!("{err:#}")}),
+                        )),
                         &mut reconciled,
                     )?;
                     continue;
@@ -2195,6 +2588,7 @@ async fn reconcile_active_threads_inner(
     Ok(ActiveThreadReconcileReport {
         active_thread_ids,
         resume_intents: intents,
+        held_roots,
     })
 }
 
@@ -2245,11 +2639,104 @@ fn reconcile_runtime_workspace_operations_before_thread_recovery(
 /// can conclude absence, but the exact durable epoch/profile fence is retained
 /// through every root-backed projection repair and detached only afterward.
 #[doc(hidden)]
+/// Settle every local qualification Worker row a previous daemon generation
+/// left `Attached`, for example when its stop could not write service SQL.
+/// Each exact group is proved absent first, killing it when still alive; a
+/// group whose death cannot be proved keeps its row attached and quarantined.
+/// Only the exact listed rows are settled.
+fn reconcile_qualification_worker_processes(state: &AppState) -> Result<usize> {
+    let mut settled = 0usize;
+    for (placement, identity) in state
+        .state_store
+        .prior_generation_attached_qualification_workers()?
+    {
+        let dead = match execution_group_liveness(&identity) {
+            IdentityLiveness::DeadOrStale => true,
+            IdentityLiveness::Alive => {
+                let killed = kill_by_action(&identity, ryeos_app::process::ShutdownAction::Hard);
+                killed.success
+                    && execution_group_liveness(&identity) == IdentityLiveness::DeadOrStale
+            }
+            IdentityLiveness::Unavailable => false,
+        };
+        if !dead {
+            tracing::error!(
+                placement_thread_id = %placement,
+                "local qualification Worker remains quarantined: process-group death is unproved"
+            );
+            continue;
+        }
+        if let Err(error) = ryeos_app::process::assert_reaped_process_group_absent(&identity) {
+            tracing::error!(
+                placement_thread_id = %placement,
+                error = %format!("{error:#}"),
+                "local qualification Worker remains quarantined: group absence is unproved"
+            );
+            continue;
+        }
+        ryeos_app::external_qualification_local::settle_qualification_worker_process(
+            state, &placement,
+        )
+        .with_context(|| format!("settle local qualification Worker row for {placement}"))?;
+        settled = settled.saturating_add(1);
+    }
+    Ok(settled)
+}
+
 pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> {
     reconcile_process_resource_reservations(state)?;
+    let settled_qualification_workers = reconcile_qualification_worker_processes(state)?;
+    if settled_qualification_workers != 0 {
+        tracing::info!(
+            settled_qualification_workers,
+            "settled local qualification Worker rows left attached by a previous daemon"
+        );
+    }
+    // The Worker groups above were the connector peers; with them settled, a
+    // connector row the old daemon could not close can be proved peerless and
+    // closed, which is what lets the allocation settle and the credential go.
+    let closed_connectors =
+        ryeos_app::external_connector::close_connectors_left_by_prior_generations(state)?;
+    if closed_connectors != 0 {
+        tracing::warn!(
+            closed_connectors,
+            "closed external connectors a previous daemon left open"
+        );
+    }
+    // A Q connector's configuration mount target lives in the shared
+    // credential home; a daemon that died holding the connector left it
+    // reserved there, and every later Q start on that credential is refused
+    // until it is released.
+    let released_mount_targets =
+        ryeos_app::external_connector::release_mount_targets_left_by_prior_generations(state)?;
+    if released_mount_targets != 0 {
+        tracing::warn!(
+            released_mount_targets,
+            "released connector mount targets a previous daemon left reserved"
+        );
+    }
+    let released_qualification_credentials =
+        ryeos_app::external_qualification_local::release_settled_qualification_credential_custody(
+            state,
+        )?;
+    if released_qualification_credentials != 0 {
+        tracing::info!(
+            released_qualification_credentials,
+            "released Q credential custody a previous daemon left held"
+        );
+    }
     reconcile_process_resource_owners(state)?;
-    quiesce_unattached_worker_scopes(state)?;
+    // The old workers are stopped (no durable change) and the remote
+    // execution of every predecessor session is driven to its observed
+    // provider terminal BEFORE any local settlement of a session: the runtime
+    // database refuses to complete or re-identify a session whose external
+    // allocation is unsettled. A provider that has not yet resolved leaves the
+    // allocation quarantined and charged; every local settlement below then
+    // skips that session, and the periodic pass settles it once the allocation
+    // does. Pending never fails startup nor holds readiness.
     quiesce_dedicated_workers(state)?;
+    terminate_predecessor_external_leases(state).await?;
+    quiesce_unattached_worker_scopes(state)?;
     ryeos_app::dedicated_session_service::reconcile_command_outboxes(state)
         .context("reconcile hosted command testimony before worker detachment")?;
     ryeos_app::dedicated_session_service::reconcile_observation_outboxes(state)
@@ -2302,6 +2789,57 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
     Ok(())
 }
 
+/// Terminate, by occurrence id, every remote lease held for a worker of a
+/// previous daemon incarnation; none is reattached. The workers were fenced
+/// above, so each session bound to such a lease is interrupted and imports
+/// nothing from its interrupted turn. A lease whose terminal is not yet
+/// observed stays quarantined and charged, and the periodic cleanup pass
+/// keeps observing it; the node lease budget is released only by the
+/// settlement that records the observed terminal. Provider operations run on
+/// a Lillux host task so they do not hold an async worker. This runs only
+/// here, before the node is ready: a lease is judged a predecessor's by its
+/// worker row alone, which is sound only while no worker of this incarnation
+/// can have started.
+async fn terminate_predecessor_external_leases(state: &AppState) -> Result<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let owner = state.clone();
+    let task = lillux::task::spawn_host_task("external-lease-restart", move || {
+        let _ = sender
+            .send(ryeos_app::external_placement::terminate_predecessor_external_leases(&owner));
+    })
+    .context("start Lillux predecessor lease termination owner")?;
+    task.detach();
+    let report = receiver
+        .await
+        .context("predecessor lease termination owner stopped without a result")?
+        .context("discover remote leases of previous daemon incarnations")?;
+    tracing::info!(
+        discovered = report.discovered,
+        terminated = report.terminated.len(),
+        pending = report.pending.len(),
+        failed = report.failures.len(),
+        "predecessor external leases and session allocations driven toward their observed \
+         provider terminal at startup; none is reattached"
+    );
+    for placement in report.terminated.iter().chain(&report.pending) {
+        tracing::warn!(
+            placement = %placement,
+            reason = ryeos_app::external_placement::PREDECESSOR_LEASE_INTERRUPTION,
+            "session interrupted by a controller restart"
+        );
+    }
+    for (placement, error) in &report.failures {
+        tracing::error!(
+            placement = %placement,
+            error = %error,
+            reason = ryeos_app::external_placement::PREDECESSOR_LEASE_INTERRUPTION,
+            "remote lease of a previous daemon incarnation remains quarantined after a failed \
+             termination attempt"
+        );
+    }
+    Ok(())
+}
+
 /// Retained pre-contact rows can only be retired.  They are never authority
 /// to allocate or relaunch after restart.  A bound scope may contain a child
 /// from the crash gap before attachment, so Lillux must prove termination
@@ -2350,6 +2888,16 @@ pub fn reconcile_process_resource_owners(state: &AppState) -> Result<()> {
             if attached.contains(recovery.owner_incarnation.as_str()) {
                 continue;
             }
+            // Financial reservation precedes resource binding. Its retained
+            // recovery identity therefore has an empty resource set and no
+            // settlement tag. An absent local scope cannot prove either the
+            // selected authority or driver retirement after a lost attach ACK.
+            if recovery.process_identity.process_scope.is_none() {
+                anyhow::bail!(
+                    "unattached resource owner `{}` remains quarantined: settlement and driver retirement are unproved",
+                    recovery.owner_incarnation
+                );
+            }
             let dead = match execution_group_liveness(&recovery.process_identity) {
                 IdentityLiveness::DeadOrStale => true,
                 IdentityLiveness::Alive => {
@@ -2377,6 +2925,19 @@ pub fn reconcile_process_resource_owners(state: &AppState) -> Result<()> {
         }
     }
     for owner in owners {
+        if !owner.cleanup_proved
+            && matches!(
+                owner.process_identity.resource_settlement_authority,
+                Some(
+                    ryeos_app::process::ProcessResourceSettlementAuthority::TrustedProcessGroup { .. }
+                )
+            )
+        {
+            anyhow::bail!(
+                "trusted resource owner `{}` remains quarantined: driver retirement is unproved",
+                owner.owner_coordinate
+            );
+        }
         let evidence = if owner.cleanup_proved {
             owner
                 .cleanup_evidence
@@ -2642,15 +3203,34 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
             if state.state_store.worker_process(worker_id)?.is_some() {
                 continue;
             }
+            let allocation_unsettled =
+                ryeos_app::external_placement::session_has_unsettled_external_allocation(
+                    state,
+                    &session.placement_thread_id,
+                )?;
             let Some(reservation) = state.state_store.dedicated_worker_scope(
                 &session.placement_thread_id,
                 worker_id,
                 epoch,
             )?
             else {
+                if allocation_unsettled {
+                    warn_session_awaits_external_terminal(&session.placement_thread_id);
+                    continue;
+                }
+                settle_unattached_trusted_holding(
+                    state,
+                    &session.placement_thread_id,
+                    worker_id,
+                    epoch,
+                )?;
                 continue;
             };
             if reservation.daemon_generation_id == ryeos_app::runtime_db::daemon_generation_id() {
+                continue;
+            }
+            if allocation_unsettled {
+                warn_session_awaits_external_terminal(&session.placement_thread_id);
                 continue;
             }
             if reservation
@@ -2670,6 +3250,10 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                     "unattached process scope and launcher belonged to an ended host lifetime",
                     true,
                 )?;
+                log_predecessor_session_settled(
+                    &session.placement_thread_id,
+                    "unattached process scope and launcher belonged to an ended host lifetime",
+                );
                 continue;
             }
             let Some(recovery) = reservation.recovery else {
@@ -2677,13 +3261,19 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                 // spawn is permitted before binding. Unlike a bound scope,
                 // this journal phase proves there is no wrapper/reap owner.
                 match reservation.allocation.discard_unlaunched() {
-                    Ok(()) => state.state_store.fail_dedicated_session_start(
-                        &session.placement_thread_id,
-                        worker_id,
-                        epoch,
-                        "discarded unbound process-scope allocation before worker contact",
-                        true,
-                    )?,
+                    Ok(()) => {
+                        state.state_store.fail_dedicated_session_start(
+                            &session.placement_thread_id,
+                            worker_id,
+                            epoch,
+                            "discarded unbound process-scope allocation before worker contact",
+                            true,
+                        )?;
+                        log_predecessor_session_settled(
+                            &session.placement_thread_id,
+                            "discarded unbound process-scope allocation before worker contact",
+                        );
+                    }
                     Err(error) => tracing::warn!(
                         placement_thread_id = %session.placement_thread_id,
                         worker_instance_id = worker_id, error,
@@ -2706,6 +3296,87 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+fn log_predecessor_session_settled(placement_thread_id: &str, reason: &str) {
+    tracing::info!(
+        placement_thread_id,
+        reason,
+        "predecessor session settled locally after its external allocation was settled"
+    );
+}
+
+fn warn_session_awaits_external_terminal(placement_thread_id: &str) {
+    tracing::warn!(
+        placement_thread_id,
+        "session's external allocation has no observed provider terminal yet; the session stays \
+         quarantined with its credential lock held until the periodic cleanup settles it"
+    );
+}
+
+/// The trusted-process-group form of the pre-contact holding. There is no
+/// scope to terminate, so the only thing that can settle it is the recorded
+/// host lifetime having ended; otherwise, or when Lillux cannot decide, or
+/// when no holding was recorded, nothing is claimed and the session stays
+/// quarantined with its credential lock held. An undecidable lifetime must
+/// not abort daemon startup.
+fn settle_unattached_trusted_holding(
+    state: &AppState,
+    placement_thread_id: &str,
+    worker_id: &str,
+    epoch: u64,
+) -> Result<()> {
+    use ryeos_app::runtime_db::UnattachedTrustedHoldingProof as Proof;
+    let Some(holding) = state.state_store.dedicated_worker_trusted_holding(
+        placement_thread_id,
+        worker_id,
+        epoch,
+    )?
+    else {
+        return Ok(());
+    };
+    if holding.daemon_generation_id == ryeos_app::runtime_db::daemon_generation_id() {
+        return Ok(());
+    }
+    match state.state_store.unattached_trusted_holding_proof(
+        placement_thread_id,
+        worker_id,
+        epoch,
+    )? {
+        Proof::Ended => {
+            state.state_store.fail_dedicated_session_start(
+                placement_thread_id,
+                worker_id,
+                epoch,
+                "unattached trusted process group and launcher belonged to an ended host lifetime",
+                true,
+            )?;
+            log_predecessor_session_settled(
+                placement_thread_id,
+                "unattached trusted process group and launcher belonged to an ended host lifetime",
+            );
+            Ok(())
+        }
+        Proof::Absent | Proof::NotEnded => {
+            tracing::warn!(
+                placement_thread_id,
+                worker_instance_id = worker_id,
+                boot_epoch = epoch,
+                "unattached trusted worker launcher is not proved gone; session stays quarantined"
+            );
+            Ok(())
+        }
+        Proof::Undecided(reason) => {
+            tracing::warn!(
+                placement_thread_id,
+                worker_instance_id = worker_id,
+                boot_epoch = epoch,
+                reason,
+                "unattached trusted worker host lifetime cannot be decided; session stays quarantined"
+            );
+            Ok(())
+        }
+    }
+}
+
 fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
     let current_generation = ryeos_app::runtime_db::daemon_generation_id();
     for worker in state.state_store.live_worker_processes()? {
@@ -2714,52 +3385,118 @@ fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
         if worker.daemon_generation_id == current_generation && !retained_unproved {
             continue;
         }
-        let initial_liveness = execution_group_liveness(&worker.process_identity);
-        let cleanup_state = match initial_liveness {
-            IdentityLiveness::DeadOrStale => "reaped",
-            IdentityLiveness::Alive => {
-                let killed = kill_by_action(
-                    &worker.process_identity,
-                    ryeos_app::process::ShutdownAction::Hard,
-                );
-                if killed.success
-                    && execution_group_liveness(&worker.process_identity)
-                        == IdentityLiveness::DeadOrStale
-                {
-                    "reaped"
-                } else {
-                    "unproved"
-                }
+        fence_retained_dedicated_worker(state, &worker, retained_unproved)?;
+    }
+    Ok(())
+}
+
+/// Fence one worker retained from a previous daemon generation. A worker whose
+/// session's external allocation is unsettled is left exactly as it is: the
+/// fence would re-identify the session, which the runtime database refuses
+/// until the provider terminal is observed. Returns whether it was fenced.
+fn fence_retained_dedicated_worker(
+    state: &AppState,
+    worker: &ryeos_app::runtime_db::WorkerProcessRecord,
+    retained_unproved: bool,
+) -> Result<bool> {
+    if ryeos_app::external_placement::session_has_unsettled_external_allocation(
+        state,
+        &worker.placement_thread_id,
+    )? {
+        warn_session_awaits_external_terminal(&worker.placement_thread_id);
+        return Ok(false);
+    }
+    let initial_liveness = execution_group_liveness(&worker.process_identity);
+    let cleanup_state = match initial_liveness {
+        IdentityLiveness::DeadOrStale => "reaped",
+        IdentityLiveness::Alive => {
+            let killed = kill_by_action(
+                &worker.process_identity,
+                ryeos_app::process::ShutdownAction::Hard,
+            );
+            if killed.success
+                && execution_group_liveness(&worker.process_identity)
+                    == IdentityLiveness::DeadOrStale
+            {
+                "reaped"
+            } else {
+                "unproved"
             }
-            IdentityLiveness::Unavailable => "unproved",
-        };
-        if retained_unproved {
-            if cleanup_state == "reaped" {
-                state.state_store.settle_worker_process(
-                    &worker.worker_instance_id,
-                    &worker.placement_thread_id,
-                    worker.boot_epoch,
-                    "reaped",
-                    "abandoned worker cleanup proved during startup",
-                )?;
-            }
-        } else {
-            state.state_store.fence_abandoned_worker_process(
+        }
+        IdentityLiveness::Unavailable => "unproved",
+    };
+    if retained_unproved {
+        if cleanup_state == "reaped" {
+            state.state_store.settle_worker_process(
                 &worker.worker_instance_id,
                 &worker.placement_thread_id,
                 worker.boot_epoch,
-                cleanup_state,
+                "reaped",
+                "abandoned worker cleanup proved during startup",
             )?;
         }
-        tracing::warn!(
-            worker_instance_id = %worker.worker_instance_id,
-            placement_thread_id = %worker.placement_thread_id,
-            dead_daemon_generation = %worker.daemon_generation_id,
+    } else {
+        state.state_store.fence_abandoned_worker_process(
+            &worker.worker_instance_id,
+            &worker.placement_thread_id,
+            worker.boot_epoch,
             cleanup_state,
-            "fenced a dedicated worker retained from a previous daemon generation"
-        );
+        )?;
     }
-    Ok(())
+    tracing::warn!(
+        worker_instance_id = %worker.worker_instance_id,
+        placement_thread_id = %worker.placement_thread_id,
+        dead_daemon_generation = %worker.daemon_generation_id,
+        cleanup_state,
+        "fenced a dedicated worker retained from a previous daemon generation"
+    );
+    log_predecessor_session_settled(
+        &worker.placement_thread_id,
+        "worker of a previous daemon generation fenced",
+    );
+    Ok(true)
+}
+
+/// The periodic half of the startup settlement. A session whose external
+/// allocation was still unsettled at startup was left quarantined; once the
+/// periodic cleanup observes the provider terminal, this settles what startup
+/// skipped, by the same generation-gated rules and in the same order. It acts
+/// only on rows of an earlier daemon generation, so it never touches a live
+/// session of this one. Returns whether any session was settled.
+pub fn settle_predecessor_sessions_after_external_settlement(state: &AppState) -> Result<bool> {
+    let current_generation = ryeos_app::runtime_db::daemon_generation_id();
+    let mut settled = false;
+    for worker in state.state_store.live_worker_processes()? {
+        if worker.daemon_generation_id == current_generation {
+            continue;
+        }
+        let retained_unproved = worker.state == ryeos_app::runtime_db::WorkerProcessState::Dead
+            && worker.cleanup_state == "unproved";
+        settled |= fence_retained_dedicated_worker(state, &worker, retained_unproved)?;
+    }
+    let before = state
+        .state_store
+        .dedicated_sessions_in_state("admitted")?
+        .len()
+        + state
+            .state_store
+            .dedicated_sessions_in_state("outcome_unknown")?
+            .len();
+    quiesce_unattached_worker_scopes(state)?;
+    let after = state
+        .state_store
+        .dedicated_sessions_in_state("admitted")?
+        .len()
+        + state
+            .state_store
+            .dedicated_sessions_in_state("outcome_unknown")?
+            .len();
+    settled |= after < before;
+    if settled {
+        ryeos_app::dedicated_session_service::reconcile_command_outboxes(state)
+            .context("reconcile hosted commands classified by a deferred worker detachment")?;
+    }
+    Ok(settled)
 }
 
 /// Stop every worker retained from a previous daemon generation without
@@ -2840,6 +3577,33 @@ fn awaited_action_parent_is_open(
         && matches!(current.status.as_str(), "created" | "running"))
 }
 
+/// Re-run the lineage append for a dispatched child that may have been born
+/// before a crash. A child born before a crash may lack its lineage event. The
+/// parent has usually settled by now, which is the normal recovery case, so a
+/// settled parent or a failed append is logged and the caller's pass continues.
+fn recover_child_lineage(
+    threads: &ryeos_app::thread_lifecycle::ThreadLifecycleService,
+    operation_id: &str,
+    child_thread_id: &str,
+) {
+    match threads.record_dispatch_child_lineage(child_thread_id) {
+        Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+            ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+        )) => tracing::warn!(
+            operation_id,
+            child_thread_id,
+            "parent settled before the dispatched child's lineage event was recovered"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            operation_id,
+            child_thread_id,
+            error = %error,
+            "failed to recover the dispatched child's lineage event"
+        ),
+    }
+}
+
 fn repair_root_runtime_action_links(state: &AppState) -> Result<()> {
     for intent in state.state_store.runtime_action_intents()? {
         if !matches!(
@@ -2878,16 +3642,6 @@ fn repair_root_runtime_action_links(state: &AppState) -> Result<()> {
             // Workspace-operation recovery owns cancellation/settlement. The
             // generic detached replay path must never relaunch a child while
             // its parent root remains fenced by the same durable intent.
-            continue;
-        }
-        if let Some(incompatible) = &intent.incompatible_launch_metadata {
-            tracing::warn!(
-                operation_id = %intent.operation_id,
-                child_thread_id = %intent.child_thread_id,
-                stored_launch_metadata_schema = incompatible.schema_version,
-                stored_capsule_schema = ?incompatible.admitted_launch_capsule_schema,
-                "sealed detached intent uses unsupported launch authority; preserving it as opaque history"
-            );
             continue;
         }
         let child = match state.state_store.get_thread(&intent.child_thread_id)? {
@@ -2991,6 +3745,11 @@ fn repair_root_runtime_action_links(state: &AppState) -> Result<()> {
             &intent.child_thread_id,
             "dispatch",
         )?;
+        recover_child_lineage(
+            &state.threads,
+            &intent.operation_id,
+            &intent.child_thread_id,
+        );
         if inherited_stop.is_some() {
             continue;
         }
@@ -3077,7 +3836,7 @@ fn reconcile_abandoned_workspace_members(state: &AppState) -> Result<()> {
                         IdentityLiveness::DeadOrStale => {}
                     }
                     if execution_liveness(&identity) != IdentityLiveness::DeadOrStale
-                        || !dead_identity_safe_to_clear(&identity, &member.thread_id)
+                        || !dead_identity_safe_to_clear(state, &identity, &member.thread_id)
                     {
                         continue;
                     }
@@ -3145,23 +3904,20 @@ fn assert_abandoned_workspace_contacts_settled(
         {
             ryeos_app::process::assert_reaped_process_group_absent(&identity)?;
         }
-        if let Some(claim) = state.state_store.get_launch_claim(thread_id)? {
-            if workspace.launch_owner.as_deref() != Some(claim.claimed_by.as_str())
-                || state.state_store.is_launch_owner_active(&claim.claimed_by)
-            {
-                anyhow::bail!("workspace has an active or replacement launch owner");
-            }
+        if let Some(claim) = state.state_store.get_launch_claim(thread_id)?
+            && (workspace.launch_owner.as_deref() != Some(claim.claimed_by.as_str())
+                || state.state_store.is_launch_owner_active(&claim.claimed_by))
+        {
+            anyhow::bail!("workspace has an active or replacement launch owner");
         }
         if let Some(identity) = state
             .state_store
             .get_thread(thread_id)?
             .and_then(|thread| thread.runtime.process_identity)
+            && (execution_liveness(&identity) != IdentityLiveness::DeadOrStale
+                || !dead_identity_safe_to_clear(state, &identity, thread_id))
         {
-            if execution_liveness(&identity) != IdentityLiveness::DeadOrStale
-                || !dead_identity_safe_to_clear(&identity, thread_id)
-            {
-                anyhow::bail!("workspace root process death is unproved");
-            }
+            anyhow::bail!("workspace root process death is unproved");
         }
     }
     // During Constructing this is the held creator, not the root target. Once
@@ -3171,6 +3927,7 @@ fn assert_abandoned_workspace_contacts_settled(
         let identity: ryeos_app::process::ExecutionProcessIdentity = serde_json::from_str(raw)?;
         if execution_liveness(&identity) != IdentityLiveness::DeadOrStale
             || !dead_identity_safe_to_clear(
+                state,
                 &identity,
                 workspace
                     .thread_id
@@ -3218,7 +3975,7 @@ fn reconcile_execution_workspaces(
             if let Some(thread_id) = workspace.thread_id.as_ref() {
                 blocked_freezes.insert(thread_id.clone());
             }
-            tracing::warn!(workspace_id = %workspace.workspace_id, %error,
+            tracing::warn!(workspace_id = %workspace.workspace_id, error = %format!("{error:#}"),
                 "workspace contact remains unresolved; preserving its exact journal");
             continue;
         }
@@ -3226,7 +3983,7 @@ fn reconcile_execution_workspaces(
             if let Err(error) = cleanup_dead_execution_workspace(state, &workspace) {
                 tracing::warn!(
                     workspace_id = %workspace.workspace_id,
-                    %error,
+                    error = %format!("{error:#}"),
                     "verified workspace destroy could not finish idempotent root/row cleanup"
                 );
             }
@@ -3268,7 +4025,7 @@ fn reconcile_execution_workspaces(
                     if let Some(thread_id) = workspace.thread_id.as_ref() {
                         blocked_freezes.insert(thread_id.clone());
                     }
-                    tracing::error!(workspace_id = %workspace.workspace_id, %error,
+                    tracing::error!(workspace_id = %workspace.workspace_id, error = %format!("{error:#}"),
                         "interrupted workspace freeze has contradictory generation authority; preserving quarantine");
                     continue;
                 }
@@ -3337,7 +4094,7 @@ fn reconcile_execution_workspaces(
                         }
                         tracing::error!(
                             workspace_id = %workspace.workspace_id,
-                            %error,
+                            error = %format!("{error:#}"),
                             "interrupted callback freeze could not be recovered; preserving backend mutation state"
                         );
                     }
@@ -3415,7 +4172,7 @@ fn reconcile_execution_workspaces(
         if let Err(error) = cleanup_dead_execution_workspace(state, &workspace) {
             tracing::warn!(
                 workspace_id = %workspace.workspace_id,
-                %error,
+                error = %format!("{error:#}"),
                 "dead execution workspace could not be owner-verified and removed; retaining quarantine"
             );
         }
@@ -3459,7 +4216,7 @@ fn should_retain_workspace_for_native_resume(
     };
     let attempts = state.state_store.get_resume_attempts(thread_id)?;
     if !matches!(
-        decide_resume(Some(metadata), attempts),
+        decide_resume(Some(metadata), attempts, None, 0),
         ResumeDecision::Resume { .. }
     ) || metadata.sealed_root_request.is_none()
     {
@@ -3627,7 +4384,10 @@ fn remove_exact_workspace_root_if_present(root_path: &std::path::Path) -> Result
         return Ok(());
     };
     root.remove_contents_recursive()?;
-    if !parent.remove_empty_child_if_same(name, &root)? {
+    if !parent
+        .remove_empty_child_if_same(name, &root)
+        .map(|receipt| receipt.is_some())?
+    {
         anyhow::bail!("workspace root remained non-empty");
     }
     Ok(())
@@ -3657,8 +4417,11 @@ pub enum FollowReconcileAction {
     /// stored): `ready`/`resuming`. Driven by `launch_follow_resume_successor`.
     Resume { follow_key: String },
     /// A `waiting` waiter whose CHILD row was created but never launched (crash in
-    /// the pre-launch window). Driven by `launch_follow_child(.., None, None)` — a
-    /// fresh detached launch with no parent clamp (reconcile parity).
+    /// the pre-launch window). Driven by `prepare_and_spawn_follow_child_recovery`
+    /// at startup and `launch_follow_child(.., None, None)` in periodic recovery:
+    /// a detached launch under the persisted parent context (hard limits, depth,
+    /// accounting scope) and `FollowChildHybrid` parent caps, the same clamp as
+    /// the hot path.
     RelaunchChild { child_thread_id: String },
 }
 
@@ -3930,7 +4693,171 @@ fn converge_reserved_follow(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_resume_predicate_covers_every_dedicated_session_state() {
+        use ryeos_app::dedicated_session_service::{
+            SESSION_STATE_POLICY,
+            SessionRootResume::{Finalise, Hold, Resume},
+            session_root_resume,
+        };
+        assert_eq!(SESSION_STATE_POLICY.len(), 16);
+        for state in [
+            "admitted",
+            "binding",
+            "idle",
+            "turn_running",
+            "awaiting_approval",
+            "recovering",
+            "outcome_unknown",
+            "draining",
+        ] {
+            assert_eq!(session_root_resume(Some(state)), Resume, "{state}");
+        }
+        for state in [
+            "freezing",
+            "frozen",
+            "verifying",
+            "qualifying",
+            "publish_ready",
+            "publishing",
+            "discarding",
+        ] {
+            assert_eq!(session_root_resume(Some(state)), Hold, "{state}");
+        }
+        assert_eq!(session_root_resume(Some("terminal")), Finalise);
+        // A thread with no dedicated session resumes as before; a state the
+        // table does not know is held rather than resumed.
+        assert_eq!(session_root_resume(None), Resume);
+        assert_eq!(session_root_resume(Some("novel")), Hold);
+        for policy in SESSION_STATE_POLICY {
+            assert_eq!(session_root_resume(Some(policy.state)), policy.root_resume);
+        }
+    }
+
+    #[test]
+    fn a_drained_running_thread_is_interrupted_by_restart_not_spawn() {
+        use super::{NoProcessCause, no_process_cause};
+        assert_eq!(no_process_cause(Some(7), "running"), None);
+        assert_eq!(
+            no_process_cause(None, "created"),
+            Some(NoProcessCause::InterruptedSpawn)
+        );
+        let drained = no_process_cause(None, "running").unwrap();
+        assert_eq!(drained, NoProcessCause::InterruptedByRestart);
+        assert_eq!(drained.outcome_code(), "interrupted_by_restart");
+        assert_eq!(
+            NoProcessCause::InterruptedSpawn.outcome_code(),
+            "interrupted_spawn"
+        );
+    }
+
     use super::*;
+
+    fn lineage_thread(thread_id: &str) -> ryeos_app::state_store::NewThreadRecord {
+        let hash = "a".repeat(64);
+        ryeos_app::state_store::NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: "directive".to_string(),
+            item_ref: format!("directive:test/{thread_id}"),
+            executor_ref: "native:test".to_string(),
+            launch_mode: "wait".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some("fp:test".to_string()),
+            project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: Some(ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: format!("directive:test/{thread_id}"),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn lineage_recovery_continues_past_a_child_whose_parent_settled() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        let store = &state.state_store;
+        for (index, (parent, child)) in [("T-p1", "T-c1"), ("T-p2", "T-c2")].iter().enumerate() {
+            store
+                .create_thread_for_test(&lineage_thread(parent))
+                .unwrap();
+            store.mark_thread_running(parent, None).unwrap();
+            store
+                .reserve_runtime_action_intent(
+                    &format!("{index}").repeat(64),
+                    parent,
+                    ryeos_app::runtime_db::RuntimeActionMode::Detached,
+                    &"b".repeat(64),
+                    child,
+                    None,
+                )
+                .unwrap();
+            store
+                .create_thread_for_test(&lineage_thread(child))
+                .unwrap();
+            store.record_child_link(parent, child, "dispatch").unwrap();
+        }
+        store
+            .finalize_thread(
+                "T-p1",
+                &ryeos_app::state_store::FinalizeThreadRecord {
+                    status: "completed".to_string(),
+                    outcome_code: Some("completed".to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .unwrap();
+
+        for (operation, child) in [("op-1", "T-c1"), ("op-2", "T-c2")] {
+            recover_child_lineage(&state.threads, operation, child);
+        }
+
+        let spawned = |parent: &str| {
+            store
+                .replay_events(parent, Some(parent), None, 64, 1024 * 1024)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|event| event.event_type == "child_thread_spawned")
+                .count()
+        };
+        assert_eq!(spawned("T-p1"), 0);
+        assert_eq!(spawned("T-p2"), 1);
+    }
+
+    #[test]
+    fn advance_head_ref_coordinates_accept_only_the_canonical_project_head() {
+        let principal = "a".repeat(64);
+        let project = "b".repeat(64);
+        let head_ref = format!("projects/{principal}/{project}/head");
+        assert_eq!(
+            advance_head_ref_coordinates(&head_ref),
+            Some((principal.as_str(), project.as_str()))
+        );
+        assert!(advance_head_ref_coordinates("projects/a/b").is_none());
+        assert!(advance_head_ref_coordinates("projects/a/b/head/extra").is_none());
+        assert!(advance_head_ref_coordinates("chains/a/b/head").is_none());
+    }
     use ryeos_app::launch_metadata::ResumeContext;
     use ryeos_engine::contracts::{
         EffectivePrincipal, ExecutionHints, NativeResumeSpec, Principal, ProjectContext,
@@ -4038,6 +4965,8 @@ mod tests {
                 project_authority_id: lillux::sha256_hex(b"live-project\0site:a:/tmp/p\0/tmp/p"),
                 source_identity: "dotenv:/tmp/p/.env".to_string(),
                 include_operator_vault: true,
+                recipient_principal: "operator".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
             },
             Vec::new(),
@@ -4236,8 +5165,8 @@ mod tests {
                 stop_requested_at_ms: None,
                 stop_intent: None,
                 launch_metadata: lm,
-                incompatible_launch_metadata: None,
                 recovery_wait: None,
+                process_quarantine: None,
             },
         }
     }
@@ -4261,6 +5190,7 @@ mod tests {
             supports_interrupt: false,
             supports_continuation: false,
             supports_operator_followup: false,
+            retirement_fence: false,
         };
         assert!(is_daemon_owned_non_execution_thread(
             &seat,
@@ -4421,13 +5351,19 @@ mod tests {
 
     #[test]
     fn no_metadata_finalizes() {
-        assert_eq!(decide_resume(None, 0), ResumeDecision::NoResumePolicy);
+        assert_eq!(
+            decide_resume(None, 0, None, 0),
+            ResumeDecision::NoResumePolicy
+        );
     }
 
     #[test]
     fn no_native_resume_finalizes() {
         let m = RuntimeLaunchMetadata::default();
-        assert_eq!(decide_resume(Some(&m), 0), ResumeDecision::NoResumePolicy);
+        assert_eq!(
+            decide_resume(Some(&m), 0, None, 0),
+            ResumeDecision::NoResumePolicy
+        );
     }
 
     #[test]
@@ -4440,7 +5376,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide_resume(Some(&m), 0),
+            decide_resume(Some(&m), 0, None, 0),
             ResumeDecision::MissingResumeContext
         );
     }
@@ -4456,18 +5392,64 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide_resume(Some(&m), 0),
+            decide_resume(Some(&m), 0, None, 0),
             ResumeDecision::Resume {
                 next_attempt: 1,
                 max: 3
             }
         );
         assert_eq!(
-            decide_resume(Some(&m), 2),
+            decide_resume(Some(&m), 2, None, 0),
             ResumeDecision::Resume {
                 next_attempt: 3,
                 max: 3
             }
+        );
+    }
+
+    #[test]
+    fn a_deadline_stop_keeps_a_frozen_advance_head_generation() {
+        let generation = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "a".repeat(64),
+            output_capture_hash: None,
+        };
+        assert_eq!(
+            plan_deadline_settlement(Some((
+                "head_advance_interrupted",
+                serde_json::json!({}),
+                generation.clone()
+            ))),
+            DeadlineSettlement::RetainGeneration(generation)
+        );
+        assert_eq!(plan_deadline_settlement(None), DeadlineSettlement::Plain);
+    }
+
+    #[test]
+    fn a_passed_deadline_beats_resume_and_an_open_one_does_not() {
+        let m = RuntimeLaunchMetadata {
+            native_resume: Some(NativeResumeSpec {
+                checkpoint_interval_secs: 30,
+                max_auto_resume_attempts: 3,
+            }),
+            resume_context: Some(ctx()),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide_resume(Some(&m), 0, Some(1_000), 1_000),
+            ResumeDecision::DeadlineReached { end_at_ms: 1_000 }
+        );
+        assert_eq!(
+            decide_resume(Some(&m), 0, Some(1_000), 999),
+            ResumeDecision::Resume {
+                next_attempt: 1,
+                max: 3
+            }
+        );
+        // A thread that cannot resume is finalized as before, deadline or not.
+        let plain = RuntimeLaunchMetadata::default();
+        assert_eq!(
+            decide_resume(Some(&plain), 0, Some(1_000), 2_000),
+            ResumeDecision::NoResumePolicy
         );
     }
 
@@ -4482,14 +5464,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide_resume(Some(&m), 2),
+            decide_resume(Some(&m), 2, None, 0),
             ResumeDecision::Exhausted {
                 attempts: 2,
                 max: 2
             }
         );
         assert_eq!(
-            decide_resume(Some(&m), 5),
+            decide_resume(Some(&m), 5, None, 0),
             ResumeDecision::Exhausted {
                 attempts: 5,
                 max: 2

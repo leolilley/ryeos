@@ -108,17 +108,92 @@ pub struct IsolationLaunchProvenance {
     /// mount selection remains committed by plan_digest.
     pub network_runtime_files: BTreeMap<std::path::PathBuf, String>,
     pub plan_digest: Option<String>,
+    /// How a disabled-isolation launch delivered its admitted command's exact
+    /// bytes. Absence means "not applicable": no admitted command was
+    /// delivered by disabled isolation (an enforced launch, which always
+    /// materializes a named read-only copy, or callback/class provenance). It
+    /// is not a back-compatibility default and never means "written by an
+    /// older version". Omitting it keeps enforced provenance byte-identical.
+    /// An attempt fact, like the plan digest, not part of the admission class,
+    /// and never authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_delivery: Option<IsolationCommandDelivery>,
+    /// The execution posture of a launch that did not run under the node's
+    /// isolation lane. Absence means confined: the lane's own isolation,
+    /// enforced or not, so confined provenance stays byte-identical. Present
+    /// only for a host-direct launch, with the exact operator grant that
+    /// admitted it. An attempt fact like the plan digest, not admission class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_posture: Option<IsolationExecutionPosture>,
+}
+
+/// A launch posture other than confined, recorded in launch provenance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum IsolationExecutionPosture {
+    /// Ran on the host, unconfined, as the daemon user, under this grant.
+    HostDirect(IsolationHostDirectGrant),
+}
+
+/// Exact identity of the operator grant that admitted one host-direct launch:
+/// the node-policy generation that carried it, the grant, the pinned subject
+/// and the origin and containment it ran under.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationHostDirectGrant {
+    pub policy_generation: String,
+    pub grant_id: String,
+    pub item: String,
+    pub signer: String,
+    /// Effective source-closure content-manifest digest, or `None` for an
+    /// item with no source closure.
+    pub source_closure: Option<String>,
+    pub runtime_ref: String,
+    pub runtime_content_hash: String,
+    /// `direct`, `graph_child` or `schedule`.
+    pub origin: String,
+    pub containment: IsolationHostDirectContainment,
+    /// Names delivered from the daemon's boot environment, sorted.
+    pub host_env: Vec<String>,
+}
+
+/// Whole-descendant containment of a host-direct launch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationHostDirectContainment {
+    /// A cgroup process scope: cancel and recovery reach every descendant.
+    Scope,
+    /// The strict process group only: a descendant that leaves the group
+    /// survives cancel.
+    Group,
+}
+
+/// The carrier of an admitted command's verified bytes under disabled
+/// isolation. Both carriers execute exactly the admitted digest through a
+/// retained descriptor; neither reopens a path.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationCommandDelivery {
+    /// A kernel-sealed anonymous copy. Immutable even to the workload, but its
+    /// executable self lookup names an anonymous file.
+    SealedCopy,
+    /// The original host inode, proved unwritable by the daemon's effective
+    /// identity and re-digested through the retained descriptor. Its
+    /// executable self lookup names the real file.
+    VerifiedHostInode,
 }
 
 impl IsolationLaunchProvenance {
     /// Project one concrete launch onto the node-owned isolation class that
     /// can be promised before a target process is compiled. The redacted plan
-    /// digest is deliberately excluded: it is an attempt fact, while every
-    /// other field identifies the retained policy/backend generation and its
-    /// effective capabilities.
+    /// digest and the command delivery are deliberately excluded: they are
+    /// attempt facts, while every other field identifies the retained
+    /// policy/backend generation and its effective capabilities.
     pub fn admission_class(&self) -> Self {
         Self {
             plan_digest: None,
+            command_delivery: None,
+            execution_posture: None,
             ..self.clone()
         }
     }
@@ -144,8 +219,9 @@ pub struct AppliedIsolationLaunch {
 /// this type when handing it to Lillux's attachment-aware spawn path instead of
 /// accidentally passing it to an ordinary spawn API.
 pub struct IsolationRequestAwaitingAttachment {
-    request: lillux::SubprocessRequest,
+    request: Option<lillux::SubprocessRequest>,
     scope: Option<lillux::ProcessScope>,
+    original_backend_capture: Option<std::sync::Arc<super::VerifiedIsolationBackendCapture>>,
 }
 
 impl IsolationRequestAwaitingAttachment {
@@ -153,18 +229,53 @@ impl IsolationRequestAwaitingAttachment {
         request: lillux::SubprocessRequest,
         scope: Option<lillux::ProcessScope>,
     ) -> Self {
-        Self { request, scope }
+        Self {
+            request: Some(request),
+            scope,
+            original_backend_capture: None,
+        }
+    }
+
+    /// Only the actual selected runtime compiler can populate this private
+    /// request custody. It carries capture facts, not native authority.
+    pub(super) fn new_with_original_backend_capture(
+        request: lillux::SubprocessRequest,
+        capture: std::sync::Arc<super::VerifiedIsolationBackendCapture>,
+    ) -> Self {
+        Self {
+            request: Some(request),
+            scope: None,
+            original_backend_capture: Some(capture),
+        }
+    }
+
+    pub(crate) fn take_original_backend_capture(
+        &mut self,
+    ) -> Option<std::sync::Arc<super::VerifiedIsolationBackendCapture>> {
+        self.original_backend_capture.take()
     }
 
     /// Require exact post-release applied-launch testimony on this held
     /// supervised adapter request. This is an explicit stronger consumer
     /// contract; ordinary managed launches keep their existing status floor.
     pub fn require_applied_launch_receipt(mut self) -> Result<Self, EngineError> {
-        let status = self.request.supervised_status.as_mut().ok_or_else(|| {
+        let request = self
+            .request
+            .as_mut()
+            .ok_or_else(|| EngineError::Internal("compiled held request already spent".into()))?;
+        let status = request.supervised_status.as_mut().ok_or_else(|| {
             EngineError::IsolationPolicyRefused {
                 reason: "held launch has no supervised adapter status channel".into(),
             }
         })?;
+        if status
+            .validate_existing_native_settlement_requirements(
+                ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+            )
+            .map_err(|reason| EngineError::IsolationPolicyRefused { reason })?
+        {
+            return Ok(self);
+        }
         status
             .require_applied_launch_receipt(
                 ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
@@ -183,12 +294,47 @@ impl IsolationRequestAwaitingAttachment {
         // The concrete scope was validated and retained BEFORE compiling the
         // plan. It cannot be swapped or omitted at this last launch seam.
         // Its higher owner separately journals recovery through any error.
+        let Some(request) = self.request else {
+            return Err(lillux::SubprocessResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "compiled held request already spent".into(),
+                exit_code: -1,
+                duration_ms: 0.0,
+                pid: 0,
+                timed_out: false,
+                launcher_refusal: None,
+                aborted_before_attachment: None,
+                output_limit_exceeded: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                process_creation_busy: None,
+            });
+        };
         match self.scope {
             Some(scope) => scope
-                .spawn_awaiting_attachment(self.request)
+                .spawn_awaiting_attachment(request)
                 .map_err(|error| error.result),
-            None => lillux::spawn_awaiting_attachment(self.request),
+            None => lillux::spawn_awaiting_attachment(request),
         }
+    }
+
+    /// Narrow the existing unscoped attachment path by its original expiry.
+    /// Trusted pooled ownership does not acquire a local process scope.
+    pub fn spawn_until(
+        self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<lillux::ProcessAwaitingAttachment, EngineError> {
+        if self.scope.is_some() {
+            return Err(EngineError::Internal(
+                "deadline-bound unscoped attachment cannot acquire local scope".into(),
+            ));
+        }
+        let request = self
+            .request
+            .ok_or_else(|| EngineError::Internal("compiled held request already spent".into()))?;
+        lillux::spawn_awaiting_attachment_until(request, deadline)
+            .map_err(crate::dispatch::subprocess_spawn_error)
     }
 }
 
@@ -203,6 +349,8 @@ pub struct AppliedIsolationLaunchAwaitingAttachment {
     /// Exact destination/kind/access expectation compiled independently of
     /// adapter translation, before the held target or provider can run.
     pub expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
+    /// Private compiler custody; callers cannot construct or replace it.
+    pub(crate) original_command_binding: Option<super::CompiledOriginalCommandBinding>,
 }
 
 pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, EngineError> {
@@ -242,6 +390,11 @@ pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, Engin
 mod tests {
     use super::*;
 
+    // The former selected_outer_refusal fixture minted owned Lillux custody.
+    // L1 intentionally exports no dependency-build fixture/native issuer, so
+    // exact outer refusal/transfer controls require the future real root loan.
+    // Lower lexical refusal controls remain in Lillux's private unit fixtures.
+
     fn provenance(protocol: &str) -> IsolationLaunchProvenance {
         IsolationLaunchProvenance {
             policy_digest: None,
@@ -257,6 +410,8 @@ mod tests {
             process_scope_capabilities: BTreeSet::new(),
             network_runtime_files: BTreeMap::new(),
             plan_digest: Some("sha256:attempt".to_string()),
+            command_delivery: None,
+            execution_posture: None,
         }
     }
 
@@ -306,6 +461,42 @@ mod tests {
                 serde_json::from_value(admitted.into()).unwrap();
             assert_eq!(identity.as_str(), admitted);
         }
+    }
+
+    #[test]
+    fn confined_launch_provenance_is_byte_identical() {
+        let confined = provenance("ryeos.isolation-adapter/v9");
+        let value = serde_json::to_value(&confined).unwrap();
+        assert!(value.get("execution_posture").is_none());
+        let mut host = confined.clone();
+        host.execution_posture = Some(IsolationExecutionPosture::HostDirect(
+            IsolationHostDirectGrant {
+                policy_generation: "a".repeat(64),
+                grant_id: "guarded-cargo".into(),
+                item: "tool:ryeos/development/guarded-cargo".into(),
+                signer: "b".repeat(64),
+                source_closure: Some(format!("sha256:{}", "c".repeat(64))),
+                runtime_ref: "tool:ryeos/core/runtimes/python/script".into(),
+                runtime_content_hash: "d".repeat(64),
+                origin: "direct".into(),
+                containment: IsolationHostDirectContainment::Scope,
+                host_env: vec!["HOME".into(), "PATH".into()],
+            },
+        ));
+        let value = serde_json::to_value(&host).unwrap();
+        assert_eq!(
+            value["execution_posture"]["host_direct"]["grant_id"],
+            "guarded-cargo"
+        );
+        assert_eq!(
+            value["execution_posture"]["host_direct"]["containment"],
+            "scope"
+        );
+        assert_eq!(
+            serde_json::from_value::<IsolationLaunchProvenance>(value).unwrap(),
+            host
+        );
+        assert!(host.has_same_admission_class(&confined));
     }
 
     #[test]

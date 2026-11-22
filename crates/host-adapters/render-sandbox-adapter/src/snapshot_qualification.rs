@@ -1,22 +1,21 @@
 //! Render-specific interpretation of an independently produced snapshot probe.
 //!
 //! Parsing and matching this shape grants no lifecycle capability. The daemon
-//! must first authenticate a current, published product qualification and its
-//! admitted verifier execution, then join these fields to the signed binding.
-//! Schema 5 contains only snapshot-content and retained-operation coordinates:
+//! must first authenticate the source-appropriate published qualification and
+//! its admitted verifier execution, then join these fields to the signed
+//! binding. The current caller still admits captured products only.
+//! Schema 6 contains only snapshot-content and retained-operation coordinates:
 //! supervisor Ready, lost-stream survival, and writer exclusion require their
 //! own witnessed operations and cannot be asserted as probe hashes.
 
 use anyhow::{Context as _, Result, ensure};
-use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::io::Cursor;
 
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     MAX_RESTORED_OWNER_RESULT_BYTES, MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES,
-    RESTORATION_VERIFIER_REMOTE_DIRECTORY, RESTORED_VERIFIER_ADAPTER_PROTOCOL,
-    RestoredOwnerChallenge, RestoredOwnerMeasurement, RestoredVerifierAdapterRequest,
-    RestoredVerifierAdapterResponse,
+    RESTORED_VERIFIER_ADAPTER_PROTOCOL, RestoredOwnerChallenge, RestoredOwnerMeasurement,
+    RestoredVerifierAdapterRequest, RestoredVerifierAdapterResponse,
 };
 use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator;
 use ryeos_external_execution_contract::runtime_snapshot::{
@@ -25,9 +24,6 @@ use ryeos_external_execution_contract::runtime_snapshot::{
     RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotQualificationTerminalObservation,
     RuntimeSnapshotQualificationTerminationAdapterRequest,
     RuntimeSnapshotQualificationTerminationAdapterResponse, RuntimeSnapshotReadinessObservation,
-};
-use ryeos_external_execution_contract::{
-    LIFECYCLE_ADAPTER_PROTOCOL, LifecycleRuntimeProbeRequest, LifecycleRuntimeProbeResponse,
 };
 use ryeos_http_transport::{SseLimits, SseReader};
 
@@ -45,6 +41,28 @@ struct QualificationSettings {
     region: String,
     sandbox_group_id: String,
     tls_roots_der_base64: Vec<String>,
+}
+
+/// The egress hosts the occurrence's launch shape asks its sandbox to reach;
+/// empty for a deny-all shape.
+fn qualification_egress_hosts(
+    shape: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+) -> std::collections::BTreeSet<String> {
+    use ryeos_external_execution_contract::runtime_snapshot::LaunchSandboxNetworkPolicy;
+    match &shape.sandbox_network_policy {
+        LaunchSandboxNetworkPolicy::DenyAll => std::collections::BTreeSet::new(),
+        LaunchSandboxNetworkPolicy::AllowList { hosts } => hosts.clone(),
+    }
+}
+
+/// The egress policy a qualification occurrence was created with, derived
+/// from its own launch shape. Create requests it and every later read of the
+/// Sandbox (termination, reconciliation) must echo exactly it.
+fn qualification_expected_egress(
+    spec: &ProviderSpec,
+    shape: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+) -> Result<crate::provider_spec::EgressPolicy> {
+    spec.egress_policy(&qualification_egress_hosts(shape))
 }
 
 fn selected_qualification_settings(
@@ -152,6 +170,7 @@ pub(crate) fn create_restored_sandbox(
         &selected.region,
         &request.locator.snapshot_id,
         request.intent.maximum_lifetime_seconds,
+        &qualification_egress_hosts(&request.intent.launch_shape),
     )?;
     let route = spec
         .qualification_create_route()
@@ -168,10 +187,8 @@ pub(crate) fn create_restored_sandbox(
         plan: selected.plan,
         region: projection.region.clone(),
         timeout_seconds: projection.timeout_seconds,
-        network_policy: crate::NetworkPolicy {
-            default: crate::RenderNetworkPolicyDefault::DenyAll,
-        },
-        snapshot_id: projection.snapshot_id.clone(),
+        network_policy: crate::NetworkPolicy::requested(&projection.network_policy),
+        snapshot_id: Some(projection.snapshot_id.clone()),
     };
     let body = ryeos_external_execution_contract::canonical_json(&body)?;
     let network = crate::network_context_from_captured_inputs()?;
@@ -188,7 +205,7 @@ pub(crate) fn create_restored_sandbox(
         &selected,
         &cancellation,
     ) {
-        Ok(response) => match crate::read_response(response) {
+        Ok(response) => match crate::contact_failure::read_classified(response) {
             Ok((status, body)) => match crate::accepted_create_response(status, &body, &projection)
             {
                 Some(sandbox) => RuntimeSnapshotQualificationAdapterResponse::OccurrenceBound {
@@ -202,14 +219,21 @@ pub(crate) fn create_restored_sandbox(
                 },
                 None => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
                     operation_id: request.intent.operation_id.clone(),
+                    reason: Some(crate::contact_failure::create_rejection(status, &body)),
                 },
             },
-            Err(()) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
+            Err(reason) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
                 operation_id: request.intent.operation_id.clone(),
+                reason: Some(reason),
             },
         },
-        Err(_) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
+        Err(error) => RuntimeSnapshotQualificationAdapterResponse::Uncertain {
             operation_id: request.intent.operation_id.clone(),
+            reason: Some(crate::contact_failure::reason_of(
+                &error,
+                ryeos_external_execution_contract::UncertaintyClass::Transport,
+                "create request failed",
+            )),
         },
     };
     result.validate_for(&request)?;
@@ -294,15 +318,163 @@ pub(crate) fn run_restored_verifier(adapter: &lillux::InheritedDescriptorAuthori
         deadline,
         &cancellation,
     )
-    .unwrap_or_else(|_| RestoredVerifierAdapterResponse::Uncertain {
+    .unwrap_or_else(|error| RestoredVerifierAdapterResponse::Uncertain {
         operation_id: request.intent.operation_id.clone(),
+        reason: Some(crate::contact_failure::contact_reason(&error)),
     });
     result.validate_for(&request)?;
-    crate::write_response(&result)
+    crate::write_response_bounded(
+        &result,
+        ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES,
+    )
 }
 
 /// The mutation entry is called only after a durable first-contact claim.
 /// The observation entry must never issue a second POST.
+/// One read-only GET of the exact restored sandbox, before the daemon claims
+/// its one verifier attempt. The status the provider reports is mapped to
+/// `running` or a bounded status word; nothing is created, run or ended.
+pub(crate) fn observe_restored_sandbox(
+    adapter: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest;
+    let deadline = crate::operation_deadline()?;
+    ensure!(
+        [
+            crate::LIFECYCLE_BOOTSTRAP_FD_ENV,
+            crate::LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            crate::LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+        ]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "qualification observation received worker activation authority"
+    );
+    let bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_REQUEST_FD_ENV,
+        MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+    )?;
+    let request: RuntimeSnapshotQualificationReadinessRequest =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &bytes,
+            MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+        )?;
+    request.validate()?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&request)? == bytes
+            && request.qualification_intent.provider_id == ADAPTER_ID,
+        "qualification observation request is noncanonical or selects another provider"
+    );
+    crate::verify_artifact(
+        adapter,
+        &request.qualification_intent.adapter_artifact_hash,
+        None,
+    )?;
+    let spec_bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+        usize::try_from(ryeos_external_execution_contract::MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?,
+    )?;
+    let captured_spec_digest = std::env::var(crate::LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("qualification observation lacks captured provider spec digest")?;
+    ensure!(
+        captured_spec_digest == request.provider_spec_digest
+            && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
+        "qualification observation provider spec changed its signed handoff"
+    );
+    let spec = ProviderSpec::parse(
+        &spec_bytes,
+        &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+    )?;
+    let settings_bytes =
+        crate::read_sealed_env(crate::LIFECYCLE_SETTINGS_FD_ENV, crate::MAX_SETTINGS_BYTES)?;
+    let settings = selected_qualification_settings(
+        &settings_bytes,
+        &request.qualification_intent.settings_digest,
+        &request.qualification_intent.provider_group_id,
+        &request.qualification_intent.snapshot_id,
+    )?;
+    let (url, target) = crate::api_url(
+        &spec,
+        crate::provider_spec::RouteName::ById,
+        Some(&request.occurrence.occurrence_id),
+        &settings,
+        None,
+    )?;
+    crate::validate_api_url(
+        &url,
+        &target.path_segments,
+        target.owner_id_query.as_deref(),
+        None,
+    )?;
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    let credential = crate::read_credential()?;
+    let (status, body) = crate::read_response(crate::send_api_request(
+        &network,
+        &url,
+        "GET",
+        None,
+        &credential,
+        deadline,
+        &settings,
+        &cancellation,
+    )?)
+    .map_err(|()| anyhow::anyhow!("qualification observation response is not bounded JSON"))?;
+    let result = restored_sandbox_readiness(&request, status, &body)?;
+    result.validate_for(&request)?;
+    crate::write_response(&result)
+}
+
+/// Map one provider answer about the exact restored sandbox.
+pub(crate) fn restored_sandbox_readiness(
+    request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+    status: u16,
+    body: &[u8],
+) -> Result<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>{
+    use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse as Response;
+    let not_running = |word: &str| Response::NotRunning {
+        operation_id: request.qualification_intent.operation_id.clone(),
+        occurrence_id: request.occurrence.occurrence_id.clone(),
+        status: word.to_owned(),
+    };
+    if status == 404 {
+        return Ok(not_running("absent"));
+    }
+    ensure!(
+        status == 200,
+        "qualification observation returned an unexpected provider status"
+    );
+    let sandbox = ryeos_external_execution_contract::from_json_slice_strict::<crate::RenderSandbox>(
+        body,
+        usize::try_from(crate::MAX_API_RESPONSE_BYTES)?,
+    )?;
+    ensure!(
+        sandbox.id == request.occurrence.occurrence_id
+            && sandbox.sandbox_group_id == request.qualification_intent.provider_group_id,
+        "qualification observation returned another sandbox"
+    );
+    Ok(
+        if sandbox.status == crate::RenderSandboxStatus::Running && sandbox.terminated_at.is_none()
+        {
+            Response::Running {
+                operation_id: request.qualification_intent.operation_id.clone(),
+                occurrence_id: sandbox.id,
+                provider_response_sha256: lillux::sha256_hex(body),
+            }
+        } else {
+            not_running(match sandbox.status {
+                crate::RenderSandboxStatus::Creating => "creating",
+                crate::RenderSandboxStatus::Errored => "errored",
+                crate::RenderSandboxStatus::Resuming => "resuming",
+                crate::RenderSandboxStatus::Running => "terminated",
+                crate::RenderSandboxStatus::Suspended => "suspended",
+                crate::RenderSandboxStatus::Suspending => "suspending",
+                crate::RenderSandboxStatus::Terminated => "terminated",
+            })
+        },
+    )
+}
+
 pub(crate) fn terminate_restored_sandbox(
     adapter: &lillux::InheritedDescriptorAuthority,
     first_contact: bool,
@@ -372,6 +544,45 @@ pub(crate) fn terminate_restored_sandbox(
         spec.termination_terminal_proof_enabled() && spec.reconciliation_terminal_proof_enabled(),
         "signed provider spec has no exact terminal observation profile"
     );
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    let credential = crate::read_credential()?;
+    let mut transport = |method: &str, url: &url::Url| -> Option<(u16, Vec<u8>)> {
+        crate::send_api_request(
+            &network,
+            url,
+            method,
+            None,
+            &credential,
+            deadline,
+            &settings,
+            &cancellation,
+        )
+        .ok()
+        .and_then(|response| crate::read_response(response).ok())
+    };
+    let result = settle_qualification_termination(
+        &request,
+        &spec,
+        &settings,
+        first_contact,
+        &mut transport,
+    )?;
+    crate::write_response(&result)
+}
+
+/// The post-setup half of qualification termination. `transport` performs one
+/// request and returns the status and body, or `None` for a transport failure.
+/// Only a 200 echo of the exact terminated sandbox with the egress policy the
+/// occurrence was created with settles; anything else stays pending.
+fn settle_qualification_termination(
+    request: &RuntimeSnapshotQualificationTerminationAdapterRequest,
+    spec: &ProviderSpec,
+    settings: &Settings,
+    first_contact: bool,
+    transport: &mut dyn FnMut(&str, &url::Url) -> Option<(u16, Vec<u8>)>,
+) -> Result<RuntimeSnapshotQualificationTerminationAdapterResponse> {
     let mutation = spec
         .termination_mutation_route()
         .context("signed provider spec has no qualification termination route")?;
@@ -383,94 +594,76 @@ pub(crate) fn terminate_restored_sandbox(
     .context("signed provider spec has no qualification terminal observation route")?;
     for route in [mutation, observation] {
         let (url, target) = crate::api_url(
-            &spec,
+            spec,
             route,
             Some(&request.intent.occurrence_id),
-            &settings,
+            settings,
             None,
         )?;
         crate::validate_api_url(
             &url,
             &target.path_segments,
             target.owner_id_query.as_deref(),
-            target.upload_path_query.as_deref(),
+            target.file_path_query.as_deref(),
         )?;
     }
-    let network = crate::network_context_from_captured_inputs()?;
-    let cancellation = lillux::network::NetworkCancellation::default();
-    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
-    let credential = crate::read_credential()?;
+    let expected_egress =
+        qualification_expected_egress(spec, &request.qualification_intent.launch_shape)?;
     if first_contact {
         let (url, _) = crate::api_url(
-            &spec,
+            spec,
             mutation,
             Some(&request.intent.occurrence_id),
-            &settings,
+            settings,
             None,
         )?;
         // The acknowledgement is never terminal. A lost response remains
         // under this already-claimed attempt; recovery is GET-only.
-        let _ = crate::send_api_request(
-            &network,
-            &url,
-            "POST",
-            None,
-            &credential,
-            deadline,
-            &settings,
-            &cancellation,
-        );
+        let _ = transport("POST", &url);
     }
     let pending = || RuntimeSnapshotQualificationTerminationAdapterResponse::Pending {
         operation_id: request.intent.operation_id.clone(),
     };
     let (url, _) = crate::api_url(
-        &spec,
+        spec,
         observation,
         Some(&request.intent.occurrence_id),
-        &settings,
+        settings,
         None,
     )?;
-    let result = crate::send_api_request(
-        &network,
-        &url,
-        "GET",
-        None,
-        &credential,
-        deadline,
-        &settings,
-        &cancellation,
-    )
-    .ok()
-    .and_then(|response| crate::read_response(response).ok())
-    .and_then(|(status, body)| {
-        if status != 200 {
-            return None;
-        }
-        let sandbox: crate::RenderSandbox =
-            ryeos_external_execution_contract::from_json_slice_strict(
-                &body,
-                usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?,
-            )
-            .ok()?;
-        let terminated_at =
-            crate::exact_terminal_timestamp(&sandbox, &request.intent.occurrence_id, &settings)?;
-        Some(
-            RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
-                observation: RuntimeSnapshotQualificationTerminalObservation {
-                    schema: 1,
-                    operation_id: request.intent.operation_id.clone(),
-                    occurrence_id: request.intent.occurrence_id.clone(),
-                    provider_response_sha256: lillux::sha256_hex(&body),
-                    terminated_at: terminated_at.into(),
-                    contact_deadline_exceeded: false,
+    let result = transport("GET", &url)
+        .and_then(|(status, body)| {
+            if status != 200 {
+                return None;
+            }
+            let sandbox: crate::RenderSandbox =
+                ryeos_external_execution_contract::from_json_slice_strict(
+                    &body,
+                    usize::try_from(crate::MAX_API_RESPONSE_BYTES).ok()?,
+                )
+                .ok()?;
+            let terminated_at = crate::exact_terminal_timestamp(
+                &sandbox,
+                &request.intent.occurrence_id,
+                settings,
+                &expected_egress,
+            )?;
+            Some(
+                RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {
+                    observation: RuntimeSnapshotQualificationTerminalObservation {
+                        schema: 1,
+                        operation_id: request.intent.operation_id.clone(),
+                        occurrence_id: request.intent.occurrence_id.clone(),
+                        provider_response_sha256: lillux::sha256_hex(&body),
+                        terminated_at: terminated_at.into(),
+                        contact_deadline_exceeded: false,
+                    },
                 },
-            },
-        )
-    })
-    .unwrap_or_else(pending);
-    result.validate_for(&request)?;
-    crate::write_response(&result)
+            )
+        })
+        .unwrap_or_else(pending);
+    result.validate_for(request)?;
+    Ok(result)
 }
 
 fn preflight_verifier_upload_and_routes(
@@ -482,20 +675,22 @@ fn preflight_verifier_upload_and_routes(
     request.validate()?;
     upload.require_owned_regular()?;
     let observation = upload.regular_file_observation()?;
+    let expected_mode = request.required_upload_mode();
     ensure!(
-        observation.full_permission_mode()? == 0o600
+        observation.full_permission_mode()? == expected_mode
             && observation.size() == request.upload_bytes
             && upload.digest_regular_file_stable_exact(&observation)? == request.upload_sha256,
         "sealed restored verifier upload differs from retained attempt"
     );
+    let upload_directory = request.intent.remote_upload_directory()?;
     let (upload_route, run_route) = spec.qualification_verifier_routes();
     for (route, operation, path) in [
         (
             upload_route,
             crate::proxy_route::ProxyOperation::UploadFile {
-                remote_path: RESTORATION_VERIFIER_REMOTE_DIRECTORY,
+                remote_path: &upload_directory,
             },
-            Some(RESTORATION_VERIFIER_REMOTE_DIRECTORY),
+            Some(upload_directory.as_str()),
         ),
         (
             run_route,
@@ -514,7 +709,7 @@ fn preflight_verifier_upload_and_routes(
             &url,
             &target.path_segments,
             target.owner_id_query.as_deref(),
-            target.upload_path_query.as_deref(),
+            target.file_path_query.as_deref(),
         )?;
         ensure!(
             url == crate::proxy_route::connect_token_url(
@@ -556,255 +751,507 @@ pub(crate) fn parse_restored_verifier_stream(
     locator: &RuntimeSnapshotLocator,
     readiness: &RuntimeSnapshotReadinessObservation,
 ) -> Result<RestoredVerifierStreamObservation> {
-    ensure!(
-        !body.is_empty() && body.len() <= MAX_RESTORED_RUN_STREAM_BYTES,
-        "restored verifier stream exceeds its bound"
-    );
-    let mut events = SseReader::new(
-        Cursor::new(body),
-        SseLimits {
-            line_bytes: 16 * 1024,
-            event_bytes: 16 * 1024,
-            total_bytes: MAX_RESTORED_RUN_STREAM_BYTES as u64,
-            events: 32,
-        },
+    let parsed = parse_verifier_stdout(
+        body,
+        MAX_RESTORED_RUN_STREAM_BYTES,
+        16 * 1024,
+        32,
+        MAX_RESTORED_OWNER_RESULT_BYTES,
+        None,
     )?;
-    let mut stdout = String::new();
-    let mut exited = false;
-    while let Some(event) = events.next_event()? {
-        ensure!(
-            event.id.is_none() && event.retry_ms.is_none() && !exited,
-            "restored verifier stream has unexpected event authority"
-        );
-        match event.event.as_deref() {
-            Some("output") => {
-                let output: VerifierOutputEvent =
-                    ryeos_external_execution_contract::from_json_slice_strict(
-                        event.data.as_bytes(),
-                        16 * 1024,
-                    )?;
-                ensure!(
-                    output.stream == "stdout" && !output.data.is_empty(),
-                    "restored verifier emitted non-measurement output"
-                );
-                stdout.push_str(&output.data);
-                ensure!(
-                    stdout.len() <= MAX_RESTORED_OWNER_RESULT_BYTES + 1,
-                    "restored verifier output exceeds its bound"
-                );
-            }
-            Some("exit") => {
-                let exit: VerifierExitEvent =
-                    ryeos_external_execution_contract::from_json_slice_strict(
-                        event.data.as_bytes(),
-                        1024,
-                    )?;
-                ensure!(
-                    exit.exit_code == 0,
-                    "restored verifier did not exit successfully"
-                );
-                exited = true;
-            }
-            _ => anyhow::bail!("restored verifier stream has unsupported event"),
-        }
-    }
-    ensure!(exited, "restored verifier stream has no complete exit");
-    let bytes = stdout
-        .strip_suffix('\n')
-        .context("restored verifier output lacks its single terminator")?
-        .as_bytes();
+    let bytes = parsed.stdout.as_slice();
     let measurement: RestoredOwnerMeasurement =
         ryeos_external_execution_contract::from_json_slice_strict(
             bytes,
             MAX_RESTORED_OWNER_RESULT_BYTES,
-        )?;
-    ensure!(
-        ryeos_external_execution_contract::canonical_json(&measurement)? == bytes,
-        "restored verifier output is noncanonical"
-    );
-    measurement.validate_content_for_bound_snapshot(challenge, intent, locator, readiness)?;
+        )
+        .map_err(|_| parsed.refusal("restored verifier output did not decode as a measurement"))?;
+    if ryeos_external_execution_contract::canonical_json(&measurement)? != bytes {
+        return Err(parsed.refusal("restored verifier output is noncanonical"));
+    }
+    measurement
+        .validate_content_for_bound_snapshot(challenge, intent, locator, readiness)
+        .map_err(|error| parsed.refusal(&format!("{error:#}")))?;
     Ok(RestoredVerifierStreamObservation {
         measurement,
         response_sha256: lillux::sha256_hex(body),
     })
 }
 
-pub(crate) fn interpret_authenticated_request(
-    request: &LifecycleRuntimeProbeRequest,
-    settings: &Settings,
-) -> Result<LifecycleRuntimeProbeResponse> {
-    request.validate()?;
+/// Consumer transport can be JSON-escaped again inside SSE output events.
+/// Bound the wire representation separately from the canonical evidence, while
+/// retaining the prerequisite measurement lane's original tighter limits.
+pub(crate) const MAX_CONSUMER_RUN_STREAM_BYTES: usize = 32 * 1024 * 1024;
+
+pub(crate) struct ConsumerVerifierStreamObservation {
+    pub evidence: serde_json::Value,
+    pub evidence_sha256: String,
+    pub evidence_bytes: u64,
+    pub response_sha256: String,
+}
+
+/// Provider framing only: canonical evidence is opaque to this adapter.
+/// Product semantics, executable provenance and death proof belong to their
+/// existing owners. A clean exit event is not a qualification witness.
+pub(crate) fn parse_consumer_verifier_stream(
+    body: &[u8],
+    challenge: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge,
+    deadline: lillux::time::MonotonicDeadline,
+    cancellation: &lillux::network::NetworkCancellation,
+) -> Result<ConsumerVerifierStreamObservation> {
+    use ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES;
     ensure!(
-        request.adapter_id == ADAPTER_ID
-            && request.source.manifest_hash
-                == request
-                    .probe_evidence
-                    .get("guest_runtime_manifest_hash")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default(),
-        "runtime probe request differs from exact Render adapter or source"
+        !deadline.has_elapsed() && !cancellation.is_cancelled(),
+        "consumer stream parsing expired or cancelled"
     );
-    let root_b64 = request
-        .source
-        .controller_public_root
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| anyhow::anyhow!("runtime probe source has no controller public root"))?;
-    let root_bytes = base64::engine::general_purpose::STANDARD.decode(root_b64)?;
-    let root_bytes: [u8; 32] = root_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("runtime probe controller root has wrong length"))?;
-    ensure!(
-        base64::engine::general_purpose::STANDARD.encode(root_bytes) == root_b64
-            && lillux::sha256_hex(hex::encode(root_bytes).as_bytes())
-                == request.source.controller_root_blob_sha256,
-        "runtime probe controller root differs from authenticated product"
-    );
-    let probe = RenderSnapshotProbe::from_probe_evidence(&request.probe_evidence)?;
-    probe.validate_for(
-        settings,
-        &SnapshotExpectation {
-            product_witness_hash: &request.product_witness_hash,
-            guest_runtime_manifest_hash: &request.source.manifest_hash,
-            controller_public_root: &request.source.controller_public_root,
-            account: &request.account,
-            binding_hash: &request.binding_hash,
-            installed_owner_hash: &request.source.owner_executable_sha256,
-        },
+    challenge.validate()?;
+    let maximum = usize::try_from(MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES)?;
+    let parsed = parse_verifier_stdout(
+        body,
+        MAX_CONSUMER_RUN_STREAM_BYTES,
+        MAX_CONSUMER_RUN_STREAM_BYTES,
+        16 * 1024,
+        maximum,
+        Some((cancellation, deadline)),
     )?;
-    Ok(LifecycleRuntimeProbeResponse {
-        schema: 1,
-        protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
-        adapter_id: ADAPTER_ID.into(),
-        request_digest: request.digest()?,
-    })
+    let bytes = parsed.stdout.clone();
+    let evidence: serde_json::Value =
+        ryeos_external_execution_contract::from_json_slice_strict(&bytes, maximum)
+            .map_err(|_| parsed.refusal("consumer verifier evidence did not decode as JSON"))?;
+    if !evidence.is_object()
+        || ryeos_external_execution_contract::canonical_json(&evidence)? != bytes
+    {
+        return Err(parsed.refusal("consumer verifier evidence is not an exact canonical object"));
+    }
+    ensure!(
+        !deadline.has_elapsed() && !cancellation.is_cancelled(),
+        "consumer evidence parsing expired or cancelled"
+    );
+    let observation = ConsumerVerifierStreamObservation {
+        evidence,
+        evidence_sha256: lillux::sha256_hex(&bytes),
+        evidence_bytes: bytes.len() as u64,
+        response_sha256: lillux::sha256_hex(body),
+    };
+    ensure!(
+        !deadline.has_elapsed() && !cancellation.is_cancelled(),
+        "consumer stream hashing expired or cancelled"
+    );
+    Ok(observation)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RenderSnapshotProbe {
-    pub schema: u32,
-    pub product_witness_hash: String,
-    pub guest_runtime_manifest_hash: String,
-    pub controller_public_root: String,
-    pub owner_id: String,
-    pub account: String,
-    pub snapshot_id: String,
-    /// The daemon independently rejoins this exact value to its bound
-    /// one-attempt journal before invoking the credential-free adapter.
-    pub runtime_snapshot_locator: RuntimeSnapshotLocator,
-    /// CAS-authored pointer to the daemon's complete, timely verifier run.
-    /// The adapter checks shape; the daemon authenticates the exact row.
-    pub restored_verifier_operation_id: String,
-    pub restored_verifier_observation_hash: String,
-    /// Provider terminal status only. The daemon rejoins this exact record;
-    /// guest-writer exclusion remains a separate qualification claim.
-    pub qualification_termination_operation_id: String,
-    pub provider_terminal_observation_hash: String,
-    pub snapshot_kind: String,
-    pub plan: RenderPlan,
-    pub region: String,
-    pub binding_hash: String,
-    pub restored_tree_manifest_hash: String,
-    pub installed_owner_hash: String,
-    pub installed_controller_public_root: String,
-    pub signed_import_mode: u32,
-    pub guest_package_mode: u32,
+/// The longest stderr tail a refused stream reports. The reason that carries
+/// it is bounded to 2048 printable bytes, which leaves room for the rule text
+/// and the exit code.
+const MAX_STREAM_STDERR_TAIL_BYTES: usize = 1700;
+
+/// What a verifier stream can still tell its operator when it is refused: the
+/// parse rule that failed, the exit code when the stream carried one, and the
+/// tail of the guest program's stderr. The rule text is this adapter's own, the
+/// stderr is the uploaded verifier's; the reason bounds both and makes them
+/// printable. Provider bodies are never copied here.
+#[derive(Debug, Default)]
+struct StreamDiagnostics {
+    exit_code: Option<i32>,
+    stderr_tail: String,
 }
 
-pub(crate) struct SnapshotExpectation<'a> {
-    pub product_witness_hash: &'a str,
-    pub guest_runtime_manifest_hash: &'a str,
-    pub controller_public_root: &'a str,
-    pub account: &'a str,
-    pub binding_hash: &'a str,
-    pub installed_owner_hash: &'a str,
-}
-
-impl RenderSnapshotProbe {
-    /// Decode bounded probe data only after the caller has authenticated the
-    /// published qualification and its independent verifier execution.
-    pub(crate) fn from_probe_evidence(value: &serde_json::Value) -> Result<Self> {
-        ensure!(
-            lillux::canonical_json(value)?.len() <= 32 * 1024,
-            "Render snapshot probe exceeds its byte bound"
-        );
-        Ok(serde_json::from_value(value.clone())?)
+impl StreamDiagnostics {
+    fn note_stderr(&mut self, data: &str) {
+        self.stderr_tail.push_str(data);
+        if self.stderr_tail.len() > MAX_STREAM_STDERR_TAIL_BYTES {
+            let mut cut = self.stderr_tail.len() - MAX_STREAM_STDERR_TAIL_BYTES;
+            while !self.stderr_tail.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.stderr_tail.drain(..cut);
+        }
     }
 
-    pub(crate) fn validate_for(
-        &self,
-        settings: &Settings,
-        expected: &SnapshotExpectation<'_>,
-    ) -> Result<()> {
-        ensure!(self.schema == 5, "unsupported Render snapshot probe schema");
-        for hash in [
-            &self.product_witness_hash,
-            &self.guest_runtime_manifest_hash,
-            &self.binding_hash,
-            &self.restored_tree_manifest_hash,
-            &self.installed_owner_hash,
-            &self.restored_verifier_operation_id,
-            &self.restored_verifier_observation_hash,
-            &self.qualification_termination_operation_id,
-            &self.provider_terminal_observation_hash,
-        ] {
-            ensure!(
-                lillux::valid_hash(hash),
-                "Render snapshot probe has an invalid content identity"
+    fn refusal(&self, rule: &str) -> anyhow::Error {
+        let exit = self
+            .exit_code
+            .map_or_else(|| "none".to_owned(), |code| code.to_string());
+        let detail = if self.stderr_tail.is_empty() {
+            format!("{rule}; exit {exit}; stderr empty")
+        } else {
+            format!(
+                "{rule}; exit {exit}; stderr tail: {}",
+                self.stderr_tail.replace('\n', " | ")
+            )
+        };
+        crate::contact_failure::failure(
+            ryeos_external_execution_contract::UncertaintyClass::Parse,
+            &detail,
+        )
+    }
+}
+
+/// One complete verifier run stream: its stdout bytes (the measurement or the
+/// consumer evidence) and the stderr tail kept for the refusal a later content
+/// check may raise.
+pub(crate) struct ParsedVerifierStdout {
+    pub stdout: Vec<u8>,
+    stderr_tail: String,
+}
+
+impl ParsedVerifierStdout {
+    /// A content refusal after a clean exit, carrying the stderr tail.
+    pub(crate) fn refusal(&self, rule: &str) -> anyhow::Error {
+        StreamDiagnostics {
+            exit_code: Some(0),
+            stderr_tail: self.stderr_tail.clone(),
+        }
+        .refusal(rule)
+    }
+}
+
+pub(crate) fn parse_verifier_stdout(
+    body: &[u8],
+    maximum_wire: usize,
+    maximum_event: usize,
+    maximum_events: u64,
+    maximum_output: usize,
+    operation: Option<(
+        &lillux::network::NetworkCancellation,
+        lillux::time::MonotonicDeadline,
+    )>,
+) -> Result<ParsedVerifierStdout> {
+    ensure!(
+        !body.is_empty() && body.len() <= maximum_wire,
+        "restored verifier stream exceeds its bound"
+    );
+    let limits = SseLimits {
+        line_bytes: maximum_event,
+        event_bytes: maximum_event,
+        total_bytes: maximum_wire as u64,
+        events: maximum_events,
+    };
+    let mut events = match operation {
+        Some((cancellation, deadline)) => SseReader::with_operation_policy(
+            Cursor::new(body),
+            limits,
+            cancellation.clone(),
+            deadline,
+        )?,
+        None => SseReader::new(Cursor::new(body), limits)?,
+    };
+    let mut diagnostics = StreamDiagnostics::default();
+    let mut stdout = String::new();
+    let mut exited = false;
+    while let Some(event) = events.next_event()? {
+        if event.id.is_some() || event.retry_ms.is_some() || exited {
+            return Err(
+                diagnostics.refusal("restored verifier stream has unexpected event authority")
             );
         }
-        let root = self
-            .controller_public_root
-            .strip_prefix("ed25519:")
-            .ok_or_else(|| {
-                anyhow::anyhow!("Render snapshot probe has no controller public root")
-            })?;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(root)?;
-        let root_bytes: [u8; 32] = decoded
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Render snapshot controller root has the wrong length"))?;
-        let root_key = lillux::crypto::VerifyingKey::from_bytes(&root_bytes)?;
-        ensure!(
-            !root_key.is_weak()
-                && base64::engine::general_purpose::STANDARD.encode(root_key.to_bytes()) == root,
-            "Render snapshot controller root is weak or noncanonical"
-        );
-        ensure!(
-            self.product_witness_hash == expected.product_witness_hash
-                && self.guest_runtime_manifest_hash == expected.guest_runtime_manifest_hash
-                && self.controller_public_root == expected.controller_public_root
-                && self.owner_id == settings.owner_id
-                && self.account == expected.account
-                && self.snapshot_id == settings.snapshot_id
-                && self.runtime_snapshot_locator.schema
-                    == ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA
-                && self.runtime_snapshot_locator.snapshot_id == self.snapshot_id
-                && self.runtime_snapshot_locator.operation_id.len() == 64
-                && lillux::valid_hash(&self.runtime_snapshot_locator.operation_id)
-                && lillux::valid_hash(&self.runtime_snapshot_locator.intent_digest)
-                && lillux::valid_hash(&self.runtime_snapshot_locator.provider_response_sha256)
-                && lillux::valid_hash(&self.runtime_snapshot_locator.adapter_observation_sha256)
-                && self.snapshot_kind == "filesystem"
-                && self.plan == settings.plan
-                && self.region == settings.region
-                && self.binding_hash == expected.binding_hash
-                && self.installed_owner_hash == expected.installed_owner_hash
-                && self.installed_controller_public_root == expected.controller_public_root
-                && self.restored_tree_manifest_hash == expected.guest_runtime_manifest_hash
-                // Render's observed upload is owner-writable 0600. The
-                // one-shot owner accepts that exact mode beneath its private
-                // activation root; 0400 would refuse a real upload.
-                && self.signed_import_mode == 0o600
-                && self.guest_package_mode == 0o600,
-            "Render snapshot probe differs from the exact admitted placement or restored runtime"
-        );
-        Ok(())
+        match event.event.as_deref() {
+            Some("output") => {
+                let output: VerifierOutputEvent =
+                    ryeos_external_execution_contract::from_json_slice_strict(
+                        event.data.as_bytes(),
+                        maximum_event,
+                    )
+                    .map_err(|_| {
+                        diagnostics.refusal("restored verifier output event did not decode")
+                    })?;
+                match output.stream.as_str() {
+                    "stdout" => {
+                        if output.data.is_empty() {
+                            return Err(diagnostics
+                                .refusal("restored verifier emitted an empty stdout event"));
+                        }
+                        if stdout
+                            .len()
+                            .checked_add(output.data.len())
+                            .is_none_or(|count| count > maximum_output + 1)
+                        {
+                            return Err(
+                                diagnostics.refusal("restored verifier output exceeds its bound")
+                            );
+                        }
+                        stdout.push_str(&output.data);
+                    }
+                    // Diagnostics only: the guest program's own account of a
+                    // failure, reported with any refusal, never measured.
+                    "stderr" => diagnostics.note_stderr(&output.data),
+                    _ => {
+                        return Err(diagnostics
+                            .refusal("restored verifier emitted output on an unknown stream"));
+                    }
+                }
+            }
+            Some("exit") => {
+                let exit: VerifierExitEvent =
+                    ryeos_external_execution_contract::from_json_slice_strict(
+                        event.data.as_bytes(),
+                        1024,
+                    )
+                    .map_err(|_| {
+                        diagnostics.refusal("restored verifier exit event did not decode")
+                    })?;
+                diagnostics.exit_code = Some(exit.exit_code);
+                if exit.exit_code != 0 {
+                    return Err(diagnostics.refusal("restored verifier did not exit successfully"));
+                }
+                exited = true;
+            }
+            _ => return Err(diagnostics.refusal("restored verifier stream has unsupported event")),
+        }
     }
+    if !exited {
+        return Err(diagnostics.refusal("restored verifier stream has no complete exit"));
+    }
+    let Some(bytes) = stdout.strip_suffix('\n') else {
+        return Err(diagnostics.refusal("restored verifier output lacks its single terminator"));
+    };
+    let bytes = bytes.as_bytes();
+    if bytes.is_empty() || bytes.len() > maximum_output {
+        return Err(diagnostics.refusal("verifier output is empty or exceeds its evidence bound"));
+    }
+    Ok(ParsedVerifierStdout {
+        stdout: bytes.to_vec(),
+        stderr_tail: diagnostics.stderr_tail,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn termination_expects_the_egress_the_occurrence_was_created_with() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchSandboxNetworkPolicy, LaunchShape,
+        };
+        let spec = ProviderSpec::parse(
+            include_bytes!("../fixtures/provider-spec.json"),
+            &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+        )
+        .unwrap();
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner-fixture".into(),
+            plan: RenderPlan::Standard,
+            region: "oregon".into(),
+            snapshot_id: "snp-fixture-001".into(),
+            tls_roots_der_base64: vec!["AA==".into()],
+        };
+        let terminated = |network_policy: serde_json::Value| {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../fixtures/terminated-response.json"))
+                    .unwrap();
+            value["networkPolicy"] = network_policy;
+            serde_json::from_value::<crate::RenderSandbox>(value).unwrap()
+        };
+        let settle = |shape: &LaunchShape, echo: serde_json::Value| {
+            let expected = qualification_expected_egress(&spec, shape).unwrap();
+            crate::exact_terminal_timestamp(
+                &terminated(echo),
+                "sbx-fixture-001",
+                &settings,
+                &expected,
+            )
+            .is_some()
+        };
+        let mut allow = LaunchShape::relay_deny_all();
+        allow.sandbox_network_policy = LaunchSandboxNetworkPolicy::AllowList {
+            hosts: std::collections::BTreeSet::from(["controller.example.com".to_owned()]),
+        };
+        let deny = LaunchShape::relay_deny_all();
+        let allow_echo = serde_json::json!({
+            "type": "allow-list", "default": "allow-list",
+            "rules": [{"domain": "controller.example.com", "protocol": "https"}]
+        });
+        let deny_echo = serde_json::json!({"type": "deny-all", "default": "deny-all"});
+        // An allow-list occurrence settles on its own echo, not on deny-all.
+        assert!(settle(&allow, allow_echo.clone()));
+        assert!(!settle(&allow, deny_echo.clone()));
+        // A deny-all occurrence is unchanged.
+        assert!(settle(&deny, deny_echo));
+        assert!(!settle(&deny, allow_echo));
+        // A mismatching echo (other host) stays pending.
+        assert!(!settle(
+            &allow,
+            serde_json::json!({
+                "type": "allow-list", "default": "allow-list",
+                "rules": [{"domain": "other.example.com", "protocol": "https"}]
+            })
+        ));
+    }
+
+    fn termination_request(
+        shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+    ) -> RuntimeSnapshotQualificationTerminationAdapterRequest {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+            RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL,
+            RuntimeSnapshotQualificationIntent, RuntimeSnapshotQualificationTerminationIntent,
+        };
+        let mut qualification = RuntimeSnapshotQualificationIntent {
+            schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            snapshot_operation_id: "b".repeat(64),
+            snapshot_intent_digest: "c".repeat(64),
+            snapshot_id: "snp-fixture-001".into(),
+            provider_id: ADAPTER_ID.into(),
+            provider_group_id: "sbg-fixture-001".into(),
+            qualification_profile_digest: "d".repeat(64),
+            adapter_artifact_hash: "e".repeat(64),
+            provider_spec_digest: "f".repeat(64),
+            settings_digest: "1".repeat(64),
+            verifier_artifact_hash: "2".repeat(64),
+            maximum_lifetime_seconds: 900,
+            attempt_deadline_ms: 42,
+            launch_shape: shape,
+        };
+        qualification.operation_id = qualification.derived_operation_id().unwrap();
+        let occurrence = RuntimeSnapshotQualificationOccurrence {
+            schema: 1,
+            operation_id: qualification.operation_id.clone(),
+            occurrence_id: "sbx-fixture-001".into(),
+            provider_response_sha256: "3".repeat(64),
+            contact_deadline_exceeded: false,
+        };
+        let mut intent = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: qualification.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            owner_principal: qualification.owner_principal.clone(),
+            provider_id: qualification.provider_id.clone(),
+            provider_spec_digest: qualification.provider_spec_digest.clone(),
+            attempt_deadline_ms: 44,
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let request = RuntimeSnapshotQualificationTerminationAdapterRequest {
+            protocol: RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL.into(),
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            intent,
+            qualification_intent: qualification,
+            occurrence,
+        };
+        request.validate().unwrap();
+        request
+    }
+
+    #[test]
+    fn termination_settles_only_on_the_occurrence_egress_for_both_contacts() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInputs, LaunchShape,
+        };
+        let spec = ProviderSpec::parse(
+            include_bytes!("../fixtures/provider-spec.json"),
+            &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+        )
+        .unwrap();
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner-fixture".into(),
+            plan: RenderPlan::Standard,
+            region: "oregon".into(),
+            snapshot_id: "snp-fixture-001".into(),
+            tls_roots_der_base64: vec!["AA==".into()],
+        };
+        let allow = || {
+            LaunchShape::https_allow_list(
+                ["controller.example.com".to_owned()],
+                LaunchNetworkInputs::operator(),
+            )
+        };
+        let allow_echo = serde_json::json!({
+            "type": "allow-list", "default": "allow-list",
+            "rules": [{"domain": "controller.example.com", "protocol": "https"}]
+        });
+        let other_host_echo = serde_json::json!({
+            "type": "allow-list", "default": "allow-list",
+            "rules": [{"domain": "other.example.com", "protocol": "https"}]
+        });
+        let deny_echo = serde_json::json!({"type": "deny-all", "default": "deny-all"});
+        let body = |network_policy: &serde_json::Value| {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../fixtures/terminated-response.json"))
+                    .unwrap();
+            value["networkPolicy"] = network_policy.clone();
+            serde_json::to_vec(&value).unwrap()
+        };
+        // Runs one settlement; returns the response and the recorded calls.
+        let run = |shape: LaunchShape, first_contact: bool, reply: Option<(u16, Vec<u8>)>| {
+            let request = termination_request(shape);
+            let mut calls: Vec<(String, String)> = Vec::new();
+            let response = settle_qualification_termination(
+                &request,
+                &spec,
+                &settings,
+                first_contact,
+                &mut |method: &str, url: &url::Url| {
+                    calls.push((method.to_owned(), url.path().to_owned()));
+                    if method == "GET" {
+                        reply.clone()
+                    } else {
+                        Some((200, b"{}".to_vec()))
+                    }
+                },
+            )
+            .unwrap();
+            (response, calls)
+        };
+        let is_terminal = |response: &RuntimeSnapshotQualificationTerminationAdapterResponse| {
+            matches!(
+                response,
+                RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal { .. }
+            )
+        };
+        for first_contact in [true, false] {
+            // (a) allow-list occurrence echoing its allow-list.
+            let (response, calls) = run(allow(), first_contact, Some((200, body(&allow_echo))));
+            assert!(is_terminal(&response));
+            let methods: Vec<&str> = calls.iter().map(|(m, _)| m.as_str()).collect();
+            if first_contact {
+                assert_eq!(methods, ["POST", "GET"]);
+                assert!(
+                    calls[0].1.ends_with("/sbx-fixture-001/terminate"),
+                    "{calls:?}"
+                );
+                assert!(calls[1].1.ends_with("/sbx-fixture-001"), "{calls:?}");
+            } else {
+                assert_eq!(methods, ["GET"]);
+                assert!(calls[0].1.ends_with("/sbx-fixture-001"), "{calls:?}");
+            }
+            // (b) deny-all occurrence echoing deny-all.
+            let (response, _) = run(
+                LaunchShape::relay_deny_all(),
+                first_contact,
+                Some((200, body(&deny_echo))),
+            );
+            assert!(is_terminal(&response));
+            // (c) allow-list occurrence with a deny-all or other-host echo.
+            for echo in [&deny_echo, &other_host_echo] {
+                let (response, _) = run(allow(), first_contact, Some((200, body(echo))));
+                assert!(!is_terminal(&response));
+            }
+            // A deny-all occurrence never trusts an allow-list echo.
+            let (response, _) = run(
+                LaunchShape::relay_deny_all(),
+                first_contact,
+                Some((200, body(&allow_echo))),
+            );
+            assert!(!is_terminal(&response));
+            // (d) transport failure or non-200 stays pending.
+            for reply in [
+                None,
+                Some((500, body(&allow_echo))),
+                Some((404, b"{}".to_vec())),
+            ] {
+                let (response, _) = run(allow(), first_contact, reply);
+                assert!(matches!(
+                    response,
+                    RuntimeSnapshotQualificationTerminationAdapterResponse::Pending { .. }
+                ));
+            }
+        }
+    }
 
     fn restored_stream_fixture() -> (
         RestoredOwnerChallenge,
@@ -814,20 +1261,24 @@ mod tests {
         Vec<u8>,
     ) {
         let mut intent = RuntimeSnapshotIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "1".repeat(64)),
             provider_id: ADAPTER_ID.into(),
             source_occurrence_id: "sbx-source".into(),
+            source_bootstrap_operation_id: None,
+            source_created_at: None,
+            source_timeout_seconds: None,
             provider_group_id: "sbg-exact".into(),
             production_profile_digest: "2".repeat(64),
             adapter_artifact_hash: "3".repeat(64),
             provider_spec_digest: "4".repeat(64),
             settings_digest: "5".repeat(64),
-            product_witness_hash: "6".repeat(64),
+            source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "6".repeat(64),
+            },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: public_root(),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 42,
@@ -871,7 +1322,6 @@ mod tests {
             challenge_digest: challenge.digest().unwrap(),
             manifest_hash: intent.guest_runtime_manifest_hash.clone(),
             owner_executable_sha256: intent.owner_executable_sha256.clone(),
-            controller_public_root: intent.controller_public_root.clone(),
         };
         let output = format!(
             "{}\n",
@@ -913,15 +1363,24 @@ mod tests {
         let nonzero = String::from_utf8(stream.clone())
             .unwrap()
             .replace("\"exit_code\":0", "\"exit_code\":1");
+        let refused = parse_restored_verifier_stream(
+            nonzero.as_bytes(),
+            &challenge,
+            &intent,
+            &locator,
+            &readiness,
+        )
+        .err()
+        .expect("refused");
+        let reason = crate::contact_failure::contact_reason(&refused);
+        assert_eq!(
+            reason.class,
+            ryeos_external_execution_contract::UncertaintyClass::Parse
+        );
         assert!(
-            parse_restored_verifier_stream(
-                nonzero.as_bytes(),
-                &challenge,
-                &intent,
-                &locator,
-                &readiness
-            )
-            .is_err()
+            reason.detail.contains("did not exit successfully") && reason.detail.contains("exit 1"),
+            "{}",
+            reason.detail
         );
         let extra = format!(
             "{}event: output\ndata: {{\"stream\":\"stdout\",\"data\":\"extra\"}}\n\n",
@@ -946,6 +1405,137 @@ mod tests {
     }
 
     #[test]
+    fn verifier_stream_keeps_stderr_as_diagnostics_for_its_refusal() {
+        let (challenge, intent, locator, readiness, stream) = restored_stream_fixture();
+        let stderr =
+            serde_json::json!({"stream":"stderr","data":"Error: Refused(no owned write pipe)\n"});
+        let with_stderr = format!(
+            "event: output\ndata: {stderr}\n\n{}",
+            String::from_utf8(stream).unwrap()
+        );
+        // Diagnostics do not change a clean measurement.
+        parse_restored_verifier_stream(
+            with_stderr.as_bytes(),
+            &challenge,
+            &intent,
+            &locator,
+            &readiness,
+        )
+        .unwrap();
+        // A failed exit reports the tail, flattened to one printable line.
+        let failed = with_stderr.replace("\"exit_code\":0", "\"exit_code\":1");
+        let refused = parse_restored_verifier_stream(
+            failed.as_bytes(),
+            &challenge,
+            &intent,
+            &locator,
+            &readiness,
+        )
+        .err()
+        .expect("refused");
+        let reason = crate::contact_failure::contact_reason(&refused);
+        assert!(
+            reason.detail.contains("exit 1")
+                && reason
+                    .detail
+                    .contains("stderr tail: Error: Refused(no owned write pipe) |"),
+            "{}",
+            reason.detail
+        );
+        reason.validate().unwrap();
+        // Output on an unknown stream is still refused.
+        let unknown = with_stderr.replace("\"stream\":\"stderr\"", "\"stream\":\"fd3\"");
+        assert!(
+            parse_restored_verifier_stream(
+                unknown.as_bytes(),
+                &challenge,
+                &intent,
+                &locator,
+                &readiness
+            )
+            .is_err()
+        );
+        // A long tail keeps only its end and stays within the reason bound.
+        let long = serde_json::json!({"stream":"stderr","data":format!("{}END", "x".repeat(2000))});
+        let long_failed = format!(
+            "event: output\ndata: {long}\n\n{}",
+            String::from_utf8(restored_stream_fixture().4).unwrap()
+        )
+        .replace("\"exit_code\":0", "\"exit_code\":1");
+        let reason = crate::contact_failure::contact_reason(
+            &parse_restored_verifier_stream(
+                long_failed.as_bytes(),
+                &challenge,
+                &intent,
+                &locator,
+                &readiness,
+            )
+            .err()
+            .expect("refused"),
+        );
+        assert!(reason.detail.ends_with("END"), "{}", reason.detail);
+        reason.validate().unwrap();
+    }
+
+    #[test]
+    fn qualification_observation_maps_creating_and_running() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL, RuntimeSnapshotQualificationIntent,
+            RuntimeSnapshotQualificationOccurrence,
+            RuntimeSnapshotQualificationReadinessAdapterResponse as Response,
+            RuntimeSnapshotQualificationReadinessRequest,
+        };
+        let mut intent = RuntimeSnapshotQualificationIntent {
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            snapshot_operation_id: "b".repeat(64),
+            snapshot_intent_digest: "c".repeat(64),
+            snapshot_id: "snp-exact".into(),
+            provider_id: ADAPTER_ID.into(),
+            provider_group_id: "sbg-damv59p42hec73ck8b7g".into(),
+            qualification_profile_digest: "d".repeat(64),
+            adapter_artifact_hash: "e".repeat(64),
+            provider_spec_digest: "f".repeat(64),
+            settings_digest: "1".repeat(64),
+            verifier_artifact_hash: "2".repeat(64),
+            maximum_lifetime_seconds: 900,
+            attempt_deadline_ms: 42, launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let request = RuntimeSnapshotQualificationReadinessRequest {
+            protocol: RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL.into(),
+            occurrence: RuntimeSnapshotQualificationOccurrence {
+                schema: 1,
+                operation_id: intent.operation_id.clone(),
+                occurrence_id: "sbx-18p4gdbht7ogae00c739p3070".into(),
+                provider_response_sha256: "3".repeat(64),
+                contact_deadline_exceeded: false,
+            },
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            qualification_intent: intent,
+        };
+        request.validate().unwrap();
+        let body = |status: &str| {
+            format!(
+                r#"{{"createdAt":"2026-10-29T23:16:50Z","id":"sbx-18p4gdbht7ogae00c739p3070","idleTimeoutSeconds":900,"networkPolicy":{{"default":"deny-all","type":"deny-all"}},"plan":"starter","region":"oregon","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","status":"{status}","terminatedAt":null,"timeoutSeconds":600}}"#
+            )
+        };
+        let creating =
+            restored_sandbox_readiness(&request, 200, body("creating").as_bytes()).unwrap();
+        assert!(matches!(&creating, Response::NotRunning { status, .. } if status == "creating"));
+        creating.validate_for(&request).unwrap();
+        let running =
+            restored_sandbox_readiness(&request, 200, body("running").as_bytes()).unwrap();
+        assert!(matches!(running, Response::Running { .. }));
+        running.validate_for(&request).unwrap();
+        let absent = restored_sandbox_readiness(&request, 404, b"{}").unwrap();
+        assert!(matches!(&absent, Response::NotRunning { status, .. } if status == "absent"));
+        let other = body("running").replace("sbx-18p4gdbht7ogae00c739p3070", "sbx-other");
+        assert!(restored_sandbox_readiness(&request, 200, other.as_bytes()).is_err());
+        assert!(restored_sandbox_readiness(&request, 500, b"{}").is_err());
+    }
+
+    #[test]
     fn sealed_verifier_handoff_and_observation_join_exact_occurrence() {
         use ryeos_external_execution_contract::restored_runtime_measurement::{
             RESTORED_VERIFIER_ADAPTER_PROTOCOL, RestoredVerifierAdapterObservation,
@@ -960,7 +1550,7 @@ mod tests {
         let upload = lillux::sealed_memfd(c"verifier-upload-test", b"tar-fixture").unwrap();
         let upload_sha256 = lillux::sha256_hex(b"tar-fixture");
         let mut qualification_intent = RuntimeSnapshotQualificationIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
             operation_id: String::new(),
             owner_principal: source_intent.owner_principal.clone(),
             snapshot_operation_id: source_intent.operation_id.clone(),
@@ -974,8 +1564,7 @@ mod tests {
             settings_digest: "1".repeat(64),
             verifier_artifact_hash: "2".repeat(64),
             maximum_lifetime_seconds: 900,
-            attempt_deadline_ms: 42,
-        };
+            attempt_deadline_ms: 42, launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
         qualification_intent.operation_id = qualification_intent.derived_operation_id().unwrap();
         let occurrence = RuntimeSnapshotQualificationOccurrence {
             schema: 1,
@@ -985,14 +1574,14 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         let mut attempt = RestoredVerifierAttemptIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: qualification_intent.operation_id.clone(),
             restored_occurrence_id: occurrence.occurrence_id.clone(),
             verifier_artifact_hash: qualification_intent.verifier_artifact_hash.clone(),
             upload_sha256: upload_sha256.clone(),
             upload_bytes: 11,
-            challenge,
+            purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge },
             attempt_deadline_ms: 42,
         };
         attempt.operation_id = attempt.derived_operation_id().unwrap();
@@ -1000,6 +1589,7 @@ mod tests {
             protocol: RESTORED_VERIFIER_ADAPTER_PROTOCOL.into(),
             provider_spec_digest: qualification_intent.provider_spec_digest.clone(),
             intent: attempt,
+            consumer_selection: None,
             source_intent,
             locator,
             readiness,
@@ -1010,6 +1600,7 @@ mod tests {
             upload_sha256,
         };
         request.validate().unwrap();
+        assert_eq!(request.required_upload_mode(), 0o600);
         let spec = ProviderSpec::parse(
             include_bytes!("../fixtures/provider-spec.json"),
             &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
@@ -1026,7 +1617,7 @@ mod tests {
         preflight_verifier_upload_and_routes(&request, &upload, &spec, &settings).unwrap();
         let parsed = parse_restored_verifier_stream(
             &stream,
-            &request.intent.challenge,
+            request.intent.owner_challenge().unwrap(),
             &request.source_intent,
             &request.locator,
             &request.readiness,
@@ -1046,6 +1637,234 @@ mod tests {
             }),
         };
         response.validate_for(&request).unwrap();
+        let mut omitted = serde_json::to_value(&request).unwrap();
+        omitted
+            .as_object_mut()
+            .unwrap()
+            .remove("consumer_selection");
+        assert!(serde_json::from_value::<RestoredVerifierAdapterRequest>(omitted).is_err());
+        let mut predecessor = request.clone();
+        predecessor.protocol = "ryeos.restored-verifier-adapter.v1".into();
+        assert!(predecessor.validate().is_err());
+        use ryeos_external_execution_contract::restored_runtime_measurement::{
+            ConsumerRuntimeVerificationCoordinate, ConsumerRuntimeVerifierSelection,
+            ConsumerVerifierAdapterObservation, RemoteVerificationPurpose,
+        };
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-consumer-fixture".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "consumer-fixture".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: request.intent.operation_id.clone(),
+            prerequisite_measurement_observation_digest: "f".repeat(64),
+        };
+        let mut consumer = request.clone();
+        consumer.consumer_selection = Some(ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: coordinate.scenario_source_digest.clone(),
+            verifier_artifact_hash: "9".repeat(64),
+            archive_budget: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+        });
+        consumer.intent.verifier_artifact_hash = "9".repeat(64);
+        consumer.intent.purpose = RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            nonce_hex: "8".repeat(64),
+            guest_runtime_manifest_hash: consumer.source_intent.guest_runtime_manifest_hash.clone(),
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        };
+        consumer.intent.operation_id = consumer.intent.derived_operation_id().unwrap();
+        consumer.validate().unwrap();
+        assert_eq!(consumer.required_upload_mode(), 0o400);
+        // The prerequisite upload's private staging mode is not a permissive
+        // fallback for frozen consumer delivery, even when its bytes match.
+        assert!(
+            preflight_verifier_upload_and_routes(&consumer, &upload, &spec, &settings).is_err()
+        );
+        upload.set_regular_file_mode(0o400).unwrap();
+        preflight_verifier_upload_and_routes(&consumer, &upload, &spec, &settings).unwrap();
+        assert!(preflight_verifier_upload_and_routes(&request, &upload, &spec, &settings).is_err());
+        let mut substituted_runtime = consumer.clone();
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            guest_runtime_manifest_hash,
+            ..
+        } = &mut substituted_runtime.intent.purpose
+        else {
+            unreachable!()
+        };
+        *guest_runtime_manifest_hash = "0".repeat(64);
+        substituted_runtime.intent.operation_id =
+            substituted_runtime.intent.derived_operation_id().unwrap();
+        assert!(substituted_runtime.validate().is_err());
+        assert!(substituted_runtime.consumer_challenge().is_err());
+        let challenge = consumer.consumer_challenge().unwrap();
+        let command = crate::restored_verifier_contact::verifier_command(&consumer).unwrap();
+        let expected_prefix = format!(
+            "{}/{} --consumer-challenge-b64 ",
+            consumer.intent.remote_upload_directory().unwrap(),
+            ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_VERIFIER_REMOTE_NAME
+        );
+        let encoded = command.strip_prefix(&expected_prefix).unwrap();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(
+            ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge::parse(&decoded).unwrap(),
+            challenge
+        );
+        assert!(crate::restored_verifier_contact::verifier_command(&substituted_runtime).is_err());
+        assert_eq!(challenge.intent, consumer.intent);
+        assert_eq!(
+            Some(&challenge.selection),
+            consumer.consumer_selection.as_ref()
+        );
+        assert!(request.consumer_challenge().is_err());
+        assert!(response.validate_for(&consumer).is_err());
+        // Transport fixtures, not runtime qualification: larger canonical
+        // evidence is chunked through the same finite provider SSE framing.
+        let encode_stream = |output: &str, exit_code: i32| {
+            let mut stream = String::new();
+            for chunk in output.as_bytes().chunks(4096) {
+                let chunk = std::str::from_utf8(chunk).unwrap(); // ASCII fixture.
+                let event = serde_json::json!({"stream":"stdout", "data":chunk});
+                stream.push_str(&format!("event: output\ndata: {event}\n\n"));
+            }
+            stream.push_str(&format!(
+                "event: exit\ndata: {{\"exit_code\":{exit_code}}}\n\n"
+            ));
+            stream.into_bytes()
+        };
+        let transport_evidence =
+            serde_json::json!({"opaque_product_evidence":"x".repeat(128 * 1024)});
+        let canonical =
+            ryeos_external_execution_contract::canonical_json(&transport_evidence).unwrap();
+        let consumer_stream = encode_stream(
+            &format!("{}\n", std::str::from_utf8(&canonical).unwrap()),
+            0,
+        );
+        let deadline =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+        let cancellation = lillux::network::NetworkCancellation::default();
+        let parsed =
+            parse_consumer_verifier_stream(&consumer_stream, &challenge, deadline, &cancellation)
+                .unwrap();
+        assert_eq!(parsed.evidence, transport_evidence);
+        assert_eq!(parsed.evidence_sha256, lillux::sha256_hex(&canonical));
+        assert_eq!(parsed.evidence_bytes, canonical.len() as u64);
+        assert_eq!(parsed.response_sha256, lillux::sha256_hex(&consumer_stream));
+        // Render may place the entire bounded stdout write in one SSE event.
+        // A small line ceiling would reject valid evidence before its 5 MiB
+        // canonical-content bound is checked.
+        let single_output = serde_json::json!({
+            "stream": "stdout",
+            "data": format!("{}\n", std::str::from_utf8(&canonical).unwrap()),
+        });
+        let single_stream = format!(
+            "event: output\ndata: {single_output}\n\nevent: exit\ndata: {{\"exit_code\":0}}\n\n"
+        );
+        let single = parse_consumer_verifier_stream(
+            single_stream.as_bytes(),
+            &challenge,
+            deadline,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(single.evidence_sha256, parsed.evidence_sha256);
+        assert_eq!(single.evidence_bytes, parsed.evidence_bytes);
+        for output in ["{}", "{}\n\n", " {}\n", "[]\n", "{\"x\":1,\"x\":2}\n"] {
+            assert!(
+                parse_consumer_verifier_stream(
+                    &encode_stream(output, 0),
+                    &challenge,
+                    deadline,
+                    &cancellation
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            parse_consumer_verifier_stream(
+                &encode_stream("{}\n", 1),
+                &challenge,
+                deadline,
+                &cancellation
+            )
+            .is_err()
+        );
+        let mut after_exit = encode_stream("{}\n", 0);
+        after_exit.extend_from_slice(b"event: exit\ndata: {\"exit_code\":0}\n\n");
+        assert!(
+            parse_consumer_verifier_stream(&after_exit, &challenge, deadline, &cancellation)
+                .is_err()
+        );
+        let missing_exit = b"event: output\ndata: {\"stream\":\"stdout\",\"data\":\"{}\\n\"}\n\n";
+        assert!(
+            parse_consumer_verifier_stream(missing_exit, &challenge, deadline, &cancellation)
+                .is_err()
+        );
+        cancellation.cancel();
+        assert!(
+            parse_consumer_verifier_stream(&consumer_stream, &challenge, deadline, &cancellation)
+                .is_err()
+        );
+        let evidence = serde_json::json!({"fixture_only": true});
+        let bytes = ryeos_external_execution_contract::canonical_json(&evidence).unwrap();
+        let consumer_response = RestoredVerifierAdapterResponse::ConsumerObserved {
+            observation: Box::new(ConsumerVerifierAdapterObservation {
+                schema: 1,
+                operation_id: consumer.intent.operation_id.clone(),
+                occurrence_id: consumer.occurrence.occurrence_id.clone(),
+                verifier_artifact_hash: consumer.intent.verifier_artifact_hash.clone(),
+                challenge_digest: consumer.intent.consumer_challenge_digest().unwrap(),
+                upload_token_execution_id: "exe-upload".into(),
+                run_token_execution_id: "exe-run".into(),
+                upload_response_sha256: "5".repeat(64),
+                run_stream_sha256: "6".repeat(64),
+                evidence_sha256: lillux::sha256_hex(&bytes),
+                evidence_bytes: bytes.len() as u64,
+                contact_deadline_exceeded: false,
+            }),
+            evidence,
+        };
+        consumer_response.validate_for(&consumer).unwrap();
+        assert!(consumer_response.validate_for(&request).is_err());
+        let mut changed_evidence = consumer_response.clone();
+        if let RestoredVerifierAdapterResponse::ConsumerObserved { evidence, .. } =
+            &mut changed_evidence
+        {
+            *evidence = serde_json::json!({"fixture_only": false});
+        }
+        assert!(changed_evidence.validate_for(&consumer).is_err());
+        let mut larger = consumer_response.clone();
+        if let RestoredVerifierAdapterResponse::ConsumerObserved {
+            observation,
+            evidence,
+        } = &mut larger
+        {
+            *evidence = serde_json::json!({"fixture_only": "x".repeat(128 * 1024)});
+            let bytes = ryeos_external_execution_contract::canonical_json(evidence).unwrap();
+            observation.evidence_sha256 = lillux::sha256_hex(&bytes);
+            observation.evidence_bytes = bytes.len() as u64;
+        }
+        larger.validate_for(&consumer).unwrap();
+        let mut oversized = consumer_response;
+        if let RestoredVerifierAdapterResponse::ConsumerObserved {
+            observation,
+            evidence,
+        } = &mut oversized
+        {
+            *evidence = serde_json::json!({"fixture_only": "x".repeat(
+                ryeos_external_execution_contract::restored_runtime_measurement::MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES as usize
+            )});
+            let bytes = ryeos_external_execution_contract::canonical_json(evidence).unwrap();
+            observation.evidence_sha256 = lillux::sha256_hex(&bytes);
+            observation.evidence_bytes = bytes.len() as u64;
+        }
+        assert!(oversized.validate_for(&consumer).is_err());
         let mut changed = request.clone();
         changed.occurrence.occurrence_id = "sbx-other".into();
         assert!(response.validate_for(&changed).is_err());
@@ -1053,187 +1872,5 @@ mod tests {
         changed.upload_sha256 = "6".repeat(64);
         assert!(response.validate_for(&changed).is_err());
         assert!(preflight_verifier_upload_and_routes(&changed, &upload, &spec, &settings).is_err());
-    }
-
-    fn public_root() -> String {
-        let signing = lillux::crypto::SigningKey::from_bytes(&[3; 32]);
-        format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().to_bytes())
-        )
-    }
-
-    fn probe() -> RenderSnapshotProbe {
-        RenderSnapshotProbe {
-            schema: 5,
-            product_witness_hash: "1".repeat(64),
-            guest_runtime_manifest_hash: "2".repeat(64),
-            controller_public_root: public_root(),
-            owner_id: "owner".into(),
-            account: "account".into(),
-            snapshot_id: "snp-exact".into(),
-            runtime_snapshot_locator: RuntimeSnapshotLocator {
-                schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_RESULT_SCHEMA,
-                operation_id: "a".repeat(64),
-                intent_digest: "b".repeat(64),
-                source_occurrence_id: "sbx-source".into(),
-                provider_group_id: "sbg-exact".into(),
-                snapshot_id: "snp-exact".into(),
-                provider_response_sha256: "c".repeat(64),
-                provider_creation_observation: serde_json::json!({"schema": 1}),
-                adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
-            },
-            restored_verifier_operation_id: "d".repeat(64),
-            restored_verifier_observation_hash: "e".repeat(64),
-            qualification_termination_operation_id: "f".repeat(64),
-            provider_terminal_observation_hash: "8".repeat(64),
-            snapshot_kind: "filesystem".into(),
-            plan: RenderPlan::Starter,
-            region: "oregon".into(),
-            binding_hash: "4".repeat(64),
-            restored_tree_manifest_hash: "2".repeat(64),
-            installed_owner_hash: "5".repeat(64),
-            installed_controller_public_root: public_root(),
-            signed_import_mode: 0o600,
-            guest_package_mode: 0o600,
-        }
-    }
-
-    #[test]
-    fn probe_requires_all_exact_placement_and_execution_coordinates() {
-        let settings = Settings {
-            schema: 2,
-            owner_id: "owner".into(),
-            plan: RenderPlan::Starter,
-            region: "oregon".into(),
-            snapshot_id: "snp-exact".into(),
-            tls_roots_der_base64: Vec::new(),
-        };
-        let expected = SnapshotExpectation {
-            product_witness_hash: &"1".repeat(64),
-            guest_runtime_manifest_hash: &"2".repeat(64),
-            controller_public_root: &public_root(),
-            account: "account",
-            binding_hash: &"4".repeat(64),
-            installed_owner_hash: &"5".repeat(64),
-        };
-        let mut observed = probe();
-        observed.validate_for(&settings, &expected).unwrap();
-        observed.snapshot_id = "snp-other".into();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.runtime_snapshot_locator.snapshot_id = "snp-other".into();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.runtime_snapshot_locator.provider_response_sha256 = "invalid".into();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.snapshot_kind = "runtime".into();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.installed_controller_public_root = "ed25519:other".into();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.signed_import_mode = 0o400;
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.signed_import_mode = 0o644;
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.guest_package_mode = 0o644;
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.qualification_termination_operation_id.clear();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.provider_terminal_observation_hash.clear();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.restored_verifier_operation_id.clear();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-        observed = probe();
-        observed.restored_verifier_observation_hash.clear();
-        assert!(observed.validate_for(&settings, &expected).is_err());
-
-        let mut untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted
-            .as_object_mut()
-            .unwrap()
-            .remove("runtime_snapshot_locator");
-        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
-        untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted
-            .as_object_mut()
-            .unwrap()
-            .remove("restored_verifier_operation_id");
-        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
-        untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["authenticated_ready_evidence_hash"] = serde_json::Value::String("7".repeat(64));
-        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
-        untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["writer_exclusion_evidence_hash"] = serde_json::Value::String("9".repeat(64));
-        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
-        untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["lost_stream_survival_evidence_hash"] = serde_json::Value::String("6".repeat(64));
-        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
-        untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["schema"] = serde_json::Value::from(4);
-        assert!(
-            RenderSnapshotProbe::from_probe_evidence(&untrusted)
-                .unwrap()
-                .validate_for(&settings, &expected)
-                .is_err()
-        );
-        untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["qualified"] = serde_json::Value::Bool(true);
-        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
-        untrusted = serde_json::to_value(probe()).unwrap();
-        untrusted["region"] = serde_json::Value::String("x".repeat(32 * 1024));
-        assert!(RenderSnapshotProbe::from_probe_evidence(&untrusted).is_err());
-    }
-
-    #[test]
-    fn offline_probe_interpretation_joins_protected_source_and_settings() {
-        let public_root = public_root();
-        let root_bytes = base64::engine::general_purpose::STANDARD
-            .decode(public_root.strip_prefix("ed25519:").unwrap())
-            .unwrap();
-        let settings = Settings {
-            schema: 2,
-            owner_id: "owner".into(),
-            plan: RenderPlan::Starter,
-            region: "oregon".into(),
-            snapshot_id: "snp-exact".into(),
-            tls_roots_der_base64: Vec::new(),
-        };
-        let request = LifecycleRuntimeProbeRequest {
-            schema: 1,
-            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
-            adapter_id: ADAPTER_ID.into(),
-            adapter_artifact_hash: "a".repeat(64),
-            settings_digest: "b".repeat(64),
-            binding_hash: "4".repeat(64),
-            qualification_attestation_hash: "c".repeat(64),
-            product_witness_hash: "1".repeat(64),
-            account: "account".into(),
-            source: ryeos_external_execution_contract::LifecycleRuntimeProbeSource {
-                manifest_hash: "2".repeat(64),
-                owner_executable_sha256: "5".repeat(64),
-                controller_root_blob_sha256: lillux::sha256_hex(hex::encode(root_bytes).as_bytes()),
-                controller_public_root: public_root,
-            },
-            probe_evidence: serde_json::to_value(probe()).unwrap(),
-        };
-        let response = interpret_authenticated_request(&request, &settings).unwrap();
-        response.validate_for(&request).unwrap();
-        let mut changed = request.clone();
-        changed.source.owner_executable_sha256 = "d".repeat(64);
-        assert!(interpret_authenticated_request(&changed, &settings).is_err());
-        changed = request.clone();
-        changed.source.controller_root_blob_sha256 = "e".repeat(64);
-        assert!(interpret_authenticated_request(&changed, &settings).is_err());
-        let mut changed_settings = settings;
-        changed_settings.snapshot_id = "snp-other".into();
-        assert!(interpret_authenticated_request(&request, &changed_settings).is_err());
     }
 }

@@ -1,0 +1,1 @@
+{"model":"qwen3-0.6b","messages":[{"role":"user","content":"Reply with exactly OK and nothing else."}],"tools":[],"stream":true,"stream_options":{"include_usage":true},"max_tokens":8,"temperature":0.0,"seed":0,"enable_thinking":false}

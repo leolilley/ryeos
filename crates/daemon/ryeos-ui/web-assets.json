@@ -1,62 +1,167 @@
 {
   "schema_version": "ryeos.ui.asset-manifest.v1",
-  "ui_binding_revision": "ryeos.ui.binding.v5",
+  "ui_binding_revision": "ryeos.ui.binding.v16",
+  "source_digest": "7e2d188d8df924a64f3a66f1c5b4b4ad59e688903372ada27bed7603fcb4b450",
   "assets": [
     {
       "route": "/ui",
       "filename": "index.html",
       "mime": "text/html; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "ef90a265205b429fac3e265b5e6cc42407b7bd544ca9577427296d0f1e078124",
+      "sha256": "8172e368840fb5e41937ee4dfecb6d4f7c5b8fd9b2349549670377716bd26b9e",
       "imports": [
-        "/ui/assets/ryeos_ui.css",
-        "/ui/assets/ryeos_ui.js"
+        "/ui/assets/ryeos_boot.js"
       ]
     },
     {
-      "route": "/ui/assets/ryeos_ui.js",
-      "filename": "ryeos_ui.js",
+      "route": "/ui/assets/ryeos_boot.js",
+      "filename": "ryeos_boot.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "a06591e95d4546fd54d9e329fd5647681521a3999e5fa18e4c69aa2de5ceb45e",
+      "sha256": "cf40b5b7ecbe326098c9389618c4d028327222d590709ec99f6e00487e38f3fc",
       "imports": [
-        "/ui/assets/ryeos_three.js",
-        "/ui/assets/ryeos_web.js",
-        "/ui/assets/ryeos_web_bg.wasm"
+        "/ui/assets/ryeos_rune.js",
+        "/ui/assets/ryeos-cjk.ttf",
+        "/ui/assets/ryeos-emoji.ttf"
       ]
     },
     {
-      "route": "/ui/assets/ryeos_ui.css",
-      "filename": "ryeos_ui.css",
-      "mime": "text/css; charset=utf-8",
+      "route": "/ui/assets/ryeos_rune.js",
+      "filename": "ryeos_rune.js",
+      "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "eb26a439e40e3ab54b5836df9253126e0222182efd9bdc1b0206590762bf1365",
+      "sha256": "0ff721fc60fdf64f751a97150149f661382dff6271e73e89fade426fa6a8a93e",
+      "imports": [
+        "/ui/assets/rune_bridge.js",
+        "/ui/assets/rune_health.js",
+        "/ui/assets/rune_pipelines.js",
+        "/ui/assets/rune_platform.js",
+        "/ui/assets/rune_spell_web.js",
+        "/ui/assets/rune_text_browser_platform.js",
+        "/ui/assets/rune_text_platform_text.js",
+        "/ui/assets/rune_text_web.js",
+        "/ui/assets/ryeos_rune_bg.wasm",
+        "/ui/assets/Inter-Regular.ttf",
+        "/ui/assets/Inter-Medium.ttf",
+        "/ui/assets/Inter-SemiBold.ttf"
+      ]
+    },
+    {
+      "route": "/ui/assets/rune_bridge.js",
+      "filename": "rune_bridge.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "ff6be555f8588ee384aca0822cf33b56fe1671fba955bbd6e9a90f1f56478c08",
       "imports": []
     },
     {
-      "route": "/ui/assets/ryeos_three.js",
-      "filename": "ryeos_three.js",
+      "route": "/ui/assets/rune_platform.js",
+      "filename": "rune_platform.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "914899ca99c9e5aba19e97a9df9bc3e6895c524159133bf591e9b66e7d24eb62",
+      "sha256": "acf5dbc11a5f4cd1e7ec6c20de84ae7d460174db250ddc3abc453cf9b66ee41f",
       "imports": []
     },
     {
-      "route": "/ui/assets/ryeos_web.js",
-      "filename": "ryeos_web.js",
+      "route": "/ui/assets/rune_health.js",
+      "filename": "rune_health.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "4f73526ceaaca1e7c991d0d37d65543b933f6d2e49dcb14af32b7552790c0474",
-      "imports": [
-        "/ui/assets/ryeos_web_bg.wasm"
-      ]
+      "sha256": "0e06cedda4200a137a5d8d7bb1923d98ef8533897fdd189dfd04adca0e03c40e",
+      "imports": []
     },
     {
-      "route": "/ui/assets/ryeos_web_bg.wasm",
-      "filename": "ryeos_web_bg.wasm",
+      "route": "/ui/assets/rune_pipelines.js",
+      "filename": "rune_pipelines.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "0f80a483a9917b23e1e0cb0943fbc37b5be9ed1d2c7eb11dfc6e9343d20bec96",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_text_platform_text.js",
+      "filename": "rune_text_platform_text.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "e2d39ad694699c3eb18204fae9509ac1abaaeac7c977059873d4619462d7c3b9",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_spell_web.js",
+      "filename": "rune_spell_web.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "635f08a57a6a25c0d0e63742a3a3e0e92efeea1e95a7309a388422f2156030ca",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_text_browser_platform.js",
+      "filename": "rune_text_browser_platform.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "09ab5fef2338b9446b014934129ec6f5aae40efc9f3d669766b97f15e0a9a6f9",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/rune_text_web.js",
+      "filename": "rune_text_web.js",
+      "mime": "application/javascript; charset=utf-8",
+      "cache": "no-cache",
+      "sha256": "972800315f80c01e4069f80642e848f31b29b732082e282500b1294179538b99",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/ryeos_rune_bg.wasm",
+      "filename": "ryeos_rune_bg.wasm.gz",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "e93086e1ce638e871913c343de765229468a09ab1e71e15066f3a0b9ecd32059",
+      "sha256": "5f44a0a5cb64bb19c13c7f369066842559b189cf68297b84d10853e844694a8b",
+      "imports": [],
+      "encoding": "gzip"
+    },
+    {
+      "route": "/ui/assets/ryeos-cjk.ttf",
+      "filename": "ryeos-cjk.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "199b2f451085c70084374dba4ee64b9b60ff93646c26b48dd4b47fb910036af2",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/ryeos-emoji.ttf",
+      "filename": "ryeos-emoji.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "2da9fbdc39dfa60745991459a5e4a4298a35af66df15fb3077fcca4143401203",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-Regular.ttf",
+      "filename": "Inter-Regular.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "8bc20f364ca84cb6d6bd422f9c6e139f1898dc181890f4e4365fb5541b90e583",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-Medium.ttf",
+      "filename": "Inter-Medium.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "66377866c203e4f5ea795f9812b2e2b015bf2bf15a9d6321d6ba54fc7a85bb90",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/Inter-SemiBold.ttf",
+      "filename": "Inter-SemiBold.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "ece247e56ef12a6cfa6c35abde0ba73da3cb8473465f42265b9453db11561376",
       "imports": []
     }
   ]

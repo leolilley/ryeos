@@ -18,3 +18,6 @@ url = { workspace = true }
 [[bin]]
 name = "ryeos-web-tools"
 path = "src/bin/ryeos-web-tools.rs"
+
+[lints]
+workspace = true

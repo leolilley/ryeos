@@ -107,6 +107,5 @@ pub(crate) async fn reach(params: &Value) -> Result<Value> {
             .context("flush runtime phase-cut evidence")?;
     }
     std::future::pending::<()>().await;
-    #[allow(unreachable_code)]
     Ok(json!({"reached": true}))
 }

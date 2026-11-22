@@ -1,0 +1,2147 @@
+//! Stopped-node amendments of the capacity account's issuance: re-anchoring
+//! it to another filesystem, and replacing the policy it runs under. Both
+//! are documents in one chain over the original, operator-signed issuance. A
+//! document is signed by the operator's own key in the operator's process, or
+//! by the node key carrying the operator-signed offline-operation request that
+//! authorized it; the daemon holds no operator key, so a document produced
+//! while applying a queued operation is the second kind.
+//!
+//! A durable identity names the filesystem's own identity plus the inode, so a
+//! volume re-attached under another device number needs nothing. Moving the
+//! data to a different filesystem is a different act: every recorded identity
+//! then names a place the node no longer is. That move must be explicit and
+//! signed. One document names the exact prior
+//! binding (by digest), the original issuance the account records still carry,
+//! and the newly measured root, runtime, account-directory and account
+//! identities. Boot accepts the account at the new place only through that
+//! document: the re-signed initialization completion embeds a binding that
+//! names the document's digest, and the document must verify under the pinned
+//! operator key and agree with the binding in every identity.
+//!
+//! Documents are published under content-addressed names
+//! (`native-capacity-reanchor.<digest>.json`) and never overwritten, so an
+//! interrupted re-anchor cannot destroy the document the sealed completion
+//! still names. Each document names the previous one and the exact binding it
+//! replaces, and carries the account's epoch, debit sequence and anchor digest
+//! at the time; a document that steps back from the one before it is refused.
+//! Restoring a whole older volume (rolling the account back to an earlier
+//! image) is the separate rollback class and is out of scope here.
+//!
+//! The command needs the node stopped (the state lock), refuses while an
+//! incarnation debit is outstanding, never touches the account or anchor
+//! records (they keep their original issuance digest), and records evidence
+//! like re-issuance does.
+//!
+//! A policy amendment is the same document with the places unchanged and a
+//! `policy` that replaces the one in force. The issuance pins the policy it
+//! was granted under, so without it no `native_capacity` policy generation
+//! other than the issued one can ever start the node; with it the operator
+//! applies the new generation and the account continues under it, epoch and
+//! debit sequence unchanged. The account's current image must already fit
+//! the new policy's bounds, because every later start validates that image
+//! under the generation's policy; an image that does not fit is refused
+//! before any write, and an operator re-issuance opens a fresh image that
+//! will.
+
+use std::ffi::OsStr;
+use std::path::Path;
+
+use anyhow::{Context, Result, ensure};
+use base64::Engine as _;
+use lillux::crypto::{Signature, Verifier};
+use lillux::{PinnedDirectory, PinnedDirectoryIdentity, PinnedRegularFileIdentity};
+use ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy;
+use ryeos_node_runtime::state_lock::StateLock;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
+
+use super::OperatorLineage;
+use crate::apply_authority::{Authority, DocumentSigner};
+use crate::offline_operation::contract::SignedRequest;
+
+use super::reissue::StoppedCapacityAccount;
+use super::{NativeCapacityAccountBinding, digest, hex_digest, refuse_old_capacity_document};
+
+const DOCUMENT_PREFIX: &str = "native-capacity-reanchor.";
+const DOCUMENT_SUFFIX: &str = ".json";
+/// The document embeds the signed request that authorized it.
+const REANCHOR_DOCUMENT_BOUND: u64 = 96 * 1024;
+const REANCHOR_SCHEMA: &str = "ryeos/native-capacity-reanchor/v3";
+/// Offline operations whose request may authorize a move.
+const MOVE_OPERATIONS: &[&str] = &["node.capacity.reanchor"];
+/// Offline operations whose request may authorize a policy amendment.
+const AMENDMENT_OPERATIONS: &[&str] = &["node.policy-apply", "node.reset.policy-generation"];
+/// Longest chain of documents a node will walk.
+const MAX_CHAIN: usize = 64;
+/// Bound on directory entries scanned for documents.
+const MAX_DIRECTORY_ENTRIES: usize = 4096;
+/// Evidence of every re-anchor an operator performed, oldest first.
+pub const REANCHOR_EVIDENCE_LOG: &str = "native-capacity-reanchors.jsonl";
+const REANCHOR_EVIDENCE_LOG_BOUND: usize = 256 * 1024;
+/// Evidence of every policy amendment an operator applied to this node's
+/// capacity account, oldest first.
+pub const POLICY_AMENDMENT_EVIDENCE_LOG: &str = "native-capacity-policy-amendments.jsonl";
+const REASON_BOUND_CHARS: usize = 1024;
+
+/// What a re-anchored binding records of the move: the original issuance the
+/// account and anchor still carry, and the digest of the signed document that
+/// authorises the new identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BindingReanchor {
+    document_digest: String,
+    issuance_digest: String,
+}
+
+impl BindingReanchor {
+    pub(super) fn original_issuance(&self) -> Result<[u8; 32]> {
+        parse_digest(&self.issuance_digest)
+    }
+}
+
+fn parse_digest(value: &str) -> Result<[u8; 32]> {
+    ensure!(digest(value), "re-anchor digest is not canonical");
+    let mut out = [0_u8; 32];
+    for (slot, pair) in out.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        *slot = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+    }
+    Ok(out)
+}
+
+/// Where the account stood when the operator signed a move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccountPosition {
+    pub(crate) epoch: u64,
+    pub(crate) sequence: u64,
+    pub(crate) anchor_digest: String,
+}
+
+/// What the operator signed to move one capacity account to a new place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReanchorBody {
+    schema: String,
+    operator_fingerprint: String,
+    node_fingerprint: String,
+    /// Digest of the original issuance, which the account records carry.
+    issuance_digest: String,
+    /// Digest of the canonical JSON of the exact binding this replaces.
+    prior_binding_digest: String,
+    /// The document this one follows; absent for the first re-anchor.
+    prior_document_digest: Option<String>,
+    /// The account's epoch, debit sequence and anchor image when signed. A
+    /// later document may not carry a lower epoch or sequence.
+    epoch: u64,
+    sequence: u64,
+    anchor_digest: String,
+    root_identity: PinnedDirectoryIdentity,
+    runtime_identity: PinnedDirectoryIdentity,
+    account_directory_identity: PinnedDirectoryIdentity,
+    account_identity: PinnedRegularFileIdentity,
+    /// The policy this document puts in force in place of the one before
+    /// it; absent, the policy in force stays. A document that moves nothing
+    /// and replaces no policy amends nothing and is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy: Option<NodeNativeCapacityPolicy>,
+    reason: String,
+    anchored_at: String,
+    /// Which key signed the document and what vouches for the operator.
+    authority: Authority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReanchorDocument {
+    body: ReanchorBody,
+    /// The operator-signed request the node applied, when the node signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request: Option<SignedRequest>,
+    signature: String,
+}
+
+fn document_name(document_digest: &str) -> String {
+    format!("{DOCUMENT_PREFIX}{document_digest}{DOCUMENT_SUFFIX}")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_digest(&sha2::Sha256::digest(bytes).into())
+}
+
+/// Parse and verify a re-anchor document against the node and operator it
+/// must name. The boot check and the command share this.
+fn verify_document(
+    bytes: &[u8],
+    lineage: &OperatorLineage,
+    node_fingerprint: &str,
+) -> Result<ReanchorBody> {
+    ensure!(
+        u64::try_from(bytes.len())? <= REANCHOR_DOCUMENT_BOUND,
+        "capacity re-anchor document exceeds its bound"
+    );
+    refuse_old_capacity_document(bytes, REANCHOR_SCHEMA, "the capacity re-anchor document")?;
+    let document: ReanchorDocument = serde_json::from_slice(bytes)?;
+    let body = document.body;
+    ensure!(
+        body.node_fingerprint == node_fingerprint,
+        "capacity re-anchor belongs to another node"
+    );
+    ensure!(
+        digest(&body.issuance_digest)
+            && digest(&body.prior_binding_digest)
+            && digest(&body.anchor_digest)
+            && body.prior_document_digest.as_deref().is_none_or(digest),
+        "capacity re-anchor digest is not canonical"
+    );
+    ensure!(body.epoch >= 1, "capacity re-anchor names no epoch");
+    ensure!(
+        body.reason.chars().count() <= REASON_BOUND_CHARS,
+        "capacity re-anchor reason exceeds its bound"
+    );
+    if let Some(policy) = &body.policy {
+        policy
+            .validate()
+            .context("capacity amendment names an invalid policy")?;
+    }
+    lineage.verify_document(
+        lillux::canonical_json(&serde_json::to_value(&body)?)?.as_bytes(),
+        &document.signature,
+        &body.authority,
+        document.request.as_ref(),
+        if body.policy.is_some() {
+            AMENDMENT_OPERATIONS
+        } else {
+            MOVE_OPERATIONS
+        },
+        &body.operator_fingerprint,
+    )?;
+    Ok(body)
+}
+
+/// One published document's bytes, owned by the running account, which must
+/// hash to the digest its name carries.
+fn read_named(onboarding: &PinnedDirectory, document_digest: &str) -> Result<Option<Vec<u8>>> {
+    ensure!(digest(document_digest), "re-anchor digest is not canonical");
+    let name = document_name(document_digest);
+    let Some(file) = onboarding.open_pinned_regular(OsStr::new(&name), false)? else {
+        return Ok(None);
+    };
+    file.require_effective_user_owned()?;
+    let observation = file.observation()?;
+    let bytes = file.read_stable_bounded(&observation, REANCHOR_DOCUMENT_BOUND)?;
+    ensure!(
+        sha256_hex(&bytes) == document_digest,
+        "capacity re-anchor document does not hash to its name"
+    );
+    Ok(Some(bytes))
+}
+
+/// Digests of the documents published in `onboarding`, by name.
+fn published_digests(onboarding: &PinnedDirectory) -> Result<Vec<String>> {
+    let mut digests = Vec::new();
+    for name in onboarding.entry_names_bounded(MAX_DIRECTORY_ENTRIES)? {
+        let Some(name) = name.to_str() else { continue };
+        if let Some(candidate) = name
+            .strip_prefix(DOCUMENT_PREFIX)
+            .and_then(|rest| rest.strip_suffix(DOCUMENT_SUFFIX))
+            && digest(candidate)
+        {
+            digests.push(candidate.to_owned());
+        }
+    }
+    digests.sort();
+    Ok(digests)
+}
+
+fn onboarding(app_root: &Path) -> Result<PinnedDirectory> {
+    PinnedDirectory::open(&app_root.join(".ai/config/onboarding"))?
+        .context("operator onboarding absent")
+}
+
+/// The binding the operator-signed issuance recorded at the original place.
+fn issued_binding(
+    onboarding: &PinnedDirectory,
+    lineage: &OperatorLineage,
+) -> Result<NativeCapacityAccountBinding> {
+    let file = onboarding
+        .open_pinned_regular(OsStr::new("native-capacity-issuance.json"), false)?
+        .context("capacity issuance document absent")?;
+    file.require_effective_user_owned()?;
+    let observation = file.observation()?;
+    let bytes = file.read_stable_bounded(&observation, 16 * 1024)?;
+    let document: super::IssuanceDocument = serde_json::from_slice(&bytes)?;
+    ensure!(
+        document.body.schema == "ryeos/native-capacity-issuance/v3"
+            && document.body.operator_fingerprint == lineage.issuing().0,
+        "capacity issuance is foreign"
+    );
+    let operator = lineage.issuing().1;
+    let encoded = document
+        .signature
+        .strip_prefix("ed25519:")
+        .context("capacity signature encoding invalid")?;
+    let signature =
+        Signature::from_slice(&base64::engine::general_purpose::STANDARD.decode(encoded)?)?;
+    operator.verify(
+        lillux::canonical_json(&serde_json::to_value(&document.body)?)?.as_bytes(),
+        &signature,
+    )?;
+    Ok(document.body.binding)
+}
+
+impl NativeCapacityAccountBinding {
+    /// This binding moved to the places `body` names, under document
+    /// `document_digest`. `original` supplies the issuance the account keeps.
+    fn moved_by(&self, body: &ReanchorBody, document_digest: &str) -> Self {
+        Self {
+            root_identity: body.root_identity,
+            runtime_identity: body.runtime_identity,
+            account_directory_identity: body.account_directory_identity,
+            account_identity: body.account_identity,
+            policy: body.policy.clone().unwrap_or_else(|| self.policy.clone()),
+            reanchor: Some(BindingReanchor {
+                document_digest: document_digest.to_owned(),
+                issuance_digest: body.issuance_digest.clone(),
+            }),
+            ..self.clone()
+        }
+    }
+}
+
+/// A verified chain of documents ending at one tip.
+struct Chain {
+    /// The binding the tip authorises.
+    effective: NativeCapacityAccountBinding,
+    tip: ReanchorBody,
+    length: usize,
+}
+
+/// Walk back from `tip_digest` through the documents' `prior_document_digest`
+/// links, then check forward from the original binding: every document is
+/// signed by the operator for this node and issuance, names exactly the
+/// binding the previous one produced, and never steps back in epoch or debit
+/// sequence.
+fn verify_chain(
+    onboarding: &PinnedDirectory,
+    original: &NativeCapacityAccountBinding,
+    tip_digest: &str,
+    lineage: &OperatorLineage,
+) -> Result<Chain> {
+    let mut walk = Vec::new();
+    let mut next = Some(tip_digest.to_owned());
+    while let Some(current) = next {
+        ensure!(
+            walk.len() < MAX_CHAIN,
+            "capacity re-anchor chain is too long"
+        );
+        let bytes = read_named(onboarding, &current)?
+            .with_context(|| format!("capacity re-anchor document {current} is absent"))?;
+        let body = verify_document(&bytes, lineage, &original.node_fingerprint)?;
+        next = body.prior_document_digest.clone();
+        walk.push((current, body));
+    }
+    walk.reverse();
+    let issuance = hex_digest(&original.issuance_digest()?);
+    let mut effective = original.clone();
+    let mut previous: Option<(u64, u64)> = None;
+    let length = walk.len();
+    let mut last = None;
+    for (document_digest, body) in walk {
+        ensure!(
+            body.issuance_digest == issuance,
+            "capacity re-anchor names another issuance"
+        );
+        ensure!(
+            body.prior_binding_digest == effective.binding_digest()?,
+            "capacity re-anchor does not replace the binding before it"
+        );
+        if let Some((epoch, sequence)) = previous {
+            ensure!(
+                body.epoch >= epoch && body.sequence >= sequence,
+                "capacity re-anchor steps back in epoch or debit sequence; restoring an older \
+                 volume is out of scope"
+            );
+        }
+        previous = Some((body.epoch, body.sequence));
+        let amended = effective.moved_by(&body, &document_digest);
+        ensure!(
+            !amended.same_places(&effective) || amended.policy != effective.policy,
+            "capacity amendment moves nothing and replaces no policy"
+        );
+        effective = amended;
+        last = Some(body);
+    }
+    Ok(Chain {
+        effective,
+        tip: last.context("capacity re-anchor chain is empty")?,
+        length,
+    })
+}
+
+/// The longest valid chain among the published documents, ties broken by the
+/// later debit sequence. An invalid or stale document is not a tip; the one
+/// a sealed completion names is verified on its own at boot.
+fn best_chain(
+    onboarding: &PinnedDirectory,
+    original: &NativeCapacityAccountBinding,
+    lineage: &OperatorLineage,
+) -> Result<Option<(String, Chain)>> {
+    let mut best: Option<(String, Chain)> = None;
+    for candidate in published_digests(onboarding)? {
+        let Ok(chain) = verify_chain(onboarding, original, &candidate, lineage) else {
+            continue;
+        };
+        let better = best.as_ref().is_none_or(|(_, current)| {
+            (chain.length, chain.tip.sequence) > (current.length, current.tip.sequence)
+        });
+        if better {
+            best = Some((candidate, chain));
+        }
+    }
+    Ok(best)
+}
+
+impl NativeCapacityAccountBinding {
+    /// The binding as the best published re-anchor chain, when there is one,
+    /// moves it. Used where an operator-signed issuance is loaded to be
+    /// resealed: the issuance document keeps its original identities, the
+    /// chain supersedes them.
+    pub(crate) fn with_current_reanchor(
+        self,
+        app_root: &Path,
+        lineage: &OperatorLineage,
+    ) -> Result<Self> {
+        let onboarding = onboarding(app_root)?;
+        Ok(match best_chain(&onboarding, &self, lineage)? {
+            Some((_, chain)) => chain.effective,
+            None => self,
+        })
+    }
+
+    /// Boot's check of a re-anchored binding: the document it names and every
+    /// document before it must verify under the pinned operator key, chain
+    /// back to the operator-signed issuance without stepping back, and
+    /// produce exactly this binding. A binding that was never re-anchored
+    /// passes through to the ordinary install check alone.
+    pub(crate) fn require_reanchor_document(
+        &self,
+        app_root: &Path,
+        lineage: &OperatorLineage,
+    ) -> Result<()> {
+        let Some(marker) = &self.reanchor else {
+            return Ok(());
+        };
+        let onboarding = onboarding(app_root)?;
+        let original = issued_binding(&onboarding, lineage)?;
+        let chain = verify_chain(&onboarding, &original, &marker.document_digest, lineage)?;
+        ensure!(
+            chain.effective == *self,
+            "capacity re-anchor chain disagrees with the binding it authorises"
+        );
+        Ok(())
+    }
+
+    /// This binding's identities as they are measured at `app_root` now, the
+    /// issuance anchor unchanged.
+    fn measured_at(&self, app_root: &Path) -> Result<Self> {
+        let directory = PinnedDirectory::open(&app_root.join(".ai/node/native-capacity"))?
+            .context("capacity directory absent")?;
+        let account = directory
+            .open_pinned_regular(OsStr::new("account"), false)?
+            .context("original capacity account is absent")?;
+        Ok(Self {
+            root_identity: PinnedDirectory::open(app_root)?
+                .context("capacity root absent")?
+                .identity()?,
+            runtime_identity: PinnedDirectory::open(&app_root.join(".ai/state"))?
+                .context("capacity runtime absent")?
+                .identity()?,
+            account_directory_identity: directory.identity()?,
+            account_identity: account.identity()?,
+            ..self.clone()
+        })
+    }
+
+    fn binding_digest(&self) -> Result<String> {
+        let canonical = lillux::canonical_json(&serde_json::to_value(self)?)?;
+        Ok(sha256_hex(canonical.as_bytes()))
+    }
+
+    fn same_places(&self, other: &Self) -> bool {
+        self.root_identity == other.root_identity
+            && self.runtime_identity == other.runtime_identity
+            && self.account_directory_identity == other.account_directory_identity
+            && self.account_identity == other.account_identity
+    }
+}
+
+/// One operator re-anchor on a stopped node.
+pub struct ReanchorRequest<'a> {
+    pub app_root: &'a Path,
+    /// Held for the whole operation: a running daemon holds the same lock.
+    pub state_lock: &'a StateLock,
+    /// What signs the document and vouches for the operator: the operator's
+    /// own key in the operator's process, or the node key under the
+    /// operator-signed request being applied.
+    pub signer: DocumentSigner<'a>,
+    pub reason: &'a str,
+    /// The command name recorded in the evidence log.
+    pub command: &'a str,
+}
+
+/// What the command changed, or found already changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReanchorReport {
+    /// The signed document now authorising this place; absent when the node
+    /// was found anchored where it is and was never moved.
+    pub document_digest: Option<String>,
+    pub prior_binding_digest: Option<String>,
+    /// The recorded binding already names this place: nothing was written.
+    pub already_applied: bool,
+}
+
+/// One line of the bounded evidence log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityReanchorEvidence {
+    pub document_digest: String,
+    pub prior_binding_digest: String,
+    pub reason: String,
+    pub recorded_at: String,
+    pub actor: lillux::process_control::ControllerAccount,
+    pub command: String,
+}
+
+/// Anchor a stopped node's capacity account at the place it now is. Rerunning
+/// after any interruption converges: the signed document is rewritten from
+/// the same measurements and the completion resealed, and a node whose
+/// recorded binding already names this place reports `already_applied`.
+pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport> {
+    let ReanchorRequest {
+        app_root,
+        state_lock,
+        signer,
+        reason,
+        command,
+    } = request;
+    state_lock.ensure_protects_app_root(app_root)?;
+    let actor = lillux::process_control::ControllerAccount::current().map_err(|error| {
+        anyhow::anyhow!(
+            "capacity re-anchor refused before any write: the acting account cannot be recorded as its evidence actor ({error}); run it as the node account"
+        )
+    })?;
+    ensure!(
+        reason.chars().count() <= REASON_BOUND_CHARS,
+        "capacity re-anchor reason exceeds its bound"
+    );
+    let report = crate::init::verify_init_completion_before_capacity_install(app_root)?
+        .context("re-anchoring requires completed initialization")?;
+    let operator_fingerprint = signer.operator_fingerprint().context(
+        "a capacity re-anchor needs the operator's consent: sign it with the operator key or \
+         apply it under the operator's signed request",
+    )?;
+    ensure!(
+        operator_fingerprint == report.operator_fingerprint,
+        "operator differs from the one that initialized this node"
+    );
+    let lineage = super::OperatorLineage::load(app_root)?;
+    lineage.require_member(&operator_fingerprint)?;
+    let prior = report.capacity_account;
+    let measured = prior.measured_at(app_root)?;
+    let onboarding = onboarding(app_root)?;
+    let state =
+        PinnedDirectory::open(&app_root.join(".ai/state"))?.context("capacity runtime absent")?;
+    if let Some(log) = state.open_pinned_regular(OsStr::new(REANCHOR_EVIDENCE_LOG), false)? {
+        require_owned_log(&log, REANCHOR_EVIDENCE_LOG, "re-anchor")?;
+    }
+    if prior.same_places(&measured) {
+        // A rerun after the seal but before the evidence line owes the line.
+        if let Some(marker) = &prior.reanchor {
+            let bytes = read_named(&onboarding, &marker.document_digest)?
+                .context("the document the binding names is absent")?;
+            let body = verify_document(&bytes, &lineage, &report.node_fingerprint)?;
+            append_evidence_once(
+                &state,
+                &CapacityReanchorEvidence {
+                    document_digest: marker.document_digest.clone(),
+                    prior_binding_digest: body.prior_binding_digest,
+                    reason: body.reason,
+                    recorded_at: lillux::time::iso8601_now(),
+                    actor,
+                    command: command.to_owned(),
+                },
+            )?;
+        }
+        return Ok(ReanchorReport {
+            document_digest: prior
+                .reanchor
+                .as_ref()
+                .map(|marker| marker.document_digest.clone()),
+            prior_binding_digest: None,
+            already_applied: true,
+        });
+    }
+    let policy = prior.policy.clone();
+    // The records must be this account's, at the place now measured, and
+    // carry no debit: nothing outstanding can be attributed across a move.
+    measured.require_installed(app_root, &report.node_fingerprint, &policy)?;
+    let issuance = prior.issuance_digest()?;
+    let directory = PinnedDirectory::open(&app_root.join(".ai/node/native-capacity"))?
+        .context("capacity directory absent")?;
+    let mut owner = StoppedCapacityAccount::open(
+        directory,
+        measured.account_identity,
+        onboarding.try_clone()?,
+        state.try_clone()?,
+        issuance,
+        &policy,
+        state_lock.witness()?,
+    )?;
+    let position = owner.require_no_outstanding_debit(&policy)?;
+    state_lock.ensure_protects_app_root(app_root)?;
+
+    let prior_document_digest = prior
+        .reanchor
+        .as_ref()
+        .map(|marker| marker.document_digest.clone());
+    if let Some(previous) = &prior_document_digest {
+        let bytes = read_named(&onboarding, previous)?
+            .context("the document the binding names is absent")?;
+        let previous = verify_document(&bytes, &lineage, &report.node_fingerprint)?;
+        ensure!(
+            position.epoch >= previous.epoch && position.sequence >= previous.sequence,
+            "the account stands before the previous re-anchor; restoring an older volume is out of scope"
+        );
+    }
+    let prior_binding_digest = prior.binding_digest()?;
+    let body = ReanchorBody {
+        schema: REANCHOR_SCHEMA.to_owned(),
+        operator_fingerprint: operator_fingerprint.clone(),
+        node_fingerprint: report.node_fingerprint.clone(),
+        issuance_digest: hex_digest(&issuance),
+        prior_binding_digest: prior_binding_digest.clone(),
+        prior_document_digest,
+        epoch: position.epoch,
+        sequence: position.sequence,
+        anchor_digest: position.anchor_digest,
+        root_identity: measured.root_identity,
+        runtime_identity: measured.runtime_identity,
+        account_directory_identity: measured.account_directory_identity,
+        account_identity: measured.account_identity,
+        policy: None,
+        reason: reason.to_owned(),
+        anchored_at: lillux::time::iso8601_now(),
+        authority: signer.authority()?,
+    };
+    // An interrupted run leaves a document no completion names yet; a rerun
+    // measures the same facts and adopts it instead of publishing another.
+    let adopted = published_digests(&onboarding)?
+        .into_iter()
+        .filter_map(|candidate| {
+            let bytes = read_named(&onboarding, &candidate).ok()??;
+            let existing = verify_document(&bytes, &lineage, &report.node_fingerprint).ok()?;
+            body.same_facts(&existing).then_some(candidate)
+        })
+        .next();
+    let document_digest = match adopted {
+        Some(digest) => digest,
+        None => {
+            let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
+            let document = ReanchorDocument {
+                request: signer.request(),
+                signature: signer.sign(canonical.as_bytes()),
+                body,
+            };
+            let document_bytes = serde_json::to_vec(&document)?;
+            ensure!(
+                u64::try_from(document_bytes.len())? <= REANCHOR_DOCUMENT_BOUND,
+                "capacity re-anchor document exceeds its bound"
+            );
+            let document_digest = sha256_hex(&document_bytes);
+            // Content-addressed and create-only: nothing already published,
+            // least of all the document the sealed completion names, is
+            // overwritten.
+            onboarding.atomic_write_pinned_if_same(
+                OsStr::new(&document_name(&document_digest)),
+                None,
+                &document_bytes,
+                0o600,
+                crate::NODE_TEMP_PURPOSE,
+            )?;
+            onboarding.sync()?;
+            document_digest
+        }
+    };
+    // The completion now embeds the re-anchored binding and names the
+    // document; until it is resealed boot still honours the previous one.
+    crate::init::seal_current_init_completion(app_root, None, signer, None)?;
+    append_evidence_once(
+        &state,
+        &CapacityReanchorEvidence {
+            document_digest: document_digest.clone(),
+            prior_binding_digest: prior_binding_digest.clone(),
+            reason: reason.to_owned(),
+            recorded_at: lillux::time::iso8601_now(),
+            actor,
+            command: command.to_owned(),
+        },
+    )?;
+    Ok(ReanchorReport {
+        document_digest: Some(document_digest),
+        prior_binding_digest: Some(prior_binding_digest),
+        already_applied: false,
+    })
+}
+
+/// One operator policy amendment on a stopped node: the capacity account
+/// continues under `policy`, which the accompanying `native_capacity`
+/// policy generation puts in force.
+pub struct CapacityPolicyAmendmentRequest<'a> {
+    pub app_root: &'a Path,
+    /// Held by the command for the whole operation: a running daemon holds
+    /// the same lock, so acquiring it is the proof that the node is stopped.
+    pub state_lock: &'a StateLock,
+    /// What signs the document and vouches for the operator: the operator's
+    /// own key in the operator's process, or the node key under the
+    /// operator-signed request being applied.
+    pub signer: DocumentSigner<'a>,
+    pub policy: &'a NodeNativeCapacityPolicy,
+    pub reason: &'a str,
+    /// The command name recorded in the evidence log.
+    pub command: &'a str,
+}
+
+/// What the amendment changed, or found already in force.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityPolicyAmendmentReport {
+    /// The amendment document in force for this policy.
+    pub document_digest: Option<String>,
+    /// Digest of the binding the amendment replaced; absent when the policy
+    /// was already in force.
+    pub prior_binding_digest: Option<String>,
+    /// Digest of the canonical JSON of the policy now in force.
+    pub policy_digest: String,
+    pub already_applied: bool,
+    /// The dead incarnation whose debit was settled before the amendment,
+    /// exactly as the next start would have settled it; absent when none was
+    /// owed.
+    pub settled_incarnation: Option<String>,
+}
+
+/// One line of the bounded policy-amendment evidence log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityPolicyAmendmentEvidence {
+    pub document_digest: String,
+    pub prior_binding_digest: String,
+    pub policy_digest: String,
+    pub reason: String,
+    pub recorded_at: String,
+    pub actor: lillux::process_control::ControllerAccount,
+    pub command: String,
+}
+
+/// The authenticated operator and node an amendment acts for.
+pub(super) struct AmendmentIdentity<'a> {
+    pub(super) signer: DocumentSigner<'a>,
+    pub(super) operator_fingerprint: String,
+    /// The operators whose earlier documents the amendment chain may carry.
+    pub(super) lineage: OperatorLineage,
+    pub(super) node_fingerprint: String,
+}
+
+/// The directories an amendment reads and writes: the account's own
+/// directory, the operator onboarding directory the documents live in, and
+/// the state directory that holds the evidence log.
+pub(super) struct AmendmentPlaces {
+    pub(super) directory: PinnedDirectory,
+    pub(super) onboarding: PinnedDirectory,
+    pub(super) state: PinnedDirectory,
+}
+
+/// Put `policy` in force for a stopped node's capacity account by publishing
+/// one amendment document over the issuance chain. The account and anchor
+/// records are untouched: epoch and debit sequence continue, and they keep
+/// the original issuance digest.
+///
+/// The caller publishes the matching `native_capacity` policy generation and
+/// reseals the initialization completion; until both have happened the node
+/// refuses to start, and rerunning the same operation converges. The prior
+/// binding is read from the issuance and its published chain, not from the
+/// completion record, because the generation may already have been
+/// published when a run is repeated and the completion is then stale.
+pub fn amend_capacity_policy(
+    request: CapacityPolicyAmendmentRequest<'_>,
+) -> Result<CapacityPolicyAmendmentReport> {
+    let CapacityPolicyAmendmentRequest {
+        app_root,
+        state_lock,
+        signer,
+        policy,
+        reason,
+        command,
+    } = request;
+    state_lock.ensure_protects_app_root(app_root)?;
+    let actor = lillux::process_control::ControllerAccount::current().map_err(|error| {
+        anyhow::anyhow!(
+            "capacity policy amendment refused before any write: the acting account cannot be recorded as its evidence actor ({error}); run it as the node account"
+        )
+    })?;
+    let AmendmentInputs {
+        prior,
+        places,
+        lineage,
+        operator_fingerprint,
+        node_fingerprint,
+    } = amendment_inputs(
+        app_root,
+        &signer.operator_fingerprint().context(
+            "a capacity policy amendment needs the operator's consent: sign it with the operator \
+             key or apply it under the operator's signed request",
+        )?,
+    )?;
+    state_lock.ensure_protects_app_root(app_root)?;
+    amend_policy_at(
+        places,
+        &prior,
+        policy,
+        &AmendmentIdentity {
+            signer,
+            operator_fingerprint,
+            lineage,
+            node_fingerprint,
+        },
+        actor,
+        reason,
+        command,
+        state_lock,
+    )
+}
+
+/// What amending a stopped node's capacity issuance to one policy would do,
+/// decided by reading only. A refusal is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityPolicyAmendmentCheck {
+    /// The policy is already the one in force; there is nothing to amend.
+    AlreadyApplied,
+    /// The account admits the amendment: no incarnation debit is
+    /// outstanding, or only a provably dead incarnation's (which the
+    /// amendment settles first, as a start would), and its image fits the
+    /// new policy.
+    Needed,
+}
+
+/// Decide, without writing, whether [`amend_capacity_policy`] to `policy`
+/// would be already applied, needed, or refused. It runs the amendment's own
+/// read-only checks, so a caller can refuse before changing anything else
+/// and amend later under the same lock.
+pub fn check_capacity_policy_amendment(
+    app_root: &Path,
+    state_lock: &StateLock,
+    operator_fingerprint: &str,
+    policy: &NodeNativeCapacityPolicy,
+) -> Result<CapacityPolicyAmendmentCheck> {
+    state_lock.ensure_protects_app_root(app_root)?;
+    let AmendmentInputs { prior, places, .. } = amendment_inputs(app_root, operator_fingerprint)?;
+    let check = check_policy_amendment_at(&places, &prior, policy, state_lock)?;
+    state_lock.ensure_protects_app_root(app_root)?;
+    Ok(check)
+}
+
+/// The issuance in force and the places an amendment acts on, read and
+/// authenticated without writing.
+struct AmendmentInputs {
+    prior: NativeCapacityAccountBinding,
+    places: AmendmentPlaces,
+    lineage: OperatorLineage,
+    operator_fingerprint: String,
+    node_fingerprint: String,
+}
+
+fn amendment_inputs(app_root: &Path, operator_fingerprint: &str) -> Result<AmendmentInputs> {
+    let operator_fingerprint = operator_fingerprint.to_owned();
+    let lineage = super::OperatorLineage::load(app_root)?;
+    lineage.require_member(&operator_fingerprint)?;
+    let node_identity_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/identity/public-identity.json");
+    let node_fingerprint =
+        ryeos_node_runtime::identity::NodeIdentity::load_public_identity(&node_identity_path)
+            .context("load pinned public node identity for the capacity policy amendment")?
+            .verified_fingerprint()?;
+    let onboarding = onboarding(app_root)?;
+    let original = issued_binding(&onboarding, &lineage)?;
+    original.require_node(&node_fingerprint)?;
+    let prior = match best_chain(&onboarding, &original, &lineage)? {
+        Some((_, chain)) => chain.effective,
+        None => original,
+    };
+    // The records must be this account's, at the place the binding names,
+    // under the policy in force now.
+    prior.require_installed(app_root, &node_fingerprint, &prior.policy)?;
+    let places = AmendmentPlaces {
+        directory: PinnedDirectory::open(&app_root.join(".ai/node/native-capacity"))?
+            .context("capacity directory absent")?,
+        onboarding,
+        state: PinnedDirectory::open(&app_root.join(".ai/state"))?
+            .context("capacity runtime absent")?,
+    };
+    Ok(AmendmentInputs {
+        prior,
+        places,
+        lineage,
+        operator_fingerprint,
+        node_fingerprint,
+    })
+}
+
+/// [`check_capacity_policy_amendment`] below the app-root plumbing.
+pub(super) fn check_policy_amendment_at(
+    places: &AmendmentPlaces,
+    prior: &NativeCapacityAccountBinding,
+    policy: &NodeNativeCapacityPolicy,
+    state_lock: &StateLock,
+) -> Result<CapacityPolicyAmendmentCheck> {
+    policy.validate()?;
+    if prior.policy == *policy {
+        return Ok(CapacityPolicyAmendmentCheck::AlreadyApplied);
+    }
+    require_policy_amendment_log(&places.state)?;
+    admit_policy_amendment(places, prior, policy, state_lock)?;
+    Ok(CapacityPolicyAmendmentCheck::Needed)
+}
+
+/// The log an amendment must end by extending, checked before its first
+/// write so a refused log never leaves an amendment without evidence.
+fn require_policy_amendment_log(state: &PinnedDirectory) -> Result<()> {
+    if let Some(log) =
+        state.open_pinned_regular(OsStr::new(POLICY_AMENDMENT_EVIDENCE_LOG), false)?
+    {
+        require_owned_log(&log, POLICY_AMENDMENT_EVIDENCE_LOG, "policy amendment")?;
+    }
+    Ok(())
+}
+
+/// Refuse, before any write, an amendment the account cannot take: one with
+/// a live or unproved incarnation debit outstanding, or whose current image
+/// does not fit the new policy. Returns where the account stands for the
+/// signed document, or `None` when the account first owes the cold
+/// settlement a start would perform: a dead incarnation's debit (a host that
+/// kills the daemon instead of stopping it always leaves one, and a new
+/// binary cannot start under the old generation to settle it) or an image a
+/// published redo has not reached. The settled image, recovery charge
+/// included, must fit the new policy as well.
+fn admit_policy_amendment(
+    places: &AmendmentPlaces,
+    prior: &NativeCapacityAccountBinding,
+    policy: &NodeNativeCapacityPolicy,
+    state_lock: &StateLock,
+) -> Result<Option<AccountPosition>> {
+    let issuance = prior.issuance_digest()?;
+    ensure!(
+        places.directory.identity()? == prior.account_directory_identity,
+        "capacity directory differs from the binding in force"
+    );
+    let mut owner = StoppedCapacityAccount::open(
+        places.directory.try_clone()?,
+        prior.account_identity,
+        places.onboarding.try_clone()?,
+        places.state.try_clone()?,
+        issuance,
+        &prior.policy,
+        state_lock.witness()?,
+    )?;
+    // Every later start validates the account's current image under the
+    // generation's policy, so the image must already fit the new one.
+    let mut fit = StoppedCapacityAccount::open(
+        places.directory.try_clone()?,
+        prior.account_identity,
+        places.onboarding.try_clone()?,
+        places.state.try_clone()?,
+        issuance,
+        policy,
+        state_lock.witness()?,
+    )?;
+    if owner.owes_cold_settlement(&prior.policy)? {
+        fit.owes_cold_settlement(policy).context(
+            "the capacity account, once its dead incarnation is settled, does not fit the new \
+             policy; open a fresh epoch with `ryeos node capacity reissue` first, then apply the policy",
+        )?;
+        return Ok(None);
+    }
+    let position = owner.require_no_outstanding_debit(&prior.policy)?;
+    fit.require_no_outstanding_debit(policy).context(
+        "the capacity account's current image does not fit the new policy; open a fresh epoch \
+         with `ryeos node capacity reissue` first, then apply the policy",
+    )?;
+    Ok(Some(position))
+}
+
+/// [`amend_capacity_policy`] below the app-root plumbing: `prior` is the
+/// binding in force (the issuance as amended by its chain) and `places` are
+/// its directories.
+pub(super) fn amend_policy_at(
+    places: AmendmentPlaces,
+    prior: &NativeCapacityAccountBinding,
+    policy: &NodeNativeCapacityPolicy,
+    identity: &AmendmentIdentity<'_>,
+    actor: lillux::process_control::ControllerAccount,
+    reason: &str,
+    command: &str,
+    state_lock: &StateLock,
+) -> Result<CapacityPolicyAmendmentReport> {
+    policy.validate()?;
+    ensure!(
+        reason.chars().count() <= REASON_BOUND_CHARS,
+        "capacity policy amendment reason exceeds its bound"
+    );
+    let policy_digest =
+        sha256_hex(lillux::canonical_json(&serde_json::to_value(policy)?)?.as_bytes());
+    // The log this run must end by extending is checked before the first
+    // write, so a refused log never leaves an amendment without evidence.
+    require_policy_amendment_log(&places.state)?;
+    if prior.policy == *policy {
+        // Already in force. A rerun after the document but before the
+        // evidence line owes the line, and only when the document in force
+        // is a policy amendment rather than a move.
+        let document_digest = prior
+            .reanchor
+            .as_ref()
+            .map(|marker| marker.document_digest.clone());
+        if let Some(document_digest) = &document_digest {
+            let bytes = read_named(&places.onboarding, document_digest)?
+                .context("the document the binding names is absent")?;
+            let body = verify_document(&bytes, &identity.lineage, &identity.node_fingerprint)?;
+            if body.policy.is_some() {
+                append_policy_evidence_once(
+                    &places.state,
+                    &CapacityPolicyAmendmentEvidence {
+                        document_digest: document_digest.clone(),
+                        prior_binding_digest: body.prior_binding_digest,
+                        policy_digest: policy_digest.clone(),
+                        reason: body.reason,
+                        recorded_at: lillux::time::iso8601_now(),
+                        actor,
+                        command: command.to_owned(),
+                    },
+                )?;
+            }
+        }
+        return Ok(CapacityPolicyAmendmentReport {
+            document_digest,
+            prior_binding_digest: None,
+            policy_digest,
+            already_applied: true,
+            settled_incarnation: None,
+        });
+    }
+    let issuance = prior.issuance_digest()?;
+    // A dead incarnation's debit is settled first, exactly as the next start
+    // would; the document then names the settled anchor. A run interrupted
+    // anywhere in the settlement converges on rerun.
+    let settled_incarnation = match admit_policy_amendment(&places, prior, policy, state_lock)? {
+        Some(_) => None,
+        None => StoppedCapacityAccount::open(
+            places.directory.try_clone()?,
+            prior.account_identity,
+            places.onboarding.try_clone()?,
+            places.state.try_clone()?,
+            issuance,
+            &prior.policy,
+            state_lock.witness()?,
+        )?
+        .settle_cold(&prior.policy)?,
+    };
+    let position = admit_policy_amendment(&places, prior, policy, state_lock)?
+        .context("the capacity account still owes a settlement after its cold settlement")?;
+    let prior_binding_digest = prior.binding_digest()?;
+    let body = ReanchorBody {
+        schema: REANCHOR_SCHEMA.to_owned(),
+        operator_fingerprint: identity.operator_fingerprint.clone(),
+        node_fingerprint: identity.node_fingerprint.clone(),
+        issuance_digest: hex_digest(&issuance),
+        prior_binding_digest: prior_binding_digest.clone(),
+        prior_document_digest: prior
+            .reanchor
+            .as_ref()
+            .map(|marker| marker.document_digest.clone()),
+        epoch: position.epoch,
+        sequence: position.sequence,
+        anchor_digest: position.anchor_digest,
+        root_identity: prior.root_identity,
+        runtime_identity: prior.runtime_identity,
+        account_directory_identity: prior.account_directory_identity,
+        account_identity: prior.account_identity,
+        policy: Some(policy.clone()),
+        reason: reason.to_owned(),
+        anchored_at: lillux::time::iso8601_now(),
+        authority: identity.signer.authority()?,
+    };
+    let document_digest = publish_or_adopt(&places.onboarding, body, identity)?;
+    append_policy_evidence_once(
+        &places.state,
+        &CapacityPolicyAmendmentEvidence {
+            document_digest: document_digest.clone(),
+            prior_binding_digest: prior_binding_digest.clone(),
+            policy_digest: policy_digest.clone(),
+            reason: reason.to_owned(),
+            recorded_at: lillux::time::iso8601_now(),
+            actor,
+            command: command.to_owned(),
+        },
+    )?;
+    Ok(CapacityPolicyAmendmentReport {
+        document_digest: Some(document_digest),
+        prior_binding_digest: Some(prior_binding_digest),
+        policy_digest,
+        already_applied: false,
+        settled_incarnation,
+    })
+}
+
+/// Publish `body` as a content-addressed document, or adopt a published one
+/// that signs the same facts: an interrupted run leaves a document no
+/// completion names yet, and a rerun must not publish another.
+fn publish_or_adopt(
+    onboarding: &PinnedDirectory,
+    body: ReanchorBody,
+    identity: &AmendmentIdentity<'_>,
+) -> Result<String> {
+    let adopted = published_digests(onboarding)?
+        .into_iter()
+        .filter_map(|candidate| {
+            let bytes = read_named(onboarding, &candidate).ok()??;
+            let existing =
+                verify_document(&bytes, &identity.lineage, &identity.node_fingerprint).ok()?;
+            body.same_facts(&existing).then_some(candidate)
+        })
+        .next();
+    if let Some(digest) = adopted {
+        return Ok(digest);
+    }
+    let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
+    let document = ReanchorDocument {
+        request: identity.signer.request(),
+        signature: identity.signer.sign(canonical.as_bytes()),
+        body,
+    };
+    let document_bytes = serde_json::to_vec(&document)?;
+    ensure!(
+        u64::try_from(document_bytes.len())? <= REANCHOR_DOCUMENT_BOUND,
+        "capacity amendment document exceeds its bound"
+    );
+    let document_digest = sha256_hex(&document_bytes);
+    // Content-addressed and create-only: nothing already published, least
+    // of all the document a sealed completion names, is overwritten.
+    onboarding.atomic_write_pinned_if_same(
+        OsStr::new(&document_name(&document_digest)),
+        None,
+        &document_bytes,
+        0o600,
+        crate::NODE_TEMP_PURPOSE,
+    )?;
+    onboarding.sync()?;
+    Ok(document_digest)
+}
+
+/// A rerun after an interruption between the document and the log append
+/// owes exactly one line; a rerun after a complete run owes none.
+fn append_policy_evidence_once(
+    directory: &PinnedDirectory,
+    evidence: &CapacityPolicyAmendmentEvidence,
+) -> Result<()> {
+    let recorded: Vec<CapacityPolicyAmendmentEvidence> =
+        read_log(directory, POLICY_AMENDMENT_EVIDENCE_LOG, "policy amendment")?;
+    if recorded
+        .iter()
+        .any(|entry| entry.document_digest == evidence.document_digest)
+    {
+        return Ok(());
+    }
+    append_log(
+        directory,
+        POLICY_AMENDMENT_EVIDENCE_LOG,
+        "policy amendment",
+        evidence,
+    )
+}
+
+impl ReanchorBody {
+    /// Whether `other` signs the same facts: everything but the free text and
+    /// the time.
+    fn same_facts(&self, other: &Self) -> bool {
+        self.issuance_digest == other.issuance_digest
+            && self.prior_binding_digest == other.prior_binding_digest
+            && self.prior_document_digest == other.prior_document_digest
+            && self.epoch == other.epoch
+            && self.sequence == other.sequence
+            && self.anchor_digest == other.anchor_digest
+            && self.root_identity == other.root_identity
+            && self.runtime_identity == other.runtime_identity
+            && self.account_directory_identity == other.account_directory_identity
+            && self.account_identity == other.account_identity
+            && self.policy == other.policy
+    }
+}
+
+/// A rerun after an interruption between the seal and the log append owes
+/// exactly one line; a rerun after a complete run owes none.
+fn append_evidence_once(
+    directory: &PinnedDirectory,
+    evidence: &CapacityReanchorEvidence,
+) -> Result<()> {
+    if read_evidence(directory)?
+        .iter()
+        .any(|entry| entry.document_digest == evidence.document_digest)
+    {
+        return Ok(());
+    }
+    append_evidence(directory, evidence)
+}
+
+/// Every recorded re-anchor, oldest first. An unreadable line is an error.
+pub fn read_capacity_reanchors(state_dir: &Path) -> Result<Vec<CapacityReanchorEvidence>> {
+    let Some(directory) = PinnedDirectory::open(state_dir)? else {
+        return Ok(Vec::new());
+    };
+    read_evidence(&directory)
+}
+
+fn read_evidence(directory: &PinnedDirectory) -> Result<Vec<CapacityReanchorEvidence>> {
+    read_log(directory, REANCHOR_EVIDENCE_LOG, "re-anchor")
+}
+
+fn append_evidence(directory: &PinnedDirectory, evidence: &CapacityReanchorEvidence) -> Result<()> {
+    append_log(directory, REANCHOR_EVIDENCE_LOG, "re-anchor", evidence)
+}
+
+/// Every recorded policy amendment, oldest first. An unreadable line is an
+/// error.
+pub fn read_capacity_policy_amendments(
+    state_dir: &Path,
+) -> Result<Vec<CapacityPolicyAmendmentEvidence>> {
+    let Some(directory) = PinnedDirectory::open(state_dir)? else {
+        return Ok(Vec::new());
+    };
+    read_log(
+        &directory,
+        POLICY_AMENDMENT_EVIDENCE_LOG,
+        "policy amendment",
+    )
+}
+
+/// An evidence log is the node account's own record: owned by the account
+/// running the command and writable by no group or other. A log another
+/// account owns or can write is refused, never read as evidence and never
+/// extended.
+pub(super) fn require_owned_log(
+    log: &lillux::PinnedRegularFile,
+    name: &str,
+    what: &str,
+) -> Result<()> {
+    log.require_effective_user_owned().with_context(|| {
+        format!(
+            "{what} evidence log {name} is refused: it must be owned by the account running this command and not group/other writable"
+        )
+    })
+}
+
+pub(super) fn read_log<T: DeserializeOwned>(
+    directory: &PinnedDirectory,
+    name: &str,
+    what: &str,
+) -> Result<Vec<T>> {
+    let Some(log) = directory.open_pinned_regular(OsStr::new(name), false)? else {
+        return Ok(Vec::new());
+    };
+    require_owned_log(&log, name, what)?;
+    let observation = log.observation()?;
+    let raw = log.read_stable_bounded(&observation, REANCHOR_EVIDENCE_LOG_BOUND as u64)?;
+    raw.split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_slice(line)
+                .map_err(|error| anyhow::anyhow!("{what} evidence entry is unreadable: {error}"))
+        })
+        .collect()
+}
+
+/// Append one line by pinned compare-and-write, dropping the oldest whole
+/// lines only when the log would exceed its bound.
+pub(super) fn append_log<T: Serialize>(
+    directory: &PinnedDirectory,
+    name: &str,
+    what: &str,
+    evidence: &T,
+) -> Result<()> {
+    let existing = directory.open_pinned_regular(OsStr::new(name), false)?;
+    let mut body = match &existing {
+        Some(log) => {
+            require_owned_log(log, name, what)?;
+            let observation = log.observation()?;
+            log.read_stable_bounded(&observation, REANCHOR_EVIDENCE_LOG_BOUND as u64)?
+        }
+        None => Vec::new(),
+    };
+    let mut line = serde_json::to_vec(evidence)?;
+    line.push(b'\n');
+    ensure!(
+        line.len() <= REANCHOR_EVIDENCE_LOG_BOUND,
+        "{what} evidence entry exceeds the log bound"
+    );
+    while body.len() + line.len() > REANCHOR_EVIDENCE_LOG_BOUND {
+        match body.iter().position(|byte| *byte == b'\n') {
+            Some(end) => {
+                body.drain(..=end);
+            }
+            None => body.clear(),
+        }
+    }
+    body.extend_from_slice(&line);
+    directory.atomic_write_pinned_if_same(
+        OsStr::new(name),
+        existing.as_ref(),
+        &body,
+        0o600,
+        crate::NODE_TEMP_PURPOSE,
+    )?;
+    directory.sync()?;
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod controls {
+    //! Document-level controls for the re-anchor chain. The binding is a
+    //! synthetic issuance and the keys are deterministic; nothing here is
+    //! admission.
+
+    use super::*;
+    use lillux::crypto::{Signer as _, SigningKey};
+    use ryeos_node_runtime::node_policy::sections::native_capacity::{
+        NativeCapacityUnits, NativeIncarnationEnvelope, NativeRecoveryEnvelope,
+        NativeRenewalEnvelope, NodeNativeCapacityPolicy,
+    };
+
+    fn directory_id(device: u64, inode: u64) -> PinnedDirectoryIdentity {
+        serde_json::from_value(
+            serde_json::json!({"filesystem": {"device": device}, "inode": inode}),
+        )
+        .unwrap()
+    }
+
+    fn file_id(device: u64, inode: u64) -> PinnedRegularFileIdentity {
+        serde_json::from_value(
+            serde_json::json!({"filesystem": {"device": device}, "inode": inode}),
+        )
+        .unwrap()
+    }
+
+    fn original() -> NativeCapacityAccountBinding {
+        let units = NativeCapacityUnits {
+            storage_bytes: 1 << 20,
+            host_control_storage_bytes: 4096,
+            allocator_steps: 1000,
+            connection_tickets: 4,
+            cleanup_steps: 8,
+        };
+        NativeCapacityAccountBinding {
+            schema: 6,
+            node_fingerprint: "f".repeat(64),
+            root_identity: directory_id(1, 10),
+            runtime_identity: directory_id(1, 11),
+            account_directory_identity: directory_id(1, 12),
+            account_identity: file_id(1, 13),
+            anchor_protocol: super::super::anchor::PROTOCOL.to_owned(),
+            reanchor: None,
+            policy: NodeNativeCapacityPolicy {
+                schema: 7,
+                issuance_nonce: "a".repeat(32),
+                allowance: units,
+                incarnation: NativeIncarnationEnvelope {
+                    units,
+                    maximum_occupancy_ms: 3,
+                    cleanup_occupancy_ms: 1,
+                    rollover_drain_margin_ms: 1,
+                    rollover_work_margin_steps: Some(1),
+                    host_release_steps: 2,
+                    outside_cleanup_steps: 1,
+                },
+                recovery: NativeRecoveryEnvelope {
+                    maximum_attempts: 32,
+                    work_per_attempt: 65_536,
+                    control_storage_bytes: 262_144,
+                    maximum_duration_ms: 120_000,
+                },
+                renewal: NativeRenewalEnvelope {
+                    at_orderly_rollover: false,
+                    operator_reissue: true,
+                    maximum_epochs: None,
+                },
+            },
+        }
+    }
+
+    struct Fixture {
+        _temporary: tempfile::TempDir,
+        onboarding: PinnedDirectory,
+        operator: SigningKey,
+        operator_fingerprint: String,
+        original: NativeCapacityAccountBinding,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let onboarding = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+            let operator = SigningKey::from_bytes(&[7; 32]);
+            Self {
+                _temporary: temporary,
+                onboarding,
+                operator_fingerprint: ryeos_engine::trust::compute_fingerprint(
+                    &operator.verifying_key(),
+                ),
+                operator,
+                original: original(),
+            }
+        }
+
+        /// The facts of a move to places numbered `place`, following
+        /// `previous` (the binding and document it replaces).
+        fn body(
+            &self,
+            previous: &NativeCapacityAccountBinding,
+            previous_document: Option<&str>,
+            place: u64,
+            epoch: u64,
+            sequence: u64,
+        ) -> ReanchorBody {
+            ReanchorBody {
+                schema: REANCHOR_SCHEMA.to_owned(),
+                operator_fingerprint: self.operator_fingerprint.clone(),
+                node_fingerprint: self.original.node_fingerprint.clone(),
+                issuance_digest: hex_digest(&self.original.issuance_digest().unwrap()),
+                prior_binding_digest: previous.binding_digest().unwrap(),
+                prior_document_digest: previous_document.map(str::to_owned),
+                epoch,
+                sequence,
+                anchor_digest: "c".repeat(64),
+                root_identity: directory_id(place, 10),
+                runtime_identity: directory_id(place, 11),
+                account_directory_identity: directory_id(place, 12),
+                account_identity: file_id(place, 13),
+                policy: None,
+                reason: "controls".to_owned(),
+                anchored_at: "fixture".to_owned(),
+                authority: Authority::Operator,
+            }
+        }
+
+        fn sign_with(key: &SigningKey, body: ReanchorBody) -> Vec<u8> {
+            let canonical = lillux::canonical_json(&serde_json::to_value(&body).unwrap()).unwrap();
+            let signature = key.sign(canonical.as_bytes());
+            serde_json::to_vec(&ReanchorDocument {
+                body,
+                request: None,
+                signature: format!(
+                    "ed25519:{}",
+                    base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+                ),
+            })
+            .unwrap()
+        }
+
+        fn publish_bytes(&self, bytes: &[u8]) -> String {
+            let digest = sha256_hex(bytes);
+            self.onboarding
+                .atomic_write_pinned_if_same(
+                    OsStr::new(&document_name(&digest)),
+                    None,
+                    bytes,
+                    0o600,
+                    crate::NODE_TEMP_PURPOSE,
+                )
+                .unwrap();
+            digest
+        }
+
+        fn publish(&self, body: ReanchorBody) -> String {
+            self.publish_bytes(&Self::sign_with(&self.operator, body))
+        }
+
+        fn chain(&self, tip: &str) -> Result<Chain> {
+            verify_chain(
+                &self.onboarding,
+                &self.original,
+                tip,
+                &OperatorLineage::single(
+                    &self.operator_fingerprint,
+                    &self.operator.verifying_key(),
+                ),
+            )
+        }
+
+        fn best(&self) -> Option<(String, Chain)> {
+            best_chain(
+                &self.onboarding,
+                &self.original,
+                &OperatorLineage::single(
+                    &self.operator_fingerprint,
+                    &self.operator.verifying_key(),
+                ),
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn an_interrupted_second_reanchor_leaves_the_first_bootable_and_converges() {
+        let f = Fixture::new();
+        let first = f.publish(f.body(&f.original, None, 2, 1, 4));
+        let after_first = f.chain(&first).unwrap().effective;
+        // The second run published its document, then died before the seal:
+        // the completion still names the first, which must still verify.
+        let second_body = f.body(&after_first, Some(&first), 3, 1, 4);
+        let second = f.publish(second_body.clone());
+        assert_ne!(first, second, "documents are never overwritten");
+        assert_eq!(f.chain(&first).unwrap().effective, after_first);
+        // A rerun measures the same facts, adopts the stray document, and the
+        // reseal's best chain is the second.
+        let rerun = ReanchorBody {
+            reason: "rerun".to_owned(),
+            anchored_at: "later".to_owned(),
+            ..second_body.clone()
+        };
+        assert!(rerun.same_facts(&second_body));
+        let (tip, chain) = f.best().expect("a valid chain");
+        assert_eq!(tip, second);
+        assert_eq!(chain.length, 2);
+        assert_eq!(
+            chain.effective.reanchor.as_ref().unwrap().document_digest,
+            second
+        );
+    }
+
+    impl Fixture {
+        /// Publish `body` as the daemon writes it: signed by the node key,
+        /// carrying `request`.
+        fn publish_under(
+            &self,
+            mut body: ReanchorBody,
+            request: &crate::offline_operation::contract::SignedRequest,
+        ) -> String {
+            let node = OperatorLineage::test_node_key();
+            let signer = DocumentSigner::Request {
+                node: &node,
+                request,
+            };
+            body.authority = signer.authority().unwrap();
+            let canonical = lillux::canonical_json(&serde_json::to_value(&body).unwrap()).unwrap();
+            let bytes = serde_json::to_vec(&ReanchorDocument {
+                request: signer.request(),
+                signature: signer.sign(canonical.as_bytes()),
+                body,
+            })
+            .unwrap();
+            self.publish_bytes(&bytes)
+        }
+    }
+
+    #[test]
+    fn an_apply_time_document_is_node_signed_with_the_request_digest_and_verifies() {
+        let f = Fixture::new();
+        let node = OperatorLineage::test_node_key();
+        let request =
+            crate::apply_authority::test_request(&node, &f.operator, "node.capacity.reanchor");
+        let digest = f.publish_under(f.body(&f.original, None, 2, 1, 0), &request);
+        let chain = f
+            .chain(&digest)
+            .expect("verifies through the operator's request");
+        assert_eq!(chain.length, 1);
+        let document: ReanchorDocument =
+            serde_json::from_slice(&read_named(&f.onboarding, &digest).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            document.body.authority,
+            Authority::NodeUnderRequest {
+                request_digest: request.digest().unwrap()
+            }
+        );
+        assert_eq!(document.request.as_ref(), Some(&request));
+        // A policy amendment is authorized by a policy request, a move is not.
+        let amend = ReanchorBody {
+            policy: Some(f.original.policy.clone()),
+            ..f.body(&f.original, None, 2, 1, 0)
+        };
+        let amend_request =
+            crate::apply_authority::test_request(&node, &f.operator, "node.policy-apply");
+        let amend_digest = f.publish_under(amend.clone(), &amend_request);
+        assert!(f.chain(&amend_digest).is_ok());
+        let move_request =
+            crate::apply_authority::test_request(&node, &f.operator, "node.capacity.reanchor");
+        let mismatched = f.publish_under(amend, &move_request);
+        let error = f.chain(&mismatched).err().expect("wrong operation");
+        assert!(
+            format!("{error:#}").contains("apply_authority_request_operation"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_document_whose_request_is_not_operator_signed_is_refused_and_never_a_tip() {
+        let f = Fixture::new();
+        let node = OperatorLineage::test_node_key();
+        let stranger = SigningKey::from_bytes(&[9; 32]);
+        let by_stranger =
+            crate::apply_authority::test_request(&node, &stranger, "node.capacity.reanchor");
+        let digest = f.publish_under(f.body(&f.original, None, 2, 1, 0), &by_stranger);
+        let error = f.chain(&digest).err().expect("a stranger's request");
+        assert!(
+            format!("{error:#}").contains("apply_authority_request_not_operator"),
+            "{error:#}"
+        );
+        assert!(f.best().is_none());
+        // A request under a delegated grant is not the operator's consent.
+        let mut delegated =
+            crate::apply_authority::test_request(&node, &f.operator, "node.capacity.reanchor");
+        delegated.body.signer_grant_digest = Some("a".repeat(64));
+        delegated =
+            crate::offline_operation::contract::SignedRequest::sign(delegated.body, &f.operator)
+                .unwrap();
+        let digest = f.publish_under(f.body(&f.original, None, 2, 1, 0), &delegated);
+        assert!(f.chain(&digest).is_err());
+    }
+
+    #[test]
+    fn a_reanchor_document_of_the_old_shape_is_refused_by_name_with_its_cure() {
+        let f = Fixture::new();
+        let mut body = serde_json::to_value(ReanchorDocument {
+            body: f.body(&f.original, None, 2, 1, 0),
+            request: None,
+            signature: "ed25519:AA==".to_owned(),
+        })
+        .unwrap();
+        body["body"]["schema"] = "ryeos/native-capacity-reanchor/v2".into();
+        let digest = f.publish_bytes(&serde_json::to_vec(&body).unwrap());
+        let error = f.chain(&digest).err().expect("the old shape");
+        let text = format!("{error:#}");
+        assert!(text.contains("capacity_document_old_shape"), "{text}");
+        assert!(text.contains("ryeos init"), "{text}");
+    }
+
+    #[test]
+    fn a_foreign_operator_is_refused_and_never_a_tip() {
+        let f = Fixture::new();
+        let foreign = SigningKey::from_bytes(&[9; 32]);
+        let body = f.body(&f.original, None, 2, 1, 0);
+        let digest = f.publish_bytes(&Fixture::sign_with(&foreign, body));
+        let error = f.chain(&digest).err().expect("signed by another key");
+        assert!(format!("{error:#}").to_lowercase().contains("signature"));
+        assert!(f.best().is_none());
+        // Claiming the operator's fingerprint does not help.
+        let other = ReanchorBody {
+            operator_fingerprint: "e".repeat(64),
+            ..f.body(&f.original, None, 2, 1, 0)
+        };
+        let digest = f.publish(other);
+        assert!(f.chain(&digest).is_err());
+    }
+
+    #[test]
+    fn a_document_for_another_node_is_refused() {
+        let f = Fixture::new();
+        let body = ReanchorBody {
+            node_fingerprint: "d".repeat(64),
+            ..f.body(&f.original, None, 2, 1, 0)
+        };
+        let digest = f.publish(body);
+        let error = f.chain(&digest).err().expect("another node");
+        assert!(format!("{error:#}").contains("another node"), "{error:#}");
+    }
+
+    #[test]
+    fn a_tampered_body_field_or_name_is_refused() {
+        let f = Fixture::new();
+        let bytes = Fixture::sign_with(&f.operator, f.body(&f.original, None, 2, 1, 0));
+        let digest = f.publish_bytes(&bytes);
+        // A body field changed after signing no longer verifies.
+        let mut tampered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        tampered["body"]["sequence"] = 99.into();
+        let error = verify_document(
+            &serde_json::to_vec(&tampered).unwrap(),
+            &OperatorLineage::single(&f.operator_fingerprint, &f.operator.verifying_key()),
+            &f.original.node_fingerprint,
+        )
+        .expect_err("tampered field");
+        assert!(format!("{error:#}").to_lowercase().contains("signature"));
+        // Bytes that do not hash to the name they sit under are not that
+        // document.
+        let name = document_name(&digest);
+        let path = f._temporary.path().join(&name);
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(read_named(&f.onboarding, &digest).is_err());
+    }
+
+    #[test]
+    fn a_stale_or_stepping_back_document_is_refused() {
+        let f = Fixture::new();
+        let first = f.publish(f.body(&f.original, None, 2, 2, 10));
+        let after_first = f.chain(&first).unwrap().effective;
+        // Names the original binding although the first already replaced it.
+        let stale = f.publish(f.body(&f.original, Some(&first), 3, 2, 10));
+        let error = f.chain(&stale).err().expect("stale prior binding");
+        assert!(
+            format!("{error:#}").contains("does not replace the binding before it"),
+            "{error:#}"
+        );
+        // A lower debit sequence or epoch than the document before it.
+        for (epoch, sequence) in [(2, 9), (1, 10)] {
+            let back = f.publish(f.body(&after_first, Some(&first), 3, epoch, sequence));
+            let error = f.chain(&back).err().expect("steps back");
+            assert!(format!("{error:#}").contains("steps back"), "{error:#}");
+        }
+        // The only tip left is the first.
+        assert_eq!(f.best().unwrap().0, first);
+        // Another issuance entirely.
+        let foreign = ReanchorBody {
+            issuance_digest: "9".repeat(64),
+            ..f.body(&f.original, None, 4, 1, 0)
+        };
+        let digest = f.publish(foreign);
+        assert!(f.chain(&digest).is_err());
+    }
+
+    #[test]
+    fn a_policy_amendment_replaces_the_policy_and_keeps_the_places_and_issuance() {
+        let f = Fixture::new();
+        let mut amended_policy = f.original.policy.clone();
+        amended_policy.incarnation.rollover_work_margin_steps = amended_policy
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        // A document that neither moves nor replaces the policy amends
+        // nothing and is no tip.
+        let idle = f.publish(f.body(&f.original, None, 1, 1, 0));
+        let error = f.chain(&idle).err().expect("amends nothing");
+        assert!(format!("{error:#}").contains("moves nothing"), "{error:#}");
+        assert!(f.best().is_none());
+        let amendment = f.publish(ReanchorBody {
+            policy: Some(amended_policy.clone()),
+            ..f.body(&f.original, None, 1, 1, 0)
+        });
+        let chain = f.chain(&amendment).unwrap();
+        assert_eq!(chain.effective.policy, amended_policy);
+        assert!(chain.effective.same_places(&f.original));
+        assert_eq!(
+            chain.effective.issuance_digest().unwrap(),
+            f.original.issuance_digest().unwrap()
+        );
+        assert_eq!(f.best().unwrap().0, amendment);
+        // A later move keeps the amended policy; a later amendment over the
+        // moved binding keeps the move.
+        let moved = f.publish(f.body(&chain.effective, Some(&amendment), 2, 1, 0));
+        let after_move = f.chain(&moved).unwrap().effective;
+        assert_eq!(after_move.policy, amended_policy);
+        assert_eq!(after_move.root_identity, directory_id(2, 10));
+        let mut again = amended_policy.clone();
+        again.incarnation.rollover_work_margin_steps = again
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        let second = f.publish(ReanchorBody {
+            policy: Some(again.clone()),
+            ..f.body(&after_move, Some(&moved), 2, 1, 0)
+        });
+        let final_binding = f.chain(&second).unwrap().effective;
+        assert_eq!(final_binding.policy, again);
+        assert_eq!(final_binding.root_identity, directory_id(2, 10));
+        // An invalid policy is refused as a document.
+        let mut invalid = again.clone();
+        invalid.issuance_nonce = "short".to_owned();
+        let bad = f.publish(ReanchorBody {
+            policy: Some(invalid),
+            ..f.body(&final_binding, Some(&second), 2, 1, 0)
+        });
+        assert!(f.chain(&bad).is_err());
+    }
+
+    /// A real account and anchor on disk under the controls binding, so the
+    /// amendment reads and fits them the way the command does.
+    struct AccountFixture {
+        _temporary: tempfile::TempDir,
+        /// The stopped node's state lock, held for the fixture's lifetime.
+        lock: StateLock,
+        places: AmendmentPlaces,
+        onboarding: PinnedDirectory,
+        state: PinnedDirectory,
+        binding: NativeCapacityAccountBinding,
+        operator: SigningKey,
+        operator_fingerprint: String,
+    }
+
+    impl AccountFixture {
+        fn new() -> Self {
+            use super::super::redo::AccountRedo;
+            use super::super::{CapacityRecord, RECORD_SCHEMA, encode, genesis_consumed};
+            let temporary = tempfile::tempdir().unwrap();
+            for name in [
+                "native-capacity",
+                "onboarding",
+                "state",
+                "root",
+                "root/.ai/state",
+            ] {
+                std::fs::create_dir_all(temporary.path().join(name)).unwrap();
+            }
+            let directory = PinnedDirectory::open(&temporary.path().join("native-capacity"))
+                .unwrap()
+                .unwrap();
+            directory.tighten_owner_private_directory().unwrap();
+            let onboarding = PinnedDirectory::open(&temporary.path().join("onboarding"))
+                .unwrap()
+                .unwrap();
+            let state = PinnedDirectory::open(&temporary.path().join("state"))
+                .unwrap()
+                .unwrap();
+            let (policy, _, _) = super::super::redo::controls::fixture();
+            let account = directory
+                .atomic_create_pinned_regular(
+                    OsStr::new("account"),
+                    &[0; super::super::RECORD_BYTES],
+                    0o600,
+                    crate::NODE_TEMP_PURPOSE,
+                )
+                .unwrap()
+                .unwrap();
+            let binding = NativeCapacityAccountBinding {
+                root_identity: PinnedDirectory::open(&temporary.path().join("root"))
+                    .unwrap()
+                    .unwrap()
+                    .identity()
+                    .unwrap(),
+                runtime_identity: PinnedDirectory::open(&temporary.path().join("root/.ai/state"))
+                    .unwrap()
+                    .unwrap()
+                    .identity()
+                    .unwrap(),
+                account_directory_identity: directory.identity().unwrap(),
+                account_identity: account.identity().unwrap(),
+                policy,
+                ..original()
+            };
+            let genesis = CapacityRecord {
+                schema: RECORD_SCHEMA,
+                epoch: 1,
+                issuance_digest: binding.issuance_digest().unwrap(),
+                sequence: 0,
+                consumed: genesis_consumed(),
+                outstanding: None,
+            };
+            let redo = AccountRedo::genesis(genesis, &binding.policy).unwrap();
+            let bytes = encode(&genesis).unwrap();
+            let mut scratch = [0; super::super::RECORD_BYTES];
+            account
+                .overwrite_fixed_if_matches(
+                    &[0; super::super::RECORD_BYTES][..bytes.len()],
+                    &bytes,
+                    &mut scratch[..bytes.len()],
+                    lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(10)),
+                )
+                .unwrap();
+            directory
+                .atomic_create_pinned_regular(
+                    OsStr::new("anchor"),
+                    &redo.encode(&binding.policy).unwrap(),
+                    0o600,
+                    crate::NODE_TEMP_PURPOSE,
+                )
+                .unwrap()
+                .unwrap();
+            let operator = SigningKey::from_bytes(&[7; 32]);
+            let lock = StateLock::acquire(&temporary.path().join("operator.lock")).unwrap();
+            Self {
+                places: AmendmentPlaces {
+                    directory,
+                    onboarding: onboarding.try_clone().unwrap(),
+                    state: state.try_clone().unwrap(),
+                },
+                _temporary: temporary,
+                lock,
+                onboarding,
+                state,
+                operator_fingerprint: ryeos_engine::trust::compute_fingerprint(
+                    &operator.verifying_key(),
+                ),
+                binding,
+                operator,
+            }
+        }
+
+        fn amend(
+            &self,
+            prior: &NativeCapacityAccountBinding,
+            policy: &NodeNativeCapacityPolicy,
+        ) -> Result<CapacityPolicyAmendmentReport> {
+            let places = AmendmentPlaces {
+                directory: self.places.directory.try_clone().unwrap(),
+                onboarding: self.places.onboarding.try_clone().unwrap(),
+                state: self.places.state.try_clone().unwrap(),
+            };
+            amend_policy_at(
+                places,
+                prior,
+                policy,
+                &AmendmentIdentity {
+                    signer: DocumentSigner::Operator(&self.operator),
+                    operator_fingerprint: self.operator_fingerprint.clone(),
+                    lineage: OperatorLineage::single(
+                        &self.operator_fingerprint,
+                        &self.operator.verifying_key(),
+                    ),
+                    node_fingerprint: self.binding.node_fingerprint.clone(),
+                },
+                lillux::process_control::ControllerAccount::current().unwrap(),
+                "controls",
+                "ryeos node policy-apply native_capacity",
+                &self.lock,
+            )
+        }
+
+        fn owner(&self, policy: &NodeNativeCapacityPolicy) -> StoppedCapacityAccount<'_> {
+            StoppedCapacityAccount::open(
+                self.places.directory.try_clone().unwrap(),
+                self.binding.account_identity,
+                self.onboarding.try_clone().unwrap(),
+                self.state.try_clone().unwrap(),
+                self.binding.issuance_digest().unwrap(),
+                policy,
+                self.lock.witness().unwrap(),
+            )
+            .unwrap()
+        }
+
+        /// Leave an outstanding debit of `process` in the account.
+        fn debit(&self, process: &lillux::process_control::ExactProcessIdentity) {
+            super::super::reissue::leave_debit(
+                &mut self.owner(&self.binding.policy),
+                &self.binding.policy,
+                self.binding.issuance_digest().unwrap(),
+                process,
+            )
+            .unwrap();
+        }
+
+        fn in_force(&self) -> NativeCapacityAccountBinding {
+            best_chain(
+                &self.onboarding,
+                &self.binding,
+                &OperatorLineage::single(
+                    &self.operator_fingerprint,
+                    &self.operator.verifying_key(),
+                ),
+            )
+            .unwrap()
+            .map(|(_, chain)| chain.effective)
+            .unwrap_or_else(|| self.binding.clone())
+        }
+
+        fn evidence(&self) -> Vec<CapacityPolicyAmendmentEvidence> {
+            read_log(
+                &self.state,
+                POLICY_AMENDMENT_EVIDENCE_LOG,
+                "policy amendment",
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn amending_the_policy_publishes_one_document_and_converges_on_rerun() {
+        let f = AccountFixture::new();
+        let mut amended = f.binding.policy.clone();
+        amended.incarnation.rollover_work_margin_steps = amended
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        let report = f.amend(&f.binding, &amended).unwrap();
+        assert!(!report.already_applied);
+        let document = report.document_digest.clone().expect("a document");
+        assert_eq!(
+            report.prior_binding_digest.as_deref(),
+            Some(f.binding.binding_digest().unwrap().as_str())
+        );
+        let in_force = f.in_force();
+        assert_eq!(in_force.policy, amended);
+        assert_eq!(
+            in_force.reanchor.as_ref().unwrap().document_digest,
+            document
+        );
+        assert_eq!(
+            in_force.issuance_digest().unwrap(),
+            f.binding.issuance_digest().unwrap()
+        );
+        assert_eq!(f.evidence().len(), 1);
+        assert_eq!(f.evidence()[0].policy_digest, report.policy_digest);
+        // The records are untouched: the anchor still loads under the old
+        // policy at epoch 1, sequence 0.
+        let mut owner = f.owner(&f.binding.policy);
+        let position = owner
+            .require_no_outstanding_debit(&f.binding.policy)
+            .unwrap();
+        assert_eq!((position.epoch, position.sequence), (1, 0));
+        // A rerun with the policy already in force publishes nothing and
+        // owes no second line.
+        let rerun = f.amend(&in_force, &amended).unwrap();
+        assert!(rerun.already_applied);
+        assert_eq!(rerun.document_digest.as_deref(), Some(document.as_str()));
+        assert_eq!(f.evidence().len(), 1);
+        assert_eq!(published_digests(&f.onboarding).unwrap().len(), 1);
+        // A second amendment chains on the first.
+        let mut again = amended.clone();
+        again.incarnation.rollover_work_margin_steps = again
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        let second = f.amend(&in_force, &again).unwrap();
+        assert!(!second.already_applied);
+        assert_eq!(f.in_force().policy, again);
+        assert_eq!(published_digests(&f.onboarding).unwrap().len(), 2);
+        assert_eq!(f.evidence().len(), 2);
+    }
+
+    #[test]
+    fn a_policy_the_current_image_does_not_fit_is_refused_before_any_write() {
+        let f = AccountFixture::new();
+        let mut too_small = f.binding.policy.clone();
+        // Valid in itself (above the control-storage floor), but genesis
+        // already consumed more storage than this allowance grants, so the
+        // current image cannot be held under it.
+        too_small.allowance.storage_bytes = 70_000;
+        too_small.incarnation.units.storage_bytes = 70_000;
+        too_small.validate().unwrap();
+        let error = f.amend(&f.binding, &too_small).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("does not fit the new policy"),
+            "{error:#}"
+        );
+        assert!(published_digests(&f.onboarding).unwrap().is_empty());
+        assert!(f.evidence().is_empty());
+        assert_eq!(f.in_force(), f.binding);
+    }
+
+    #[test]
+    fn the_amendment_check_writes_nothing() {
+        let f = AccountFixture::new();
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.binding, &f.binding.policy, &f.lock).unwrap(),
+            CapacityPolicyAmendmentCheck::AlreadyApplied
+        );
+        let mut amended = f.binding.policy.clone();
+        amended.incarnation.rollover_work_margin_steps = amended
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.binding, &amended, &f.lock).unwrap(),
+            CapacityPolicyAmendmentCheck::Needed
+        );
+        let mut too_small = f.binding.policy.clone();
+        too_small.allowance.storage_bytes = 70_000;
+        too_small.incarnation.units.storage_bytes = 70_000;
+        too_small.validate().unwrap();
+        let error =
+            check_policy_amendment_at(&f.places, &f.binding, &too_small, &f.lock).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("does not fit the new policy"),
+            "{error:#}"
+        );
+        // No check published a document or wrote evidence.
+        assert!(published_digests(&f.onboarding).unwrap().is_empty());
+        assert!(f.evidence().is_empty());
+        assert_eq!(f.in_force(), f.binding);
+        // The amendment the check admitted applies, after which the same
+        // check finds it in force.
+        assert!(!f.amend(&f.binding, &amended).unwrap().already_applied);
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.in_force(), &amended, &f.lock).unwrap(),
+            CapacityPolicyAmendmentCheck::AlreadyApplied
+        );
+    }
+    /// A previous daemon recorded in another pid namespace: a real identity
+    /// of this process with its namespace rewritten, so its pid, birth and
+    /// boot all match a LIVE process here and only the namespace says it is
+    /// not this observer's.
+    fn foreign_process() -> lillux::process_control::ExactProcessIdentity {
+        let mut process = lillux::process_control::capture_current_process_identity().unwrap();
+        process.pid_namespace = "pid:[1]".to_owned();
+        process
+    }
+
+    fn amended_policy(f: &AccountFixture) -> NodeNativeCapacityPolicy {
+        let mut amended = f.binding.policy.clone();
+        amended.incarnation.rollover_work_margin_steps = amended
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        amended
+    }
+
+    #[test]
+    fn amend_settles_a_foreign_namespace_debit_through_the_lock_witness_as_a_dead_one() {
+        let f = AccountFixture::new();
+        let foreign = foreign_process();
+        // Without a proof the only classification fails closed.
+        let error = foreign.has_ended().unwrap_err();
+        assert!(error.contains("pid:[1]"), "{error}");
+        f.debit(&foreign);
+        let amended = amended_policy(&f);
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.binding, &amended, &f.lock).unwrap(),
+            CapacityPolicyAmendmentCheck::Needed
+        );
+        let report = f.amend(&f.binding, &amended).unwrap();
+        assert!(!report.already_applied);
+        assert!(
+            report.settled_incarnation.is_some(),
+            "the foreign incarnation's debit is settled exactly as a dead one's"
+        );
+        assert_eq!(f.in_force().policy, amended);
+    }
+
+    #[test]
+    fn amend_still_refuses_a_live_incarnation_of_this_namespace_under_the_witness() {
+        let f = AccountFixture::new();
+        f.debit(&lillux::process_control::capture_current_process_identity().unwrap());
+        let amended = amended_policy(&f);
+        let error =
+            check_policy_amendment_at(&f.places, &f.binding, &amended, &f.lock).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("remains live or unproved"),
+            "{error:#}"
+        );
+        let error = f.amend(&f.binding, &amended).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("remains live or unproved"),
+            "{error:#}"
+        );
+        assert!(published_digests(&f.onboarding).unwrap().is_empty());
+        assert!(f.evidence().is_empty());
+    }
+
+    /// Re-anchoring never classifies a process: any outstanding debit blocks
+    /// a move, so a foreign-namespace debit is refused exactly as a dead
+    /// one, with or without the witness open on the account.
+    #[test]
+    fn reanchor_precondition_refuses_a_foreign_namespace_debit_like_a_dead_one() {
+        let f = AccountFixture::new();
+        f.debit(&foreign_process());
+        let error = f
+            .owner(&f.binding.policy)
+            .require_no_outstanding_debit(&f.binding.policy)
+            .expect_err("an outstanding debit blocks a move");
+        assert!(
+            format!("{error:#}").contains("incarnation debit is outstanding"),
+            "{error:#}"
+        );
+    }
+}

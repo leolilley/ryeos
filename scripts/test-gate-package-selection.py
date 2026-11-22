@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Check canonical gate scope using a fake Cargo; never build or sign bundles.
+
+gate.sh runs from a shadow root: its own script and the helpers it sources are
+the real ones, but the custody token scan and the Core reporter unit tests it
+runs before Cargo are stubbed. Both are checked elsewhere in CI (the scan in its
+own step, the reporter tests in every real gate run), and the scan reads the
+whole tree, which alone outlasted this test's per-invocation timeout. What this
+test checks is only the Cargo argument selection.
+"""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def shadow_gate(shadow):
+    """Lay out the real gate.sh and its sourced helpers under `shadow`, with
+    the pre-Cargo checks it runs replaced by no-ops. Returns the gate path."""
+    scripts = shadow / "scripts"
+    (scripts / "ci").mkdir(parents=True)
+    (scripts / "gate.sh").symlink_to(ROOT / "scripts/gate.sh")
+    for helper in ("lib", "pkg"):
+        (scripts / helper).symlink_to(ROOT / "scripts" / helper)
+    custody = scripts / "ci/check-custody-tokens.sh"
+    custody.write_text("#!/bin/sh\nexit 0\n")
+    custody.chmod(0o700)
+    reporter = shadow / "bundles/core/tests/reporter/test_reporter.py"
+    reporter.parent.mkdir(parents=True)
+    reporter.write_text("")
+    return scripts / "gate.sh"
+
+
+class GatePackageSelection(unittest.TestCase):
+    def invoke(self, *args):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate = shadow_gate(root / "repo")
+            log = root / "argv.json"
+            cargo = root / "cargo"
+            cargo.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json,os,sys\n"
+                "with open(os.environ['GATE_ARGV_LOG'],'w') as out:\n"
+                " json.dump(sys.argv[1:],out)\n"
+            )
+            cargo.chmod(0o700)
+            environment = dict(os.environ, CARGO=str(cargo), GATE_ARGV_LOG=str(log),
+                               GATE_BUILD_JOBS="1", GATE_TEST_THREADS="1")
+            result = subprocess.run(
+                ["bash", str(gate), *args],
+                env=environment, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(log.read_text())
+
+    def test_default_keeps_complete_workspace(self):
+        args = self.invoke()
+        self.assertIn("--workspace", args)
+        self.assertIn("ryeos-handler-bins/graph-handlers", args[args.index("--features") + 1])
+
+    def test_native_package_never_widens_to_workspace_or_product_features(self):
+        for selection in [("-p", "lillux-sqlite"), ("--package=lillux-sqlite",),
+                          ("-plillux-sqlite",)]:
+            with self.subTest(selection=selection):
+                args = self.invoke(*selection, "--locked", "--offline")
+                self.assertNotIn("--workspace", args)
+                self.assertNotIn("--features", args)
+                self.assertIn("--locked", args)
+                self.assertIn("--offline", args)
+
+    def test_selected_scheduler_consumer_gets_only_its_composition_feature(self):
+        for package in ["ryeosd", "ryeos-cli", "ryeos-api"]:
+            with self.subTest(package=package):
+                args = self.invoke("--bundle-set", "core-scheduling", "-p", package)
+                self.assertNotIn("--workspace", args)
+                self.assertEqual(args[args.index("--features") + 1], f"{package}/scheduling")
+
+    def test_standard_selects_provider_setup_for_api_and_cli_consumers(self):
+        for package in ["ryeosd", "ryeos-api", "ryeos-cli"]:
+            with self.subTest(package=package):
+                args = self.invoke("--bundle-set", "standard", "-p", package)
+                features = f"{package}/model-provider-setup"
+                features += f",{package}/scheduling"
+                self.assertEqual(args[args.index("--features") + 1], features)
+                self.assertNotIn("--workspace", args)
+
+    def test_reduced_daemon_keeps_scheduler_absent(self):
+        args = self.invoke("--bundle-set", "core", "-p", "ryeosd")
+        self.assertNotIn("--workspace", args)
+        self.assertNotIn("--features", args)
+
+    def test_version_and_glob_preserve_cargo_selection_and_scoped_features(self):
+        for selection in ["ryeos-api@0.1.0", "ryeos-api*"]:
+            with self.subTest(selection=selection):
+                args = self.invoke("--bundle-set", "core-scheduling", "-p", selection)
+                self.assertNotIn("--workspace", args)
+                self.assertIn(selection, args)
+                self.assertEqual(args[args.index("--features") + 1], "ryeos-api/scheduling")
+
+    def test_explicit_workspace_remains_explicit(self):
+        args = self.invoke("--workspace", "-p", "lillux-sqlite")
+        self.assertEqual(args.count("--workspace"), 1)
+        self.assertIn("--features", args)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -2,7 +2,7 @@
 //!
 //! Proves the full SSE chain works:
 //!   1. Start mock provider
-//!   2. Pre-init: trusted signer, standard bundle, provider-config bundle, model routing,
+//!   2. Pre-init: trusted signer, workflow bundles, provider-config bundle, model routing,
 //!      directive, route YAML, node signing key, authorized key file
 //!   3. Start daemon
 //!   4. POST /execute to run a directive, capture thread_id
@@ -10,7 +10,7 @@
 //!   6. Read SSE events until terminal
 //!   7. Assert events received correctly
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -203,14 +203,14 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-thread-events-model-config",
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
-            // thread/events-stream route is provided by the standard bundle.
+            // thread/events-stream route is provided by core.
             // post_execute signs with fixture.user, so the thread's
             // requested_by is the user fingerprint. The SSE GET must be
             // signed by the same user for the ownership check to pass.
@@ -349,7 +349,14 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
 /// Set up a daemon with the standard SSE thread-events fixture and run a
 /// directive end-to-end. Returns `(harness, user_sk, node_fp, thread_id)`.
 /// Reused by D.3 reconnect + non-owner tests.
-async fn boot_and_run_directive() -> (DaemonHarness, SigningKey, String, String) {
+async fn boot_and_run_directive() -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    String,
+    String,
+) {
     boot_and_run_directive_with_extra_keys(&[]).await
 }
 
@@ -360,7 +367,14 @@ async fn boot_and_run_directive() -> (DaemonHarness, SigningKey, String, String)
 /// principal-mismatch 404 branch deterministically.
 async fn boot_and_run_directive_with_extra_keys(
     extra_keys: &[SigningKey],
-) -> (DaemonHarness, SigningKey, String, String) {
+) -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    String,
+    String,
+) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
@@ -372,14 +386,14 @@ async fn boot_and_run_directive_with_extra_keys(
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-thread-events-model-config",
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
-            // thread/events-stream route is provided by the standard bundle.
+            // thread/events-stream route is provided by core.
             // post_execute signs with fixture.user, so the thread's
             // requested_by is the user fingerprint. Authorize the user key
             // so SSE requests signed by it pass the ryeos_signed verifier.
@@ -440,12 +454,10 @@ async fn boot_and_run_directive_with_extra_keys(
         .expect("thread.thread_id")
         .to_string();
 
-    // Hold the project tempdir alive for the duration of the test by
-    // leaking it. Tests are short-lived; tempdir cleanup is OS-on-exit.
-    std::mem::forget(project);
-    std::mem::forget(mock);
+    // The project tempdir and mock provider are returned to the caller, which
+    // keeps them alive until the test ends.
 
-    (h, user_sk, node_fp, thread_id)
+    (Box::new((project, mock)), h, user_sk, node_fp, thread_id)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -455,7 +467,7 @@ async fn sse_thread_events_returns_404_for_non_owner() {
     // request through the source's principal-mismatch branch, which
     // is the path we want to assert returns 404 (not 401).
     let other_sk = SigningKey::generate(&mut rand::rngs::OsRng);
-    let (h, _user_sk, node_fp, thread_id) =
+    let (_keep, h, _user_sk, node_fp, thread_id) =
         boot_and_run_directive_with_extra_keys(std::slice::from_ref(&other_sk)).await;
 
     // Sign the SSE GET with the OTHER (authorized) key. The
@@ -486,7 +498,7 @@ async fn sse_thread_events_returns_404_for_non_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
-    let (h, user_sk, node_fp, thread_id) = boot_and_run_directive().await;
+    let (_keep, h, user_sk, node_fp, thread_id) = boot_and_run_directive().await;
 
     let audience = format!("fp:{node_fp}");
     let sse_path = format!("/threads/{thread_id}/events/stream");

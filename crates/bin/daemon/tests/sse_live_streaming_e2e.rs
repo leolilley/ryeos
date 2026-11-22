@@ -18,7 +18,7 @@
 //! while model routing and the directive are planted into the project passed
 //! as `project_path`.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,7 +26,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -125,32 +125,6 @@ model:
     );
     let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
     std::fs::write(&path, signed)?;
-    Ok(())
-}
-
-/// Plant the `/execute/stream` (gateway / `dispatch_launch`) route.
-fn plant_execute_stream_route(state_path: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = state_path.join(".ai/node/routes");
-    std::fs::create_dir_all(&dir)?;
-    let body = r#"id: execute/stream
-path: /execute/stream
-methods:
-  - POST
-auth: ryeos_signed
-limits:
-  body_bytes_max: 1048576
-  timeout_ms: 0
-  concurrent_max: 32
-request:
-  body: json
-response:
-  mode: event_stream
-  source: dispatch_launch
-  source_config:
-    keep_alive_secs: 15
-"#;
-    let signed = lillux::signature::sign_content(body, signer, "#", None);
-    std::fs::write(dir.join("execute-stream.yaml"), signed)?;
     Ok(())
 }
 
@@ -287,7 +261,14 @@ async fn read_timed_until_terminal(
 /// response. Returns the harness, the user signing key (HTTP principal), the
 /// publisher signing key (signs project items), the node fingerprint
 /// (audience).
-async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
+async fn boot_live_daemon() -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    SigningKey,
+    String,
+) {
     let mock = MockProvider::start_with_response_delay(
         vec![
             MockResponse::Text("Hello ".into()),
@@ -300,14 +281,13 @@ async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-live-stream-model-config",
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
-            plant_execute_stream_route(state_path, &fixture.publisher)?;
             write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
             Ok(())
         };
@@ -321,11 +301,10 @@ async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
     .await
     .expect("start daemon with delayed mock + execute-stream route");
 
-    std::mem::forget(mock);
     let user_sk = fixture.user.clone();
     let publisher_sk = fixture.publisher.clone();
     let node_fp = fixture.node_fp();
-    (h, user_sk, publisher_sk, node_fp)
+    (Box::new(mock), h, user_sk, publisher_sk, node_fp)
 }
 
 /// Open the gateway `/execute/stream` and return the live response plus the
@@ -411,7 +390,7 @@ async fn open_gateway_stream(
 /// delivery rather than a single buffered flush at completion.
 #[tokio::test(flavor = "multi_thread")]
 async fn gateway_stream_delivers_events_incrementally_not_buffered() {
-    let (mut h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
+    let (_keep, mut h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     plant_project_items(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();
@@ -499,7 +478,7 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
 /// the terminal only later — once the delayed provider settles.
 #[tokio::test(flavor = "multi_thread")]
 async fn chain_tail_attached_before_terminal_receives_terminal_live() {
-    let (h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
+    let (_keep, h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     plant_project_items(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();

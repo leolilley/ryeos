@@ -263,11 +263,53 @@ fn bounded_budget_outcome(reason: &str) -> Result<DedicatedSessionBoundedOutcome
     })
 }
 
+/// The subject-projection contract a slot-backed credential profile requires
+/// of its worker environment.
+const DELIVERED_SECRET_SUBJECT_CONTRACT: &str = "ryeos.credential.delivered_secret.v1";
+
+/// Judge the worker environment's admitted subject-projection contract
+/// against the credential profile's activation. A delivered-secret profile
+/// requires exactly the delivered-secret contract; a ceremony profile must not
+/// use it. Only names reach the refusal.
+fn require_subject_contract_matches_activation(
+    profile_id: &str,
+    activation: &ryeos_app::runtime_db::CredentialActivation,
+    contract: Option<&str>,
+) -> Result<()> {
+    let is_delivered_secret_contract = contract == Some(DELIVERED_SECRET_SUBJECT_CONTRACT);
+    if activation.is_slot_backed() != is_delivered_secret_contract {
+        bail!(
+            "credential_subject_contract_mismatch: credential profile '{profile_id}' is {} but the worker environment's subject contract is {}",
+            if activation.is_slot_backed() {
+                "slot-backed"
+            } else {
+                "a ceremony profile"
+            },
+            contract.map_or_else(|| "absent".to_owned(), |name| format!("'{name}'")),
+        );
+    }
+    Ok(())
+}
+
+/// The retained session capsule hash, whether the admitted mode is a bounded
+/// turn, and the worker environment's admitted subject-projection contract
+/// (`None` for a direct worker).
+struct AdmittedSession {
+    capsule_hash: String,
+    bounded_turn: bool,
+    /// Whether the bounded mode continues a completed predecessor's upstream
+    /// conversation instead of starting a session.
+    continuation: bool,
+    subject_contract: Option<String>,
+    /// The item's signed per-route request pins, empty when it states none.
+    route_fixed_params: ryeos_engine::route_fixed_params::RouteFixedParams,
+}
+
 fn admitted_session_capsule(
     state: &AppState,
     thread_id: &str,
     dependency_ref: &str,
-) -> Result<(String, bool)> {
+) -> Result<AdmittedSession> {
     let launch = state
         .state_store
         .admitted_launch_capsule(thread_id)?
@@ -282,6 +324,15 @@ fn admitted_session_capsule(
     let prepared: ryeos_executor::execution::launch_preparation::PreparedRuntimeLaunch =
         serde_json::from_value(prepared_runtime_launch)
             .context("decode retained runtime launch authority")?;
+    let subject_contract = match prepared
+        .runtime_data
+        .get("worker_execution")
+        .and_then(|value| value.get("credential_subject_contract"))
+    {
+        Some(Value::String(contract)) => Some(contract.clone()),
+        Some(Value::Null) => None,
+        _ => bail!("worker execution has no admitted credential subject contract"),
+    };
     let mode = prepared
         .runtime_data
         .get("worker_execution")
@@ -295,6 +346,15 @@ fn admitted_session_capsule(
         "bounded_turn" => true,
         _ => bail!("worker execution has an unknown admitted mode"),
     };
+    let continuation = ryeos_app::dedicated_session_service::bounded_mode_is_continuation(
+        prepared
+            .runtime_data
+            .get("worker_execution")
+            .ok_or_else(|| anyhow!("worker execution has no admitted config"))?,
+    )?;
+    if continuation && !bounded_turn {
+        bail!("only a bounded-turn worker execution can be a continuation");
+    }
     let mut matches = prepared
         .execution_dependencies
         .iter()
@@ -311,7 +371,184 @@ fn admitted_session_capsule(
         .get(name)
         .cloned()
         .ok_or_else(|| anyhow!("admitted dependency has no retained session capsule"))?;
-    Ok((capsule_hash, bounded_turn))
+    // The launch's stated lifetime is judged here, at session start, against
+    // the worker kind's signed ceiling frozen in the capsule just admitted.
+    let ceiling = state
+        .state_store
+        .admitted_persistent_session_capsule(&capsule_hash)?
+        .lifecycle
+        .max_lifetime_seconds_ceiling;
+    ryeos_app::dedicated_session_service::admitted_lifetime_seconds(
+        prepared
+            .runtime_data
+            .get("worker_execution")
+            .ok_or_else(|| anyhow!("worker execution has no admitted config"))?,
+        ceiling,
+    )?;
+    let route_fixed_params = match prepared
+        .runtime_data
+        .get("worker_execution")
+        .and_then(|value| value.get("route_fixed_params"))
+    {
+        None => Default::default(),
+        Some(value) => ryeos_engine::route_fixed_params::parse_route_fixed_params(value)
+            .context("admitted worker execution route_fixed_params is invalid")?,
+    };
+    Ok(AdmittedSession {
+        capsule_hash,
+        bounded_turn,
+        continuation,
+        subject_contract,
+        route_fixed_params,
+    })
+}
+
+/// Which kind of retained predecessor a new placement carries an upstream
+/// session over from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinuationPredecessor {
+    /// A frozen placement of the same chain: the worker was handed over.
+    Frozen,
+    /// A terminal placement whose bounded turn completed: a later turn of the
+    /// same upstream conversation, in a new chain.
+    TerminalCompleted,
+}
+
+/// What a new placement is admitted as, judged against its predecessor.
+struct ContinuationSubject<'a> {
+    chain_root_id: &'a str,
+    owner_principal: &'a str,
+    credential_profile_id: &'a str,
+    credential_generation: u64,
+}
+
+/// The upstream session id a new placement is admitted with, or the first
+/// refusal. Every refusal is a stable code followed by a bounded explanation;
+/// no predecessor content reaches the message. `already_continued` is the
+/// placement already admitted to continue this predecessor, if any.
+fn judge_continuation_predecessor(
+    kind: ContinuationPredecessor,
+    predecessor: Option<&ryeos_app::runtime_db::DedicatedSessionRecord>,
+    already_continued: Option<&str>,
+    subject: &ContinuationSubject<'_>,
+) -> Result<String> {
+    let predecessor = predecessor.ok_or_else(|| {
+        anyhow!("continuation_predecessor_unknown: the predecessor has no dedicated session")
+    })?;
+    if predecessor.owner_principal != subject.owner_principal {
+        bail!("continuation_not_owned: the predecessor belongs to another principal");
+    }
+    if predecessor.credential_profile_id != subject.credential_profile_id {
+        bail!("continuation_profile_mismatch: the predecessor used another credential profile");
+    }
+    if predecessor.credential_generation != subject.credential_generation {
+        bail!(
+            "continuation_credential_generation_changed: the credential profile changed generation since the predecessor"
+        );
+    }
+    match kind {
+        ContinuationPredecessor::Frozen => {
+            if predecessor.chain_root_id != subject.chain_root_id || predecessor.state != "frozen" {
+                bail!(
+                    "continuation_predecessor_not_frozen: the predecessor is not the frozen placement of this chain"
+                );
+            }
+        }
+        ContinuationPredecessor::TerminalCompleted => {
+            if predecessor.state != "terminal" {
+                bail!("continuation_predecessor_not_terminal: the predecessor has not ended");
+            }
+            if predecessor
+                .bounded_outcome
+                .as_ref()
+                .map(|outcome| outcome.kind)
+                != Some(ryeos_runtime::callback::DedicatedSessionBoundedOutcomeKind::Completed)
+            {
+                bail!(
+                    "continuation_predecessor_not_completed: the predecessor did not complete its turn"
+                );
+            }
+        }
+    }
+    let upstream = predecessor.remote_thread_id.clone().ok_or_else(|| {
+        anyhow!(
+            "continuation_no_upstream_session: the predecessor never established an upstream session"
+        )
+    })?;
+    if kind == ContinuationPredecessor::TerminalCompleted && already_continued.is_some() {
+        bail!(
+            "continuation_predecessor_already_continued: another placement already continues this predecessor"
+        );
+    }
+    Ok(upstream)
+}
+
+/// Read the predecessor and judge it. See [`judge_continuation_predecessor`].
+fn continuation_upstream_session(
+    state: &AppState,
+    predecessor_thread_id: &str,
+    kind: ContinuationPredecessor,
+    subject: &ContinuationSubject<'_>,
+) -> Result<String> {
+    let predecessor = state.state_store.dedicated_session(predecessor_thread_id)?;
+    let already_continued = state
+        .state_store
+        .dedicated_session_continuing(predecessor_thread_id)?;
+    judge_continuation_predecessor(
+        kind,
+        predecessor.as_ref(),
+        already_continued.as_deref(),
+        subject,
+    )
+}
+
+/// A concurrent admission lost the race for the same predecessor: the unique
+/// lineage index refused it. Name that as the refusal it is.
+fn classify_continuation_admission_error(error: anyhow::Error) -> anyhow::Error {
+    if format!("{error:#}").contains("continued_from_placement") {
+        anyhow!(
+            "continuation_predecessor_already_continued: another placement already continues this predecessor"
+        )
+    } else {
+        error
+    }
+}
+
+/// Record the continuation on the successor thread. Best effort and
+/// idempotent per successor: the admission itself is already durable, and a
+/// failure here never changes it.
+fn record_worker_continuation_admitted(
+    state: &AppState,
+    successor_thread_id: &str,
+    predecessor_thread_id: &str,
+    upstream_session_id: &str,
+) {
+    let result = (|| -> Result<()> {
+        let operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+            "schema":"ryeos.worker_continuation_admitted.v1",
+            "successor_thread_id":successor_thread_id,
+            "predecessor_thread_id":predecessor_thread_id,
+        }))?;
+        ryeos_app::authoritative_root_fact::append_once_to_settled_thread(
+            &state.state_store,
+            successor_thread_id,
+            ryeos_state::event_types::WORKER_CONTINUATION_ADMITTED,
+            &operation_id,
+            json!({
+                "predecessor_thread_id":predecessor_thread_id,
+                "upstream_session_id":upstream_session_id,
+            }),
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(
+            successor_thread_id,
+            predecessor_thread_id,
+            error = %error,
+            "failed to record worker_continuation_admitted on the successor",
+        );
+    }
 }
 
 fn require_structured_session_route_effect_contract(
@@ -320,13 +557,17 @@ fn require_structured_session_route_effect_contract(
     route_set: &str,
     allowed_effect_classes: &[String],
     recover_upstream_session: bool,
+    route_fixed_params: &ryeos_engine::route_fixed_params::RouteFixedParams,
 ) -> Result<()> {
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let value = authority
         .cas_store()?
-        .get_object(capsule_hash)?
+        .get_object_bounded(
+            capsule_hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
     let capsule =
         ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -341,7 +582,150 @@ fn require_structured_session_route_effect_contract(
         route_set,
         allowed_effect_classes,
         recover_upstream_session,
+    )?;
+    // The item's pins never override the profile: every named route must be in
+    // the selected route set and no pinned field may be one the route owns.
+    ryeos_engine::route_fixed_params::check_route_fixed_params_against_profile(
+        &profile.contract,
+        route_set,
+        route_fixed_params,
+    )?;
+    // A start always binds a credential profile, so only the profile's
+    // requirements for that credential kind are judged against this node's
+    // signed capability report, with its controller requirements, before
+    // the credential is acquired or a worker launched.
+    ryeos_app::node_requirement_admission::admit_structured_session_start(
+        state,
+        &profile.contract,
+        Some(ryeos_app::node_requirement_admission::CREDENTIAL_PROFILE_KIND),
     )
+}
+
+/// Read the secrets the admitted session capsule names for delivery, under the
+/// root's sealed environment authority with the session owner as recipient.
+/// Only names cross into errors; values stay in the returned delivery.
+fn deliver_session_secrets(
+    state: &AppState,
+    capsule_hash: &str,
+    owner: &str,
+    cap: &ryeos_app::callback_token::CallbackCapability,
+    recovering: bool,
+) -> Result<ryeos_engine::contracts::DeliveredSecretEnv> {
+    let names = {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
+            .cas_store()?
+            .get_object_bounded(
+                capsule_hash,
+                ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+            )?
+            .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
+        let capsule =
+            ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
+        if capsule.content_hash()? != capsule_hash {
+            bail!("admitted session capsule content hash changed");
+        }
+        ryeos_state::objects::session_process_environment_delivered_secret_names(
+            &capsule.process_environment,
+        )
+    };
+    if names.is_empty() {
+        return Ok(ryeos_engine::contracts::DeliveredSecretEnv::empty());
+    }
+    let refused_code = if recovering {
+        "session_secret_revoked"
+    } else {
+        "session_secret_recipient_refused"
+    };
+    let delivered = ryeos_app::vault::authorize_secret_delivery(
+        &state.secret_sources(),
+        ryeos_app::vault::SecretRecipient { principal: owner },
+        &names,
+        cap.provenance.project_authority(),
+    )
+    .map_err(|error| match error {
+        ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => anyhow!(
+            "session_secret_missing: the session's admitted environment authority does not \
+             provide [{}]",
+            names.join(", ")
+        ),
+        ryeos_app::vault::VaultReadError::AuthorityViolation(detail) => {
+            anyhow!("{refused_code}: {detail}")
+        }
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            anyhow!("{refused_code}: {} ({})", refusal, refusal.code())
+        }
+        ryeos_app::vault::VaultReadError::Internal(error) => {
+            error.context("session secret delivery failed")
+        }
+    })?;
+    for name in delivered.names() {
+        let value = delivered.get(name).unwrap_or_default();
+        if value.is_empty()
+            || value.len() > ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            bail!(
+                "session_secret_unbounded: delivered secret `{name}` is empty, oversize or holds control characters"
+            );
+        }
+    }
+    Ok(delivered)
+}
+
+/// Admit a slot-backed credential profile against the secrets this start
+/// received, and fence it on their values. Every slot the profile names must
+/// have been delivered (names only reach an error). The keyed digest of each
+/// value is recorded on the profile: a first use stores it, an unchanged value
+/// does nothing, and a changed value advances the credential generation so
+/// that sessions started under the old value are fenced by the existing
+/// generation checks. A ceremony profile passes through unchanged. Returns
+/// the profile as it stands after the fence.
+fn admit_slot_backed_profile(
+    state: &AppState,
+    profile: ryeos_app::runtime_db::CredentialProfileRecord,
+    owner: &str,
+    delivered: &ryeos_engine::contracts::DeliveredSecretEnv,
+) -> Result<ryeos_app::runtime_db::CredentialProfileRecord> {
+    let Some(names) = profile.activation.slot_names() else {
+        return Ok(profile);
+    };
+    let missing: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| delivered.get(name).is_none())
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "credential_slot_not_delivered: credential profile '{}' needs [{}], which this session does not receive",
+            profile.profile_id,
+            missing.join(", ")
+        );
+    }
+    let accounting = state.accounting.as_ref().ok_or_else(|| {
+        anyhow!(
+            "credential_slot_fence_unavailable: the node holds no keyed digest authority, so a slot-backed credential profile cannot be fenced"
+        )
+    })?;
+    let digests: std::collections::BTreeMap<String, String> = names
+        .iter()
+        .map(|name| {
+            let value = delivered.get(name).unwrap_or_default();
+            (
+                name.clone(),
+                accounting.credential_slot_value_digest(name, value.as_bytes()),
+            )
+        })
+        .collect();
+    state
+        .state_store
+        .fence_credential_slot_digests(&profile.profile_id, owner, &digests)?;
+    state
+        .state_store
+        .credential_profile(&profile.profile_id)?
+        .ok_or_else(|| anyhow!("credential profile disappeared during slot fencing"))
 }
 
 fn validate_structured_session_route_effect_contract(
@@ -518,11 +902,11 @@ fn create_dedicated_runtime_workspace(
                         .map_err(|error| format!("capture workspace creator identity: {error}"))?,
                     None,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| format!("{error:#}"))?;
                 state
                     .state_store
                     .attach_workspace_creator(workspace_id, thread_id, launch_owner, &identity)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| format!("{error:#}"))
             },
         )
         .map_err(|error| anyhow!(error.to_string()))?;
@@ -679,6 +1063,27 @@ struct DedicatedSessionTerminateParams {
     bounded_outcome: Option<DedicatedSessionBoundedOutcome>,
 }
 
+/// Admit the pinned terminal publication a worker launches under. Both
+/// worker modes retain their result; only an interactive session carries a
+/// HEAD destination, because a bounded candidate is never published directly
+/// (integration mints its own destination).
+fn validate_worker_terminal_publication(
+    bounded_turn: bool,
+    publication: &ryeos_state::objects::PinnedTerminalPublication,
+) -> Result<()> {
+    use ryeos_state::objects::PinnedTerminalPublication as Pinned;
+    match publication {
+        Pinned::RetainResult => Ok(()),
+        Pinned::RetainCurrentHead { .. } if bounded_turn => bail!(
+            "a bounded turn retains its result and carries no HEAD destination; \
+             launch it with terminal publication retain_result \
+             (execution policy terminal_publication kind `retain_result`), not retain_current_head"
+        ),
+        Pinned::RetainCurrentHead { .. } => Ok(()),
+        _ => bail!("worker execution requires a retain-result pinned CoW realization"),
+    }
+}
+
 fn validate_runtime_termination(request: &DedicatedSessionTerminateParams) -> Result<()> {
     match (
         request.reason.as_str(),
@@ -722,6 +1127,8 @@ pub(super) async fn start(
     params: &Value,
     state: &AppState,
     cap: &CallbackCapability,
+    _publication: Option<&ryeos_executor::SelectedApplicationPublication>,
+    credentials: Option<ryeos_app::DedicatedWorkerCredentialTransport>,
 ) -> Result<Value> {
     require_start_authority(state, cap)?;
     if cap
@@ -736,15 +1143,33 @@ pub(super) async fn start(
     if request.thread_id != cap.thread_id {
         bail!("dedicated-session start is restricted to the callback root");
     }
+    if let Some(credentials) = credentials.as_ref() {
+        credentials.require_current_for_thread(
+            &state.callback_tokens,
+            &state.thread_auth,
+            &request.thread_id,
+        )?;
+    }
     let _root_operation = ryeos_app::hosted_operation::begin_hosted_root_operation_async(
         &state.state_store,
         &request.thread_id,
     )
     .await?;
-    let _credential_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
-        &request.credential_profile_id,
-    )
-    .await?;
+    tracing::info!(
+        thread_id = %request.thread_id,
+        credential_profile_id = %request.credential_profile_id,
+        "dedicated-session start: waiting for the credential profile operation gate"
+    );
+    let _credential_operation =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation_within(
+            &request.credential_profile_id,
+            ryeos_app::hosted_operation::CREDENTIAL_PROFILE_START_GATE_TIMEOUT,
+        )
+        .await?;
+    tracing::info!(
+        thread_id = %request.thread_id,
+        "dedicated-session start: operation gates held, admitting the session"
+    );
     ryeos_engine::protocol_vocabulary::validate_env_name(&request.credential_home_env)?;
     ryeos_engine::protocol_vocabulary::validate_env_name(&request.workspace_env)?;
     if request.route_set.is_empty()
@@ -779,13 +1204,12 @@ pub(super) async fn start(
     if request.credential_home_env == request.workspace_env {
         bail!("credential-home and workspace environment slots must be distinct");
     }
+    let mut pinned_terminal_publication = None;
     if request.require_pinned_cow {
         if request.required_terminal_publication != "retain_result" {
             bail!("pinned CoW worker execution requires retain_result terminal publication");
         }
-        use ryeos_state::objects::{
-            ExecutionProjectAuthority, PinnedProjectRealization, PinnedTerminalPublication,
-        };
+        use ryeos_state::objects::{ExecutionProjectAuthority, PinnedProjectRealization};
         let ExecutionProjectAuthority::PinnedGeneration { realization, .. } =
             cap.provenance.project_authority()
         else {
@@ -797,13 +1221,7 @@ pub(super) async fn start(
         else {
             bail!("dedicated-session launch requires a private CoW realization");
         };
-        if !matches!(
-            terminal_publication,
-            PinnedTerminalPublication::RetainResult
-                | PinnedTerminalPublication::RetainCurrentHead { .. }
-        ) {
-            bail!("worker execution requires a retain-result pinned CoW realization");
-        }
+        pinned_terminal_publication = Some(terminal_publication);
     } else if request.required_terminal_publication != "any" {
         bail!("projectless worker execution requires any terminal publication");
     }
@@ -815,10 +1233,36 @@ pub(super) async fn start(
         _ => bail!("dedicated-session candidate disposition contradicts its project policy"),
     };
     let mut aggregate_budget = execution_resource_budget(state, cap)?;
-    let (capsule_hash, bounded_turn) =
-        admitted_session_capsule(state, &request.thread_id, &request.dependency_ref)?;
+    let AdmittedSession {
+        capsule_hash,
+        bounded_turn,
+        continuation,
+        subject_contract,
+        route_fixed_params,
+    } = admitted_session_capsule(state, &request.thread_id, &request.dependency_ref)?;
+    if continuation != request.continue_from.is_some() {
+        bail!(
+            "continuation_mode_mismatch: a worker execution admitted as a continuation names its predecessor with continue_from, and no other execution may"
+        );
+    }
+    if let Some(named) = request.continue_from.as_deref() {
+        // The predecessor is the one the sealed invocation named, never one
+        // the runtime chose afterwards.
+        let launch = state
+            .state_store
+            .admitted_launch_capsule(&request.thread_id)?
+            .ok_or_else(|| anyhow!("thread has no authoritative admitted launch capsule"))?;
+        if launch.sealed_invocation["parameters"]["continue_from"].as_str() != Some(named) {
+            bail!(
+                "continuation_mode_mismatch: the continuation predecessor differs from the sealed invocation"
+            );
+        }
+    }
     if bounded_turn != (candidate_disposition == DedicatedCandidateDisposition::RetainedForReview) {
         bail!("dedicated-session candidate disposition contradicts its admitted worker mode");
+    }
+    if let Some(publication) = pinned_terminal_publication {
+        validate_worker_terminal_publication(bounded_turn, publication)?;
     }
     if aggregate_budget
         .as_ref()
@@ -882,44 +1326,72 @@ pub(super) async fn start(
     if profile.owner_principal != owner {
         bail!("credential profile is not owned by the session principal");
     }
+    require_subject_contract_matches_activation(
+        &profile.profile_id,
+        &profile.activation,
+        subject_contract.as_deref(),
+    )?;
     require_structured_session_route_effect_contract(
         state,
         &capsule_hash,
         &request.route_set,
         &request.allowed_effect_classes,
         request.recover_upstream_session,
+        &route_fixed_params,
     )?;
-    if !recovering {
-        if let (Some(scope), Some(accounting)) =
+    // A continuation's predecessor is judged before any secret, claim, lock or
+    // worker exists, so a refusal leaves nothing to settle.
+    let continuation_upstream = match request.continue_from.as_deref() {
+        Some(predecessor) if !recovering => Some(continuation_upstream_session(
+            state,
+            predecessor,
+            ContinuationPredecessor::TerminalCompleted,
+            &ContinuationSubject {
+                chain_root_id: &thread.chain_root_id,
+                owner_principal: owner,
+                credential_profile_id: &request.credential_profile_id,
+                credential_generation: profile.credential_generation,
+            },
+        )?),
+        _ => None,
+    };
+    // Delivered before any lock, worker identity or contact, so a refusal
+    // leaves nothing to settle. Recovery re-authorises here too: a value is
+    // never replayed from a previous incarnation.
+    let delivered_secrets = deliver_session_secrets(state, &capsule_hash, owner, cap, recovering)?;
+    // A slot-backed profile is judged here, before the profile lock, a claim
+    // or any worker contact, against the values this start received.
+    let profile = admit_slot_backed_profile(state, profile, owner, &delivered_secrets)?;
+    if !recovering
+        && let (Some(scope), Some(accounting)) =
             (cap.accounting_scope.as_ref(), state.accounting.as_ref())
-        {
-            let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
-                "schema":1,
-                "kind":"dedicated_worker_execution",
-                "request":&request,
-                "admitted_session_capsule_hash":&capsule_hash,
-                "credential_generation":profile.credential_generation,
-            }))?;
-            match accounting.claim_execution_resource(
-                &scope.execution_budget_id,
-                ExecutionResourceDimension::WorkerExecution,
-                &request.thread_id,
-                &request_digest,
-                lillux::time::timestamp_millis(),
-            )? {
-                ExecutionResourceClaimOutcome::Admitted { .. } => {}
-                ExecutionResourceClaimOutcome::ReleasedUncontacted { .. } => {
-                    bail!("worker-execution claim cannot be in a released state")
-                }
-                ExecutionResourceClaimOutcome::Denied { reason, .. } => {
-                    aggregate_budget = execution_resource_budget(state, cap)?;
-                    let refused = json!({
-                        "state":"budget_exhausted",
-                        "budget_reason":reason,
-                        "bounded_outcome":bounded_budget_outcome(&reason)?,
-                    });
-                    return attach_execution_resource_budget(refused, aggregate_budget.as_ref());
-                }
+    {
+        let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
+            "schema":1,
+            "kind":"dedicated_worker_execution",
+            "request":&request,
+            "admitted_session_capsule_hash":&capsule_hash,
+            "credential_generation":profile.credential_generation,
+        }))?;
+        match accounting.claim_execution_resource(
+            &scope.execution_budget_id,
+            ExecutionResourceDimension::WorkerExecution,
+            &request.thread_id,
+            &request_digest,
+            lillux::time::timestamp_millis(),
+        )? {
+            ExecutionResourceClaimOutcome::Admitted { .. } => {}
+            ExecutionResourceClaimOutcome::ReleasedUncontacted { .. } => {
+                bail!("worker-execution claim cannot be in a released state")
+            }
+            ExecutionResourceClaimOutcome::Denied { reason, .. } => {
+                aggregate_budget = execution_resource_budget(state, cap)?;
+                let refused = json!({
+                    "state":"budget_exhausted",
+                    "budget_reason":reason,
+                    "bounded_outcome":bounded_budget_outcome(&reason)?,
+                });
+                return attach_execution_resource_budget(refused, aggregate_budget.as_ref());
             }
         }
     }
@@ -1066,25 +1538,29 @@ pub(super) async fn start(
         Some(reservation.upstream_session_id.clone())
     } else if !recovering && request.recover_upstream_session {
         match thread.upstream_thread_id.as_deref() {
-            Some(source_thread_id) => {
-                let source = state
-                    .state_store
-                    .dedicated_session(source_thread_id)?
-                    .ok_or_else(|| {
-                        anyhow!("worker continuation source has no dedicated session")
-                    })?;
-                if source.chain_root_id != thread.chain_root_id || source.state != "frozen" {
-                    bail!("worker continuation source is not the frozen predecessor placement");
-                }
-                Some(source.remote_thread_id.ok_or_else(|| {
-                    anyhow!("worker continuation source has no upstream session identity")
-                })?)
-            }
+            Some(source_thread_id) => Some(continuation_upstream_session(
+                state,
+                source_thread_id,
+                ContinuationPredecessor::Frozen,
+                &ContinuationSubject {
+                    chain_root_id: &thread.chain_root_id,
+                    owner_principal: owner,
+                    credential_profile_id: &request.credential_profile_id,
+                    credential_generation,
+                },
+            )?),
             None => None,
         }
     } else {
         None
     };
+    if continuation_upstream.is_some()
+        && (handoff_reservation.is_some() || continuation_remote_thread_id.is_some())
+    {
+        // Fresh admission has acquired no credential lock yet, so there is
+        // nothing to release.
+        bail!("a worker continuation cannot also be a worker adoption");
+    }
     let admitted_epoch = if recovering {
         state.state_store.prepare_dedicated_session_recovery(
             &request.thread_id,
@@ -1112,6 +1588,30 @@ pub(super) async fn start(
                 &reservation.reservation_id,
             )
             .map(|()| 1)
+    } else if let (Some(upstream_session_id), Some(predecessor_thread_id)) = (
+        continuation_upstream.as_deref(),
+        request.continue_from.as_deref(),
+    ) {
+        state
+            .state_store
+            .admit_dedicated_session_continuing(
+                NewDedicatedSession {
+                    placement_thread_id: &request.thread_id,
+                    chain_root_id: &thread.chain_root_id,
+                    owner_principal: owner,
+                    admitted_capsule_hash: &capsule_hash,
+                    workspace_id: &workspace.workspace_id,
+                    candidate_required: request.require_pinned_cow,
+                    candidate_disposition: candidate_disposition.clone(),
+                    credential_profile_id: &request.credential_profile_id,
+                    credential_generation,
+                    credential_lock_owner: &worker_instance_id,
+                },
+                upstream_session_id,
+                predecessor_thread_id,
+            )
+            .map(|()| 1)
+            .map_err(classify_continuation_admission_error)
     } else if let Some(remote_thread_id) = continuation_remote_thread_id.as_deref() {
         state
             .state_store
@@ -1163,6 +1663,18 @@ pub(super) async fn start(
             ));
         }
     };
+
+    if let (Some(upstream_session_id), Some(predecessor_thread_id)) = (
+        continuation_upstream.as_deref(),
+        request.continue_from.as_deref(),
+    ) {
+        record_worker_continuation_admitted(
+            state,
+            &request.thread_id,
+            predecessor_thread_id,
+            upstream_session_id,
+        );
+    }
 
     let control_channel_identity = ryeos_app::thread_lifecycle::new_thread_id();
     let boot_identity_hash = lillux::cas::sha256_hex(
@@ -1228,7 +1740,17 @@ pub(super) async fn start(
             "RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES".to_owned(),
             request.allowed_effect_classes.join(","),
         ),
+        (
+            ryeos_engine::route_fixed_params::ROUTE_FIXED_PARAMS_ENV.to_owned(),
+            serde_json::to_string(&route_fixed_params)?,
+        ),
     ]);
+    tracing::info!(
+        thread_id = %request.thread_id,
+        worker_instance_id = %worker_instance_id,
+        boot_epoch,
+        "dedicated-session start: admitted, starting the worker process"
+    );
     let start_state = state.clone();
     let start_capsule = capsule_hash.clone();
     let start_workspace = workspace_path.clone();
@@ -1258,6 +1780,7 @@ pub(super) async fn start(
                 workspace_lifeline,
                 Some(&start_state_root),
                 &runtime_environment,
+                delivered_secrets,
                 extra_target_channels,
                 &start_identity,
                 observation_sink,
@@ -1293,6 +1816,10 @@ pub(super) async fn start(
         .await
         .context("join dedicated-session worker start")?;
     started?;
+    tracing::info!(
+        thread_id = %request.thread_id,
+        "dedicated-session start: worker ready and bound"
+    );
     let session = state
         .state_store
         .dedicated_session(&request.thread_id)?
@@ -1309,9 +1836,235 @@ pub(super) async fn start(
 #[cfg(test)]
 mod tests {
     use super::{
-        DedicatedSessionTerminateParams, bounded_worker_failure_reason, require_callback_root,
-        validate_runtime_termination, validate_structured_session_route_effect_contract,
+        ContinuationPredecessor, ContinuationSubject, DedicatedSessionTerminateParams,
+        bounded_worker_failure_reason, classify_continuation_admission_error,
+        judge_continuation_predecessor, require_callback_root,
+        require_subject_contract_matches_activation, validate_runtime_termination,
+        validate_structured_session_route_effect_contract, validate_worker_terminal_publication,
     };
+    use ryeos_app::runtime_db::{
+        CredentialActivation, DedicatedCandidateDisposition, DedicatedSessionRecord,
+    };
+    use ryeos_runtime::callback::{
+        DedicatedSessionBoundedOutcome, DedicatedSessionBoundedOutcomeKind,
+    };
+
+    fn predecessor_record() -> DedicatedSessionRecord {
+        DedicatedSessionRecord {
+            placement_thread_id: "T-predecessor".to_owned(),
+            chain_root_id: "T-predecessor".to_owned(),
+            owner_principal: "principal-a".to_owned(),
+            admitted_capsule_hash: "a".repeat(64),
+            worker_instance_id: None,
+            worker_boot_epoch: None,
+            workspace_id: "workspace".to_owned(),
+            candidate_required: true,
+            candidate_disposition: DedicatedCandidateDisposition::RetainedForReview,
+            credential_profile_id: "profile-a".to_owned(),
+            credential_generation: 4,
+            remote_thread_id: Some("upstream-session-1".to_owned()),
+            current_turn_id: None,
+            state: "terminal".to_owned(),
+            send_boundary: "none".to_owned(),
+            candidate_snapshot_hash: None,
+            candidate_validation_hash: None,
+            candidate_evaluation_hash: None,
+            candidate_evaluation: None,
+            candidate_qualification: None,
+            candidate_disposition_root_id: None,
+            candidate_disposition_operation_id: None,
+            publication_result: None,
+            completion_fence: None,
+            bounded_outcome: Some(DedicatedSessionBoundedOutcome {
+                kind: DedicatedSessionBoundedOutcomeKind::Completed,
+                dimension: None,
+                approval: None,
+            }),
+            terminal_reason: Some("completed".to_owned()),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        }
+    }
+
+    fn successor<'a>() -> ContinuationSubject<'a> {
+        ContinuationSubject {
+            chain_root_id: "T-successor",
+            owner_principal: "principal-a",
+            credential_profile_id: "profile-a",
+            credential_generation: 4,
+        }
+    }
+
+    fn refusal(
+        kind: ContinuationPredecessor,
+        predecessor: Option<&DedicatedSessionRecord>,
+        already_continued: Option<&str>,
+    ) -> String {
+        judge_continuation_predecessor(kind, predecessor, already_continued, &successor())
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn a_completed_terminal_predecessor_hands_over_its_upstream_session() {
+        let predecessor = predecessor_record();
+        assert_eq!(
+            judge_continuation_predecessor(
+                ContinuationPredecessor::TerminalCompleted,
+                Some(&predecessor),
+                None,
+                &successor(),
+            )
+            .unwrap(),
+            "upstream-session-1"
+        );
+    }
+
+    #[test]
+    fn every_continuation_refusal_carries_its_stable_code() {
+        use ContinuationPredecessor::TerminalCompleted;
+        let predecessor = predecessor_record();
+        assert!(
+            refusal(TerminalCompleted, None, None).starts_with("continuation_predecessor_unknown:")
+        );
+
+        let mut other_owner = predecessor.clone();
+        other_owner.owner_principal = "principal-b".to_owned();
+        assert!(
+            refusal(TerminalCompleted, Some(&other_owner), None)
+                .starts_with("continuation_not_owned:")
+        );
+
+        let mut other_profile = predecessor.clone();
+        other_profile.credential_profile_id = "profile-b".to_owned();
+        assert!(
+            refusal(TerminalCompleted, Some(&other_profile), None)
+                .starts_with("continuation_profile_mismatch:")
+        );
+
+        let mut other_generation = predecessor.clone();
+        other_generation.credential_generation = 3;
+        assert!(
+            refusal(TerminalCompleted, Some(&other_generation), None)
+                .starts_with("continuation_credential_generation_changed:")
+        );
+
+        let mut running = predecessor.clone();
+        running.state = "idle".to_owned();
+        assert!(
+            refusal(TerminalCompleted, Some(&running), None)
+                .starts_with("continuation_predecessor_not_terminal:")
+        );
+
+        for outcome in [
+            None,
+            Some(DedicatedSessionBoundedOutcomeKind::OutcomeUnknown),
+            Some(DedicatedSessionBoundedOutcomeKind::WorkerFailure),
+        ] {
+            let mut incomplete = predecessor.clone();
+            incomplete.bounded_outcome = outcome.map(|kind| DedicatedSessionBoundedOutcome {
+                kind,
+                dimension: None,
+                approval: None,
+            });
+            assert!(
+                refusal(TerminalCompleted, Some(&incomplete), None)
+                    .starts_with("continuation_predecessor_not_completed:")
+            );
+        }
+
+        let mut no_upstream = predecessor.clone();
+        no_upstream.remote_thread_id = None;
+        assert!(
+            refusal(TerminalCompleted, Some(&no_upstream), None)
+                .starts_with("continuation_no_upstream_session:")
+        );
+
+        assert!(
+            refusal(
+                TerminalCompleted,
+                Some(&predecessor),
+                Some("T-earlier-successor")
+            )
+            .starts_with("continuation_predecessor_already_continued:")
+        );
+        // The refusal never echoes the upstream session id.
+        assert!(
+            !refusal(TerminalCompleted, Some(&predecessor), Some("T-x"))
+                .contains("upstream-session-1")
+        );
+    }
+
+    #[test]
+    fn the_frozen_predecessor_path_shares_the_ownership_checks() {
+        use ContinuationPredecessor::Frozen;
+        let mut frozen = predecessor_record();
+        frozen.state = "frozen".to_owned();
+        frozen.bounded_outcome = None;
+        frozen.chain_root_id = "T-successor".to_owned();
+        assert_eq!(
+            judge_continuation_predecessor(Frozen, Some(&frozen), None, &successor()).unwrap(),
+            "upstream-session-1"
+        );
+        let mut other_chain = frozen.clone();
+        other_chain.chain_root_id = "T-elsewhere".to_owned();
+        assert!(
+            refusal(Frozen, Some(&other_chain), None)
+                .starts_with("continuation_predecessor_not_frozen:")
+        );
+        let mut not_frozen = frozen.clone();
+        not_frozen.state = "terminal".to_owned();
+        assert!(
+            refusal(Frozen, Some(&not_frozen), None)
+                .starts_with("continuation_predecessor_not_frozen:")
+        );
+        let mut other_owner = frozen;
+        other_owner.owner_principal = "principal-b".to_owned();
+        assert!(refusal(Frozen, Some(&other_owner), None).starts_with("continuation_not_owned:"));
+    }
+
+    #[test]
+    fn a_lost_admission_race_is_reported_as_the_already_continued_refusal() {
+        let race =
+            anyhow::anyhow!("UNIQUE constraint failed: dedicated_session.continued_from_placement");
+        assert!(
+            classify_continuation_admission_error(race)
+                .to_string()
+                .starts_with("continuation_predecessor_already_continued:")
+        );
+        let other =
+            anyhow::anyhow!("dedicated admission lost its credential generation/lock fence");
+        assert!(
+            classify_continuation_admission_error(other)
+                .to_string()
+                .starts_with("dedicated admission")
+        );
+    }
+
+    #[test]
+    fn subject_contract_must_match_the_profile_activation() {
+        let slot = CredentialActivation::delivered_secret(["API_KEY"]).unwrap();
+        let ceremony = CredentialActivation::Ceremony;
+        let contract = "ryeos.credential.delivered_secret.v1";
+        require_subject_contract_matches_activation("p", &slot, Some(contract)).unwrap();
+        require_subject_contract_matches_activation("p", &ceremony, Some("fixture.account.v1"))
+            .unwrap();
+        require_subject_contract_matches_activation("p", &ceremony, None).unwrap();
+        for (activation, presented) in [
+            (&slot, Some("fixture.account.v1")),
+            (&slot, None),
+            (&ceremony, Some(contract)),
+        ] {
+            let error = require_subject_contract_matches_activation("p", activation, presented)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("credential_subject_contract_mismatch"),
+                "{error}"
+            );
+            assert!(!error.contains("API_KEY"), "{error}");
+        }
+    }
 
     fn structured_contract() -> serde_json::Value {
         serde_json::json!({
@@ -1432,5 +2185,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("enables upstream recovery"));
+    }
+
+    #[test]
+    fn worker_terminal_publication_admission_pairs_with_the_worker_mode() {
+        use ryeos_state::objects::PinnedTerminalPublication as Pinned;
+        let head = || Pinned::RetainCurrentHead {
+            principal_key: "principal".to_owned(),
+            project_hash: "p".repeat(64),
+            expected_hash: "e".repeat(64),
+        };
+        assert!(validate_worker_terminal_publication(true, &Pinned::RetainResult).is_ok());
+        assert!(validate_worker_terminal_publication(false, &Pinned::RetainResult).is_ok());
+        assert!(validate_worker_terminal_publication(false, &head()).is_ok());
+        let refused = validate_worker_terminal_publication(true, &head())
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("carries no HEAD destination"), "{refused}");
+        assert!(refused.contains("retain_result"), "{refused}");
+        for bounded in [true, false] {
+            assert!(validate_worker_terminal_publication(bounded, &Pinned::Discard).is_err());
+            assert!(
+                validate_worker_terminal_publication(
+                    bounded,
+                    &Pinned::AdvanceHead {
+                        head_ref: "refs/heads/main".to_owned(),
+                        expected_hash: "e".repeat(64),
+                    },
+                )
+                .is_err()
+            );
+        }
     }
 }

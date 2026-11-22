@@ -35,6 +35,19 @@ pub trait HostServiceController: Send + Sync {
     fn check_available(&self) -> Result<()>;
     fn request_up(&self) -> Result<()>;
     fn request_down(&self) -> Result<()>;
+    /// Want the service down without signalling a running process: the
+    /// supervisor does not restart it after its next exit. For a supervised
+    /// process that is already exiting on its own and must not be restarted.
+    fn inhibit_restart(&self) -> Result<()>;
+    /// Want the service down and have the supervisor end its exact process
+    /// with the definitive signal. The supervisor owns that process identity,
+    /// so no pid read from elsewhere is promoted into signal authority. Only
+    /// for a process a graceful request could not end.
+    fn force_down(&self) -> Result<()>;
+    /// Want the service down and return only once the supervisor reports its
+    /// process gone, or refuse when `timeout` passes first. A down request
+    /// alone returns while the process may still be exiting.
+    fn wait_down(&self, timeout: std::time::Duration) -> Result<()>;
     /// Opaque native boot disposition retained by a client's upgrade journal.
     fn capture_upgrade_state(&self) -> Result<serde_json::Value>;
     fn restore_upgrade_state(&self, state: &serde_json::Value) -> Result<()>;
@@ -62,6 +75,35 @@ pub fn discover_host_service(name: &str) -> Result<Option<HostServiceInstallatio
 /// down until its client requests its ordinary lifecycle transition.
 pub fn provision_host_service(name: &str, launch: &HostServiceLaunch) -> Result<()> {
     runit::provision(name, launch)
+}
+
+/// One native service association found by enumeration. Enumeration reads
+/// only the recorded launch; it never validates that the launch can still run,
+/// so an association whose client is gone is still named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostServiceAssociation {
+    pub name: String,
+    /// The recorded launch, or why it could not be read. An association
+    /// without a readable launch record is never retired by name.
+    pub launch: std::result::Result<HostServiceLaunch, String>,
+    /// Whether the service manager is currently set to supervise it.
+    pub activated: bool,
+}
+
+/// Enumerate native service associations whose name starts with `prefix`.
+/// `None` means this host has no readable native service directory: the
+/// service manager is absent, or its directory is not readable by the caller.
+pub fn list_host_services(prefix: &str) -> Result<Option<Vec<HostServiceAssociation>>> {
+    runit::list(prefix)
+}
+
+/// Retire one native service association: bring it down, deactivate it, wait
+/// (bounded) for the service manager to release it, then remove its service
+/// definition and its logs. `expected` must equal the launch the association
+/// records, so a caller retires exactly what it inspected. `Ok(false)` means
+/// no association existed; leftovers of an interrupted retirement are removed.
+pub fn retire_host_service(name: &str, expected: &HostServiceLaunch) -> Result<bool> {
+    runit::retire(name, expected)
 }
 
 pub use installation::{

@@ -1,0 +1,28 @@
+# ryeos:signed:2026-11-20T23:17:59Z:09206a609ed881638e849aa10604fd5afc7d91b29490dcb41b3abddd9bd3281a:o+be23KM4DZb0AAHpkzsokLjT0+UEM+d1Z9H18LeGURsGe6IaizB57tsP34GXAsq1VB27rkMqVc2ute4HrQ9BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# The landing set of the observation-only Home: projects and sites at the
+# left, the home overview above recent threads and work.
+schema: 2
+id: overview
+title: Overview
+root:
+  type: split
+  axis: horizontal
+  ratio: 0.22
+  first:
+    type: group
+    label: Projects
+    views: ["view:ryeos/projects/list", "view:ryeos/sites/list"]
+    active: 0
+  second:
+    type: split
+    axis: vertical
+    ratio: 0.6
+    first:
+      type: group
+      views: ["view:ryeos/home/overview"]
+      active: 0
+    second:
+      type: group
+      label: Recent
+      views: ["view:ryeos/threads/history", "view:ryeos/work/list"]
+      active: 0

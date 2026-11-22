@@ -9,7 +9,7 @@ use ryeos_engine::contracts::{InstanceViolationCode, SignatureEnvelope};
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
+use ryeos_engine::parsers::{ParseResultCache, ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 use crate::manifest::{
@@ -132,25 +132,19 @@ pub fn preflight_verify_bundle(
             .into_iter()
             .map(|record| record.bundle_root)
             .collect();
-    let node_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
-    preflight_verify_bundle_in_context(
-        source_path,
-        &installed_bundle_roots,
-        &node_config_root,
-        isolation,
-    )
+    preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, app_root, isolation)
 }
 
 pub fn preflight_verify_bundle_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_bundle_report_in_context(
         source_path,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         isolation,
     )?;
     Ok(())
@@ -166,14 +160,14 @@ pub fn preflight_verify_named_bundle_in_context(
     source_path: &Path,
     expected_bundle_name: &str,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_named_bundle_report_in_context(
         source_path,
         expected_bundle_name,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         isolation,
     )?;
     Ok(())
@@ -187,16 +181,16 @@ pub fn preflight_verify_named_bundle_report_in_context(
     source_path: &Path,
     expected_bundle_name: &str,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<PreflightReport> {
     preflight_verify_bundle_in_context_inner(
         source_path,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         Some(expected_bundle_name),
-        true,
         isolation,
+        None,
     )
 }
 
@@ -209,16 +203,61 @@ pub fn preflight_verify_bundle_staging_in_context(
     staging_path: &Path,
     expected_bundle_name: &str,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_bundle_in_context_inner(
         staging_path,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         Some(expected_bundle_name),
-        false,
         isolation,
+        None,
+    )?;
+    Ok(())
+}
+
+/// [`preflight_verify_bundle_in_context`] reading and filling `parse_results`.
+///
+/// One cache shared by the source pass and the later staging pass means a
+/// staged file whose bytes match a file already parsed under the same parser
+/// set is not parsed again. Trust, anchoring and contract checks still run on
+/// every file; only the parse is skipped, and a changed file is parsed.
+pub fn preflight_verify_bundle_in_context_with_parse_results(
+    source_path: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    app_root: &Path,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    parse_results: &Arc<ParseResultCache>,
+) -> Result<()> {
+    preflight_verify_bundle_in_context_inner(
+        source_path,
+        dependency_bundle_roots,
+        app_root,
+        None,
+        isolation,
+        Some(parse_results),
+    )?;
+    Ok(())
+}
+
+/// [`preflight_verify_bundle_staging_in_context`] reading and filling
+/// `parse_results`; see [`preflight_verify_bundle_in_context_with_parse_results`].
+pub fn preflight_verify_bundle_staging_in_context_with_parse_results(
+    staging_path: &Path,
+    expected_bundle_name: &str,
+    dependency_bundle_roots: &[PathBuf],
+    app_root: &Path,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    parse_results: &Arc<ParseResultCache>,
+) -> Result<()> {
+    preflight_verify_bundle_in_context_inner(
+        staging_path,
+        dependency_bundle_roots,
+        app_root,
+        Some(expected_bundle_name),
+        isolation,
+        Some(parse_results),
     )?;
     Ok(())
 }
@@ -231,7 +270,7 @@ pub fn preflight_verify_bundle_staging_in_context(
 pub fn preflight_verify_bundle_report_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<PreflightReport> {
     // The core logic below populates `failures` (blocking) and
@@ -240,10 +279,10 @@ pub fn preflight_verify_bundle_report_in_context(
     preflight_verify_bundle_in_context_inner(
         source_path,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         None,
-        true,
         isolation,
+        None,
     )
 }
 
@@ -251,10 +290,10 @@ pub fn preflight_verify_bundle_report_in_context(
 fn preflight_verify_bundle_in_context_inner(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     expected_bundle_name: Option<&str>,
-    check_source_mtime: bool,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    parse_results: Option<&Arc<ParseResultCache>>,
 ) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     validate_regular_tree(&ai_dir).with_context(|| {
@@ -286,12 +325,11 @@ fn preflight_verify_bundle_in_context_inner(
         // item namespace still requires an explicit kind dependency and is
         // refused here rather than being silently ignored.
         let trust_store =
-            TrustStore::load(None, node_config_root).context("preflight: load node trust store")?;
+            TrustStore::load_node_registry(app_root).context("preflight: load node trust store")?;
         if trust_store.is_empty() {
             bail!(
-                "preflight: node trust store is empty — run `ryeos init` to \
-                 pin the platform author key, or `ryeos trust pin <fingerprint>` \
-                 to pin a third-party publisher"
+                "preflight: node trust registry is empty — run `ryeos init` to \
+                 establish the node trust registry"
             );
         }
         ryeos_engine::binary_resolver::verify_bundle_executor_manifest(source_path, &trust_store)
@@ -302,27 +340,33 @@ fn preflight_verify_bundle_in_context_inner(
                 source_path,
                 expected_bundle_name,
                 &trust_store,
-                check_source_mtime,
             ),
             None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
         }
         .context("preflight: bundle manifest verification")?;
+        refuse_overlapping_owned_namespaces(source_path, dependency_bundle_roots, &trust_store)?;
+        // No kind schema is in scope, so a `{kind}` declaration cannot resolve
+        // and is refused as an unknown kind; explicit roots are still checked.
+        refuse_invalid_sync_include(source_path, dependency_bundle_roots, &trust_store, &|_| {
+            None
+        })?;
         validate_manifest_only_control_tree(&ai_dir)?;
         return Ok(PreflightReport::default());
     }
 
     let trust_store =
-        TrustStore::load(None, node_config_root).context("preflight: load node trust store")?;
+        TrustStore::load_node_registry(app_root).context("preflight: load node trust store")?;
     if trust_store.is_empty() {
         bail!(
-            "preflight: node trust store is empty — run `ryeos init` to \
-             pin the platform author key, or `ryeos trust pin <fingerprint>` \
-             to pin a third-party publisher"
+            "preflight: node trust registry is empty — run `ryeos init` to \
+             establish the node trust registry"
         );
     }
 
     ryeos_engine::binary_resolver::verify_bundle_executor_manifest(source_path, &trust_store)
         .context("preflight: verify node-authorized bundle executables")?;
+    crate::pictures::verify_bundle_pictures(source_path, &trust_store, true)
+        .context("preflight: verify signed bundle pictures")?;
 
     let kinds = KindRegistry::load_base(&schema_roots, &trust_store)
         .context("preflight: load kind schemas")?;
@@ -359,17 +403,6 @@ fn preflight_verify_bundle_in_context_inner(
         &mut seen_roots,
     );
 
-    let old_trust = source_path
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/trusted");
-    if old_trust.is_dir() {
-        tracing::warn!(
-            path = %old_trust.display(),
-            "bundle ships a old `.ai/config/keys/trusted/` dir which is \
-             ignored — pin the publisher key with `ryeos trust pin <fingerprint>` \
-             instead"
-        );
-    }
     let (parser_tools, _dups) = ParserRegistry::load_base(
         &parser_search_roots
             .iter()
@@ -382,7 +415,10 @@ fn preflight_verify_bundle_in_context_inner(
     let handler_registry =
         HandlerRegistry::load_base(&parser_search_roots, &trust_store, isolation)
             .context("preflight: load handler descriptors")?;
-    let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
+    let mut parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
+    if let Some(results) = parse_results {
+        parser_dispatcher = parser_dispatcher.with_parse_results(Arc::clone(results));
+    }
 
     let mut failures: Vec<String> = Vec::new();
     let mut warnings: Vec<PreflightIssue> = Vec::new();
@@ -402,7 +438,7 @@ fn preflight_verify_bundle_in_context_inner(
         let mut files: Vec<PathBuf> = Vec::new();
         if let Err(e) = collect_files_recursive(&kind_dir, &mut files) {
             failures.push(format!(
-                "{}: scan failed: {e}",
+                "{}: scan failed: {e:#}",
                 kind_dir
                     .strip_prefix(&ai_dir)
                     .unwrap_or(&kind_dir)
@@ -473,11 +509,9 @@ fn preflight_verify_bundle_in_context_inner(
                 Some(header) => {
                     if !trust_store.is_trusted(&header.signer_fingerprint) {
                         failures.push(format!(
-                            "{}: signer {} not in node trust store \
-                             (run `ryeos trust pin {}` to trust this publisher)",
+                            "{}: signer {} not in node trust store",
                             rel.display(),
                             header.signer_fingerprint,
-                            header.signer_fingerprint
                         ));
                         continue;
                     }
@@ -486,6 +520,7 @@ fn preflight_verify_bundle_in_context_inner(
                         &header,
                         &source_format.signature,
                         &trust_store,
+                        &ryeos_engine::trust::SignerContext::bundle(kind_name),
                     ) {
                         failures.push(format!(
                             "{}: signature verification failed: {e}",
@@ -539,11 +574,17 @@ fn preflight_verify_bundle_in_context_inner(
             source_path,
             expected_bundle_name,
             &trust_store,
-            check_source_mtime,
         ),
         None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
     }
     .context("preflight: bundle manifest verification")?;
+    refuse_overlapping_owned_namespaces(source_path, dependency_bundle_roots, &trust_store)?;
+    refuse_invalid_sync_include(
+        source_path,
+        dependency_bundle_roots,
+        &trust_store,
+        &|kind| kinds.directory(kind).map(str::to_owned),
+    )?;
 
     if !warnings.is_empty() {
         tracing::info!(
@@ -563,6 +604,80 @@ fn preflight_verify_bundle_in_context_inner(
 /// Refuse an item namespace when no kind schema is in the exact dependency
 /// closure. Manifest-only bundles may contain only their signed manifest and
 /// content-addressed executable payload machinery.
+/// Refuse a candidate bundle whose signed manifest claims a namespace that an
+/// installed bundle (one of `dependency_bundle_roots`) already owns, or sits
+/// inside. A dependency root without a manifest is not an installed bundle
+/// and claims nothing.
+fn refuse_overlapping_owned_namespaces(
+    candidate_root: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+) -> Result<()> {
+    let (candidate, candidate_claims) =
+        crate::manifest::verified_owned_namespaces(candidate_root, trust_store)
+            .context("preflight: read candidate owned namespaces")?;
+    if candidate_claims.is_empty() {
+        return Ok(());
+    }
+    let mut claims = vec![(candidate, candidate_claims)];
+    for root in dependency_bundle_roots {
+        let manifest = root.join(ryeos_engine::AI_DIR).join("manifest.yaml");
+        if !manifest.is_file() {
+            continue;
+        }
+        let installed = crate::manifest::verified_owned_namespaces(root, trust_store)
+            .with_context(|| {
+                format!(
+                    "preflight: read owned namespaces of installed bundle at {}",
+                    root.display()
+                )
+            })?;
+        claims.push(installed);
+    }
+    ryeos_engine::item_resolution::check_owned_namespace_claims(&claims)
+        .map_err(|error| anyhow::anyhow!("preflight: {error}"))
+}
+
+/// Refuse a candidate bundle whose signed `sync_include` declarations are not
+/// legal against the floors, name an unknown kind, or overlap a declaration of
+/// an installed bundle (one of `dependency_bundle_roots`). The candidate's own
+/// earlier version, if installed, is replaced rather than conflicted with.
+fn refuse_invalid_sync_include(
+    candidate_root: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+    kind_directory: &dyn Fn(&str) -> Option<String>,
+) -> Result<()> {
+    let (candidate, decls) = crate::manifest::verified_sync_include(candidate_root, trust_store)
+        .context("preflight: read candidate sync_include")?;
+    if decls.is_empty() {
+        return Ok(());
+    }
+    let mut bundles = vec![(candidate.clone(), decls)];
+    for root in dependency_bundle_roots {
+        if !root
+            .join(ryeos_engine::AI_DIR)
+            .join("manifest.yaml")
+            .is_file()
+        {
+            continue;
+        }
+        let (name, decls) = crate::manifest::verified_sync_include(root, trust_store)
+            .with_context(|| {
+                format!(
+                    "preflight: read sync_include of installed bundle at {}",
+                    root.display()
+                )
+            })?;
+        if name != candidate {
+            bundles.push((name, decls));
+        }
+    }
+    ryeos_state::project_sync::SyncInclude::compose(&bundles, kind_directory)
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("preflight: {error:#}"))
+}
+
 fn validate_manifest_only_control_tree(ai_dir: &Path) -> Result<()> {
     const ALLOWED: &[&str] = &[
         "bin",
@@ -596,7 +711,7 @@ pub fn verify_manifest_signature(
     source_path: &Path,
     trust_store: &TrustStore,
 ) -> Result<()> {
-    verify_manifest_signature_inner(ai_dir, source_path, None, trust_store, true)
+    verify_manifest_signature_inner(ai_dir, source_path, None, trust_store)
 }
 
 fn verify_manifest_signature_for_bundle_name(
@@ -604,15 +719,8 @@ fn verify_manifest_signature_for_bundle_name(
     source_path: &Path,
     expected_bundle_name: &str,
     trust_store: &TrustStore,
-    check_source_mtime: bool,
 ) -> Result<()> {
-    verify_manifest_signature_inner(
-        ai_dir,
-        source_path,
-        Some(expected_bundle_name),
-        trust_store,
-        check_source_mtime,
-    )
+    verify_manifest_signature_inner(ai_dir, source_path, Some(expected_bundle_name), trust_store)
 }
 
 fn verify_manifest_signature_inner(
@@ -620,7 +728,6 @@ fn verify_manifest_signature_inner(
     source_path: &Path,
     expected_bundle_name: Option<&str>,
     trust_store: &TrustStore,
-    check_source_mtime: bool,
 ) -> Result<()> {
     let manifest_path = ai_dir.join("manifest.yaml");
     let manifest_meta = match fs::symlink_metadata(&manifest_path) {
@@ -657,10 +764,8 @@ fn verify_manifest_signature_inner(
 
     if !trust_store.is_trusted(&sig_header.signer_fingerprint) {
         bail!(
-            "manifest.yaml: signer {} not in node trust store \
-             (run `ryeos trust pin {}` to trust this publisher)",
+            "manifest.yaml: signer {} not in node trust store",
             sig_header.signer_fingerprint,
-            sig_header.signer_fingerprint
         );
     }
     let publisher_trust_path = source_path.join("PUBLISHER_TRUST.toml");
@@ -690,8 +795,14 @@ fn verify_manifest_signature_inner(
         }
     }
 
-    ryeos_engine::trust::verify_item_signature(&raw, &sig_header, &envelope, trust_store)
-        .map_err(|e| anyhow::anyhow!("manifest.yaml signature verification failed: {e}"))?;
+    ryeos_engine::trust::verify_item_signature(
+        &raw,
+        &sig_header,
+        &envelope,
+        trust_store,
+        &ryeos_engine::trust::SignerContext::bundle("bundle_manifest"),
+    )
+    .map_err(|e| anyhow::anyhow!("manifest.yaml signature verification failed: {e}"))?;
 
     let body = lillux::signature::strip_signature_lines(&raw);
     let manifest = parse_current_manifest_body(&body, &manifest_path)?;
@@ -746,14 +857,10 @@ fn verify_manifest_signature_inner(
         if !source_meta.file_type().is_file() {
             bail!("manifest.source.yaml must be a regular file, not a symlink or directory");
         }
-        // Copying into an install staging tree does not preserve source mtimes,
-        // so completed-staging verification relies on the exact materialized
-        // manifest comparison below instead of temporary copy order.
-        if check_source_mtime && source_meta.modified()? > manifest_meta.modified()? {
-            bail!(
-                "manifest.yaml is older than manifest.source.yaml — regenerate and re-sign manifest.yaml"
-            );
-        }
+        // Freshness is a content property: the signed manifest must equal
+        // the manifest materialized from manifest.source.yaml. File mtimes
+        // are never consulted (git checkout and copies make them arbitrary),
+        // so install preflight and `node doctor` cannot disagree.
         let source_raw = fs::read_to_string(&source_manifest_path)
             .with_context(|| format!("read manifest source {}", source_manifest_path.display()))?;
         let source_body = lillux::signature::strip_signature_lines(&source_raw);
@@ -764,7 +871,7 @@ fn verify_manifest_signature_inner(
                 .context("materialize manifest.source.yaml for staleness check")?;
         if manifest != expected_manifest {
             bail!(
-                "manifest.yaml is stale relative to manifest.source.yaml — regenerate and re-sign manifest.yaml with the publish pipeline"
+                "manifest.yaml is stale relative to manifest.source.yaml — regenerate and re-sign it with `ryeos bundle manifest-sign`"
             );
         }
     }
@@ -780,9 +887,8 @@ fn verify_manifest_signature_inner(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightNodeBundleRecord {
-    #[allow(dead_code)]
-    kind: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "kind")]
+    _kind: Option<String>,
     path: PathBuf,
 }
 
@@ -793,41 +899,40 @@ struct PreflightNodeRouteRecord {
     path: String,
     methods: std::collections::HashSet<String>,
     auth: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    auth_config: Option<serde_json::Value>,
-    #[allow(dead_code)]
+    #[serde(rename = "auth_config")]
+    _auth_config: Option<serde_json::Value>,
     #[serde(default)]
-    limits: PreflightRawLimits,
+    #[serde(rename = "limits")]
+    _limits: PreflightRawLimits,
     response: PreflightRawResponseSpec,
-    #[allow(dead_code)]
     #[serde(default)]
     execute: Option<PreflightRawExecute>,
-    #[allow(dead_code)]
     #[serde(default)]
-    request: PreflightRawRequest,
+    #[serde(rename = "request")]
+    _request: PreflightRawRequest,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightRawLimits {
-    #[allow(dead_code)]
     #[serde(default = "default_body_max")]
-    body_bytes_max: u64,
-    #[allow(dead_code)]
+    #[serde(rename = "body_bytes_max")]
+    _body_bytes_max: u64,
     #[serde(default = "default_timeout")]
-    timeout_ms: u64,
-    #[allow(dead_code)]
+    #[serde(rename = "timeout_ms")]
+    _timeout_ms: u64,
     #[serde(default = "default_concurrent_max")]
-    concurrent_max: u32,
+    #[serde(rename = "concurrent_max")]
+    _concurrent_max: u32,
 }
 
 impl Default for PreflightRawLimits {
     fn default() -> Self {
         Self {
-            body_bytes_max: default_body_max(),
-            timeout_ms: default_timeout(),
-            concurrent_max: default_concurrent_max(),
+            _body_bytes_max: default_body_max(),
+            _timeout_ms: default_timeout(),
+            _concurrent_max: default_concurrent_max(),
         }
     }
 }
@@ -848,38 +953,37 @@ fn default_concurrent_max() -> u32 {
 #[serde(deny_unknown_fields)]
 struct PreflightRawResponseSpec {
     mode: String,
-    #[allow(dead_code)]
     #[serde(default)]
     source: Option<String>,
-    #[allow(dead_code)]
     #[serde(default)]
-    source_config: serde_json::Value,
-    #[allow(dead_code)]
+    #[serde(rename = "source_config")]
+    _source_config: serde_json::Value,
     #[serde(default)]
-    status: Option<u16>,
-    #[allow(dead_code)]
+    #[serde(rename = "status")]
+    _status: Option<u16>,
     #[serde(default)]
-    content_type: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "content_type")]
+    _content_type: Option<String>,
     #[serde(default)]
-    body_b64: Option<String>,
+    #[serde(rename = "body_b64")]
+    _body_b64: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightRawExecute {
     item_ref: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    params: serde_json::Value,
+    #[serde(rename = "params")]
+    _params: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct PreflightRawRequest {
-    #[allow(dead_code)]
     #[serde(default)]
-    body: PreflightRawRequestBody,
+    #[serde(rename = "body")]
+    _body: PreflightRawRequestBody,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -890,6 +994,7 @@ enum PreflightRawRequestBody {
     Raw,
     Text,
     Json,
+    ObjectsPutV1,
 }
 
 #[derive(Debug, Deserialize)]
@@ -899,100 +1004,99 @@ struct PreflightCommandRecord {
     description: String,
     #[serde(default)]
     aliases: Vec<PreflightCommandAliasRecord>,
-    #[allow(dead_code)]
     #[serde(default)]
-    help: Option<PreflightCommandHelp>,
-    #[allow(dead_code)]
+    #[serde(rename = "help")]
+    _help: Option<PreflightCommandHelp>,
     #[serde(default)]
     arguments: Vec<PreflightCommandArgument>,
     #[serde(default)]
     forms: Vec<PreflightCommandForm>,
-    #[allow(dead_code)]
     #[serde(default)]
-    sensitive_fields: Vec<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "sensitive_fields")]
+    _sensitive_fields: Vec<String>,
     #[serde(default)]
-    defaults: std::collections::BTreeMap<String, serde_json::Value>,
-    #[allow(dead_code)]
+    #[serde(rename = "defaults")]
+    _defaults: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default)]
-    parameter_binding: Option<PreflightCommandParameterBinding>,
-    #[allow(dead_code)]
+    #[serde(rename = "parameter_binding")]
+    _parameter_binding: Option<PreflightCommandParameterBinding>,
     #[serde(default)]
     // Project selection has one closed wire owner. Do not copy its fields here:
     // a stale preflight mirror can reject descriptors accepted by the actual
     // runtime and prevent the install needed to activate that same contract.
-    project: Option<ryeos_runtime::CommandProjectPolicy>,
-    #[allow(dead_code)]
+    #[serde(rename = "project")]
+    _project: Option<ryeos_runtime::CommandProjectPolicy>,
     #[serde(default)]
-    control_flags: Vec<PreflightCommandControlFlag>,
+    #[serde(rename = "control_flags")]
+    _control_flags: Vec<PreflightCommandControlFlag>,
     dispatch: PreflightCommandDispatch,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandControlFlag {
-    #[allow(dead_code)]
-    flag: String,
-    #[allow(dead_code)]
-    help: String,
+    #[serde(rename = "flag")]
+    _flag: String,
+    #[serde(rename = "help")]
+    _help: String,
     // Routing destination — validated against the real `ControlFlagBinding`
     // enum by the command model at load; preflight only checks structure.
-    #[allow(dead_code)]
-    binding: String,
-    #[allow(dead_code)]
+    #[serde(rename = "binding")]
+    _binding: String,
     #[serde(default)]
-    ref_binding_name: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "ref_binding_name")]
+    _ref_binding_name: Option<String>,
     #[serde(default)]
-    aliases: Vec<String>,
+    #[serde(rename = "aliases")]
+    _aliases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandAliasRecord {
     tokens: Vec<String>,
-    #[allow(dead_code)]
     #[serde(default)]
-    description: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "description")]
+    _description: Option<String>,
     #[serde(default)]
-    deprecated: Option<bool>,
-    #[allow(dead_code)]
+    #[serde(rename = "deprecated")]
+    _deprecated: Option<bool>,
     #[serde(default)]
-    replacement_tokens: Option<Vec<String>>,
-    #[allow(dead_code)]
+    #[serde(rename = "replacement_tokens")]
+    _replacement_tokens: Option<Vec<String>>,
     #[serde(default)]
-    removed_in: Option<String>,
+    #[serde(rename = "removed_in")]
+    _removed_in: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandHelp {
-    #[allow(dead_code)]
     #[serde(default)]
-    usage: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "usage")]
+    _usage: Option<String>,
     #[serde(default)]
-    examples: Vec<String>,
+    #[serde(rename = "examples")]
+    _examples: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandArgument {
     name: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    kind: PreflightCommandArgumentKind,
+    #[serde(rename = "kind")]
+    _kind: PreflightCommandArgumentKind,
     positional: usize,
-    #[allow(dead_code)]
     #[serde(default)]
-    required: bool,
-    #[allow(dead_code)]
+    #[serde(rename = "required")]
+    _required: bool,
     #[serde(default)]
-    arity: PreflightCommandArgumentArity,
-    #[allow(dead_code)]
+    #[serde(rename = "arity")]
+    _arity: PreflightCommandArgumentArity,
     #[serde(default)]
-    description: Option<String>,
+    #[serde(rename = "description")]
+    _description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1006,9 +1110,9 @@ struct PreflightCommandForm {
 #[serde(deny_unknown_fields)]
 struct PreflightCommandSlot {
     field: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    matcher: PreflightCommandArgumentKind,
+    #[serde(rename = "matcher")]
+    _matcher: PreflightCommandArgumentKind,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1033,17 +1137,17 @@ enum PreflightCommandArgumentArity {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandParameterBinding {
-    #[allow(dead_code)]
-    mode: PreflightCommandParameterBindingMode,
-    #[allow(dead_code)]
+    #[serde(rename = "mode")]
+    _mode: PreflightCommandParameterBindingMode,
     #[serde(default)]
-    input_flag: Option<String>,
-    #[allow(dead_code)]
+    #[serde(rename = "input_flag")]
+    _input_flag: Option<String>,
     #[serde(default)]
-    single_json_object_arg: bool,
-    #[allow(dead_code)]
+    #[serde(rename = "single_json_object_arg")]
+    _single_json_object_arg: bool,
     #[serde(default)]
-    flag_key_normalization: PreflightFlagKeyNormalization,
+    #[serde(rename = "flag_key_normalization")]
+    _flag_key_normalization: PreflightFlagKeyNormalization,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1069,23 +1173,23 @@ enum PreflightCommandDispatch {
     Group,
     LocalHandler {
         handler: String,
-        #[allow(dead_code)]
         #[serde(default)]
-        bootstrap: bool,
+        #[serde(rename = "bootstrap")]
+        _bootstrap: bool,
     },
     DirectExecuteItemRef {
         item_ref_arg: String,
-        #[allow(dead_code)]
-        validate_only: bool,
-        #[allow(dead_code)]
+        #[serde(rename = "validate_only")]
+        _validate_only: bool,
         #[serde(default)]
-        availability: PreflightCommandAvailability,
+        #[serde(rename = "availability")]
+        _availability: PreflightCommandAvailability,
     },
     ExecuteRef {
         execute: String,
-        #[allow(dead_code)]
         #[serde(default)]
-        availability: PreflightCommandAvailability,
+        #[serde(rename = "availability")]
+        _availability: PreflightCommandAvailability,
     },
 }
 
@@ -1128,7 +1232,7 @@ fn collect_node_config_failures(ai_dir: &Path, trust_store: &TrustStore) -> Vec<
 
     let mut files = Vec::new();
     if let Err(e) = collect_node_config_files_recursive(&node_dir, &mut files) {
-        failures.push(format!("node: node config scan failed: {e}"));
+        failures.push(format!("node: node config scan failed: {e:#}"));
         return failures;
     }
 
@@ -1231,8 +1335,14 @@ fn validate_node_config_item(
             header.signer_fingerprint
         );
     }
-    ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)
-        .context("signature verification failed")?;
+    ryeos_engine::trust::verify_item_signature(
+        &content,
+        &header,
+        &envelope,
+        trust_store,
+        &ryeos_engine::trust::SignerContext::bundle("node_config"),
+    )
+    .context("signature verification failed")?;
 
     if !file_path.starts_with(section_root) {
         bail!("not under expected node config section directory");
@@ -1484,7 +1594,7 @@ mod tests {
                 serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             validate_node_command_record(&path, &root, &body).unwrap();
             let record: PreflightCommandRecord = serde_json::from_value(body.clone()).unwrap();
-            let policy = record.project.unwrap();
+            let policy = record._project.unwrap();
             assert_eq!(
                 policy.bind_no_project_parameter.as_deref(),
                 (name != "remote-doctor").then_some("no_project")
@@ -1517,7 +1627,31 @@ mod tests {
         let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
-        assert_eq!(record.control_flags.len(), 10, "expected 10 control flags");
+        let flags: Vec<&str> = record
+            ._control_flags
+            .iter()
+            .map(|f| f._flag.as_str())
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                "async",
+                "stream",
+                "no-stream",
+                "debug-raw",
+                "pin-project",
+                "current-head",
+                "project-snapshot",
+                "live-project",
+                "retain-child-results",
+                "no-operator-vault",
+                "method",
+                "args",
+                "state-root",
+                "ref-binding",
+                "product-selections",
+            ]
+        );
     }
 
     /// Command preflight must recognize the same sensitive-field metadata as
@@ -1541,7 +1675,7 @@ mod tests {
         let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
-        assert_eq!(record.sensitive_fields, ["value"]);
+        assert_eq!(record._sensitive_fields, ["value"]);
     }
 
     struct BundleLayout {
@@ -1549,7 +1683,7 @@ mod tests {
         source: PathBuf,
         ai_dir: PathBuf,
         signing_key: SigningKey,
-        node_config_root: PathBuf,
+        app_root: PathBuf,
     }
 
     impl BundleLayout {
@@ -1561,29 +1695,27 @@ mod tests {
             let signing_key = SigningKey::generate(&mut OsRng);
 
             let app_root = tmp.path().join("app");
-            let node_config_root = app_root.join(".ai/config");
-            let trust_dir = node_config_root.join("keys/trusted");
-            fs::create_dir_all(&trust_dir).unwrap();
+            fs::create_dir_all(&app_root).unwrap();
 
-            ryeos_engine::trust::pin_key(
+            ryeos_engine::test_support::pin_signer(
+                &app_root,
                 &signing_key.verifying_key(),
                 "test-publisher",
-                &trust_dir,
-                None,
-            )
-            .unwrap();
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::publisher_default(),
+            );
 
             Self {
                 _tmp: tmp,
                 source,
                 ai_dir,
                 signing_key,
-                node_config_root,
+                app_root,
             }
         }
 
         fn trust_store(&self) -> TrustStore {
-            TrustStore::load(None, &self.node_config_root).unwrap()
+            TrustStore::load_node_registry(&self.app_root).unwrap()
         }
 
         fn add_kind_schema(&self, kind_name: &str) {
@@ -1711,9 +1843,13 @@ output_schema:
             let bin_path = self.ai_dir.join(&bin_rel);
             fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
 
+            // Handlers answer inside the mandatory versioned envelope.
             let response = serde_json::json!({
-                "result": "parse_ok",
-                "value": value,
+                "schema_version": ryeos_handler_protocol::HANDLER_PROTOCOL_SCHEMA_VERSION,
+                "response": {
+                    "result": "parse_ok",
+                    "value": value,
+                },
             })
             .to_string();
             let script = format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{response}'\n");
@@ -1904,7 +2040,6 @@ description: "fixed parser handler for preflight tests"
             &layout.source,
             "test-bundle",
             &ts,
-            true,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -1945,7 +2080,7 @@ description: "fixed parser handler for preflight tests"
         let report = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("a signed manifest-only bundle needs no synthetic kind dependency");
@@ -1965,7 +2100,7 @@ description: "fixed parser handler for preflight tests"
         let error = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect_err("an undeclared item namespace must not be silently ignored");
@@ -2016,6 +2151,47 @@ description: "fixed parser handler for preflight tests"
             msg.contains("stale relative to manifest.source.yaml"),
             "should reject stale signed manifest: {msg}"
         );
+    }
+
+    #[test]
+    fn verify_manifest_stale_error_names_manifest_sign_cure() {
+        let layout = BundleLayout::new("test-bundle");
+        fs::write(
+            layout.ai_dir.join("manifest.source.yaml"),
+            "name: test-bundle\nversion: '2.0'\ndescription: changed\n",
+        )
+        .unwrap();
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\ndescription: old\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+        let ts = layout.trust_store();
+        let msg = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("ryeos bundle manifest-sign"), "{msg}");
+    }
+
+    #[test]
+    fn verify_manifest_ignores_source_mtime_newer_than_manifest() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\ndescription: same\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+        let source = layout.ai_dir.join("manifest.source.yaml");
+        fs::write(
+            &source,
+            "name: test-bundle\nversion: '1.0'\ndescription: same\n",
+        )
+        .unwrap();
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        let ts = layout.trust_store();
+        assert!(verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok());
     }
 
     #[test]
@@ -2343,7 +2519,7 @@ optional: {}
         let err = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .unwrap_err();
@@ -2376,7 +2552,7 @@ optional: {}
         let report = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("non-identity composer should skip pre-composition contract validation");
@@ -2404,7 +2580,7 @@ strict_fields: warn
         let report = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("warnings should not fail preflight");
@@ -2439,6 +2615,7 @@ strict_fields: warn
             },
             content: None,
             execution: None,
+            thread_profile: None,
             composed_value_contract: shape_from_yaml(contract_yaml),
             composer: IDENTITY_COMPOSER.to_string(),
             composer_config: serde_json::Value::Null,
@@ -2446,6 +2623,9 @@ strict_fields: warn
             inventory_kinds: vec![],
             inventory_schema_keys: vec![],
             inventory_policy: Default::default(),
+            launch_trust: None,
+            project_shadowing: Default::default(),
+            runtime_authoring: Default::default(),
         }
     }
 
@@ -2687,9 +2867,13 @@ strict_fields: warn
         .unwrap();
         let key = trust_document.decode_verifying_key().unwrap();
         let config = tempfile::tempdir().unwrap();
-        let trusted = config.path().join("keys/trusted");
-        std::fs::create_dir_all(&trusted).unwrap();
-        ryeos_engine::trust::pin_key(&key, "development-publisher", &trusted, None).unwrap();
+        ryeos_engine::test_support::pin_signer(
+            config.path(),
+            &key,
+            "development-publisher",
+            ryeos_engine::trust::SignerRole::Publisher,
+            ryeos_engine::trust::SignerScope::publisher_default(),
+        );
         let report = preflight_verify_bundle_report_in_context(
             &core,
             &[],

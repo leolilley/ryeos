@@ -33,13 +33,11 @@ mod integration_tests {
         }
     }
 
-    fn setup_state_store() -> (TempDir, Arc<StateStore>) {
+    fn setup_state_store() -> (TempDir, ryeos_app::test_support::TestStateStore) {
         let tmpdir = TempDir::new().unwrap();
-        let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
 
         let test_key_path = tmpdir.path().join("test_key.pem");
-        let identity = ryeos_app::identity::NodeIdentity::create(&test_key_path)
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&test_key_path)
             .expect("test identity creation should succeed");
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
@@ -52,17 +50,15 @@ mod integration_tests {
 
         let write_barrier = WriteBarrier::new();
 
-        let store = StateStore::new_with_head_trust(
-            tmpdir.path().to_path_buf(),
-            runtime_state_dir,
-            runtime_db_path,
+        let store = ryeos_app::test_support::TestStateStore::open_with_barrier(
+            tmpdir.path(),
             signer,
             write_barrier,
             Arc::new(head_trust),
         )
         .expect("StateStore creation should succeed");
 
-        (tmpdir, Arc::new(store))
+        (tmpdir, store)
     }
 
     fn make_thread(
@@ -258,12 +254,26 @@ mod integration_tests {
         store.set_follow_parent_successor("k4", "S").unwrap();
         store.mark_follow_waiting("k4").unwrap();
 
+        // A followed graph child's terminal envelope carries its complete
+        // GraphResult and null `outputs`; the authored return is `{ "x": 1 }`.
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
         let envelope = serde_json::json!({
             "success": true,
             "child_thread_id": "T-child",
             "status": "completed",
-            "result": { "x": 1 },
-            "outputs": {},
+            "result": {
+                "success": true,
+                "graph_id": "test/storage-fixture",
+                "definition_ref": sealed.item_ref(),
+                "effective_definition_digest": "d".repeat(64),
+                "graph_run_id": "g",
+                "status": "completed",
+                "steps": 1,
+                "state": {},
+                "result": { "x": 1 },
+            },
+            "outputs": null,
             "warnings": [],
             "cost": null,
         });
@@ -692,7 +702,9 @@ mod integration_tests {
                     target_start_time_ticks: 10,
                     group_leader_pid: 67890,
                     group_leader_start_time_ticks: 20,
+                    pid_namespace: lillux::current_pid_namespace().unwrap(),
                     resource_selections: Vec::new(),
+                    resource_settlement_authority: None,
                     resource_operations: Vec::new(),
                     resource_allocation_limit: None,
                     resource_occupancy_start: None,
@@ -1383,8 +1395,6 @@ mod integration_tests {
 
     #[test]
     fn prepared_machine_successor_cannot_drop_source_execution_policy() {
-        use ryeos_app::launch_metadata::RuntimeLaunchMetadata;
-
         let (_tmpdir, store) = setup_state_store();
         store
             .create_thread_for_test(&make_project_thread(
@@ -1401,8 +1411,15 @@ mod integration_tests {
             .unwrap()
             .unwrap();
         let resume_context = source_metadata.resume_context.clone().unwrap();
-        let incomplete_prepared =
-            RuntimeLaunchMetadata::default().with_resume_context(resume_context.clone());
+        // A complete machine successor seed except that it drops the source's
+        // native-resume policy.
+        let mut incomplete_prepared = source_metadata
+            .continuation_successor_seed(resume_context.clone())
+            .with_continuation_runtime_bootstrap(
+                ryeos_app::launch_metadata::ContinuationRuntimeBootstrap::PredecessorNativeCheckpoint,
+            );
+        assert!(incomplete_prepared.native_resume.is_some());
+        incomplete_prepared.native_resume = None;
 
         let error = store
             .create_machine_continuation_with_events(
@@ -2077,8 +2094,11 @@ mod integration_tests {
 
                 // Clear edges from projection
                 db.projection()
-                    .connection()
-                    .execute_batch("DELETE FROM thread_edges; DELETE FROM projection_meta;")
+                    .with_sql(|connection| {
+                        Ok(connection.execute_batch(
+                            "DELETE FROM thread_edges; DELETE FROM projection_meta;",
+                        )?)
+                    })
                     .expect("clear projection should succeed");
 
                 // Rebuild from CAS
@@ -2153,8 +2173,11 @@ mod integration_tests {
         store
             .with_state_db(|db| {
                 db.projection()
-                    .connection()
-                    .execute_batch("DELETE FROM thread_artifacts; DELETE FROM projection_meta;")
+                    .with_sql(|connection| {
+                        Ok(connection.execute_batch(
+                            "DELETE FROM thread_artifacts; DELETE FROM projection_meta;",
+                        )?)
+                    })
                     .expect("clear artifacts should succeed");
                 Ok::<_, anyhow::Error>(())
             })
@@ -2221,8 +2244,7 @@ mod integration_tests {
 
                 // Clear threads table to simulate drift
                 db.projection()
-                    .connection()
-                    .execute_batch("DELETE FROM threads")
+                    .with_sql(|connection| Ok(connection.execute_batch("DELETE FROM threads")?))
                     .expect("clear threads should succeed");
 
                 Ok::<_, anyhow::Error>(())
@@ -2326,14 +2348,15 @@ mod integration_tests {
         store
             .with_state_db(|db| {
                 db.projection()
-                    .connection()
-                    .execute_batch(
-                        "DELETE FROM thread_edges;
+                    .with_sql(|connection| {
+                        Ok(connection.execute_batch(
+                            "DELETE FROM thread_edges;
                  DELETE FROM thread_artifacts;
                  DELETE FROM threads;
                  DELETE FROM events;
                  DELETE FROM projection_meta;",
-                    )
+                        )?)
+                    })
                     .expect("clear projection");
 
                 let cas_root = db.cas_root().to_path_buf();
@@ -2422,7 +2445,9 @@ mod integration_tests {
                     target_start_time_ticks: 10,
                     group_leader_pid: 99999,
                     group_leader_start_time_ticks: 10,
+                    pid_namespace: lillux::current_pid_namespace().unwrap(),
                     resource_selections: Vec::new(),
+                    resource_settlement_authority: None,
                     resource_operations: Vec::new(),
                     resource_allocation_limit: None,
                     resource_occupancy_start: None,

@@ -1,0 +1,15 @@
+composer:{"session_id":"S-fixture","binding_attachment_id":"surface-attachment","binding_generation":1,"binding_digest":"surface-binding","owner":{"kind":"surface","presentation_id":"11111111-1111-4111-8111-111111111111","surface_instance_id":"22222222-2222-4222-8222-222222222222","view_set_id":1},"buffer":{"view_instance_key":"seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2","binding_scope":"7955087a76c020b9ce8b7ef1f205aa479032eb09179fa21b6fe538bf1e419fdd","view_ref":"view:ryeos/threads/history","input_id":"filter"}} 40.00 115.50 857.59 15.00
+item:RyeOsViewInstanceKey("seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2"):view:ryeos/threads/history#thread_id:T-5d21 24.00 233.00 917.59 28.00
+item:RyeOsViewInstanceKey("seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2"):view:ryeos/threads/history#thread_id:T-61c0 24.00 204.00 917.59 28.00
+item:RyeOsViewInstanceKey("seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2"):view:ryeos/threads/history#thread_id:T-7f3a 24.00 175.00 917.59 28.00
+lane:RyeOsViewInstanceKey("seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:3") 985.59 962.00 574.41 24.00
+menu:RyeOsViewInstanceKey("seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2"):open 907.59 62.00 24.00 24.00
+menu:RyeOsViewInstanceKey("seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:3"):open 1542.00 62.00 24.00 24.00
+shell:health 1580.00 980.00 6.00 6.00
+split: 16.00 52.00 1568.00 934.00
+split::divider 949.59 52.00 12.00 934.00
+table:RyeOsViewInstanceKey("seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2") 16.00 146.00 933.59 123.00
+tile:2 16.00 52.00 933.59 934.00
+tile:3 961.59 52.00 622.41 934.00
+timeline:RyeOsViewInstanceKey("seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:3") 961.59 110.00 622.41 52.38
+view-set:ViewSetId(1) 742.84 6.00 94.31 44.00

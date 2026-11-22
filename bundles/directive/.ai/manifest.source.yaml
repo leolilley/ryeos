@@ -1,0 +1,12 @@
+name: directive
+version: "0.5.0"
+description: "Directive kind, directive runtime, model providers, and model routing"
+requires_kinds:
+  - config
+  - handler
+  - parser
+  - runtime
+  - service
+  - worker
+uses_kinds:
+  - knowledge

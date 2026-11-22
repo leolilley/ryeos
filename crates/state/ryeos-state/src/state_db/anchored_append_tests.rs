@@ -1,0 +1,1331 @@
+//! Bounded thread-event reads and anchored conditional appends: exact fixed
+//! anchors, stale-frontier refusal before any write, two-chain and mixed live /
+//! retired cuts, and the append closure of the evidence-obligation publisher.
+
+use std::collections::BTreeSet;
+
+use super::*;
+use crate::objects::ThreadStatus;
+use crate::objects::thread_event::NewEvent;
+use crate::objects::thread_snapshot::{
+    CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+    CapturedThreadHistoryPolicy, ThreadHistoryRetention, ThreadSnapshotBuilder,
+};
+use crate::signer::TestSigner;
+use crate::test_support::TestState;
+
+const KIND: &str = "directive";
+
+struct NoRecovery;
+
+impl RuntimeLivenessInspector for NoRecovery {
+    fn chain_has_live_recovery_state(&self, _: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+}
+
+fn open() -> (tempfile::TempDir, TestState) {
+    let dir = tempfile::tempdir().unwrap();
+    let signer = TestSigner::default();
+    let mut trust = TrustStore::new();
+    trust.insert(signer.fingerprint().to_string(), signer.verifying_key());
+    let db = TestState::open(dir.path(), Arc::new(trust)).unwrap();
+    (dir, db)
+}
+
+fn created_snapshot(id: &str, kind: &str) -> ThreadSnapshot {
+    let item_ref = "directive:system/test";
+    ThreadSnapshotBuilder::new(id, id, kind, item_ref, "directive-runtime")
+        .captured_history_policy(Some(CapturedThreadHistoryPolicy {
+            retention: ThreadHistoryRetention::Durable,
+            canonical_item_ref: item_ref.to_string(),
+            item_content_hash: "11".repeat(32),
+            item_signer_fingerprint: Some("22".repeat(32)),
+            item_trust_class: CapturedItemTrustClass::Trusted,
+            kind_schema_content_hash: "33".repeat(32),
+            resolved_from: CapturedPolicyProvenance::NodeDefault {
+                node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
+            },
+        }))
+        .build()
+}
+
+/// Rows every created chain holds: the start event that makes it running.
+const START_ROWS: i64 = 1;
+
+fn create(db: &StateDb, id: &str, kind: &str) {
+    let signer = TestSigner::default();
+    let created = created_snapshot(id, kind);
+    db.create_chain(id, created.clone(), &signer).unwrap();
+    let mut running = created;
+    running.status = ThreadStatus::Running;
+    running.started_at = Some(lillux::time::iso8601_now());
+    db.append_events(
+        id,
+        id,
+        vec![event(id, "start")],
+        vec![SnapshotUpdate {
+            thread_id: id.into(),
+            new_snapshot: running,
+        }],
+        &signer,
+    )
+    .unwrap();
+}
+
+fn event(id: &str, label: &str) -> ThreadEvent {
+    NewEvent::new(id, id, "test_event")
+        .payload(serde_json::json!({ "label": label }))
+        .build()
+}
+
+fn append(db: &StateDb, id: &str, count: usize) {
+    let events = (0..count).map(|n| event(id, &format!("e{n}"))).collect();
+    db.append_events(id, id, events, vec![], &TestSigner::default())
+        .unwrap();
+}
+
+fn event_rows(db: &StateDb, id: &str) -> i64 {
+    db.projection()
+        .with_sql(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM events WHERE thread_id = ?1",
+                [id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+fn guard(db: &StateDb) -> crate::recovery::CasMutationGuard {
+    db.pinned_authority()
+        .unwrap()
+        .acquire_shared_guard()
+        .unwrap()
+}
+
+fn capture(db: &StateDb, id: &str) -> AuthoritativeThreadEventReadAnchor {
+    db.capture_thread_event_read_anchor(id, id, &guard(db))
+        .unwrap()
+        .expect("thread present")
+}
+
+fn anchored<'a>(
+    id: &'a str,
+    events: Vec<ThreadEvent>,
+    signer: &'a TestSigner,
+    expected: &'a AuthoritativeThreadEventReadAnchor,
+) -> AnchoredThreadAppend<'a> {
+    AnchoredThreadAppend {
+        chain_root_id: id,
+        thread_id: id,
+        events,
+        snapshot_updates: vec![],
+        signer,
+        runtime_liveness: &NoRecovery,
+        expected,
+    }
+}
+
+fn two_anchor<'a>(
+    id: &'a str,
+    signer: &'a TestSigner,
+    expected: &'a AuthoritativeThreadEventReadAnchor,
+    counterpart: &'a AuthoritativeThreadEventReadAnchor,
+    kind: &'a str,
+) -> TwoAnchorThreadAppend<'a> {
+    TwoAnchorThreadAppend {
+        chain_root_id: id,
+        thread_id: id,
+        events: vec![event(id, "two-anchor")],
+        signer,
+        runtime_liveness: &NoRecovery,
+        expected,
+        counterpart,
+        required_target_kind: kind,
+    }
+}
+
+fn committed(result: ConditionalThreadEventAppendResult) -> bool {
+    matches!(result, ConditionalThreadEventAppendResult::Committed(_))
+}
+
+fn labels(page: &AuthoritativeThreadEventReadPage) -> Vec<String> {
+    page.events
+        .iter()
+        .map(|(_, event)| event.payload["label"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn event_pages_walk_one_fixed_anchor_newest_first_and_ignore_later_appends() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    append(&db, "T-a", 5);
+    let anchor = capture(&db, "T-a");
+    assert_eq!(anchor.chain_root_id(), "T-a");
+    assert_eq!(anchor.thread_id(), "T-a");
+    assert_eq!(anchor.tip().map(|(_, seq)| seq), Some(6));
+    // Events after the capture cannot enter the fixed prefix.
+    append(&db, "T-a", 2);
+    let guard = guard(&db);
+    let mut seen = Vec::new();
+    let mut progress = None;
+    let mut pages = 0;
+    loop {
+        let page = db
+            .read_thread_event_page(&anchor, progress.as_ref(), 2, 1 << 20, &guard)
+            .unwrap();
+        pages += 1;
+        seen.extend(labels(&page));
+        progress = page.progress;
+        if progress.is_none() {
+            break;
+        }
+    }
+    assert_eq!(pages, 3);
+    assert_eq!(seen, ["e4", "e3", "e2", "e1", "e0", "start"]);
+}
+
+#[test]
+fn event_pages_refuse_zero_bounds_oversized_objects_and_foreign_progress() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    create(&db, "T-b", KIND);
+    append(&db, "T-a", 3);
+    append(&db, "T-b", 3);
+    let guard = guard(&db);
+    let anchor_a = capture(&db, "T-a");
+    let anchor_b = capture(&db, "T-b");
+    assert!(
+        db.read_thread_event_page(&anchor_a, None, 0, 1 << 20, &guard)
+            .is_err()
+    );
+    assert!(
+        db.read_thread_event_page(&anchor_a, None, 1, 0, &guard)
+            .is_err()
+    );
+    // A one-byte budget cannot admit even the first event; no partial page.
+    assert!(
+        db.read_thread_event_page(&anchor_a, None, 3, 1, &guard)
+            .is_err()
+    );
+    let page = db
+        .read_thread_event_page(&anchor_a, None, 1, 1 << 20, &guard)
+        .unwrap();
+    let progress = page.progress.expect("older events remain");
+    assert!(
+        db.read_thread_event_page(&anchor_b, Some(&progress), 1, 1 << 20, &guard)
+            .is_err()
+    );
+    // Progress from an earlier cut of the same thread is not valid for a later one.
+    append(&db, "T-a", 1);
+    let later = capture(&db, "T-a");
+    assert!(
+        db.read_thread_event_page(&later, Some(&progress), 1, 1 << 20, &guard)
+            .is_err()
+    );
+}
+
+#[test]
+fn capture_of_an_absent_thread_or_chain_is_none() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    let guard = guard(&db);
+    assert!(
+        db.capture_thread_event_read_anchor("T-a", "T-missing", &guard)
+            .unwrap()
+            .is_none()
+    );
+    let first = capture(&db, "T-a");
+    assert_eq!(first.tip().map(|(_, seq)| seq), Some(1));
+    assert_eq!(
+        db.read_thread_event_page(&first, None, 4, 1 << 20, &guard)
+            .unwrap()
+            .events
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn conditional_append_publishes_only_from_the_exact_frontier() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    append(&db, "T-a", 1);
+    let stale = capture(&db, "T-a");
+    append(&db, "T-a", 1);
+    let before = event_rows(&db, "T-a");
+    let refused = db
+        .append_events_admitted_if_anchor(
+            anchored("T-a", vec![event("T-a", "late")], &signer, &stale),
+            &guard(&db),
+        )
+        .unwrap();
+    assert!(matches!(
+        refused,
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-a"), before);
+
+    let fresh = capture(&db, "T-a");
+    assert!(committed(
+        db.append_events_admitted_if_anchor(
+            anchored("T-a", vec![event("T-a", "ok")], &signer, &fresh),
+            &guard(&db),
+        )
+        .unwrap()
+    ));
+    assert_eq!(event_rows(&db, "T-a"), before + 1);
+    // The consumed anchor cannot publish a second time.
+    assert!(matches!(
+        db.append_events_admitted_if_anchor(
+            anchored("T-a", vec![event("T-a", "replay")], &signer, &fresh),
+            &guard(&db),
+        )
+        .unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+}
+
+#[test]
+fn conditional_append_refuses_an_anchor_for_another_thread_and_ephemeral_events() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    create(&db, "T-b", KIND);
+    let other = capture(&db, "T-b");
+    assert!(
+        db.append_events_admitted_if_anchor(
+            anchored("T-a", vec![event("T-a", "x")], &signer, &other),
+            &guard(&db),
+        )
+        .is_err()
+    );
+    let own = capture(&db, "T-a");
+    let ephemeral = NewEvent::new("T-a", "T-a", "test_event")
+        .durability(crate::objects::EventDurability::Ephemeral)
+        .build();
+    assert!(
+        db.append_events_admitted_if_anchor(
+            anchored("T-a", vec![ephemeral], &signer, &own),
+            &guard(&db),
+        )
+        .is_err()
+    );
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS);
+}
+
+#[test]
+fn two_anchor_append_requires_both_frontiers_kind_and_admission() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    create(&db, "T-b", KIND);
+    append(&db, "T-a", 1);
+    append(&db, "T-b", 1);
+    let target = capture(&db, "T-a");
+    let counterpart = capture(&db, "T-b");
+
+    // Wrong required kind: refused without a write.
+    assert!(matches!(
+        db.append_running_events_admitted_if_two_anchors(
+            two_anchor("T-a", &signer, &target, &counterpart, "other_kind"),
+            &guard(&db),
+        )
+        .unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    // Admission sees both signed snapshots and memberships, and may refuse.
+    let mut seen = None;
+    assert!(matches!(
+        db.append_running_events_admitted_if_two_anchors_with_admission(
+            two_anchor("T-a", &signer, &target, &counterpart, KIND),
+            &guard(&db),
+            |view| {
+                seen = Some((
+                    view.target.thread_id.clone(),
+                    view.counterpart.thread_id.clone(),
+                    view.target_thread_ids.to_vec(),
+                    view.counterpart_thread_ids.to_vec(),
+                ));
+                Ok(false)
+            },
+        )
+        .unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(
+        seen,
+        Some((
+            "T-a".into(),
+            "T-b".into(),
+            vec!["T-a".to_owned()],
+            vec!["T-b".to_owned()]
+        ))
+    );
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 1);
+    // An admission error publishes nothing.
+    assert!(
+        db.append_running_events_admitted_if_two_anchors_with_admission(
+            two_anchor("T-a", &signer, &target, &counterpart, KIND),
+            &guard(&db),
+            |_| anyhow::bail!("domain refusal"),
+        )
+        .is_err()
+    );
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 1);
+
+    // A moved counterpart refuses before the target is written.
+    append(&db, "T-b", 1);
+    assert!(matches!(
+        db.append_running_events_admitted_if_two_anchors(
+            two_anchor("T-a", &signer, &target, &counterpart, KIND),
+            &guard(&db),
+        )
+        .unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 1);
+
+    let counterpart = capture(&db, "T-b");
+    assert!(committed(
+        db.append_running_events_admitted_if_two_anchors(
+            two_anchor("T-a", &signer, &target, &counterpart, KIND),
+            &guard(&db),
+        )
+        .unwrap()
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 2);
+    assert_eq!(
+        event_rows(&db, "T-b"),
+        START_ROWS + 2,
+        "the counterpart is never written"
+    );
+    assert_eq!(
+        capture(&db, "T-b"),
+        counterpart,
+        "the counterpart frontier is untouched"
+    );
+    // Same chain on both sides is a refused shape, not a conflict.
+    let target = capture(&db, "T-a");
+    assert!(
+        db.append_running_events_admitted_if_two_anchors(
+            two_anchor("T-a", &signer, &target, &target, KIND),
+            &guard(&db),
+        )
+        .is_err()
+    );
+}
+
+fn fence(db: &StateDb, id: &str, manifest: &str) {
+    drop(db.acquire_chain_lock(id).unwrap());
+    let lock = db.acquire_existing_chain_lock(id).unwrap();
+    db.recovery
+        .publish_retired_chain_fence(&guard(db), &lock, id, manifest)
+        .unwrap();
+}
+
+#[test]
+fn mixed_cut_excludes_live_and_retired_dependencies() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    create(&db, "T-b", KIND);
+    create(&db, "T-c", KIND);
+    let manifest = "ab".repeat(32);
+    fence(&db, "T-retired", &manifest);
+    let retired = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    let target = capture(&db, "T-a");
+    let counterpart = capture(&db, "T-b");
+    let extra = capture(&db, "T-c");
+    let run = |current: &[AuthoritativeThreadEventReadAnchor],
+               retired: &[RetiredChainDependency]| {
+        db.append_running_events_admitted_if_mixed_cut_with_admission(
+            two_anchor("T-a", &signer, &target, &counterpart, KIND),
+            MixedCutDependencies {
+                current_anchors: current,
+                retired,
+                obligations: &[],
+            },
+            &guard(&db),
+            |_| Ok(true),
+        )
+    };
+
+    // A retired dependency naming a different closure than its fence refuses.
+    let wrong = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: "cd".repeat(32),
+    }];
+    assert!(run(&[], &wrong).is_err());
+    // An unfenced identity, and a chain that still has a head, are conflicts.
+    drop(db.acquire_chain_lock("T-ghost").unwrap());
+    let ghost = [RetiredChainDependency {
+        chain_root_id: "T-ghost".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&[], &ghost).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    let live_as_retired = [RetiredChainDependency {
+        chain_root_id: "T-c".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&[], &live_as_retired).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    // Mixing the same chain as live and retired is refused outright.
+    let mixed = [RetiredChainDependency {
+        chain_root_id: "T-c".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(run(std::slice::from_ref(&extra), &mixed).is_err());
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS);
+
+    // A released closure can no longer prove the retired cut.
+    fence(&db, "T-released", &manifest);
+    let released_lock = db.acquire_existing_chain_lock("T-released").unwrap();
+    db.recovery
+        .publish_retired_chain_release(&guard(&db), &released_lock, "T-released", &BTreeSet::new())
+        .unwrap();
+    drop(released_lock);
+    let released = [RetiredChainDependency {
+        chain_root_id: "T-released".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&[], &released).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    // A moved extra live dependency refuses before any write.
+    append(&db, "T-c", 1);
+    assert!(matches!(
+        run(std::slice::from_ref(&extra), &retired).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS);
+
+    let extra = capture(&db, "T-c");
+    assert!(committed(
+        run(std::slice::from_ref(&extra), &retired).unwrap()
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 1);
+}
+
+fn obligation_fixture() -> (tempfile::TempDir, TestState) {
+    let (dir, db) = open();
+    create(&db, "T-owner", KIND);
+    create(&db, "T-holder", KIND);
+    append(&db, "T-holder", 1);
+    (dir, db)
+}
+
+fn holders(db: &StateDb, owner_lock: &crate::chain::ChainLock) -> BTreeSet<String> {
+    db.recovery
+        .evidence_obligation_holders(owner_lock, "T-owner")
+        .unwrap()
+}
+
+#[test]
+fn obligation_is_durable_before_the_anchored_append_the_publisher_runs() {
+    let (_dir, db) = obligation_fixture();
+    let signer = TestSigner::default();
+    let anchor = capture(&db, "T-holder");
+    let guard = guard(&db);
+    // Root-id order: holder before owner.
+    let holder_lock = db.acquire_existing_chain_lock("T-holder").unwrap();
+    let owner_lock = db.acquire_existing_chain_lock("T-owner").unwrap();
+    let before = event_rows(&db, "T-holder");
+    let committed_inside = db
+        .recovery
+        .publish_evidence_obligation_then(
+            &guard,
+            &owner_lock,
+            &holder_lock,
+            "T-owner",
+            "T-holder",
+            || {
+                assert_eq!(
+                    holders(&db, &owner_lock),
+                    BTreeSet::from(["T-holder".to_owned()]),
+                    "the obligation is visible before the evidence"
+                );
+                assert_eq!(event_rows(&db, "T-holder"), before);
+                db.append_events_admitted_if_anchor_under_lock(
+                    anchored(
+                        "T-holder",
+                        vec![event("T-holder", "evidence")],
+                        &signer,
+                        &anchor,
+                    ),
+                    &holder_lock,
+                    &guard,
+                )
+            },
+        )
+        .unwrap();
+    assert!(committed(committed_inside));
+    assert_eq!(event_rows(&db, "T-holder"), before + 1);
+    assert_eq!(holders(&db, &owner_lock).len(), 1);
+}
+
+#[test]
+fn stale_anchor_inside_the_publisher_refuses_without_the_append() {
+    let (_dir, db) = obligation_fixture();
+    let signer = TestSigner::default();
+    let stale = capture(&db, "T-holder");
+    append(&db, "T-holder", 1);
+    let guard = guard(&db);
+    let holder_lock = db.acquire_existing_chain_lock("T-holder").unwrap();
+    let owner_lock = db.acquire_existing_chain_lock("T-owner").unwrap();
+    let before = event_rows(&db, "T-holder");
+    let result = db
+        .recovery
+        .publish_evidence_obligation_then(
+            &guard,
+            &owner_lock,
+            &holder_lock,
+            "T-owner",
+            "T-holder",
+            || {
+                db.append_events_admitted_if_anchor_under_lock(
+                    anchored(
+                        "T-holder",
+                        vec![event("T-holder", "stale")],
+                        &signer,
+                        &stale,
+                    ),
+                    &holder_lock,
+                    &guard,
+                )
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-holder"), before, "no event was appended");
+    // The obligation was recorded first and stays: it only over-retains.
+    assert_eq!(
+        holders(&db, &owner_lock),
+        BTreeSet::from(["T-holder".to_owned()])
+    );
+}
+
+#[test]
+fn stale_anchor_refuses_before_a_pending_retirement_is_touched() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    let stale = capture(&db, "T-a");
+    append(&db, "T-a", 1);
+    let prepared = {
+        let lock = db.acquire_existing_chain_lock("T-a").unwrap();
+        let head = lock
+            .read_verified_head(db.trust_store.as_ref())
+            .unwrap()
+            .unwrap();
+        db.recovery
+            .prepare_remove(&lock, "T-a", &head.target_hash)
+            .unwrap()
+    };
+    assert!(matches!(
+        db.append_events_admitted_if_anchor(
+            anchored("T-a", vec![event("T-a", "late")], &signer, &stale),
+            &guard(&db),
+        )
+        .unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    let still = db
+        .recovery
+        .read_pending("T-a")
+        .unwrap()
+        .expect("pending survives");
+    assert_eq!(still.transition_id, prepared.transition_id);
+    assert_eq!(still.phase, prepared.phase);
+}
+
+#[test]
+fn pending_transition_on_a_live_dependency_is_a_conflict_at_its_exact_frontier() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    for id in ["T-a", "T-b", "T-c"] {
+        create(&db, id, KIND);
+    }
+    let target = capture(&db, "T-a");
+    let counterpart = capture(&db, "T-b");
+    let extra = capture(&db, "T-c");
+    {
+        let lock = db.acquire_existing_chain_lock("T-c").unwrap();
+        let head = lock
+            .read_verified_head(db.trust_store.as_ref())
+            .unwrap()
+            .unwrap();
+        db.recovery
+            .prepare_remove(&lock, "T-c", &head.target_hash)
+            .unwrap();
+    }
+    assert!(matches!(
+        db.append_running_events_admitted_if_mixed_cut_with_admission(
+            two_anchor("T-a", &signer, &target, &counterpart, KIND),
+            MixedCutDependencies {
+                current_anchors: std::slice::from_ref(&extra),
+                retired: &[],
+                obligations: &[],
+            },
+            &guard(&db),
+            |_| Ok(true),
+        )
+        .unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS);
+}
+
+#[test]
+fn read_anchors_run_the_callback_only_at_the_exact_frontier() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    create(&db, "T-b", KIND);
+    let a = capture(&db, "T-a");
+    let b = capture(&db, "T-b");
+    let both = [a.clone(), b.clone(), a.clone()];
+
+    let mut ran = false;
+    let result = db
+        .with_thread_event_read_anchors(&guard(&db), &both, || {
+            ran = true;
+            Ok(7)
+        })
+        .unwrap();
+    assert_eq!(result, Some(7));
+    assert!(ran);
+
+    append(&db, "T-b", 1);
+    let mut ran = false;
+    let stale = db
+        .with_thread_event_read_anchors(&guard(&db), &both, || {
+            ran = true;
+            Ok(())
+        })
+        .unwrap();
+    assert!(stale.is_none() && !ran);
+
+    assert!(
+        db.with_thread_event_read_anchors(&guard(&db), &[], || Ok(()))
+            .is_err()
+    );
+}
+
+#[test]
+fn read_anchors_refuse_contradictory_cuts_and_unknown_chains() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    let before = capture(&db, "T-a");
+    append(&db, "T-a", 1);
+    let after = capture(&db, "T-a");
+    assert!(
+        db.with_thread_event_read_anchors(&guard(&db), &[before, after.clone()], || Ok(()))
+            .is_err()
+    );
+
+    let mut foreign = after;
+    foreign.chain_root_id = "T-nowhere".into();
+    foreign.thread_id = "T-nowhere".into();
+    assert!(
+        db.with_thread_event_read_anchors(&guard(&db), &[foreign], || Ok(()))
+            .is_err()
+    );
+    assert!(!db.refs_root().join("T-nowhere").exists());
+}
+
+#[test]
+fn mixed_read_cut_requires_live_frontiers_and_the_exact_retired_fence() {
+    let (_dir, db) = open();
+    create(&db, "T-live", KIND);
+    create(&db, "T-other", KIND);
+    let manifest = "ab".repeat(32);
+    fence(&db, "T-retired", &manifest);
+    let retired = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    let live = capture(&db, "T-live");
+    let other = capture(&db, "T-other");
+    let run = |current: &[AuthoritativeThreadEventReadAnchor],
+               retired: &[RetiredChainDependency]| {
+        db.with_thread_event_read_mixed_cut(&guard(&db), current, retired, || Ok("ran"))
+    };
+
+    assert_eq!(
+        run(std::slice::from_ref(&live), &retired).unwrap(),
+        Some("ran")
+    );
+    assert_eq!(run(&[], &retired).unwrap(), Some("ran"));
+
+    // A fence naming another closure is an error, not a stale cut.
+    let wrong = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: "cd".repeat(32),
+    }];
+    assert!(run(&[], &wrong).is_err());
+    // An empty retired cut belongs to the live-only guard.
+    assert!(run(std::slice::from_ref(&live), &[]).is_err());
+    // A chain cannot be both live and retired.
+    let live_as_retired = [RetiredChainDependency {
+        chain_root_id: "T-other".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(run(std::slice::from_ref(&other), &live_as_retired).is_err());
+    // Conflicting duplicate retired cuts refuse.
+    let conflicting = [
+        retired[0].clone(),
+        RetiredChainDependency {
+            chain_root_id: "T-retired".into(),
+            manifest_hash: "cd".repeat(32),
+        },
+    ];
+    assert!(run(&[], &conflicting).is_err());
+
+    // A chain that still has a head, and an unfenced identity, are stale.
+    assert!(run(&[], &live_as_retired).unwrap().is_none());
+    drop(db.acquire_chain_lock("T-ghost").unwrap());
+    let ghost = [RetiredChainDependency {
+        chain_root_id: "T-ghost".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(run(&[], &ghost).unwrap().is_none());
+    // A chain never established at all is refused, not created.
+    let nowhere = [RetiredChainDependency {
+        chain_root_id: "T-nowhere".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(run(&[], &nowhere).is_err());
+    assert!(!db.refs_root().join("T-nowhere").exists());
+
+    // A released closure no longer proves the retired cut.
+    fence(&db, "T-released", &manifest);
+    let released_lock = db.acquire_existing_chain_lock("T-released").unwrap();
+    db.recovery
+        .publish_retired_chain_release(&guard(&db), &released_lock, "T-released", &BTreeSet::new())
+        .unwrap();
+    drop(released_lock);
+    let released = [RetiredChainDependency {
+        chain_root_id: "T-released".into(),
+        manifest_hash: manifest,
+    }];
+    assert!(run(&[], &released).unwrap().is_none());
+
+    // A moved live frontier is stale even when the retired cut holds.
+    append(&db, "T-live", 1);
+    assert!(
+        run(std::slice::from_ref(&live), &retired)
+            .unwrap()
+            .is_none()
+    );
+    let live = capture(&db, "T-live");
+    assert_eq!(run(&[live], &retired).unwrap(), Some("ran"));
+}
+
+#[test]
+fn retained_thread_event_is_read_by_exact_canonical_hash() {
+    let (_dir, db) = open();
+    create(&db, "T-a", KIND);
+    append(&db, "T-a", 2);
+    let anchor = capture(&db, "T-a");
+    let page = db
+        .read_thread_event_page(&anchor, None, 1, 1 << 20, &guard(&db))
+        .unwrap();
+    let (hash, event) = page.events.into_iter().next().unwrap();
+
+    let read = db
+        .retained_thread_event_by_hash(&hash, &guard(&db))
+        .unwrap()
+        .expect("retained event");
+    assert_eq!(read.payload, event.payload);
+    assert_eq!(read.thread_seq, event.thread_seq);
+
+    assert!(
+        db.retained_thread_event_by_hash(&"f".repeat(64), &guard(&db))
+            .unwrap()
+            .is_none()
+    );
+    for malformed in [hash.to_uppercase(), "short".to_owned(), String::new()] {
+        assert!(
+            db.retained_thread_event_by_hash(&malformed, &guard(&db))
+                .is_err()
+        );
+    }
+    // A retained object that is not a thread event never decodes as one.
+    assert!(
+        db.retained_thread_event_by_hash(&anchor.snapshot_hash, &guard(&db))
+            .is_err()
+    );
+}
+
+#[test]
+fn single_anchor_mixed_cut_commits_once_under_the_fence() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    create(&db, "T-c", KIND);
+    let manifest = "ab".repeat(32);
+    fence(&db, "T-retired", &manifest);
+    let retired = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    let target = capture(&db, "T-a");
+    let run = |expected: &AuthoritativeThreadEventReadAnchor,
+               current: &[AuthoritativeThreadEventReadAnchor],
+               retired: &[RetiredChainDependency]| {
+        db.append_running_events_admitted_if_single_anchor_mixed_cut_with_admission(
+            SingleAnchorThreadAppend {
+                chain_root_id: "T-a",
+                thread_id: "T-a",
+                events: vec![event("T-a", "single")],
+                signer: &signer,
+                runtime_liveness: &NoRecovery,
+                expected,
+                required_target_kind: KIND,
+            },
+            MixedCutDependencies {
+                current_anchors: current,
+                retired,
+                obligations: &[],
+            },
+            &guard(&db),
+            |view| {
+                assert_eq!(view.target.thread_id, "T-a");
+                Ok(true)
+            },
+        )
+    };
+
+    // A fence naming another closure refuses; nothing is written.
+    let wrong = [RetiredChainDependency {
+        chain_root_id: "T-retired".into(),
+        manifest_hash: "cd".repeat(32),
+    }];
+    assert!(run(&target, &[], &wrong).is_err());
+    // A chain that still has a head is not retired; an unfenced one neither.
+    let headed = [RetiredChainDependency {
+        chain_root_id: "T-c".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&target, &[], &headed).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    drop(db.acquire_chain_lock("T-ghost").unwrap());
+    let ghost = [RetiredChainDependency {
+        chain_root_id: "T-ghost".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&target, &[], &ghost).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    // A released fence can no longer prove the cut.
+    fence(&db, "T-released", &manifest);
+    let released_lock = db.acquire_existing_chain_lock("T-released").unwrap();
+    db.recovery
+        .publish_retired_chain_release(&guard(&db), &released_lock, "T-released", &BTreeSet::new())
+        .unwrap();
+    drop(released_lock);
+    let released = [RetiredChainDependency {
+        chain_root_id: "T-released".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    assert!(matches!(
+        run(&target, &[], &released).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS);
+
+    // The same chain named live and retired is refused outright.
+    let extra = capture(&db, "T-c");
+    assert!(run(&target, std::slice::from_ref(&extra), &headed).is_err());
+
+    // Under the fence the append commits exactly once.
+    assert!(committed(run(&target, &[], &retired).unwrap()));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 1);
+    // The target moved, so the same cut is stale.
+    assert!(matches!(
+        run(&target, &[], &retired).unwrap(),
+        ConditionalThreadEventAppendResult::Conflict
+    ));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 1);
+    // Zero retired dependencies is a plain exact-frontier append.
+    let target = capture(&db, "T-a");
+    assert!(committed(run(&target, &[], &[]).unwrap()));
+    assert_eq!(event_rows(&db, "T-a"), START_ROWS + 2);
+}
+
+fn pair<'a>(
+    first: &'a AuthoritativeThreadEventReadAnchor,
+    second: &'a AuthoritativeThreadEventReadAnchor,
+    signer: &'a TestSigner,
+    first_kind: &'a str,
+    second_kind: &'a str,
+) -> OrderedPairThreadAppend<'a> {
+    OrderedPairThreadAppend {
+        first,
+        second,
+        first_events: vec![event(&first.chain_root_id, "first")],
+        signer,
+        runtime_liveness: &NoRecovery,
+        required_first_kind: first_kind,
+        required_second_kind: second_kind,
+    }
+}
+
+#[test]
+fn ordered_pair_publishes_the_second_event_from_the_first_commit() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let built_from = std::cell::RefCell::new(None);
+    let result = db
+        .append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+                obligations: &[],
+            },
+            &guard(&db),
+            |view| {
+                assert_eq!(view.target.thread_id, "T-first");
+                assert_eq!(view.counterpart.thread_id, "T-second");
+                Ok(true)
+            },
+            |committed, after| {
+                *built_from.borrow_mut() = Some((
+                    committed.value.chain_state_hash.clone(),
+                    after.tip().map(|(hash, seq)| (hash.to_owned(), seq)),
+                ));
+                Ok(vec![event("T-second", "second")])
+            },
+        )
+        .unwrap();
+    let ConditionalThreadEventPairAppendResult::Committed {
+        first: a,
+        second: b,
+    } = result
+    else {
+        panic!("pair did not commit");
+    };
+    assert_eq!(a.value.event_count, 1);
+    assert_eq!(b.value.event_count, 1);
+    let (head, tip) = built_from.into_inner().expect("builder ran");
+    assert_eq!(head, a.value.chain_state_hash);
+    assert_eq!(tip.expect("first tip").1, first.tip().expect("tip").1 + 1);
+    assert_eq!(event_rows(&db, "T-first"), START_ROWS + 1);
+    assert_eq!(event_rows(&db, "T-second"), START_ROWS + 1);
+}
+
+#[test]
+fn ordered_pair_conflicts_before_any_write_on_a_stale_kind_or_refused_cut() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    create(&db, "T-extra", KIND);
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let extra = capture(&db, "T-extra");
+    let none = || MixedCutDependencies {
+        current_anchors: &[],
+        retired: &[],
+        obligations: &[],
+    };
+    let run = |second_kind: &str,
+               deps: MixedCutDependencies<'_>,
+               admitted: bool,
+               entered: &std::cell::Cell<bool>| {
+        db.append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, second_kind),
+            deps,
+            &guard(&db),
+            |_| {
+                entered.set(true);
+                Ok(admitted)
+            },
+            |_, _| unreachable!("the second event is never built without a first commit"),
+        )
+        .unwrap()
+    };
+    let entered = std::cell::Cell::new(false);
+    // The second chain must be the required kind.
+    assert!(matches!(
+        run("tool", none(), true, &entered),
+        ConditionalThreadEventPairAppendResult::Conflict
+    ));
+    assert!(!entered.get());
+    // A moved extra live dependency refuses before admission.
+    append(&db, "T-extra", 1);
+    assert!(matches!(
+        run(
+            KIND,
+            MixedCutDependencies {
+                current_anchors: std::slice::from_ref(&extra),
+                retired: &[],
+                obligations: &[],
+            },
+            true,
+            &entered
+        ),
+        ConditionalThreadEventPairAppendResult::Conflict
+    ));
+    assert!(!entered.get());
+    // A refused admission is a clean conflict.
+    assert!(matches!(
+        run(KIND, none(), false, &entered),
+        ConditionalThreadEventPairAppendResult::Conflict
+    ));
+    assert!(entered.get());
+    assert_eq!(event_rows(&db, "T-first"), START_ROWS);
+    assert_eq!(event_rows(&db, "T-second"), START_ROWS);
+    // The same chain twice is refused outright.
+    assert!(
+        db.append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &first, &signer, KIND, KIND),
+            none(),
+            &guard(&db),
+            |_| Ok(true),
+            |_, _| unreachable!(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn ordered_pair_reports_a_failed_second_event_as_first_committed() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let result = db
+        .append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+                obligations: &[],
+            },
+            &guard(&db),
+            |_| Ok(true),
+            |_, _| anyhow::bail!("second event could not be built"),
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        ConditionalThreadEventPairAppendResult::FirstCommittedSecondUncertain { .. }
+    ));
+    assert_eq!(event_rows(&db, "T-first"), START_ROWS + 1);
+    assert_eq!(event_rows(&db, "T-second"), START_ROWS);
+}
+
+#[test]
+fn a_retired_dependency_records_an_obligation_for_every_chain_that_publishes() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    create(&db, "T-single", KIND);
+    let manifest = "ab".repeat(32);
+    fence(&db, "T-owner", &manifest);
+    let retired = [RetiredChainDependency {
+        chain_root_id: "T-owner".into(),
+        manifest_hash: manifest.clone(),
+    }];
+    let owner_holders = || {
+        let lock = db.acquire_existing_chain_lock("T-owner").unwrap();
+        holders(&db, &lock)
+    };
+    assert!(owner_holders().is_empty());
+
+    let single = capture(&db, "T-single");
+    assert!(committed(
+        db.append_running_events_admitted_if_single_anchor_mixed_cut_with_admission(
+            SingleAnchorThreadAppend {
+                chain_root_id: "T-single",
+                thread_id: "T-single",
+                events: vec![event("T-single", "evidence")],
+                signer: &signer,
+                runtime_liveness: &NoRecovery,
+                expected: &single,
+                required_target_kind: KIND,
+            },
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &retired,
+                obligations: &[],
+            },
+            &guard(&db),
+            |_| Ok(true),
+        )
+        .unwrap()
+    ));
+    assert_eq!(owner_holders(), BTreeSet::from(["T-single".to_owned()]));
+
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let result = db
+        .append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &retired,
+                obligations: &[],
+            },
+            &guard(&db),
+            |_| Ok(true),
+            |_, _| Ok(vec![event("T-second", "second")]),
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        ConditionalThreadEventPairAppendResult::Committed { .. }
+    ));
+    assert_eq!(
+        owner_holders(),
+        BTreeSet::from([
+            "T-first".to_owned(),
+            "T-second".to_owned(),
+            "T-single".to_owned()
+        ])
+    );
+}
+
+#[test]
+fn a_cut_with_no_retired_dependency_records_no_obligation() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-a", KIND);
+    create(&db, "T-b", KIND);
+    let target = capture(&db, "T-a");
+    let counterpart = capture(&db, "T-b");
+    assert!(committed(
+        db.append_running_events_admitted_if_mixed_cut_with_admission(
+            two_anchor("T-a", &signer, &target, &counterpart, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+                obligations: &[],
+            },
+            &guard(&db),
+            |_| Ok(true),
+        )
+        .unwrap()
+    ));
+    let lock = db.acquire_existing_chain_lock("T-b").unwrap();
+    assert!(
+        db.recovery
+            .evidence_obligation_holders(&lock, "T-b")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_live_owner_obligation_is_recorded_for_the_named_holder_only() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-holder", KIND);
+    create(&db, "T-owner", KIND);
+    let first = capture(&db, "T-holder");
+    let second = capture(&db, "T-owner");
+    let obligations = [EvidenceObligationDependency {
+        owner_chain_root_id: "T-owner".into(),
+        holder_chain_root_id: "T-holder".into(),
+    }];
+    let holders_of = |root: &str| {
+        let lock = db.acquire_existing_chain_lock(root).unwrap();
+        db.recovery
+            .evidence_obligation_holders(&lock, root)
+            .unwrap()
+    };
+    let result = db
+        .append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+                obligations: &obligations,
+            },
+            &guard(&db),
+            |_| Ok(true),
+            |_, _| Ok(vec![event("T-owner", "second")]),
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        ConditionalThreadEventPairAppendResult::Committed { .. }
+    ));
+    assert_eq!(
+        holders_of("T-owner"),
+        BTreeSet::from(["T-holder".to_owned()])
+    );
+    assert!(
+        holders_of("T-holder").is_empty(),
+        "the second chain is not a holder"
+    );
+}
+
+#[test]
+fn an_obligation_naming_a_chain_outside_the_cut_or_itself_refuses_before_any_write() {
+    let (_dir, db) = open();
+    let signer = TestSigner::default();
+    create(&db, "T-first", KIND);
+    create(&db, "T-second", KIND);
+    create(&db, "T-extra", KIND);
+    let first = capture(&db, "T-first");
+    let second = capture(&db, "T-second");
+    let bad = |owner: &str, holder: &str| {
+        [EvidenceObligationDependency {
+            owner_chain_root_id: owner.into(),
+            holder_chain_root_id: holder.into(),
+        }]
+    };
+    for obligations in [
+        bad("T-extra", "T-first"),
+        bad("T-second", "T-extra"),
+        bad("T-first", "T-first"),
+    ] {
+        let entered = std::cell::Cell::new(false);
+        let result = db.append_running_event_pair_admitted_if_mixed_cut(
+            pair(&first, &second, &signer, KIND, KIND),
+            MixedCutDependencies {
+                current_anchors: &[],
+                retired: &[],
+                obligations: &obligations,
+            },
+            &guard(&db),
+            |_| {
+                entered.set(true);
+                Ok(true)
+            },
+            |_, _| Ok(vec![event("T-second", "second")]),
+        );
+        assert!(result.is_err());
+        assert!(!entered.get());
+    }
+    assert_eq!(event_rows(&db, "T-first"), START_ROWS);
+    assert_eq!(event_rows(&db, "T-second"), START_ROWS);
+}

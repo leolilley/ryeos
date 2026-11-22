@@ -4,6 +4,9 @@
 //! - Output formatting
 //! - Action library (`actions::*`) shared by the busybox `ryeos` CLI
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const TOOLS_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("tools");
+
 pub mod actions;
 
 #[cfg(feature = "test-support")]

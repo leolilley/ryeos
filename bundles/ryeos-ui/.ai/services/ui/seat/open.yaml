@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-16T02:16:20Z:be7fbb9806fe1b6df34c05b979457bd630cc12d25d6e82788e942c2c5ae8e183:/p5dLSPbpvhgPi6gobXhUwIBHKGir2ShVUlkUAaPTVuF3iWT5/dAI9Dx661iuxFyagvFLMqNyWzkEpvreRAEBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:f9eca6ef9209125eedbb6d064948f3d455bad7ba4b6226f00490a416d9284533:oQxoFR1X/08J6CCnH98p/PREF1xqNWS3iSLvi++yMzaXZKHUGiYd1xVcKbmhwKQuUNDE+EzKV1zADlUxzYb6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-open
 version: "1.0.0"
-description: Mint or attach the browser session's seat thread - the seat is itself a thread, braided and replayable
+description: Prepare an independent presentation seat, observe its retained writer without renewal, or explicitly claim a producer
 endpoint: ui.seat.open
 # Lifecycle routes preserve the authenticated browser context directly.
 # session_local is reserved for invocation through a compiled UI binding.

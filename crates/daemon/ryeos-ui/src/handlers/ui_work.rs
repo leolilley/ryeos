@@ -47,9 +47,10 @@ struct WorkPlacement {
 
 #[derive(Debug, Serialize)]
 struct WorkPhase {
-    /// Closed presentation category derived only from the retained thread
-    /// status. `state_code` below always preserves the original domain value.
-    category: &'static str,
+    /// Presentation category the attention config assigns to the retained
+    /// thread status. `state_code` below always preserves the original domain
+    /// value.
+    category: String,
     state_code: String,
 }
 
@@ -65,7 +66,7 @@ struct WorkSummary {
     phase: WorkPhase,
     observed_at: String,
     placement_count: usize,
-    attention: Vec<&'static str>,
+    attention: Vec<String>,
     attention_count: usize,
 }
 
@@ -91,29 +92,24 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         &filter,
         ryeos_app::thread_lifecycle::ThreadSort::Newest,
     )?;
-    let mut attention_by_chain = BTreeMap::<String, BTreeSet<&'static str>>::new();
-    for entry in state
-        .state_store
-        .pending_dedicated_session_approval_attention(
-            caller.principal_id(),
-            None,
-            MAX_SOURCE_THREADS,
-        )?
-    {
-        attention_by_chain
-            .entry(entry.chain_root_id)
-            .or_default()
-            .insert("approval_required");
-    }
-    for entry in state.state_store.dedicated_session_candidate_attention(
+    let config = crate::handlers::ui_attention::load_config(&state)?;
+    let mut attention_by_chain = BTreeMap::<String, BTreeSet<String>>::new();
+    for item in crate::handlers::ui_attention::collect(
+        &state,
+        &config,
         caller.principal_id(),
         None,
         MAX_SOURCE_THREADS,
     )? {
-        attention_by_chain
-            .entry(entry.chain_root_id)
-            .or_default()
-            .insert("candidate_ready");
+        if let (Some(chain_root_id), Some(kind)) = (
+            item["subject"]["chain_root_id"].as_str(),
+            item["kind"].as_str(),
+        ) {
+            attention_by_chain
+                .entry(chain_root_id.to_owned())
+                .or_default()
+                .insert(kind.to_owned());
+        }
     }
 
     let chain_roots = threads
@@ -138,13 +134,12 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         if owner_principal_id != caller.principal_id() {
             continue;
         }
-        if let Some(project_root) = project_root.as_ref() {
-            if !placements
+        if let Some(project_root) = project_root.as_ref()
+            && !placements
                 .iter()
                 .any(|placement| placement.thread.project_root.as_deref() == project_root.to_str())
-            {
-                continue;
-            }
+        {
+            continue;
         }
         let attention = attention_by_chain
             .remove(&chain_root_id)
@@ -165,7 +160,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
                 current_site_id: head.thread.current_site_id.clone(),
             },
             phase: WorkPhase {
-                category: phase_category(&head.thread.status),
+                category: config.phase_category(&head.thread.status).to_owned(),
                 state_code: head.thread.status.clone(),
             },
             observed_at: head.thread.updated_at.clone(),
@@ -190,20 +185,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     }))
 }
 
-fn phase_category(status: &str) -> &'static str {
-    match status {
-        "created" | "accepted" | "running" => "running",
-        "continued" => "blocked",
-        "completed" => "completed",
-        "failed" | "cancelled" | "killed" | "timed_out" => "failed",
-        _ => "unknown",
-    }
-}
-
-/// Bounded principal/project attention projection. This first version admits
-/// only exact durable hosted-worker approval rows; later attention producers
-/// must join here through their authoritative projections rather than teaching
-/// clients to scan work roots.
+/// The principal's attention queue: one list of items with one shape, drawn
+/// from the sources the signed attention config selects.
 pub async fn handle_attention(
     params: Value,
     ctx: HandlerContext,
@@ -220,89 +203,64 @@ pub async fn handle_attention(
         Some("current") => caller.project_query_identity()?,
         _ => None,
     };
-    let allowed_placements = if project_root.is_some() {
-        let threads = state.threads.list_thread_views_query(
-            MAX_SOURCE_THREADS,
-            &ryeos_app::thread_lifecycle::ThreadListFilter {
-                principal: Some(caller.principal_id().to_string()),
-                project_root,
-                ..Default::default()
-            },
-            ryeos_app::thread_lifecycle::ThreadSort::Newest,
-        )?;
-        Some(
-            threads
-                .into_iter()
-                .map(|thread| thread.item.thread_id)
-                .collect::<BTreeSet<_>>(),
-        )
-    } else {
-        None
-    };
-    let mut attention = state
-        .state_store
-        .pending_dedicated_session_approval_attention(
-            caller.principal_id(),
-            allowed_placements.as_ref(),
-            limit,
-        )?
-        .into_iter()
-        .map(|entry| {
-            serde_json::json!({
-                "schema_version":"ryeos.ui.attention_item.v1",
-                "kind":"worker_approval",
-                "chain_root_id":entry.chain_root_id,
-                "placement_thread_id":entry.approval.placement_thread_id,
-                "approval_id":entry.approval.approval_id,
-                "worker_boot_epoch":entry.approval.worker_boot_epoch,
-                "request_digest":entry.approval.request_digest,
-                "operation_class":entry.approval.operation_class,
-                "requested_authority":ryeos_app::dedicated_session_service::public_approval_authority(&entry.approval.requested_authority),
-                "state":entry.approval.state,
-                "expires_at_ms":entry.approval.expires_at_ms,
-                "created_at_ms":entry.approval.created_at_ms,
-            })
-        })
-        .collect::<Vec<_>>();
-    attention.sort_by(|left, right| {
-        left["created_at_ms"]
-            .as_i64()
-            .cmp(&right["created_at_ms"].as_i64())
-            .then_with(|| {
-                left["approval_id"]
-                    .as_str()
-                    .cmp(&right["approval_id"].as_str())
-            })
-    });
-    let candidates = state
-        .state_store
-        .dedicated_session_candidate_attention(
-            caller.principal_id(),
-            allowed_placements.as_ref(),
-            limit,
-        )?
-        .into_iter()
-        .map(|entry| {
-            serde_json::json!({
-                "schema_version":"ryeos.ui.candidate_attention_item.v1",
-                "kind":"worker_candidate",
-                "chain_root_id":entry.chain_root_id,
-                "placement_thread_id":entry.placement_thread_id,
-                "state":entry.state,
-                "candidate_snapshot_hash":entry.candidate_snapshot_hash,
-                "candidate_validation_hash":entry.candidate_validation_hash,
-                "candidate_evaluation_hash":entry.candidate_evaluation_hash,
-                "publication_result":entry.publication_result,
-                "updated_at_ms":entry.updated_at_ms,
-            })
-        })
-        .collect::<Vec<_>>();
+    let config = crate::handlers::ui_attention::load_config(&state)?;
+    // Count the whole queue, then return only a page of it, so the bars and
+    // the list can never disagree about what is raised.
+    let mut attention = crate::handlers::ui_attention::collect_unacknowledged(
+        &state,
+        &config,
+        caller.principal_id(),
+        project_root.as_deref(),
+        MAX_LIMIT,
+    )?;
+    let counts = crate::handlers::ui_attention::counts(&config, &attention);
+    attention.truncate(limit);
+    let running = crate::handlers::ui_attention::running(
+        &state,
+        &config,
+        caller.principal_id(),
+        project_root.as_deref(),
+        limit,
+    )?;
     Ok(serde_json::json!({
-        "schema_version":"ryeos.ui.attention.v1",
+        "schema_version":"ryeos.ui.attention.v3",
         "attention":attention,
-        "candidates":candidates,
+        "counts":counts,
+        "running":running,
         "next_cursor":null,
     }))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcknowledgeRequest {
+    /// The attention item's id. The service finds the item in the caller's own
+    /// queue; a caller names no chain, thread or principal.
+    item_id: String,
+}
+
+/// Acknowledge one attention item: hide it from the principal's queue until it
+/// has new activity. A triage act, not a decision about the underlying work.
+pub async fn handle_acknowledge(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let request: AcknowledgeRequest = ryeos_app::handler_error::parse_request(params)?;
+    if request.item_id.is_empty() || request.item_id.len() > 512 {
+        return Err(ryeos_app::handler_error::HandlerError::BadRequest(
+            "item_id is required".into(),
+        )
+        .into());
+    }
+    let config = crate::handlers::ui_attention::load_config(&state)?;
+    Ok(crate::handlers::ui_attention::acknowledge(
+        &state,
+        &config,
+        caller.principal_id(),
+        &request.item_id,
+    )?)
 }
 
 pub async fn handle_approval_history(
@@ -554,6 +512,54 @@ fn candidate_tree_changes(
     }))
 }
 
+pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/list",
+    endpoint: "ui.ryeos.work.list",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
+};
+
+pub const ATTENTION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/attention",
+    endpoint: "ui.ryeos.work.attention",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_attention(params, ctx, state).await })
+    },
+};
+
+pub const ACKNOWLEDGE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/acknowledge",
+    endpoint: "ui.ryeos.work.acknowledge",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.ui/ryeos-ui/work/acknowledge"],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_acknowledge(params, ctx, state).await })
+    },
+};
+
+pub const APPROVAL_HISTORY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/approval-history",
+    endpoint: "ui.ryeos.work.approval-history",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_approval_history(params, ctx, state).await })
+    },
+};
+
+pub const CANDIDATE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/ryeos-ui/work/candidate",
+    endpoint: "ui.ryeos.work.candidate",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_candidate(params, ctx, state).await })
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,41 +609,3 @@ mod tests {
         assert_eq!(changes["files"][1]["change"], "deleted");
     }
 }
-
-pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/work/list",
-    endpoint: "ui.ryeos.work.list",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
-};
-
-pub const ATTENTION_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/work/attention",
-    endpoint: "ui.ryeos.work.attention",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move { handle_attention(params, ctx, state).await })
-    },
-};
-
-pub const APPROVAL_HISTORY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/work/approval-history",
-    endpoint: "ui.ryeos.work.approval-history",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move { handle_approval_history(params, ctx, state).await })
-    },
-};
-
-pub const CANDIDATE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/ryeos-ui/work/candidate",
-    endpoint: "ui.ryeos.work.candidate",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move { handle_candidate(params, ctx, state).await })
-    },
-};

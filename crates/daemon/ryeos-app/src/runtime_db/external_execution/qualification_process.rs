@@ -1,0 +1,894 @@
+//! One durable, local Worker incarnation for a qualification-only allocation.
+//!
+//! This journal does not grant an ordinary dedicated session, a second local
+//! spawn, or remote cleanup. The held process must attach before release; a
+//! terminal transition needs exact whole-process death proof.
+
+use super::*;
+use ryeos_state::external_execution::journal::load_binding;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QualificationWorkerProcessPhase {
+    Attached,
+    Terminal,
+}
+
+impl QualificationWorkerProcessPhase {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "attached" => Ok(Self::Attached),
+            "terminal" => Ok(Self::Terminal),
+            _ => bail!("qualification Worker process phase is not current"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QualificationWorkerProcessRecord {
+    pub placement_thread_id: String,
+    pub accepted_root_id: String,
+    pub accepted_capsule_hash: String,
+    pub qualification_operation_id: String,
+    pub qualification_occurrence_id: String,
+    pub channel_binding_digest: String,
+    pub process_identity: crate::process::ExecutionProcessIdentity,
+    pub provider_configuration: ryeos_external_execution_contract::ProviderConfigurationLaunchInput,
+    /// The protocol the node selected for this Worker and the filesystem
+    /// authority its holding granted, recorded at attachment.
+    pub selected_holding: crate::external_qualification_local::QualificationWorkerSelectedHolding,
+    pub daemon_generation_id: String,
+    pub phase: QualificationWorkerProcessPhase,
+    pub attached_at_ms: i64,
+    pub terminal_at_ms: Option<i64>,
+}
+
+impl QualificationWorkerProcessRecord {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.placement_thread_id
+                .strip_prefix("Q-")
+                .is_some_and(lillux::valid_hash)
+                && !self.accepted_root_id.is_empty()
+                && self.accepted_root_id.len() <= 256
+                && !self.accepted_root_id.chars().any(char::is_control)
+                && !self.qualification_occurrence_id.is_empty()
+                && self.qualification_occurrence_id.len() <= 256
+                && !self
+                    .qualification_occurrence_id
+                    .chars()
+                    .any(char::is_control)
+                && !self.daemon_generation_id.is_empty()
+                && self.daemon_generation_id.len() <= 256
+                && !self.daemon_generation_id.chars().any(char::is_control),
+            "qualification Worker process has invalid owner coordinates"
+        );
+        for hash in [
+            &self.accepted_capsule_hash,
+            &self.qualification_operation_id,
+            &self.channel_binding_digest,
+        ] {
+            validate_sha256("qualification Worker process identity", hash)?;
+        }
+        crate::process::validate_execution_process_identity_shape(&self.process_identity)?;
+        self.provider_configuration.validate()?;
+        self.selected_holding.validate()?;
+        // The holding's filesystem authority must agree with how the process
+        // is held: a retained containment goes with a confined filesystem, and
+        // a bare process group with node policy. A record claiming the other
+        // pairing names a holding the process cannot have run under.
+        require_holding_matches_containment(
+            &self.selected_holding,
+            self.process_identity.process_scope.is_some(),
+        )?;
+        // The owner is the trusted process-group lane (no scope) or the
+        // enforced path's retained descendant containment (PID-namespace
+        // init or cgroup scope); the shape check above validates its record.
+        // Resource-financial settlement is not part of this Q-only journal.
+        // Keep that authority closed until a Q resource owner is implemented.
+        ensure!(
+            self.process_identity.resource_selections.is_empty()
+                && self.process_identity.resource_operations.is_empty()
+                && self.process_identity.resource_allocation_limit.is_none()
+                && self.process_identity.resource_occupancy_start.is_none()
+                && self.process_identity.resource_occupancy_limit.is_none()
+                && self
+                    .process_identity
+                    .resource_cleanup_allowance_ms
+                    .is_none(),
+            "qualification Worker process cannot carry unowned resource operations"
+        );
+        ensure!(
+            self.attached_at_ms > 0
+                && match self.phase {
+                    QualificationWorkerProcessPhase::Attached => self.terminal_at_ms.is_none(),
+                    QualificationWorkerProcessPhase::Terminal => self
+                        .terminal_at_ms
+                        .is_some_and(|terminal| terminal >= self.attached_at_ms),
+                },
+            "qualification Worker process has invalid retained times"
+        );
+        Ok(())
+    }
+}
+
+/// A retained containment goes with a confined filesystem, and a bare process
+/// group with node policy. A record claiming the other pairing names a holding
+/// the process cannot have run under.
+fn require_holding_matches_containment(
+    holding: &crate::external_qualification_local::QualificationWorkerSelectedHolding,
+    contained: bool,
+) -> Result<()> {
+    ensure!(
+        contained != (holding.filesystem_authority() == "node_policy"),
+        "qualification Worker selected holding contradicts its retained process containment"
+    );
+    Ok(())
+}
+
+/// This value can be constructed only by checking the retained exact process.
+/// A stale or unavailable observation never authorizes terminal settlement.
+pub(crate) struct QualificationWorkerDeathProof {
+    record: QualificationWorkerProcessRecord,
+}
+
+impl QualificationWorkerDeathProof {
+    pub(crate) fn capture(record: QualificationWorkerProcessRecord) -> Result<Self> {
+        ensure!(
+            record.phase == QualificationWorkerProcessPhase::Attached,
+            "qualification Worker has no attached process to prove dead"
+        );
+        crate::process::assert_reaped_process_group_absent(&record.process_identity)?;
+        Ok(Self { record })
+    }
+}
+
+fn read_process(
+    conn: &Connection,
+    placement: &str,
+) -> Result<Option<QualificationWorkerProcessRecord>> {
+    conn.query_row(
+        "SELECT accepted_root_id,accepted_capsule_hash,qualification_operation_id,
+                qualification_occurrence_id,channel_binding_digest,process_identity_json,
+                daemon_generation_id,phase,attached_at_ms,terminal_at_ms,provider_configuration_json,
+                selected_protocol_ref,selected_filesystem_authority
+         FROM external_qualification_worker_process WHERE placement_thread_id=?1",
+        [placement],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(
+        |(
+            accepted_root_id,
+            accepted_capsule_hash,
+            qualification_operation_id,
+            qualification_occurrence_id,
+            channel_binding_digest,
+            process_identity_json,
+            daemon_generation_id,
+            phase,
+            attached_at_ms,
+            terminal_at_ms,
+            provider_configuration_json,
+            selected_protocol_ref,
+            selected_filesystem_authority,
+        )| {
+            ensure!(
+                process_identity_json.len() <= 64 * 1024,
+                "retained qualification Worker process identity exceeds journal bound"
+            );
+            let process_identity = serde_json::from_str(&process_identity_json)
+                .context("decode retained qualification Worker process")?;
+            ensure!(
+                lillux::canonical_json(&serde_json::to_value(&process_identity)?)?
+                    == process_identity_json,
+                "qualification Worker process identity is not canonical"
+            );
+            let record = QualificationWorkerProcessRecord {
+                placement_thread_id: placement.to_owned(),
+                accepted_root_id,
+                accepted_capsule_hash,
+                qualification_operation_id,
+                qualification_occurrence_id,
+                channel_binding_digest,
+                process_identity,
+                provider_configuration: decode_configuration_input(&provider_configuration_json)?,
+                selected_holding:
+                    crate::external_qualification_local::QualificationWorkerSelectedHolding::new(
+                        &selected_protocol_ref,
+                        &selected_filesystem_authority,
+                    )?,
+                daemon_generation_id,
+                phase: QualificationWorkerProcessPhase::parse(&phase)?,
+                attached_at_ms,
+                terminal_at_ms,
+            };
+            record.validate()?;
+            Ok(record)
+        },
+    )
+    .transpose()
+}
+
+fn decode_configuration_input(
+    encoded: &str,
+) -> Result<ryeos_external_execution_contract::ProviderConfigurationLaunchInput> {
+    ensure!(
+        encoded.len() <= 4096,
+        "retained provider configuration input exceeds its public journal bound"
+    );
+    let input: ryeos_external_execution_contract::ProviderConfigurationLaunchInput =
+        serde_json::from_str(encoded).context("decode retained provider configuration input")?;
+    input.validate()?;
+    ensure!(
+        lillux::canonical_json(&serde_json::to_value(&input)?)? == encoded,
+        "retained provider configuration input is not canonical"
+    );
+    Ok(input)
+}
+
+fn require_configuration_binding(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+    input: &ryeos_external_execution_contract::ProviderConfigurationLaunchInput,
+) -> Result<()> {
+    input.validate()?;
+    let retained = read_retained_binding(conn, &reservation.binding_hash)?
+        .context("provider configuration input lost its original signed binding")?;
+    let contract = retained.backend_contract();
+    let selected = contract.workload.session_artifacts()?;
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        bail!("provider configuration input has no qualification owner");
+    };
+    ensure!(
+        input.provider_declaration_id == selected.provider_declaration_id
+            && input.configuration_destination == selected.provider_configuration_destination
+            && input.configuration_adapter_artifact_hash
+                == selected.configuration_adapter_artifact_hash
+            && input.configuration_adapter_artifact_bytes
+                == selected.configuration_adapter_artifact_bytes
+            && input.provider_declaration_id == owner.program.requirement.provider_declaration_id
+            && input.configuration_destination
+                == owner.program.requirement.provider_configuration_destination,
+        "provider configuration input differs from its original admitted adapter or destination"
+    );
+    Ok(())
+}
+
+fn require_canary_configuration_binding(
+    binding: &ryeos_state::external_execution::qualification_controller_canary::QControllerCanaryBinding,
+    input: &ryeos_external_execution_contract::ProviderConfigurationLaunchInput,
+) -> Result<()> {
+    binding.validate()?;
+    input.validate()?;
+    ensure!(
+        binding.provider_declaration_id == input.provider_declaration_id
+            && binding.configuration_adapter_artifact_hash
+                == input.configuration_adapter_artifact_hash
+            && binding.configuration_adapter_artifact_bytes
+                == input.configuration_adapter_artifact_bytes,
+        "Q canary binder differs from the exact process configuration adapter"
+    );
+    Ok(())
+}
+
+fn require_retained_process_owner(
+    conn: &Connection,
+    record: &QualificationWorkerProcessRecord,
+) -> Result<()> {
+    let allocation = read(conn, &record.placement_thread_id)?
+        .context("qualification Worker process lost its allocation")?;
+    require_configuration_binding(
+        conn,
+        &allocation.reservation,
+        &record.provider_configuration,
+    )?;
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+    else {
+        bail!("qualification Worker process changed allocation owner");
+    };
+    ensure!(
+        ryeos_state::external_execution::qualification_session::qualification_candidate_placement_key(
+            &owner.coordinate,
+            &owner.qualification_operation_id,
+        )? == record.placement_thread_id
+            && owner.coordinate.accepted_root_id == record.accepted_root_id
+            && owner.coordinate.accepted_capsule_hash == record.accepted_capsule_hash
+            && owner.qualification_operation_id == record.qualification_operation_id
+            && owner.qualification_occurrence.occurrence_id == record.qualification_occurrence_id,
+        "qualification Worker process differs from retained accepted root and occurrence"
+    );
+    let local = qualification_local_start::read_local_start(conn, &record.placement_thread_id)?
+        .context("qualification process lost its original local owner")?;
+    if let Some(binding) = &local.controller_canary_binding {
+        require_canary_configuration_binding(binding, &record.provider_configuration)?;
+    }
+    let channel = load_binding(conn, &record.placement_thread_id)?;
+    ensure!(
+        channel.digest()? == record.channel_binding_digest
+            && channel.execution_binding_hash == allocation.reservation.binding_hash
+            && matches!(
+                channel.execution_mode,
+                ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+            )
+            && channel.candidate_export_max_bytes == 0,
+        "qualification Worker process lost its exact zero-export channel"
+    );
+    let connector_binding: Option<String> = conn
+        .query_row(
+            "SELECT channel_binding_digest FROM external_execution_connector
+             WHERE placement_thread_id=?1",
+            [&record.placement_thread_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    ensure!(
+        connector_binding.as_deref() == Some(record.channel_binding_digest.as_str()),
+        "qualification Worker process lost its one-shot connector"
+    );
+    Ok(())
+}
+
+/// Rejoin the original attached Worker while the caller holds its current
+/// accepted-root admission and the runtime writer transaction.
+pub(super) fn require_current_attached_worker(
+    conn: &Connection,
+    placement: &str,
+) -> Result<QualificationWorkerProcessRecord> {
+    let record = read_process(conn, placement)?
+        .context("qualification Worker release lost its attached process")?;
+    require_retained_process_owner(conn, &record)?;
+    ensure!(
+        record.phase == QualificationWorkerProcessPhase::Attached
+            && record.daemon_generation_id == daemon_generation_id(),
+        "qualification Worker release lost its current attached process"
+    );
+    Ok(record)
+}
+
+/// Join a completion issuer to the exact death-proven local Worker row inside
+/// its own writer transaction. The returned record is evidence custody, not
+/// fresh contact or a standalone success permit.
+pub(super) fn require_terminal_qualification_worker_process(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<QualificationWorkerProcessRecord> {
+    let ExternalAllocationOwner::QualificationCandidate(owner) = &reservation.owner else {
+        bail!("qualification completion requires its Q allocation owner");
+    };
+    let record = read_process(conn, &reservation.placement_thread_id)?
+        .context("qualification completion has no retained local Worker process")?;
+    require_retained_process_owner(conn, &record)?;
+    ensure!(
+        record.phase == QualificationWorkerProcessPhase::Terminal
+            && record.accepted_root_id == owner.coordinate.accepted_root_id
+            && record.accepted_capsule_hash == owner.coordinate.accepted_capsule_hash
+            && record.qualification_operation_id == owner.qualification_operation_id
+            && record.qualification_occurrence_id == owner.qualification_occurrence.occurrence_id,
+        "qualification completion has no exact death-settled local Worker"
+    );
+    Ok(record)
+}
+
+/// Rejoin the live Q process under the connector's writer transaction after
+/// Lillux has observed the authenticated peer in this process's retained
+/// group. Boot and group-leader birth identity prevent numeric PGID reuse
+/// from joining a different incarnation. This makes no containment claim.
+/// How a connector peer was proved to belong to its Worker.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PeerBasis<'a> {
+    /// Member of the Worker's process group (the trusted lane).
+    Group,
+    /// Member of the Worker's retained containment, captured by the pinned
+    /// contained path against exactly this containment record.
+    Contained(&'a lillux::ProcessScopeRecovery),
+}
+
+fn require_basis_matches_holder(
+    basis: PeerBasis<'_>,
+    worker: &crate::process::ExecutionProcessIdentity,
+) -> Result<()> {
+    match (basis, worker.process_scope.as_ref()) {
+        (PeerBasis::Group, None) => Ok(()),
+        // The slow membership read happened before this transaction, against
+        // the record the proof carries. Only that record's identity with the
+        // Worker row's is compared here.
+        (PeerBasis::Contained(proven), Some(held)) => {
+            ensure!(
+                proven == held,
+                "qualification connector peer was proved against a different containment than its Worker's"
+            );
+            Ok(())
+        }
+        _ => bail!(
+            "qualification connector peer was proved by a basis that does not match its Worker's holder"
+        ),
+    }
+}
+
+pub(super) fn require_attached_qualification_worker_process(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+    channel_binding_digest: &str,
+    peer: &lillux::ExactProcessIdentity,
+    basis: PeerBasis<'_>,
+) -> Result<QualificationWorkerProcessRecord> {
+    let record = read_process(conn, &reservation.placement_thread_id)?
+        .context("qualification connector lost its attached local Worker")?;
+    require_retained_process_owner(conn, &record)?;
+    ensure!(
+        record.phase == QualificationWorkerProcessPhase::Attached
+            && record.channel_binding_digest == channel_binding_digest,
+        "qualification connector lost its live exact Worker owner"
+    );
+    // The admission path must match what holds the Worker. A contained
+    // Worker's peers are admitted only through the contained path, so every
+    // retained peer of a contained Worker was proved against its containment.
+    require_basis_matches_holder(basis, &record.process_identity)?;
+    require_trusted_peer_group(&record.process_identity, peer)?;
+    Ok(record)
+}
+
+/// Validate historical connector evidence without requiring a live Worker.
+/// A retained terminal row must still identify the exact original group.
+pub(super) fn require_retained_qualification_peer(
+    conn: &Connection,
+    placement: &str,
+    peer: &lillux::ExactProcessIdentity,
+) -> Result<()> {
+    let record = read_process(conn, placement)?
+        .context("qualification connector lost its retained local Worker")?;
+    require_retained_process_owner(conn, &record)?;
+    require_trusted_peer_group(&record.process_identity, peer)
+}
+
+fn require_trusted_peer_group(
+    worker: &crate::process::ExecutionProcessIdentity,
+    peer: &lillux::ExactProcessIdentity,
+) -> Result<()> {
+    crate::process::validate_execution_process_identity_shape(worker)?;
+    peer.incarnation_digest().map_err(anyhow::Error::msg)?;
+    ensure!(
+        worker.boot_id == peer.boot_id,
+        "qualification connector peer belongs to another boot than its Worker"
+    );
+    // The trusted lane holds the connector only by the Worker's process
+    // group. A Worker held by a retained containment (PID-namespace init or
+    // cgroup scope) instead had the peer's membership proved against that
+    // containment at connect time; the connector may sit in its own group or
+    // session, so the group leader is not part of that identity.
+    if worker.process_scope.is_some() {
+        // No schema column holds a membership attestation, so the historical
+        // check can only use what the rows already imply: a member of the
+        // Worker's namespace or scope cannot predate the Worker target.
+        ensure!(
+            u64::try_from(worker.target_start_time_ticks).ok()
+                <= Some(peer.target_start_time_ticks),
+            "qualification connector peer predates its contained Worker"
+        );
+    } else {
+        ensure!(
+            worker.group_leader_pid == i64::from(peer.group_leader_pid)
+                && u64::try_from(worker.group_leader_start_time_ticks).ok()
+                    == Some(peer.group_leader_start_time_ticks),
+            "qualification connector peer changed its trusted Worker group incarnation"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn validate_processes(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT placement_thread_id FROM external_qualification_worker_process
+         ORDER BY placement_thread_id",
+    )?;
+    let placements = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for placement in placements {
+        let record = read_process(conn, &placement)?
+            .context("qualification Worker process disappeared during validation")?;
+        require_retained_process_owner(conn, &record)?;
+        if record.phase == QualificationWorkerProcessPhase::Attached {
+            let allocation =
+                read(conn, &placement)?.context("attached Q allocation disappeared")?;
+            ensure!(
+                !allocation.phase.is_settled(),
+                "unproved qualification Worker process has a settled allocation"
+            );
+        }
+    }
+    Ok(())
+}
+
+impl RuntimeDb {
+    /// Every `Attached` local qualification Worker row left by a daemon
+    /// generation other than `current_generation`, in placement order. Start
+    /// recovery proves each such group dead before settling its row.
+    pub(crate) fn attached_qualification_worker_processes(
+        &self,
+        current_generation: &str,
+    ) -> Result<Vec<QualificationWorkerProcessRecord>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT placement_thread_id FROM external_qualification_worker_process
+                 ORDER BY placement_thread_id",
+            )?;
+            let placements = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut attached = Vec::new();
+            for placement in placements {
+                let record = read_process(conn, &placement)?
+                    .context("qualification Worker process disappeared during recovery listing")?;
+                if record.phase == QualificationWorkerProcessPhase::Attached
+                    && record.daemon_generation_id != current_generation
+                {
+                    attached.push(record);
+                }
+            }
+            Ok(attached)
+        })
+    }
+
+    pub(crate) fn qualification_worker_process(
+        &self,
+        placement: &str,
+    ) -> Result<Option<QualificationWorkerProcessRecord>> {
+        self.conn.with_sql(|conn| read_process(conn, placement))
+    }
+
+    /// Persist one held local Worker before allowing Lillux to release it.
+    pub(crate) fn attach_qualification_worker_process(
+        &self,
+        placement: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        daemon_generation_id: &str,
+        configuration: &crate::external_connector::PreparedProviderConfigurationObservation,
+        selected_holding: &crate::external_qualification_local::QualificationWorkerSelectedHolding,
+    ) -> Result<QualificationWorkerProcessRecord> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            ensure!(
+                read_process(&tx, placement)?.is_none(),
+                "qualification Worker already has a retained process incarnation"
+            );
+            let allocation =
+                read(&tx, placement)?.context("qualification Worker allocation is absent")?;
+            ensure!(
+                allocation.phase == ExternalAllocationPhase::Bound,
+                "qualification Worker requires a bound Q allocation"
+            );
+            require_contactable_qualification_owner(&tx, &allocation.reservation)?;
+            let ExternalAllocationOwner::QualificationCandidate(owner) = &allocation.reservation.owner
+            else {
+                bail!("qualification Worker requires a Q allocation owner");
+            };
+            let channel = load_binding(&tx, placement)?;
+            let credential_start =
+                qualification_local_start::require_live_credential_start_tx(&tx, placement)?;
+            let credential_home_id = &credential_start
+                .credential_custody
+                .as_ref()
+                .context("Q configuration attachment lost credential custody")?
+                .home_id;
+            let configuration_input = configuration.require_for(
+                placement,
+                &allocation.reservation.binding_hash,
+                credential_home_id,
+            )?;
+            require_configuration_binding(&tx, &allocation.reservation, configuration_input)?;
+            if let Some(binding) = &credential_start.controller_canary_binding {
+                require_canary_configuration_binding(binding, configuration_input)?;
+            }
+            let channel_binding_digest = channel.digest()?;
+            let channel_state: String = tx.query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [placement],
+                |row| row.get(0),
+            )?;
+            let release: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND json_extract(frame_json,'$.frame.payload.kind')='release')",
+                [&channel_binding_digest],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                channel_state == "running"
+                    && release
+                    && channel.execution_binding_hash == allocation.reservation.binding_hash
+                    && matches!(
+                        channel.execution_mode,
+                        ryeos_state::external_execution::ExternalExecutionMode::QualificationStructuredSession {}
+                    )
+                    && channel.candidate_export_max_bytes == 0
+                    && lillux::time::timestamp_millis() < channel.execution_deadline_ms,
+                "qualification Worker requires its live released zero-export channel"
+            );
+            let connector_state: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT state,channel_binding_digest FROM external_execution_connector
+             WHERE placement_thread_id=?1",
+                    [placement],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            ensure!(
+                connector_state.as_ref().is_some_and(|(state, binding)| {
+                    state == "prepared" && binding == &channel_binding_digest
+                }),
+                "qualification Worker has no fresh prepared connector"
+            );
+            let now = lillux::time::timestamp_millis();
+            let record = QualificationWorkerProcessRecord {
+                placement_thread_id: placement.to_owned(),
+                accepted_root_id: owner.coordinate.accepted_root_id.clone(),
+                accepted_capsule_hash: owner.coordinate.accepted_capsule_hash.clone(),
+                qualification_operation_id: owner.qualification_operation_id.clone(),
+                qualification_occurrence_id: owner.qualification_occurrence.occurrence_id.clone(),
+                channel_binding_digest,
+                process_identity: process_identity.clone(),
+                provider_configuration: configuration_input.clone(),
+                selected_holding: selected_holding.clone(),
+                daemon_generation_id: daemon_generation_id.to_owned(),
+                phase: QualificationWorkerProcessPhase::Attached,
+                attached_at_ms: now,
+                terminal_at_ms: None,
+            };
+            record.validate()?;
+            let process_json = lillux::canonical_json(&serde_json::to_value(process_identity)?)?;
+            let configuration_json =
+                lillux::canonical_json(&serde_json::to_value(&record.provider_configuration)?)?;
+            ensure!(
+                configuration_json.len() <= 4096,
+                "provider configuration input exceeds journal bound"
+            );
+            ensure!(
+                process_json.len() <= 64 * 1024,
+                "qualification Worker process identity exceeds journal bound"
+            );
+            tx.execute(
+                "INSERT INTO external_qualification_worker_process VALUES
+             (?1,?2,?3,?4,?5,?6,?7,?8,'attached',?9,NULL,?10,?11,?12)",
+                params![
+                    record.placement_thread_id,
+                    record.accepted_root_id,
+                    record.accepted_capsule_hash,
+                    record.qualification_operation_id,
+                    record.qualification_occurrence_id,
+                    record.channel_binding_digest,
+                    process_json,
+                    record.daemon_generation_id,
+                    record.attached_at_ms,
+                    configuration_json,
+                    record.selected_holding.protocol_ref(),
+                    record.selected_holding.filesystem_authority(),
+                ],
+            )?;
+            qualification_local_start::attach_local_worker_tx(
+                &tx,
+                placement,
+                process_identity,
+                daemon_generation_id,
+            )?;
+            tx.commit()?;
+            Ok(record)
+        })
+    }
+
+    pub(crate) fn settle_qualification_worker_process(
+        &self,
+        proof: QualificationWorkerDeathProof,
+    ) -> Result<QualificationWorkerProcessRecord> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let current = read_process(&tx, &proof.record.placement_thread_id)?
+                .context("qualification Worker death proof lost its attached row")?;
+            ensure!(
+                current == proof.record
+                    && current.phase == QualificationWorkerProcessPhase::Attached,
+                "qualification Worker death proof changed its exact process incarnation"
+            );
+            require_retained_process_owner(&tx, &current)?;
+            let now = lillux::time::timestamp_millis().max(current.attached_at_ms);
+            ensure!(
+                tx.execute(
+                    "UPDATE external_qualification_worker_process
+                 SET phase='terminal',terminal_at_ms=?2
+                 WHERE placement_thread_id=?1 AND phase='attached'",
+                    params![current.placement_thread_id, now],
+                )? == 1,
+                "qualification Worker terminal transition lost its one attached row"
+            );
+            let terminal = read_process(&tx, &current.placement_thread_id)?
+                .context("terminal qualification Worker process disappeared")?;
+            tx.commit()?;
+            Ok(terminal)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::external_qualification_local::QualificationWorkerSelectedHolding as Holding;
+
+    #[test]
+    fn selected_holding_is_bounded_non_empty_and_pairs_with_its_containment() {
+        let contained = Holding::new(
+            "protocol:ryeos/core/contained_structured_session",
+            "captured_execution",
+        )
+        .unwrap();
+        assert_eq!(
+            contained.protocol_ref(),
+            "protocol:ryeos/core/contained_structured_session"
+        );
+        assert_eq!(contained.filesystem_authority(), "captured_execution");
+        let trusted = Holding::new(
+            "protocol:ryeos/core/trusted_structured_session",
+            "node_policy",
+        )
+        .unwrap();
+        require_holding_matches_containment(&contained, true).unwrap();
+        require_holding_matches_containment(&trusted, false).unwrap();
+        assert!(require_holding_matches_containment(&contained, false).is_err());
+        assert!(require_holding_matches_containment(&trusted, true).is_err());
+
+        for (protocol, authority) in [
+            ("", "node_policy"),
+            ("protocol:ryeos/core/x", ""),
+            ("tool:ryeos/core/x", "node_policy"),
+            (" protocol:ryeos/core/x", "node_policy"),
+            ("protocol:ryeos/core/x", "Node Policy"),
+        ] {
+            assert!(
+                Holding::new(protocol, authority).is_err(),
+                "{protocol:?} {authority:?}"
+            );
+        }
+        assert!(Holding::new(&format!("protocol:{}", "a".repeat(300)), "node_policy").is_err());
+    }
+
+    #[test]
+    fn trusted_connector_joins_group_birth_not_just_numeric_pgid() {
+        let leader = lillux::ExactProcessIdentity {
+            boot_id: "fixture-boot".into(),
+            target_pid: 40,
+            target_start_time_ticks: 100,
+            group_leader_pid: 40,
+            group_leader_start_time_ticks: 100,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
+            group_basis: lillux::GroupBasis::ProcessGroup,
+        };
+        let worker = crate::process::execution_process_identity_from_lillux(leader, None).unwrap();
+        let peer = lillux::ExactProcessIdentity {
+            boot_id: "fixture-boot".into(),
+            target_pid: 41,
+            target_start_time_ticks: 110,
+            group_leader_pid: 40,
+            group_leader_start_time_ticks: 100,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
+            group_basis: lillux::GroupBasis::ProcessGroup,
+        };
+        require_trusted_peer_group(&worker, &peer).unwrap();
+        let mut reused_group = peer.clone();
+        reused_group.group_leader_start_time_ticks += 1;
+        assert!(require_trusted_peer_group(&worker, &reused_group).is_err());
+        let mut other_boot = peer.clone();
+        other_boot.boot_id = "different-boot".into();
+        assert!(require_trusted_peer_group(&worker, &other_boot).is_err());
+        let mut other_group = peer;
+        other_group.group_leader_pid = 39;
+        assert!(require_trusted_peer_group(&worker, &other_group).is_err());
+    }
+
+    #[test]
+    fn contained_worker_peer_is_keyed_on_boot_not_on_the_worker_group() {
+        let (boot, _) = lillux::process_control::current_host_generation().unwrap();
+        let mut worker: crate::process::ExecutionProcessIdentity =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                "boot_id": boot, "target_pid": 40, "target_start_time_ticks": 100,
+                "group_leader_pid": 39, "group_leader_start_time_ticks": 90, "pid_namespace": lillux::current_pid_namespace().unwrap(),
+                "process_scope": {
+                    "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
+                    "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+                    "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                        "init_pid": 40, "init_start_time_ticks": 100,
+                        "namespace": {"device": 4, "inode": 9}}
+                },
+                "resource_selections": [], "resource_operations": [],
+                "resource_settlement_authority": null, "resource_allocation_limit": null,
+                "resource_occupancy_start": null, "resource_occupancy_limit": null,
+                "resource_cleanup_allowance_ms": null
+            }))
+            .unwrap();
+        // A connector that called setsid: its own group and session.
+        let detached = lillux::ExactProcessIdentity {
+            boot_id: boot.clone(),
+            target_pid: 77,
+            target_start_time_ticks: 500,
+            group_leader_pid: 77,
+            group_leader_start_time_ticks: 500,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
+            group_basis: lillux::GroupBasis::ProcessGroup,
+        };
+        require_trusted_peer_group(&worker, &detached).unwrap();
+        // A process born before the Worker target cannot be a member.
+        let mut predates = detached.clone();
+        predates.target_start_time_ticks = 50;
+        assert!(require_trusted_peer_group(&worker, &predates).is_err());
+        // Another boot is still refused.
+        let mut other_boot = detached.clone();
+        other_boot.boot_id = "00000000-0000-0000-0000-000000000000".into();
+        assert!(require_trusted_peer_group(&worker, &other_boot).is_err());
+        // The same peer is refused for a Worker held only by its group.
+        worker.process_scope = None;
+        assert!(require_trusted_peer_group(&worker, &detached).is_err());
+    }
+
+    #[test]
+    fn peer_basis_must_match_what_holds_the_worker() {
+        let (boot, _) = lillux::process_control::current_host_generation().unwrap();
+        let trusted = crate::process::execution_process_identity_from_lillux(
+            lillux::ExactProcessIdentity {
+                boot_id: boot.clone(),
+                target_pid: 40,
+                target_start_time_ticks: 100,
+                group_leader_pid: 40,
+                group_leader_start_time_ticks: 100,
+                pid_namespace: lillux::current_pid_namespace().unwrap(),
+                group_basis: lillux::GroupBasis::ProcessGroup,
+            },
+            None,
+        )
+        .unwrap();
+        let mut contained = trusted.clone();
+        contained.process_scope = Some(
+            serde_json::from_value(serde_json::json!({
+                "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
+                "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+                "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                    "init_pid": 40, "init_start_time_ticks": 100,
+                    "namespace": {"device": 4, "inode": 9}}
+            }))
+            .unwrap(),
+        );
+        // Group-proved peers reach only Workers launched under the trusted
+        // process-group protocol; contained peers only Workers launched under
+        // the contained protocol. A group-proved peer can therefore never be
+        // retained against a contained Worker, so the historical containment
+        // branch is reachable only by contained admissions.
+        let held = contained.process_scope.clone().unwrap();
+        require_basis_matches_holder(PeerBasis::Group, &trusted).unwrap();
+        require_basis_matches_holder(PeerBasis::Contained(&held), &contained).unwrap();
+        assert!(require_basis_matches_holder(PeerBasis::Group, &contained).is_err());
+        assert!(require_basis_matches_holder(PeerBasis::Contained(&held), &trusted).is_err());
+        // A proof read against another containment is not this Worker's.
+        let mut other = held.clone();
+        other = serde_json::from_value({
+            let mut value = serde_json::to_value(&other).unwrap();
+            value["backend"]["init_pid"] = serde_json::json!(41);
+            value
+        })
+        .unwrap();
+        assert!(require_basis_matches_holder(PeerBasis::Contained(&other), &contained).is_err());
+    }
+}

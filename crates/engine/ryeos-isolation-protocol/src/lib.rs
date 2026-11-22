@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v12";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v16";
 /// Second PID-first status document. The adapter may publish this only after
 /// Lillux's child-owned pre-exec observation; the parent requires EOF after
 /// exactly one document before accepting it.
@@ -160,7 +160,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v12")]
+    #[serde(rename = "ryeos.isolation-adapter/v16")]
     Current,
 }
 
@@ -234,12 +234,20 @@ pub enum IsolationCapability {
     ProcessIsolatedPidNamespace,
     #[serde(rename = "process.target_pid_reporting")]
     ProcessTargetPidReporting,
+    /// Reports only the original namespace terminal occurrence. This does
+    /// not authorize driver, physical-resource or financial retirement.
+    #[serde(rename = "process.original_namespace_terminal_reporting")]
+    ProcessOriginalNamespaceTerminalReporting,
     #[serde(rename = "lifecycle.shared_process_group")]
     LifecycleSharedProcessGroup,
     #[serde(rename = "process.nested_sandbox")]
     ProcessNestedSandbox,
+    #[serde(rename = "process.target_limits")]
+    ProcessTargetLimits,
     #[serde(rename = "ipc.target_unix_stream")]
     IpcTargetUnixStream,
+    #[serde(rename = "ipc.target_sealed_payload")]
+    IpcTargetSealedPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -370,6 +378,7 @@ pub enum IsolationAuthorityPurpose {
     WorkspaceView,
     WorkspaceViewDescendant,
     TargetDuplexChannel,
+    TargetSealedPayload,
     CharacterDevice,
 }
 
@@ -517,6 +526,20 @@ pub struct IsolationTargetChannel {
     pub env_name: String,
 }
 
+/// One daemon-sealed secret payload delivered at a fixed target descriptor as
+/// an immutable in-memory file. The source authority is operational; the
+/// target descriptor and environment name are the complete admitted
+/// target-side contract. The target descriptor is unique across both this
+/// collection and the plan's target channels; the collection is target-fd
+/// sorted and every descriptor lies above stderr.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationTargetSealedPayload {
+    pub source: IsolationAuthorityId,
+    pub target_fd: u32,
+    pub env_name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationNetwork {
@@ -610,15 +633,48 @@ pub struct IsolationTarget {
     pub cwd: IsolationPath,
 }
 
+/// Restrictions installed only in the final native target. Pipe-output
+/// retention remains with the existing launch/drain owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationTargetLimits {
+    pub max_open_files: Option<u64>,
+    pub max_address_space_bytes: Option<u64>,
+    pub max_cpu_seconds: Option<u64>,
+    pub max_processes: Option<u64>,
+    pub deny_process_creation: bool,
+}
+
+impl IsolationTargetLimits {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        for (name, value) in [
+            ("max_open_files", self.max_open_files),
+            ("max_address_space_bytes", self.max_address_space_bytes),
+            ("max_cpu_seconds", self.max_cpu_seconds),
+            ("max_processes", self.max_processes),
+        ] {
+            if value == Some(0) || value == Some(u64::MAX) {
+                return Err(ProtocolValidationError::new(format!(
+                    "{name} must be positive and finite"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsolationPlan {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_limits: Option<IsolationTargetLimits>,
     pub target: IsolationTarget,
     pub mounts: Vec<IsolationMount>,
     pub fixed_parent_views: Vec<IsolationFixedParentView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_workspace: Option<IsolationProjectWorkspace>,
     pub target_channels: Vec<IsolationTargetChannel>,
+    pub target_sealed_payloads: Vec<IsolationTargetSealedPayload>,
     pub environment: IsolationEnvironment,
     pub network: IsolationNetwork,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -639,6 +695,9 @@ impl IsolationPlan {
         &self,
         authorities: &[IsolationAuthority],
     ) -> Result<BTreeSet<IsolationCapability>, ProtocolValidationError> {
+        if let Some(limits) = self.target_limits {
+            limits.validate()?;
+        }
         if let Some(ingress) = &self.loopback_ingress {
             ingress.validate()?;
             if self.network != IsolationNetwork::Isolated {
@@ -1014,6 +1073,75 @@ impl IsolationPlan {
             }
             used_authorities.insert(channel.source.clone());
         }
+        if self.target_sealed_payloads.len() > MAX_AUTHORITIES {
+            return Err(ProtocolValidationError::new(
+                "too many target sealed payloads",
+            ));
+        }
+        let mut previous_payload_fd = None;
+        for payload in &self.target_sealed_payloads {
+            if authority_ids.get(&payload.source)
+                != Some(&IsolationAuthorityPurpose::TargetSealedPayload)
+            {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload authority is missing or has the wrong purpose",
+                ));
+            }
+            if payload.target_fd <= 2 {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload cannot replace standard descriptors",
+                ));
+            }
+            if previous_payload_fd.is_some_and(|previous| previous >= payload.target_fd)
+                || self
+                    .target_channels
+                    .iter()
+                    .any(|channel| channel.target_fd == payload.target_fd)
+            {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payloads must be sorted with target descriptors unique across channels",
+                ));
+            }
+            previous_payload_fd = Some(payload.target_fd);
+            if !channel_sources.insert(payload.source.clone()) {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload source authority is duplicated",
+                ));
+            }
+            validate_environment_name(&payload.env_name)?;
+            if !channel_environment.insert(payload.env_name.as_str()) {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload environment name is duplicated",
+                ));
+            }
+            let expected_target_fd = payload.target_fd.to_string();
+            if self
+                .environment
+                .values
+                .get(&payload.env_name)
+                .map(String::as_str)
+                != Some(expected_target_fd.as_str())
+            {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload environment must name its exact target descriptor",
+                ));
+            }
+            if self
+                .mounts
+                .iter()
+                .any(|mount| mount.source == payload.source)
+                || self.target.executable == payload.source
+                || self
+                    .project_workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.view == payload.source)
+            {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload authority cannot supply filesystem or executable authority",
+                ));
+            }
+            used_authorities.insert(payload.source.clone());
+        }
         if target_mounts != 1 {
             return Err(ProtocolValidationError::new(
                 "target executable authority must have exactly one mount",
@@ -1067,6 +1195,9 @@ impl IsolationPlan {
         if !self.target_channels.is_empty() {
             capabilities.insert(IsolationCapability::IpcTargetUnixStream);
         }
+        if !self.target_sealed_payloads.is_empty() {
+            capabilities.insert(IsolationCapability::IpcTargetSealedPayload);
+        }
         if self.private_tmp {
             capabilities.insert(IsolationCapability::FilesystemPrivateTmp);
         }
@@ -1086,6 +1217,9 @@ impl IsolationPlan {
         });
         if self.shared_process_group {
             capabilities.insert(IsolationCapability::LifecycleSharedProcessGroup);
+        }
+        if self.target_limits.is_some() {
+            capabilities.insert(IsolationCapability::ProcessTargetLimits);
         }
         if self.nested_sandbox {
             capabilities.insert(IsolationCapability::ProcessNestedSandbox);
@@ -1158,6 +1292,15 @@ impl InspectedArtifact {
     }
 }
 
+/// Distinct one-use roles for the original sealed local window and retained
+/// actual clock namespace. Coordinates do not authenticate funding or release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginalNamespaceOccupancyDescriptorRoles {
+    pub window_fd: u32,
+    pub clock_namespace_fd: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterLaunchRequest {
@@ -1174,6 +1317,14 @@ pub struct AdapterLaunchRequest {
     /// listener. Present iff the plan requests isolated loopback ingress.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub loopback_transfer_fd: Option<u32>,
+    /// Explicit null is required for ordinary launches. A selected original
+    /// funded path must provide BOTH roles; absence is never a fallback.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub original_namespace_occupancy: Option<OriginalNamespaceOccupancyDescriptorRoles>,
+    /// Protected adapter-only terminal publication end. Mandatory explicit null
+    /// for ordinary launches; selected original occupancy requires this role.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub native_terminal_fd: Option<u32>,
     pub lifecycle: AdapterLaunchLifecycle,
 }
 
@@ -1337,13 +1488,44 @@ impl WorkspaceViewTransferReceipt {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkspaceMutationKind {
     UpsertRegular,
     UpsertSymlink,
     DeletePath,
     EnsureDirectory,
     OpaqueDirectory,
+    /// An upper-layer entry the protocol cannot carry as content. It names
+    /// only its path and why; RyeOS skips it when its ignore policy excludes
+    /// the path and refuses the seal when the path is included. The adapter
+    /// never decides that, because the ignore policy is not its to apply.
+    Unrepresentable {
+        reason: WorkspaceUnrepresentableReason,
+    },
+}
+
+/// Why an observed workspace entry has no protocol representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceUnrepresentableReason {
+    /// A symlink whose target is absolute, empty, not UTF-8 or contains NUL:
+    /// it is not portable relative content.
+    UnportableSymlinkTarget,
+    /// A socket, FIFO or device other than an overlay whiteout.
+    UnsupportedEntryType,
+    /// A name that is not UTF-8. The path carries the name with each invalid
+    /// byte replaced by U+FFFD, and the entry is never descended into.
+    NonUtf8Name,
+}
+
+impl WorkspaceUnrepresentableReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnportableSymlinkTarget => "unportable_symlink_target",
+            Self::UnsupportedEntryType => "unsupported_entry_type",
+            Self::NonUtf8Name => "non_utf8_name",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1553,6 +1735,7 @@ impl AdapterWorkspaceResponse {
                 WorkspaceMutationKind::UpsertRegular
                     | WorkspaceMutationKind::UpsertSymlink
                     | WorkspaceMutationKind::DeletePath
+                    | WorkspaceMutationKind::Unrepresentable { .. }
             ) {
                 non_directory_paths.insert(mutation.path.clone());
             }
@@ -1591,7 +1774,7 @@ impl AdapterWorkspaceResponse {
 
 impl AdapterLaunchRequest {
     pub fn validate(&self) -> Result<BTreeSet<IsolationCapability>, ProtocolValidationError> {
-        let required = self.plan.validate(&self.authorities)?;
+        let mut required = self.plan.validate(&self.authorities)?;
         if self.loopback_transfer_fd.is_some() != self.plan.loopback_ingress.is_some() {
             return Err(ProtocolValidationError::new(
                 "loopback ingress requires exactly one transfer endpoint",
@@ -1606,6 +1789,24 @@ impl AdapterLaunchRequest {
             return Err(ProtocolValidationError::new(
                 "loopback ingress requires a held attachment launch",
             ));
+        }
+        if self.original_namespace_occupancy.is_some()
+            && (!matches!(
+                self.lifecycle,
+                AdapterLaunchLifecycle::AwaitAttachment { .. }
+            ) || self.loopback_transfer_fd.is_some())
+        {
+            return Err(ProtocolValidationError::new(
+                "original occupancy requires the existing held-only lifecycle without an unrelated loopback transfer",
+            ));
+        }
+        if self.native_terminal_fd.is_some() != self.original_namespace_occupancy.is_some() {
+            return Err(ProtocolValidationError::new(
+                "native terminal writer and original occupancy must be selected together",
+            ));
+        }
+        if self.original_namespace_occupancy.is_some() {
+            required.insert(IsolationCapability::ProcessOriginalNamespaceTerminalReporting);
         }
         if self.status_fd <= 2 {
             return Err(ProtocolValidationError::new(
@@ -1641,6 +1842,25 @@ impl AdapterLaunchRequest {
                 ));
             }
         }
+        if let Some(roles) = self.original_namespace_occupancy {
+            for descriptor in [roles.window_fd, roles.clock_namespace_fd] {
+                if descriptor <= 2
+                    || descriptor > i32::MAX as u32
+                    || !descriptors.insert(descriptor)
+                {
+                    return Err(ProtocolValidationError::new(
+                        "original occupancy descriptor overlaps stdio or another protocol role",
+                    ));
+                }
+            }
+        }
+        if let Some(descriptor) = self.native_terminal_fd
+            && (descriptor <= 2 || descriptor > i32::MAX as u32 || !descriptors.insert(descriptor))
+        {
+            return Err(ProtocolValidationError::new(
+                "native terminal descriptor overlaps stdio or another protocol role",
+            ));
+        }
         for authority in &self.authorities {
             if !descriptors.insert(authority.inherited_fd) {
                 return Err(ProtocolValidationError::new(
@@ -1665,6 +1885,23 @@ impl AdapterLaunchRequest {
             {
                 return Err(ProtocolValidationError::new(
                     "target channel destination aliases an inherited protocol descriptor",
+                ));
+            }
+        }
+        for payload in &self.plan.target_sealed_payloads {
+            let source_fd = self
+                .authorities
+                .iter()
+                .find(|authority| authority.id == payload.source)
+                .map(|authority| authority.inherited_fd)
+                .ok_or_else(|| {
+                    ProtocolValidationError::new(
+                        "target sealed payload source disappeared after plan validation",
+                    )
+                })?;
+            if payload.target_fd != source_fd && descriptors.contains(&payload.target_fd) {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload destination aliases an inherited protocol descriptor",
                 ));
             }
         }
@@ -1868,6 +2105,7 @@ mod tests {
         let writable = IsolationAuthorityId::new("workspace").unwrap();
         (
             IsolationPlan {
+                target_limits: None,
                 target: IsolationTarget {
                     executable: executable.clone(),
                     argv0: "python".to_string(),
@@ -1897,6 +2135,7 @@ mod tests {
                 fixed_parent_views: Vec::new(),
                 project_workspace: None,
                 target_channels: Vec::new(),
+                target_sealed_payloads: Vec::new(),
                 environment: IsolationEnvironment {
                     values: BTreeMap::from([("PATH".to_string(), "/bin".to_string())]),
                 },
@@ -2295,8 +2534,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v12","protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v16","protocol":"ryeos.isolation-adapter/v16","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v16","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -2305,7 +2544,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v16","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -2313,7 +2552,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v16","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -2375,6 +2614,31 @@ mod tests {
                 max_depth: 4,
             },
         }
+    }
+
+    #[test]
+    fn target_limits_require_explicit_presence_closed_values_and_capability() {
+        let (mut plan, authorities) = complete_plan();
+        let mut missing = serde_json::to_value(&plan).unwrap();
+        missing.as_object_mut().unwrap().remove("target_limits");
+        assert!(serde_json::from_value::<IsolationPlan>(missing).is_err());
+        plan.target_limits = Some(IsolationTargetLimits {
+            max_open_files: Some(64),
+            max_address_space_bytes: Some(134217728),
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+        });
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::ProcessTargetLimits)
+        );
+        let mut unknown = serde_json::to_value(&plan).unwrap();
+        unknown["target_limits"]["max_stdout_bytes"] = serde_json::json!(32768);
+        assert!(serde_json::from_value::<IsolationPlan>(unknown).is_err());
+        plan.target_limits.as_mut().unwrap().max_cpu_seconds = Some(0);
+        assert!(plan.validate(&authorities).is_err());
     }
 
     #[test]
@@ -2691,6 +2955,78 @@ mod tests {
     }
 
     #[test]
+    fn target_sealed_payload_requires_exact_role_environment_and_unique_descriptor() {
+        let (mut plan, mut authorities) = complete_plan();
+        let source = IsolationAuthorityId::new("sealed-payload").unwrap();
+        plan.target_sealed_payloads = vec![IsolationTargetSealedPayload {
+            source: source.clone(),
+            target_fd: 5,
+            env_name: "RYEOS_SESSION_SECRET_FD".to_owned(),
+        }];
+        plan.environment
+            .values
+            .insert("RYEOS_SESSION_SECRET_FD".to_owned(), "5".to_owned());
+        authorities.push(IsolationAuthority {
+            id: source.clone(),
+            inherited_fd: 6,
+            purpose: IsolationAuthorityPurpose::TargetSealedPayload,
+        });
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::IpcTargetSealedPayload)
+        );
+
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("target_sealed_payloads");
+        assert!(serde_json::from_value::<IsolationPlan>(value).is_err());
+
+        let mut wrong_purpose = authorities.clone();
+        wrong_purpose.last_mut().unwrap().purpose = IsolationAuthorityPurpose::TargetDuplexChannel;
+        assert!(plan.validate(&wrong_purpose).is_err());
+
+        let mut standard = plan.clone();
+        standard.target_sealed_payloads[0].target_fd = 2;
+        standard
+            .environment
+            .values
+            .insert("RYEOS_SESSION_SECRET_FD".to_owned(), "2".to_owned());
+        assert!(standard.validate(&authorities).is_err());
+
+        let mut wrong_environment = plan.clone();
+        wrong_environment
+            .environment
+            .values
+            .insert("RYEOS_SESSION_SECRET_FD".to_owned(), "6".to_owned());
+        assert!(wrong_environment.validate(&authorities).is_err());
+
+        let mut colliding = plan.clone();
+        colliding.target_channels = vec![IsolationTargetChannel {
+            source: IsolationAuthorityId::new("session-channel").unwrap(),
+            target_fd: 5,
+            env_name: "RYEOS_SESSION_FD".to_owned(),
+        }];
+        colliding
+            .environment
+            .values
+            .insert("RYEOS_SESSION_FD".to_owned(), "5".to_owned());
+        let mut with_channel = authorities.clone();
+        with_channel.push(IsolationAuthority {
+            id: IsolationAuthorityId::new("session-channel").unwrap(),
+            inherited_fd: 7,
+            purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+        });
+        assert!(colliding.validate(&with_channel).is_err());
+
+        let mut filesystem = plan.clone();
+        filesystem.mounts[1].source = source;
+        assert!(filesystem.validate(&authorities).is_err());
+    }
+
+    #[test]
     fn launch_request_rejects_descriptor_reuse_across_roles() {
         let (plan, authorities) = complete_plan();
         let request = AdapterLaunchRequest {
@@ -2701,6 +3037,8 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 7,
                 release_keepalive_fd: 8,
@@ -2719,6 +3057,8 @@ mod tests {
             adapter_fd: 7,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         assert!(
@@ -2741,6 +3081,8 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         request.validate().unwrap();
@@ -2765,6 +3107,8 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: Some(11),
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
                 release_keepalive_fd: 9,
@@ -2821,6 +3165,8 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         }
         .validate()
@@ -2838,6 +3184,8 @@ mod tests {
             adapter_fd: 8,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         let value = serde_json::to_value(&run).unwrap();
@@ -2852,6 +3200,8 @@ mod tests {
             adapter_fd: 10,
             status_fd: 6,
             loopback_transfer_fd: None,
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
                 release_keepalive_fd: 9,
@@ -3028,7 +3378,7 @@ mod tests {
         let request = workspace_request(WorkspaceLifecycleOperation::Create);
         request.validate().unwrap();
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v12");
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v16");
         let purposes = encoded["authorities"]
             .as_array()
             .unwrap()
@@ -3166,6 +3516,89 @@ mod tests {
         assert!(regular.validate().is_err());
         regular.target = None;
         regular.validate().unwrap();
+    }
+
+    #[test]
+    fn unrepresentable_mutation_carries_no_content_fields() {
+        for reason in [
+            WorkspaceUnrepresentableReason::UnportableSymlinkTarget,
+            WorkspaceUnrepresentableReason::UnsupportedEntryType,
+            WorkspaceUnrepresentableReason::NonUtf8Name,
+        ] {
+            let original = WorkspaceMutation {
+                path: "cache/entry".into(),
+                kind: WorkspaceMutationKind::Unrepresentable { reason },
+                normalized_mode: None,
+                size: None,
+                content_hash: None,
+                target: None,
+            };
+            original.validate().unwrap();
+            let wire = serde_json::to_value(&original).unwrap();
+            assert_eq!(
+                wire["kind"],
+                serde_json::json!({"unrepresentable": {"reason": reason.as_str()}})
+            );
+            assert!(wire["target"].is_null());
+            assert_eq!(
+                serde_json::from_value::<WorkspaceMutation>(wire.clone()).unwrap(),
+                original
+            );
+            for (field, value) in [
+                ("normalized_mode", serde_json::json!(420)),
+                ("size", serde_json::json!(1)),
+                ("content_hash", serde_json::json!("a".repeat(64))),
+                ("target", serde_json::json!("/usr/bin/python3")),
+            ] {
+                let mut changed = wire.clone();
+                changed[field] = value;
+                assert!(
+                    serde_json::from_value::<WorkspaceMutation>(changed)
+                        .unwrap()
+                        .validate()
+                        .is_err(),
+                    "{field} on an unrepresentable entry"
+                );
+            }
+            let mut unknown_reason = wire.clone();
+            unknown_reason["kind"]["unrepresentable"]["reason"] = serde_json::json!("hard_link");
+            assert!(serde_json::from_value::<WorkspaceMutation>(unknown_reason).is_err());
+            let mut extra = wire.clone();
+            extra["kind"]["unrepresentable"]["target"] = serde_json::json!("x");
+            assert!(serde_json::from_value::<WorkspaceMutation>(extra).is_err());
+            let mut bare = wire;
+            bare["kind"] = serde_json::json!("unrepresentable");
+            assert!(serde_json::from_value::<WorkspaceMutation>(bare).is_err());
+        }
+    }
+
+    #[test]
+    fn workspace_mutations_cannot_descend_through_an_unrepresentable_entry() {
+        let request = workspace_request(WorkspaceLifecycleOperation::FreezeAndDiff);
+        let mut response = workspace_response(&request);
+        response.mutations = vec![
+            WorkspaceMutation {
+                path: "cache/\u{fffd}dir".into(),
+                kind: WorkspaceMutationKind::Unrepresentable {
+                    reason: WorkspaceUnrepresentableReason::NonUtf8Name,
+                },
+                normalized_mode: None,
+                size: None,
+                content_hash: None,
+                target: None,
+            },
+            WorkspaceMutation {
+                path: "cache/\u{fffd}dir/child".into(),
+                kind: WorkspaceMutationKind::EnsureDirectory,
+                normalized_mode: None,
+                size: None,
+                content_hash: None,
+                target: None,
+            },
+        ];
+        assert!(response.validate_for(&request).is_err());
+        response.mutations.pop();
+        response.validate_for(&request).unwrap();
     }
 
     #[test]
@@ -3315,5 +3748,190 @@ mod tests {
         let mut encoded = serde_json::to_value(receipt).unwrap();
         encoded["extra"] = serde_json::json!(true);
         assert!(serde_json::from_value::<LoopbackListenerTransferReceipt>(encoded).is_err());
+    }
+    fn original_occupancy_request() -> AdapterLaunchRequest {
+        let (plan, authorities) = complete_plan();
+        AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            plan,
+            authorities,
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            adapter_fd: 10,
+            status_fd: 6,
+            loopback_transfer_fd: None,
+            original_namespace_occupancy: Some(OriginalNamespaceOccupancyDescriptorRoles {
+                window_fd: 101,
+                clock_namespace_fd: 102,
+            }),
+            native_terminal_fd: Some(103),
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 8,
+                release_keepalive_fd: 9,
+            },
+        }
+    }
+
+    #[test]
+    fn v14_native_terminal_role_is_mandatory_nullable_and_rejects_old_or_duplicate_wire() {
+        let selected = original_occupancy_request();
+        let value = serde_json::to_value(&selected).unwrap();
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("native_terminal_fd");
+        assert!(
+            from_json_slice_strict::<AdapterLaunchRequest>(&serde_json::to_vec(&missing).unwrap())
+                .is_err()
+        );
+        for old in [
+            "ryeos.isolation-adapter/v12",
+            "ryeos.isolation-adapter/v13",
+            "ryeos.isolation-adapter/v14",
+            "ryeos.isolation-adapter/v15",
+        ] {
+            let mut altered = value.clone();
+            altered["protocol"] = serde_json::json!(old);
+            assert!(
+                from_json_slice_strict::<AdapterLaunchRequest>(
+                    &serde_json::to_vec(&altered).unwrap()
+                )
+                .is_err()
+            );
+        }
+        let text = serde_json::to_string(&selected).unwrap().replacen(
+            '{',
+            r#"{"native_terminal_fd":null,"#,
+            1,
+        );
+        assert!(from_json_str_strict::<AdapterLaunchRequest>(&text).is_err());
+        let mut unknown = value;
+        unknown["native_terminal_writer"] = serde_json::json!(103);
+        assert!(
+            from_json_slice_strict::<AdapterLaunchRequest>(&serde_json::to_vec(&unknown).unwrap())
+                .is_err()
+        );
+        let mut ordinary = selected;
+        ordinary.original_namespace_occupancy = None;
+        ordinary.native_terminal_fd = None;
+        let ordinary: AdapterLaunchRequest =
+            from_json_slice_strict(&serde_json::to_vec(&ordinary).unwrap()).unwrap();
+        ordinary.validate().unwrap();
+        assert!(serde_json::to_value(ordinary).unwrap()["native_terminal_fd"].is_null());
+    }
+
+    #[test]
+    fn v14_native_terminal_pairs_original_roles_and_rejects_all_descriptor_collisions() {
+        let selected = original_occupancy_request();
+        let mut absent = selected.clone();
+        absent.native_terminal_fd = None;
+        assert!(absent.validate().is_err());
+        let mut no_original = selected.clone();
+        no_original.original_namespace_occupancy = None;
+        assert!(no_original.validate().is_err());
+        let mut collisions = vec![0, 1, 2, 6, 7, 8, 9, 10, 101, 102, u32::MAX];
+        collisions.extend(
+            selected
+                .authorities
+                .iter()
+                .map(|authority| authority.inherited_fd),
+        );
+        for descriptor in collisions {
+            let mut altered = selected.clone();
+            altered.native_terminal_fd = Some(descriptor);
+            assert!(
+                altered.validate().is_err(),
+                "terminal descriptor {descriptor} admitted"
+            );
+        }
+        let mut run = selected;
+        run.lifecycle = AdapterLaunchLifecycle::Run;
+        assert!(run.validate().is_err());
+    }
+
+    #[test]
+    fn original_terminal_reporter_is_required_only_for_paired_original_launch() {
+        let mut request = original_occupancy_request();
+        let capability = IsolationCapability::ProcessOriginalNamespaceTerminalReporting;
+        assert!(request.validate().unwrap().contains(&capability));
+        assert_eq!(
+            serde_json::to_string(&capability).unwrap(),
+            "\"process.original_namespace_terminal_reporting\""
+        );
+        request.original_namespace_occupancy = None;
+        assert!(request.validate().is_err());
+        request.native_terminal_fd = None;
+        assert!(!request.validate().unwrap().contains(&capability));
+    }
+
+    #[test]
+    fn v14_original_occupancy_requires_explicit_complete_distinct_held_roles() {
+        let request = original_occupancy_request();
+        request.validate().unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["protocol"], "ryeos.isolation-adapter/v16");
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("original_namespace_occupancy");
+        assert!(serde_json::from_value::<AdapterLaunchRequest>(missing).is_err());
+        for role in ["window_fd", "clock_namespace_fd"] {
+            let mut missing = value.clone();
+            missing["original_namespace_occupancy"]
+                .as_object_mut()
+                .unwrap()
+                .remove(role);
+            assert!(serde_json::from_value::<AdapterLaunchRequest>(missing).is_err());
+        }
+        let mut old = value.clone();
+        old["protocol"] = serde_json::json!("ryeos.isolation-adapter/v12");
+        assert!(serde_json::from_value::<AdapterLaunchRequest>(old).is_err());
+        let mut ordinary = request.clone();
+        ordinary.original_namespace_occupancy = None;
+        ordinary.native_terminal_fd = None;
+        ordinary.validate().unwrap();
+        let ordinary_value = serde_json::to_value(&ordinary).unwrap();
+        assert!(
+            ordinary_value
+                .get("original_namespace_occupancy")
+                .unwrap()
+                .is_null()
+        );
+        for role in ["window_fd", "clock_namespace_fd"] {
+            for bad in [0, 1, 2, 6, 7, 8, 9, 10, 101, 102, 103, u32::MAX] {
+                let mut altered = value.clone();
+                altered["original_namespace_occupancy"][role] = serde_json::json!(bad);
+                let parsed: AdapterLaunchRequest = serde_json::from_value(altered).unwrap();
+                // The original unaltered coordinate is valid; every actual
+                // collision/stdio alias refuses before any adapter fork.
+                if (role == "window_fd" && bad == 101)
+                    || (role == "clock_namespace_fd" && bad == 102)
+                {
+                    parsed.validate().unwrap();
+                } else {
+                    assert!(parsed.validate().is_err());
+                }
+            }
+        }
+        for role in ["window_fd", "clock_namespace_fd"] {
+            let mut altered = value.clone();
+            altered["original_namespace_occupancy"][role] =
+                serde_json::json!(request.authorities[0].inherited_fd);
+            let parsed: AdapterLaunchRequest = serde_json::from_value(altered).unwrap();
+            assert!(parsed.validate().is_err());
+        }
+        let mut run = request.clone();
+        run.lifecycle = AdapterLaunchLifecycle::Run;
+        assert!(run.validate().is_err());
+        let mut unrelated = request.clone();
+        unrelated.loopback_transfer_fd = Some(103);
+        assert!(unrelated.validate().is_err());
+        let text = serde_json::to_string(&request).unwrap().replacen(
+            '{',
+            r#"{"original_namespace_occupancy":null,"#,
+            1,
+        );
+        assert!(from_json_str_strict::<AdapterLaunchRequest>(&text).is_err());
     }
 }

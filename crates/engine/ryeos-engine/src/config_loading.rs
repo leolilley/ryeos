@@ -17,7 +17,7 @@ use crate::trust::{
 /// Maximum bytes accepted for one config source, independent of whether it is
 /// observed live or read from an admitted content authority.
 const MAX_CONFIG_SOURCE_BYTES: u64 = 1024 * 1024;
-const MAX_BUNDLE_MANIFEST_BYTES: u64 = 256 * 1024;
+pub(crate) const MAX_BUNDLE_MANIFEST_BYTES: u64 = 256 * 1024;
 
 /// One exact, node-trusted Config from an admitted project generation. It is
 /// deliberately not a merged Config: source-bundle, node, and project overlay
@@ -141,7 +141,7 @@ fn read_signed_project_yaml(
         .map_err(|error| invalid(format!("signed project source is not UTF-8: {error}")))?;
     let (body, canonical_header) =
         lillux::signature::strip_canonical_signature_with_envelope(&raw, "#", None, false)
-            .map_err(|error| invalid(format!("noncanonical signature envelope: {error}")))?;
+            .map_err(|error| invalid(format!("noncanonical signature envelope: {error:#}")))?;
     if canonical_header.is_none() {
         return Err(invalid(
             "project source requires a trusted signature".into(),
@@ -154,7 +154,15 @@ fn read_signed_project_yaml(
     };
     let header = parse_signature_header(&raw, &envelope)
         .ok_or_else(|| invalid("project source has no valid signature envelope".into()))?;
-    let (trust_class, _) = verify_item_signature(&raw, &header, &envelope, trust)?;
+    // A project tree can carry a publisher's signed bundle source; the
+    // signature is judged as the bundle-space authority it claims to be.
+    let (trust_class, _) = verify_item_signature(
+        &raw,
+        &header,
+        &envelope,
+        trust,
+        &crate::trust::SignerContext::bundle("config"),
+    )?;
     if trust_class != TrustClass::Trusted {
         return Err(invalid("project source signer is not node-trusted".into()));
     }
@@ -299,6 +307,32 @@ pub fn load_and_verify_config_file_with_hash(
     load_and_verify_config_file_with_policy(path, ctx, false)
 }
 
+/// Where a config layer lives, for judging its signer's scope.
+fn config_signer_context<'a>(
+    path: &Path,
+    ctx: &ConfigLoadContext<'a>,
+) -> crate::trust::SignerContext<'a> {
+    let space = ctx
+        .roots
+        .ordered
+        .iter()
+        .find(|root| path.starts_with(&root.ai_root))
+        .map(|root| root.space)
+        .or_else(|| {
+            ctx.project_authority
+                .filter(|(project_root, _)| path.starts_with(project_root))
+                .map(|_| crate::contracts::ItemSpace::Project)
+        })
+        .unwrap_or(crate::contracts::ItemSpace::Node);
+    let project_root = ctx
+        .roots
+        .logical_project_root
+        .as_deref()
+        .or_else(|| ctx.project_authority.map(|(root, _)| root))
+        .or_else(|| ctx.roots.project_root());
+    crate::trust::SignerContext::new(space, "config", project_root)
+}
+
 fn load_and_verify_config_file_with_policy(
     path: &Path,
     ctx: &ConfigLoadContext<'_>,
@@ -327,7 +361,7 @@ fn load_and_verify_config_file_with_policy(
             lillux::read_regular_file_bounded_no_follow(path, MAX_CONFIG_SOURCE_BYTES).map_err(
                 |e| EngineError::InvalidRuntimeConfig {
                     path: path.display().to_string(),
-                    reason: format!("could not read config file: {e}"),
+                    reason: format!("could not read config file: {e:#}"),
                 },
             )?,
         )
@@ -380,7 +414,13 @@ fn load_and_verify_config_file_with_policy(
             // Hash compare happens inside the verify call; a mismatch
             // surfaces as the hard ContentHashMismatch arm below while
             // other trust failures only warn (allow_unsigned policy).
-            match verify_item_signature_with_hash(&recomputed, &header, ctx.trust_store) {
+            let signer_context = config_signer_context(path, ctx);
+            match verify_item_signature_with_hash(
+                &recomputed,
+                &header,
+                ctx.trust_store,
+                &signer_context,
+            ) {
                 Ok((crate::contracts::TrustClass::Trusted, _fp)) => tracing::debug!(
                     config_path = %path.display(),
                     "config file signature verified"
@@ -584,7 +624,7 @@ mod strict_project_bundle_tests {
         let project = fixture.path().join("project");
         fs::create_dir_all(&project).unwrap();
         let publisher = key(44);
-        let node_trust = trust(&[publisher.clone()]);
+        let node_trust = trust(std::slice::from_ref(&publisher));
         write(
             &installed,
             ".ai/manifest.yaml",

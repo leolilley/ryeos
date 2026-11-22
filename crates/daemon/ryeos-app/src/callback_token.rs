@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::execution_provenance::ExecutionProvenance;
-use ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose;
+use ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose;
 
 /// Protected root intent for one daemon-owned producer. This is a live bearer
 /// projection of the sealed qualification purpose, not permission to launch
@@ -15,7 +15,7 @@ use ryeos_state::external_content::products::qualification::ProductQualification
 /// recheck the durable owner and signed recipe before its irreversible cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedScopedProducerGrant {
-    pub purpose: ProductQualificationLaunchPurpose,
+    pub purpose: QualificationLaunchPurpose,
     pub root_thread_id: String,
     pub launch_owner: String,
     /// Node isolation class captured before this root may launch a producer.
@@ -35,6 +35,38 @@ impl AdmittedScopedProducerGrant {
             || self.isolation_class.backend.is_none()
         {
             bail!("scoped producer grant has no available enforced isolation class");
+        }
+        Ok(())
+    }
+}
+
+/// Sealed remote-consumer root authority, not a local isolation promise.
+/// Launcher construction must come from the admitted capsule; request data
+/// cannot manufacture this non-serializable bearer projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedRemoteConsumerGrant {
+    pub purpose: QualificationLaunchPurpose,
+    pub root_thread_id: String,
+    pub launch_owner: String,
+    pub admitted_capsule_hash: String,
+    pub root_raw_content_digest: String,
+}
+
+impl AdmittedRemoteConsumerGrant {
+    pub fn validate(&self) -> Result<()> {
+        self.purpose.validate()?;
+        ryeos_runtime::validate_runtime_thread_id(&self.root_thread_id)
+            .map_err(anyhow::Error::msg)?;
+        let owner: crate::runtime_db::LaunchOwner = serde_json::from_str(&self.launch_owner)?;
+        if owner.thread_id != self.root_thread_id
+            || owner.monotonic_launch_epoch == 0
+            || owner.unpredictable_nonce.is_empty()
+            || owner.daemon_generation_id != crate::runtime_db::daemon_generation_id()
+            || !lillux::valid_hash(&self.admitted_capsule_hash)
+            || !lillux::valid_hash(&self.root_raw_content_digest)
+            || self.purpose.remote_verifier_sources.is_empty()
+        {
+            bail!("remote consumer grant differs from its exact live root authority");
         }
         Ok(())
     }
@@ -93,6 +125,33 @@ impl CallbackRuntimeMethodSurface {
             "runtime.scoped_child_close_input".into(),
         ])
         .expect("fixed qualification callback surface is canonical")
+    }
+
+    /// Finite remote-consumer protocol, distinct from local process authority.
+    /// This surface alone grants nothing: the launcher and each handler must
+    /// join the actual verifier root, sealed purpose and retained occurrence.
+    pub fn qualification_remote_consumer() -> Self {
+        Self::exact(vec![
+            "runtime.consumer_verification_inputs".into(),
+            "runtime.consumer_verification_start".into(),
+            "runtime.consumer_verification_observe".into(),
+            "runtime.consumer_verification_settle".into(),
+        ])
+        .expect("fixed remote qualification callback surface is canonical")
+    }
+
+    /// The closed surface the daemon issues for one qualification callback
+    /// authority. A protocol that declares itself captured-compatible names
+    /// this surface by digest; admission compares against this function, never
+    /// against anything the protocol or tool supplies.
+    pub fn for_qualification_authority(
+        authority: ryeos_engine::protocols::QualificationCallbackAuthority,
+    ) -> Self {
+        use ryeos_engine::protocols::QualificationCallbackAuthority;
+        match authority {
+            QualificationCallbackAuthority::ScopedProducer => Self::qualification_scoped_producer(),
+            QualificationCallbackAuthority::RemoteConsumer => Self::qualification_remote_consumer(),
+        }
     }
 
     pub fn exact(mut methods: Vec<String>) -> Result<Self> {
@@ -230,7 +289,8 @@ impl AdmittedWorkloadClientGrant {
                 .owner_principal
                 .strip_prefix("fp:")
                 .is_none_or(|fingerprint| !lillux::valid_hash(fingerprint))
-            || crate::identity::validate_canonical_site_id(&self.origin_site_id).is_err()
+            || ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id)
+                .is_err()
             || self.worker_instance_id.is_empty()
             || self.worker_instance_id.len() > 256
             || self.worker_boot_epoch == 0
@@ -483,6 +543,8 @@ pub struct CallbackCapability {
     /// Absent on every ordinary Tool and managed runtime. Bound at most once,
     /// before a protected verifier's callback token is exposed.
     pub scoped_producer_grant: Option<AdmittedScopedProducerGrant>,
+    /// Distinct remote product edge; carries no enforced local scope claim.
+    pub remote_consumer_grant: Option<AdmittedRemoteConsumerGrant>,
 }
 
 impl CallbackCapability {
@@ -502,13 +564,70 @@ impl CallbackCapability {
     }
 }
 
+/// Original transport custody only. These strings confer no selected admission.
+/// No Clone, Debug or serialization can copy bearer custody into evidence.
+pub struct DedicatedWorkerCredentialTransport {
+    callback: String,
+    thread_auth: String,
+}
+
+impl DedicatedWorkerCredentialTransport {
+    pub fn from_transport(callback: String, thread_auth: String) -> Result<Self> {
+        anyhow::ensure!(
+            !callback.is_empty() && !thread_auth.is_empty(),
+            "dedicated worker requires both original transport credentials"
+        );
+        Ok(Self {
+            callback,
+            thread_auth,
+        })
+    }
+
+    /// Re-check, read-only, that both original bearer credentials are still
+    /// live in their stores and name `thread_id`. Neither string leaves the
+    /// transport.
+    pub fn require_current_for_thread(
+        &self,
+        callbacks: &CallbackCapabilityStore,
+        thread_auth: &ThreadAuthStore,
+        thread_id: &str,
+    ) -> Result<()> {
+        callbacks.validate_token_and_thread(&self.callback, thread_id)?;
+        thread_auth.validate(&self.thread_auth, thread_id)?;
+        Ok(())
+    }
+}
+
+// Credential records are stored behind a transparent wrapper so a record is
+// removed, pruned or expired exactly like its projection.
+struct CredentialRecord<T> {
+    projection: T,
+}
+
+impl<T> CredentialRecord<T> {
+    fn new(projection: T) -> Self {
+        Self { projection }
+    }
+}
+impl<T> std::ops::Deref for CredentialRecord<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.projection
+    }
+}
+impl<T> std::ops::DerefMut for CredentialRecord<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.projection
+    }
+}
+
 pub struct CallbackCapabilityStore {
     // Keep one callback-capability owner. A long-lived worker may receive a
     // freshly minted pair for each attached boot, but its bearer still uses
     // this same validation/revocation path. A second store would split method,
     // project, principal, expiry, and detach authority across competing
     // implementations.
-    capabilities: Mutex<HashMap<String, CallbackCapability>>,
+    capabilities: Mutex<HashMap<String, CredentialRecord<CallbackCapability>>>,
 }
 
 impl Default for CallbackCapabilityStore {
@@ -550,7 +669,6 @@ impl CallbackCapabilityStore {
 
     // One argument per capability field; launch boundaries bind them
     // positionally so every authority-bearing value is explicit at mint time.
-    #[allow(clippy::too_many_arguments)]
     pub fn generate_with_context(
         &self,
         thread_id: &str,
@@ -601,9 +719,13 @@ impl CallbackCapabilityStore {
             accounting_scope: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
+            remote_consumer_grant: None,
         };
 
-        self.capabilities.lock().unwrap().insert(token, cap.clone());
+        self.capabilities
+            .lock()
+            .unwrap()
+            .insert(token, CredentialRecord::new(cap.clone()));
         cap
     }
 
@@ -727,7 +849,7 @@ impl CallbackCapabilityStore {
         grant.validate()?;
         Ok(match self.capabilities.lock().unwrap().get_mut(token) {
             Some(cap) => {
-                if cap.workload_client_grant.is_some() {
+                if cap.workload_client_grant.is_some() || cap.remote_consumer_grant.is_some() {
                     bail!("callback workload-client grant was already bound");
                 }
                 cap.workload_client_grant = Some(grant);
@@ -748,7 +870,7 @@ impl CallbackCapabilityStore {
         grant.validate()?;
         Ok(match self.capabilities.lock().unwrap().get_mut(token) {
             Some(cap) => {
-                if cap.scoped_producer_grant.is_some() {
+                if cap.scoped_producer_grant.is_some() || cap.remote_consumer_grant.is_some() {
                     bail!("callback scoped-producer grant was already bound");
                 }
                 if cap.thread_id != grant.root_thread_id
@@ -758,6 +880,43 @@ impl CallbackCapabilityStore {
                     bail!("callback scoped-producer grant contradicts its root bearer");
                 }
                 cap.scoped_producer_grant = Some(grant);
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Bind the remote purpose and its method ceiling atomically, before the
+    /// freshly minted token is exposed. There is no second bearer store.
+    pub fn set_remote_consumer_grant(
+        &self,
+        token: &str,
+        grant: AdmittedRemoteConsumerGrant,
+    ) -> Result<bool> {
+        grant.validate()?;
+        Ok(match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                if cap.expires_at.has_elapsed()
+                    || cap.remote_consumer_grant.is_some()
+                    || cap.scoped_producer_grant.is_some()
+                    || cap.workload_client_grant.is_some()
+                    || cap.runtime_method_surface.is_exact()
+                {
+                    bail!("remote consumer grant requires a fresh exclusive callback bearer");
+                }
+                if cap.thread_id != grant.root_thread_id
+                    || cap.chain_root_id != grant.root_thread_id
+                    || cap.launch_owner.as_deref() != Some(grant.launch_owner.as_str())
+                    || cap.item_ref.as_deref() != Some(grant.purpose.verifier_ref.as_str())
+                    || cap.root_raw_content_digest != grant.root_raw_content_digest
+                    || cap.effective_definition_digest.as_deref()
+                        != Some(grant.purpose.verifier_realized_definition_digest.as_str())
+                {
+                    bail!("remote consumer grant contradicts its admitted root bearer");
+                }
+                cap.runtime_method_surface =
+                    CallbackRuntimeMethodSurface::qualification_remote_consumer();
+                cap.remote_consumer_grant = Some(grant);
                 true
             }
             None => false,
@@ -787,7 +946,7 @@ impl CallbackCapabilityStore {
             bail!("callback capability does not match project_path");
         }
 
-        Ok(cap.clone())
+        Ok(cap.projection.clone())
     }
 
     /// Validate a callback token without binding it to a thread. Returns the
@@ -805,11 +964,48 @@ impl CallbackCapabilityStore {
             bail!("callback capability expired");
         }
 
-        Ok(cap.clone())
+        Ok(cap.projection.clone())
     }
 
     pub fn invalidate(&self, token: &str) {
         self.capabilities.lock().unwrap().remove(token);
+    }
+
+    /// Linearize a short durable admission against bearer revocation. Never
+    /// perform provider contact or CAS traversal while holding this gate.
+    /// Lock order is callback store, then StateStore, then runtime transaction.
+    pub(crate) fn with_remote_consumer_admission<T>(
+        &self,
+        token: &str,
+        grant: &AdmittedRemoteConsumerGrant,
+        admit: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.with_live_admission(token, |cap| {
+            if cap.remote_consumer_grant.as_ref() != Some(grant)
+                || cap.runtime_method_surface
+                    != CallbackRuntimeMethodSurface::qualification_remote_consumer()
+            {
+                bail!("consumer callback lost its exact live admission");
+            }
+            admit()
+        })
+    }
+
+    fn with_live_admission<T>(
+        &self,
+        token: &str,
+        admit: impl FnOnce(&CallbackCapability) -> Result<T>,
+    ) -> Result<T> {
+        let map = self.capabilities.lock().unwrap();
+        let cap = map
+            .get(token)
+            .ok_or_else(|| anyhow::anyhow!("revoked consumer callback"))?;
+        if cap.expires_at.has_elapsed() {
+            bail!("consumer callback expired before durable admission");
+        }
+        let result = admit(cap);
+        drop(map);
+        result
     }
 
     /// Validate callback token + thread_id without requiring project_path.
@@ -832,7 +1028,7 @@ impl CallbackCapabilityStore {
             bail!("callback capability does not match thread_id");
         }
 
-        Ok(cap.clone())
+        Ok(cap.projection.clone())
     }
 
     pub fn invalidate_for_thread(&self, thread_id: &str) {
@@ -948,7 +1144,174 @@ pub struct ThreadAuthStore {
     // This is the paired ingress-principal proof for runtime callbacks. Hosted
     // workload clients reuse it and narrow the retained handler authority;
     // they must not invent a workload-specific principal or signing key.
-    states: Mutex<HashMap<String, ThreadAuthState>>,
+    states: Mutex<HashMap<String, CredentialRecord<ThreadAuthState>>>,
+}
+
+/// Observation of the actual paired stores and admitted born root. This is
+/// not an original bound issuer, reservation or native contact permission.
+/// No public fields, serde, Clone or caller-data constructor.
+pub struct PairedRemoteConsumerCustody {
+    callback_token: String,
+    callback_invocation_id: String,
+    thread_auth_token: String,
+    grant: AdmittedRemoteConsumerGrant,
+    callback_expiry: MonotonicDeadline,
+    thread_auth_expiry: MonotonicDeadline,
+}
+
+impl PairedRemoteConsumerCustody {
+    pub fn matches_guarded_issuer(
+        &self,
+        callback: &str,
+        thread_auth: &str,
+        thread_id: &str,
+        launch_owner: &str,
+    ) -> bool {
+        self.callback_token == callback
+            && self.thread_auth_token == thread_auth
+            && self.grant.root_thread_id == thread_id
+            && self.grant.launch_owner == launch_owner
+            && !self.callback_invocation_id.is_empty()
+            && self.grant.validate().is_ok()
+            && !self.credential_expiry().has_elapsed()
+    }
+
+    /// Only a narrowing input to a separately issued original service bound.
+    pub fn credential_expiry(&self) -> MonotonicDeadline {
+        self.callback_expiry.min(self.thread_auth_expiry)
+    }
+}
+
+impl CallbackCapabilityStore {
+    /// Revalidate actual paired records. CAS/capsule decode is completed before
+    /// locking credentials. Nested lock order: callback -> TAT -> StateStore.
+    /// No closure, native contact or token reentrant operation runs under locks.
+    pub fn paired_remote_consumer_custody(
+        &self,
+        thread_auth: &ThreadAuthStore,
+        store: &crate::state_store::StateStore,
+        callback_token: &str,
+        thread_auth_token: &str,
+        grant: &AdmittedRemoteConsumerGrant,
+    ) -> Result<PairedRemoteConsumerCustody> {
+        grant.validate()?;
+        let capsule = store
+            .admitted_launch_capsule(&grant.root_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("paired consumer has no admitted capsule"))?;
+        let capsule_hash = capsule.content_hash()?;
+        let sealed =
+            crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+                &capsule,
+            )?;
+        let subject = sealed.admitted_program_subject()?;
+        let expected_handler = sealed
+            .handler_context()
+            .map(|handler| {
+                handler.narrowed_for_execution(
+                    capsule.effective_caps.clone(),
+                    sealed.handoff_current_site_id(),
+                    sealed.origin_site_id(),
+                )
+            })
+            .transpose()?;
+        if capsule.launch_driver != ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor
+            || capsule_hash != grant.admitted_capsule_hash
+            || sealed.qualification_purpose() != Some(&grant.purpose)
+            || subject.canonical_ref != grant.purpose.verifier_ref
+            || subject.raw_content_digest != grant.root_raw_content_digest
+        {
+            bail!("paired consumer differs from actual admitted direct root");
+        }
+        let callbacks = self
+            .capabilities
+            .lock()
+            .map_err(|_| anyhow::anyhow!("callback store poisoned"))?;
+        let auths = thread_auth
+            .states
+            .lock()
+            .map_err(|_| anyhow::anyhow!("thread auth store poisoned"))?;
+        let cap = callbacks
+            .get(callback_token)
+            .ok_or_else(|| anyhow::anyhow!("paired callback revoked"))?;
+        let auth = auths
+            .get(thread_auth_token)
+            .ok_or_else(|| anyhow::anyhow!("paired thread auth revoked"))?;
+        require_remote_consumer_pair(cap, auth, grant)?;
+        if sealed.requested_by() != Some(auth.acting_principal.as_str())
+            || auth.caller_scopes != capsule.effective_caps
+            || auth.handler_context != expected_handler
+            || cap.provenance.project_authority() != &capsule.project_authority
+        {
+            bail!("paired thread auth differs from admitted principal");
+        }
+        let planning = store
+            .launch_planning_record_for_owner(
+                &grant.purpose.launch_id,
+                &grant.purpose.owner_fingerprint,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("paired consumer planning row absent"))?;
+        let root = store
+            .get_authoritative_root_thread_snapshot(&grant.root_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("paired consumer born root absent"))?;
+        if planning.state != "bound"
+            || planning.reserved_thread_id != grant.root_thread_id
+            || planning.bound_thread_id.as_deref() != Some(grant.root_thread_id.as_str())
+            || root.chain_root_id != grant.root_thread_id
+            || root.admitted_launch_capsule_hash.as_deref() != Some(capsule_hash.as_str())
+        {
+            bail!("paired consumer lost actual planning/root/capsule binding");
+        }
+        store.assert_launch_owner(&grant.root_thread_id, &grant.launch_owner)?;
+        // Existing grant validation checks actual current daemon generation;
+        // the DB owner assertion alone does not. Neither is a root-slot fence.
+        grant.validate()?;
+        require_remote_consumer_pair(cap, auth, grant)?;
+        // No atomic StateStore reservation or contact claim is made here.
+        Ok(PairedRemoteConsumerCustody {
+            callback_token: cap.token.clone(),
+            callback_invocation_id: cap.invocation_id.clone(),
+            thread_auth_token: auth.token.clone(),
+            grant: grant.clone(),
+            callback_expiry: cap.expires_at,
+            thread_auth_expiry: auth.expires_at,
+        })
+    }
+}
+
+fn require_remote_consumer_pair(
+    cap: &CallbackCapability,
+    auth: &ThreadAuthState,
+    grant: &AdmittedRemoteConsumerGrant,
+) -> Result<()> {
+    require_actual_pair_roles(cap, auth)?;
+    if cap.invocation_id.is_empty()
+        || cap.thread_id != grant.root_thread_id
+        || cap.chain_root_id != grant.root_thread_id
+        || cap.launch_owner.as_deref() != Some(grant.launch_owner.as_str())
+        || cap.remote_consumer_grant.as_ref() != Some(grant)
+        || cap.scoped_producer_grant.is_some()
+        || cap.workload_client_grant.is_some()
+        || cap.runtime_method_surface
+            != CallbackRuntimeMethodSurface::qualification_remote_consumer()
+        || cap.item_ref.as_deref() != Some(grant.purpose.verifier_ref.as_str())
+        || cap.root_raw_content_digest != grant.root_raw_content_digest
+        || cap.effective_definition_digest.as_deref()
+            != Some(grant.purpose.verifier_realized_definition_digest.as_str())
+    {
+        bail!("remote consumer credential pair expired or contradicts actual issuer");
+    }
+    Ok(())
+}
+
+fn require_actual_pair_roles(cap: &CallbackCapability, auth: &ThreadAuthState) -> Result<()> {
+    if cap.expires_at.has_elapsed()
+        || auth.expires_at.has_elapsed()
+        || cap.thread_id != auth.thread_id
+        || cap.effective_caps != auth.caller_scopes
+    {
+        bail!("actual credential records are expired or unpaired");
+    }
+    Ok(())
 }
 
 impl Default for ThreadAuthStore {
@@ -995,7 +1358,10 @@ impl ThreadAuthStore {
             expires_at: MonotonicDeadline::after(ttl),
         };
 
-        self.states.lock().unwrap().insert(token, state.clone());
+        self.states
+            .lock()
+            .unwrap()
+            .insert(token, CredentialRecord::new(state.clone()));
         Ok(state)
     }
 
@@ -1013,7 +1379,7 @@ impl ThreadAuthStore {
             bail!("thread auth token does not match thread_id");
         }
 
-        Ok(state.clone())
+        Ok(state.projection.clone())
     }
 
     pub fn invalidate(&self, token: &str) {
@@ -1044,6 +1410,30 @@ mod tests {
     use ryeos_engine::engine::Engine;
 
     type TestProvenance = ExecutionProvenance;
+
+    #[test]
+    fn paired_record_roles_refuse_wrong_thread_and_expired_auth_before_any_grant() {
+        let callbacks = CallbackCapabilityStore::new();
+        let auths = ThreadAuthStore::new();
+        let callback = callbacks.generate(
+            "T-pair",
+            PathBuf::from("/p"),
+            Duration::from_secs(60),
+            vec![],
+            provenance(PathBuf::from("/p")),
+            "0".repeat(64),
+        );
+        let wrong = mint_test(&auths, "T-other", "fp:u", vec![], Duration::from_secs(60));
+        let expired = mint_test(&auths, "T-pair", "fp:u", vec![], Duration::ZERO);
+        assert!(require_actual_pair_roles(&callback, &wrong).is_err());
+        assert!(require_actual_pair_roles(&callback, &expired).is_err());
+        let good = mint_test(&auths, "T-pair", "fp:u", vec![], Duration::from_secs(60));
+        require_actual_pair_roles(&callback, &good).unwrap();
+        // Neither record can manufacture a remote grant or admitted root.
+        assert!(callback.remote_consumer_grant.is_none());
+        auths.invalidate(&wrong.token);
+        assert!(auths.validate(&wrong.token, "T-other").is_err());
+    }
 
     fn minimal_engine() -> Arc<Engine> {
         Arc::new(Engine::new(
@@ -1123,6 +1513,104 @@ mod tests {
                 )
                 .is_err(),
             "an exact bearer must never be widened or replaced in place"
+        );
+    }
+
+    #[test]
+    fn remote_qualification_surface_does_not_inherit_local_or_publication_authority() {
+        let remote = CallbackRuntimeMethodSurface::qualification_remote_consumer();
+        let local = CallbackRuntimeMethodSurface::qualification_scoped_producer();
+        assert_ne!(
+            remote.exact_surface_digest().unwrap(),
+            local.exact_surface_digest().unwrap()
+        );
+        for method in [
+            "runtime.consumer_verification_inputs",
+            "runtime.consumer_verification_start",
+            "runtime.consumer_verification_observe",
+            "runtime.consumer_verification_settle",
+        ] {
+            remote.authorize(method).unwrap();
+            assert!(local.authorize(method).is_err());
+        }
+        for method in [
+            "runtime.scoped_child_start",
+            "runtime.scoped_child_read",
+            "runtime.dispatch_action",
+            "runtime.spawn_follow_child",
+            "runtime.author_item",
+            "runtime.publish_artifact",
+            "runtime.provider_attempt_prepare",
+        ] {
+            assert!(remote.authorize(method).is_err());
+        }
+    }
+
+    #[test]
+    fn captured_compatible_qualification_surfaces_carry_no_mutable_path_dispatch_or_publication_authority()
+     {
+        // Every runtime method that can write project or durable state, author or
+        // publish content, dispatch or continue work, or touch secrets. The thread-auth
+        // credential only pairs with a callback bearer; it never authorizes a method
+        // the bearer's closed surface omits, so these stay refused on the bearer.
+        let state_changing = [
+            "runtime.append_event",
+            "runtime.append_events",
+            "runtime.attach_process",
+            "runtime.author_item",
+            "runtime.bundle_events_append",
+            "runtime.bundle_events_materialize_attachment",
+            "runtime.claim_commands",
+            "runtime.complete_command",
+            "runtime.dedicated_session_command",
+            "runtime.dispatch_action",
+            "runtime.finalize_thread",
+            "runtime.mark_running",
+            "runtime.project_snapshot",
+            "runtime.provider_attempt_prepare",
+            "runtime.publish_artifact",
+            "runtime.publish_project_observation",
+            "runtime.publish_state_anchor",
+            "runtime.request_continuation",
+            "runtime.spawn_follow_child",
+            "runtime.start_dedicated_session",
+            "runtime.submit_command",
+            "runtime.vault_delete",
+            "runtime.vault_get",
+            "runtime.vault_list",
+            "runtime.vault_put",
+        ];
+        let remote = CallbackRuntimeMethodSurface::qualification_remote_consumer();
+        for method in state_changing {
+            assert!(remote.authorize(method).is_err(), "{method}");
+        }
+        // The only methods a captured-compatible remote verifier holds are the
+        // verification methods, each joined to the admitted grant by its handler.
+        for method in [
+            "runtime.consumer_verification_inputs",
+            "runtime.consumer_verification_start",
+            "runtime.consumer_verification_observe",
+            "runtime.consumer_verification_settle",
+        ] {
+            remote.authorize(method).unwrap();
+        }
+        // The scoped surface drives a daemon-owned producer process; it is not
+        // a captured-compatible class and must not overlap the remote surface.
+        let scoped = CallbackRuntimeMethodSurface::qualification_scoped_producer();
+        for method in state_changing {
+            assert!(scoped.authorize(method).is_err(), "{method}");
+        }
+        // The class is bound by digest to the surface the daemon issues.
+        use ryeos_engine::protocols::QualificationCallbackAuthority::{
+            RemoteConsumer, ScopedProducer,
+        };
+        assert_eq!(
+            CallbackRuntimeMethodSurface::for_qualification_authority(RemoteConsumer),
+            remote
+        );
+        assert_eq!(
+            CallbackRuntimeMethodSurface::for_qualification_authority(ScopedProducer),
+            scoped
         );
     }
 
@@ -1297,6 +1785,52 @@ mod tests {
         assert!(
             store
                 .validate(&cap.token, "T-test", PathBuf::from("/p").as_path())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_consumer_live_gate_serializes_revocation_and_refuses_expiry() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate(
+            "T-test",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+            "0".repeat(64),
+        );
+        store
+            .with_live_admission(&cap.token, |live| {
+                assert_eq!(live.thread_id, "T-test");
+                assert!(
+                    store.capabilities.try_lock().is_err(),
+                    "revocation gate must remain held through admission"
+                );
+                Ok(())
+            })
+            .unwrap();
+        store.invalidate(&cap.token);
+        assert!(
+            store
+                .with_live_admission::<()>(&cap.token, |_| panic!(
+                    "revoked callback reached admission"
+                ))
+                .is_err()
+        );
+        let expired = store.generate(
+            "T-test",
+            PathBuf::from("/p"),
+            Duration::ZERO,
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+            "0".repeat(64),
+        );
+        assert!(
+            store
+                .with_live_admission::<()>(&expired.token, |_| panic!(
+                    "expired callback reached admission"
+                ))
                 .is_err()
         );
     }
@@ -1497,6 +2031,7 @@ mod tests {
             accounting_scope: None,
             workload_client_grant: None,
             scoped_producer_grant: None,
+            remote_consumer_grant: None,
         };
 
         let cloned = cap.clone();
@@ -1658,13 +2193,13 @@ mod tests {
     }
 
     #[test]
-    fn thread_auth_preserves_and_narrows_remote_operator_authority() {
+    fn thread_auth_preserves_and_narrows_remote_principal_authority() {
         let store = ThreadAuthStore::new();
         let context = crate::handler_context::HandlerContext::new_with_authority(
             "fp:operator".to_string(),
             vec!["cap:a".to_string(), "cap:b".to_string()],
             true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_string()),
         );
         let state = store
@@ -1686,7 +2221,7 @@ mod tests {
         assert_eq!(narrowed.scopes, vec!["cap:a"]);
         assert_eq!(
             narrowed.authorized_key_class,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal)
         );
         assert_eq!(
             narrowed.authenticated_origin_site_id.as_deref(),
@@ -1808,6 +2343,7 @@ mod tests {
                 witness_hash: "6".repeat(64),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: Some("7".repeat(64)),
+                remote_testimony: None,
             },
         };
         grant

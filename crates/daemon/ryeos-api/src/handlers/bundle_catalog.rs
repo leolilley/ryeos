@@ -10,12 +10,12 @@ use ryeos_app::{
         inspect_catalog, publish_catalog, stage_local_catalog_closure,
     },
     handler_context::HandlerContext,
-    node_policy::sections::{
-        bundle_publication::BundlePublicationPolicy, object_closure::NodeObjectClosurePolicy,
-    },
     state::AppState,
 };
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_node_runtime::node_policy::sections::{
+    bundle_publication::BundlePublicationPolicy, object_closure::NodeObjectClosurePolicy,
+};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
@@ -83,7 +83,7 @@ pub async fn upload(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire catalog upload permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire catalog upload permit: {error:#}"))?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
@@ -331,7 +331,7 @@ macro_rules! descriptor {
 descriptor!(
     UPLOAD,
     "service:bundle-catalog/upload",
-    "bundle_catalog.upload",
+    "bundle-catalog.upload",
     "ryeos.execute.service.bundle-catalog/upload",
     UploadRequest,
     upload,
@@ -340,7 +340,7 @@ descriptor!(
 descriptor!(
     STAGE_LOCAL,
     "service:bundle-catalog/stage-local",
-    "bundle_catalog.stage_local",
+    "bundle-catalog.stage-local",
     "ryeos.execute.service.bundle-catalog/stage-local",
     StageLocalRequest,
     stage_local,
@@ -349,7 +349,7 @@ descriptor!(
 descriptor!(
     INSPECT,
     "service:bundle-catalog/inspect",
-    "bundle_catalog.inspect",
+    "bundle-catalog.inspect",
     "ryeos.execute.service.bundle-catalog/inspect",
     InspectRequest,
     inspect
@@ -357,7 +357,7 @@ descriptor!(
 descriptor!(
     RESOLVE,
     "service:bundle-catalog/resolve",
-    "bundle_catalog.resolve",
+    "bundle-catalog.resolve",
     "ryeos.execute.service.bundle-catalog/resolve",
     ResolveRequest,
     resolve
@@ -365,7 +365,7 @@ descriptor!(
 descriptor!(
     EXPORT_RECOVERY,
     "service:bundle-catalog/export-recovery",
-    "bundle_catalog.export_recovery",
+    "bundle-catalog.export-recovery",
     "ryeos.execute.service.bundle-catalog/export-recovery",
     ExportRecoveryRequest,
     export_recovery
@@ -373,7 +373,7 @@ descriptor!(
 descriptor!(
     RESTORE_GENESIS,
     "service:bundle-catalog/restore-genesis",
-    "bundle_catalog.restore_genesis",
+    "bundle-catalog.restore-genesis",
     "ryeos.execute.service.bundle-catalog/restore-genesis",
     RestoreGenesisRequest,
     restore_genesis,

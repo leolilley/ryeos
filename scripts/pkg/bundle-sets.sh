@@ -4,8 +4,8 @@
 # Sourced by scripts/populate-bundles.sh (publish + bin staging),
 # scripts/release/package-bundle-artifact.sh (official release archive), and
 # scripts/pkg/install-local-direct.sh (ship + init). The AUR package consumes
-# the resulting `full` release artifact, so authoring, release, and local
-# installation cannot silently drift on bundle membership.
+# the resulting release artifact and installs its `standard` set, so authoring,
+# release, and local installation cannot silently drift on bundle membership.
 #
 # `ryeos_bundle_set_names <set>` echoes the ordered bundle names for a set, one
 # per line. `ryeos_bundle_set_node_init_profile <set>` echoes that
@@ -15,43 +15,88 @@
 # duplicate distribution. Selection is publisher-authored bootstrap data
 # supplied to `ryeos init`, never inferred from bundle presence.
 #
-# `central-auth` is a member of every set: it ships in the source tree and is
-# discovered/parsed at init, so its manifest must stay current — but it owns no
-# compiled binaries, so populate excludes it from bin staging (see
-# populate-bundles.sh).
+# `central-auth` is optional application authentication above the workflow
+# layer (knowledge, directive, graph), not
+# native node/caller authority. Only explicitly composed app distributions
+# include it; baseline and compute/authoring distributions omit it. It owns no
+# compiled payloads and is published only when the selected set includes it.
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full central-host standard local-inference hosted-node hosted-workflow bundle-source release-authority
+  printf '%s\n' central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller release-authority development
 }
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference ;;
-    central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
-    standard)        printf '%s\n' core central-auth standard ;;
-    local-inference) printf '%s\n' core central-auth standard local-inference ;;
-    hosted-node)     printf '%s\n' core central-auth hosted-node ;;
-    hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex render-sandbox opencode ;;
-    bundle-source)   printf '%s\n' core central-auth bundle-source ;;
+    # The default local node: the workflow layer plus docs, UI, the hosted
+    # Codex and opencode workers, and the web and browser tools.
+    standard)        printf '%s\n' core scheduling knowledge directive graph ryeos-docs ryeos-ui codex opencode web browser ;;
+    # A developer's node: every application bundle (standard plus central-auth
+    # and environment-qualification), the Render sandbox adapter, so a
+    # local-class origin can author snapshot bindings and measurements, and
+    # the claude-code worker bundle.
+    development)     printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex opencode render-sandbox claude-code ;;
+    central-host)    printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs web ;;
+    standard-central-auth) printf '%s\n' core scheduling knowledge directive graph ryeos-docs central-auth ;;
+    local-inference) printf '%s\n' core scheduling knowledge directive graph ryeos-docs local-inference ;;
+    hosted-workflow) printf '%s\n' core scheduling knowledge directive graph ryeos-docs codex opencode ;;
+    core)            printf '%s\n' core ;;
+    core-scheduling) printf '%s\n' core scheduling ;;
+    # Core plus the graph kind and runtime only: no model providers, directive
+    # or knowledge.
+    core-workflow)   printf '%s\n' core graph ;;
+    # Core plus the knowledge kind and runtime only.
+    core-knowledge)  printf '%s\n' core knowledge ;;
+    # Controller of remote Codex authoring leases. Graph and knowledge supply
+    # the kinds codex and render-sandbox require; the controller runs no
+    # schedules, so scheduling is absent.
+    hosted-controller)  printf '%s\n' core graph knowledge codex render-sandbox ;;
+    bundle-source)   printf '%s\n' core bundle-source ;;
     release-authority)
-      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference bundle-release
+      printf '%s\n' core graph environment-qualification bundle-release
       ;;
     # Internal publication superset. This is not an installable bundle set and
     # deliberately has no node init profile: one release build publishes every
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex render-sandbox opencode local-inference tv-tracker-authoring bundle-source bundle-release
+      printf '%s\n' core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex render-sandbox modal-sandbox opencode claude-code local-inference bundle-source bundle-release
       ;;
     *) return 1 ;;
   esac
+}
+
+# Bundles carried by the released bundle archive: the sorted unique union of the
+# bundles of every installable distribution, i.e. every set in
+# `ryeos_bundle_set_ids` (each has a node init profile). The internal
+# `release-artifacts` publication superset is deliberately not iterated: it has
+# no profile and is not installable. The archive therefore lets archive and AUR
+# installs select any installable set. `modal-sandbox` belongs to no installable
+# set, so it is published by the release build but not carried here.
+ryeos_release_archive_bundle_names() {
+  local set_name
+  while IFS= read -r set_name; do
+    ryeos_bundle_set_names "$set_name"
+  done < <(ryeos_bundle_set_ids) | LC_ALL=C sort -u
+}
+
+# Select native capabilities from the same explicit distribution
+# membership used for publication and installation. Cargo defaults remain empty;
+# focused node/CLI rebuilds must carry the selected distribution's features too.
+# The selection is derived from the signed payload-ownership item, which
+# declares each bundle's payload features and daemon-linked host features.
+RYEOS_BUNDLE_SETS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+ryeos_bundle_set_cargo_features() {
+  local set_name="$1" package="$2"
+  python3 -I "$RYEOS_BUNDLE_SETS_ROOT/scripts/pkg/bundle-features.py" \
+    --set "$set_name" cargo-features "$package"
 }
 
 # Exact publisher-authored node init-profile inventory carried by the shared
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  printf '%s\n' full central-host standard local-inference hosted-node hosted-workflow bundle-source contained-workflow development release-authority
+  printf '%s\n' central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller contained-workflow development release-authority
 }
 
 # Exact installed bundle set required by one publisher-authored profile.
@@ -59,9 +104,11 @@ ryeos_node_init_profile_names() {
 # generation may intentionally operate the same distribution.
 ryeos_node_init_profile_bundle_set() {
   case "$1" in
-    full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source) printf '%s\n' "$1" ;;
+    central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller) printf '%s\n' "$1" ;;
+    # The hosted-node profile is the core set under hosted admission policy.
+    hosted-node) printf '%s\n' core ;;
     contained-workflow) printf '%s\n' hosted-workflow ;;
-    development) printf '%s\n' full ;;
+    development) printf '%s\n' development ;;
     release-authority) printf '%s\n' release-authority ;;
     *) return 1 ;;
   esac
@@ -163,7 +210,7 @@ ryeos_validate_node_init_profile() {
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source|release-authority)
+    central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|development)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
@@ -175,10 +222,10 @@ ryeos_bundle_set_node_init_profile() {
 ryeos_bundle_set_bin_managed_names() {
   local name
   ryeos_bundle_set_names "$1" | while IFS= read -r name; do
-    # central-auth (Python tool support) and tv-tracker-authoring (reuses
-    # bin:core/ryeos-core-tools) own no compiled
-    # binaries; local-inference owns separately built payloads.
-    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" ]] && continue
+    # scheduling (service/command content), central-auth (Python tool
+    # support) and ryeos-docs (knowledge) own no compiled binaries;
+    # local-inference owns separately built payloads.
+    [[ "$name" == "scheduling" || "$name" == "ryeos-docs" || "$name" == "central-auth" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" || "$name" == "environment-qualification" ]] && continue
     printf '%s\n' "$name"
   done
 }
@@ -192,7 +239,7 @@ ryeos_bundle_set_bin_managed_names() {
 ryeos_bundle_set_host_support_bins() {
   case "$1" in
     release-authority) printf '%s\n' ryeos-bundle-publisher ;;
-    full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source|release-artifacts)
+    central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-artifacts|development)
       return 0
       ;;
     *) return 1 ;;

@@ -57,7 +57,7 @@ fn write_signed_runtime(bundle_root: &Path, name: &str, body: &str) {
 
 fn with_empty_launch_contract(body: &str, serves: &str) -> String {
     format!(
-        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  content_dependencies:\n    max_dependencies: 0\n    allowed_bindings: []\n    max_targets_per_dependency: 0\n    max_executable_search_entries: 0\n    external_content: null\n  evidence_attachments:\n    max_attachments: 0\n    max_total_bytes: 0\n    target: null\n    destination_prefix: null\n    allowed_access: []\n  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
+        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  content_dependencies:\n    max_dependencies: 0\n    allowed_bindings: []\n    max_targets_per_dependency: 0\n    max_executable_search_entries: 0\n    external_content: null\n  evidence_attachments:\n    max_attachments: 0\n    max_total_bytes: 0\n    target: null\n    destination_prefix: null\n    allowed_access: []\n  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n    max_delivered_secrets: 0\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
     )
 }
 
@@ -76,6 +76,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   delegate:
     via: runtime_registry
@@ -147,6 +150,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
@@ -193,6 +197,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
@@ -266,6 +271,16 @@ fn ref_binding_source_is_explicit_and_closed() {
     );
     assert!(parse_via_registry(&unknown).is_err());
 
+    let defaulted = FULL_RUNTIME_YAML.replace(
+        "      source:\n        kind: caller\n",
+        "      source:\n        kind: caller_or_primary_ref\n",
+    );
+    let yaml = parse_via_registry(&defaulted).expect("caller_or_primary_ref source parses");
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].source,
+        ryeos_engine::runtime_registry::RefBindingSource::CallerOrPrimaryRef
+    );
+
     let projected = FULL_RUNTIME_YAML.replace(
         "      source:\n        kind: caller\n",
         "      source:\n        kind: primary_field\n        path: [product_recipe]\n",
@@ -276,6 +291,37 @@ fn ref_binding_source_is_explicit_and_closed() {
         ryeos_engine::runtime_registry::RefBindingSource::PrimaryField { ref path }
             if path == &["product_recipe".to_owned()]
     ));
+}
+
+#[test]
+fn ref_binding_continuation_rebind_defaults_to_never_and_is_closed() {
+    use ryeos_engine::runtime_registry::ContinuationRebind;
+    let field = "      project_result_requirement: none\n";
+
+    let yaml = parse_via_registry(FULL_RUNTIME_YAML).expect("full YAML parses");
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].continuation_rebind,
+        ContinuationRebind::Never,
+    );
+
+    let stated = |word: &str| {
+        FULL_RUNTIME_YAML.replace(
+            field,
+            &format!("{field}      continuation_rebind: {word}\n"),
+        )
+    };
+    let yaml = parse_via_registry(&stated("never")).expect("never parses");
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].continuation_rebind,
+        ContinuationRebind::Never,
+    );
+    let yaml = parse_via_registry(&stated("operator")).expect("operator parses");
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].continuation_rebind,
+        ContinuationRebind::Operator,
+    );
+    assert!(parse_via_registry(&stated("machine")).is_err());
+    assert!(parse_via_registry(&stated("true")).is_err());
 }
 
 #[test]
@@ -302,7 +348,7 @@ fn ref_binding_project_result_requirement_is_explicit_and_closed() {
 #[test]
 fn runtime_environment_contribution_policy_is_required_and_closed() {
     let absent = FULL_RUNTIME_YAML.replace(
-        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n",
+        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n    max_delivered_secrets: 0\n",
         "",
     );
     assert!(matches!(
@@ -311,8 +357,8 @@ fn runtime_environment_contribution_policy_is_required_and_closed() {
     ));
 
     let inconsistent = FULL_RUNTIME_YAML.replace(
-        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n",
-        "  environment_contributions:\n    max_contributions: 1\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 1\n",
+        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n    max_delivered_secrets: 0\n",
+        "  environment_contributions:\n    max_contributions: 1\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 1\n    max_delivered_secrets: 0\n",
     );
     assert!(matches!(
         parse_via_registry(&inconsistent).unwrap_err(),
@@ -626,6 +672,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   terminator:
     kind: subprocess
@@ -759,4 +808,18 @@ abi_version: "v3"
         }
         other => panic!("expected RuntimeServesKindNoExecution, got: {other:?}"),
     }
+}
+
+#[test]
+fn launch_contract_trust_lists_may_not_admit_unsigned() {
+    let body = FULL_RUNTIME_YAML.replace(
+        "  primary_allowed_trust: [trusted_bundle, trusted_project]",
+        "  primary_allowed_trust: [trusted_bundle, unsigned]",
+    );
+    assert_ne!(
+        body, FULL_RUNTIME_YAML,
+        "fixture must carry the replaced line"
+    );
+    let err = parse_via_registry(&body).unwrap_err();
+    assert!(err.to_string().contains("unsigned"), "{err}");
 }

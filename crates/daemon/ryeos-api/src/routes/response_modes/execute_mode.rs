@@ -72,6 +72,9 @@ pub struct ExecuteRequest {
     pub target_site_id: Option<String>,
     #[serde(default)]
     pub validate_only: bool,
+    /// Non-executable authoring observations use a separate typed control.
+    #[serde(default)]
+    pub validation_scope: ryeos_runtime::command::ValidationScope,
     /// Method call: `{ method, args }`. The method selector is control
     /// plane — it chooses daemon-owned projection/validation/trust before
     /// the runtime is spawned — while the args are data plane. Absent for
@@ -93,9 +96,48 @@ pub struct ExecuteRequest {
     /// diagnostics block.
     #[serde(default)]
     pub state_root: Option<String>,
+    /// Ask this node to sign the successful response envelope for this exact
+    /// signed request and executed item ref
+    /// (`crate::remote::result_attestation`). A forwarding node sets it
+    /// and refuses an unsigned result.
+    #[serde(default)]
+    pub attest_result: bool,
 }
 
 impl ExecuteRequest {
+    fn require_source_observation_shape(&self) -> Result<(), &'static str> {
+        if !self.validate_only
+            || self.execution_policy.response != ExecutionResponse::Wait
+            || !matches!(self.execution_policy.target, ExecutionTarget::Here)
+            || !matches!(
+                self.execution_policy.project,
+                ProjectExecutionPolicy::Projectless
+            )
+            || !matches!(
+                self.execution_policy.environment,
+                ExecutionEnvironmentPolicy::None
+            )
+            || self.project_path.is_some()
+            || self.launch_id.is_some()
+            || self.call.is_some()
+            || self.state_root.is_some()
+            || self.usage_subject.is_some()
+            || self.debug_raw
+            || !self.ref_bindings.is_empty()
+            || !self.product_selections.is_empty()
+            || !(self.parameters.is_null()
+                || self
+                    .parameters
+                    .as_object()
+                    .is_some_and(|value| value.is_empty()))
+        {
+            return Err(
+                "source observation requires local projectless buffered validation without execution inputs",
+            );
+        }
+        Ok(())
+    }
+
     /// The requested method name, if a `call.method` was provided.
     pub fn method(&self) -> Option<String> {
         self.call.as_ref().and_then(|c| c.method.clone())
@@ -231,7 +273,16 @@ pub(crate) fn create_isolated_no_project_workspace(
         &state.config.runtime_root().cache(),
         &format!("no-project-{checkout_id}"),
     )
-    .map_err(|error| anyhow::anyhow!("create isolated no-project workspace: {error}"))
+    .map_err(|error| anyhow::anyhow!("create isolated no-project workspace: {error:#}"))
+}
+
+/// The node's startup provider environment and the principal requesting
+/// execution. Fixed route principals and daemon-internal principals are
+/// passed here exactly like any authenticated caller.
+#[derive(Clone, Copy)]
+pub struct ProviderEnvironmentRecipient<'a> {
+    pub environment: &'a ryeos_app::vault::ProviderEnvironment,
+    pub principal: &'a str,
 }
 
 /// Resolve the portable policy and one already-selected project coordinate
@@ -246,6 +297,7 @@ pub fn resolve_execution_project_authority(
     project_site_id: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     capability_ceiling: &[String],
+    provider_environment: ProviderEnvironmentRecipient<'_>,
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
@@ -253,7 +305,7 @@ pub fn resolve_execution_project_authority(
         PinnedProjectRealization, PinnedTerminalPublication,
     };
 
-    ryeos_app::identity::validate_canonical_site_id(project_site_id)?;
+    ryeos_node_runtime::identity::validate_canonical_site_id(project_site_id)?;
 
     // Authorization scopes are a set. Authorized-key files and composed
     // grants need not preserve a particular ordering, while the immutable
@@ -263,6 +315,29 @@ pub fn resolve_execution_project_authority(
     let mut capability_ceiling = capability_ceiling.to_vec();
     capability_ceiling.sort();
     capability_ceiling.dedup();
+
+    // The provider source is project-independent, so its recipient check
+    // runs once, here, before any project or environment authority is
+    // built. Only names the requesting principal may receive are sealed;
+    // a name in play that it may not receive refuses the whole admission.
+    let provider_environment_names = match &policy.environment {
+        ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy } => {
+            let requested = match name_policy {
+                ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired => {
+                    None
+                }
+                ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::Exact { names } => {
+                    Some(names.as_slice())
+                }
+            };
+            provider_environment.environment.admit_recipient(
+                provider_environment.principal,
+                &capability_ceiling,
+                requested,
+            )?
+        }
+        _ => Vec::new(),
+    };
 
     let resolve_name_authority =
         |policy: &ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy| match policy {
@@ -276,11 +351,16 @@ pub fn resolve_execution_project_authority(
             }
         };
 
+    // The vault-reading environments seal the admitted caller and its own
+    // canonical scopes the same way, so delivery judges the recipient and
+    // never the project's access ceiling (empty for a projectless launch).
+    //
     // A project-overlay environment is part of the exact project authority,
     // not an independently authored path setting. Resolve it only after the
     // live or pinned project identity is known so remote pinned generations
     // bind to their destination-site identity instead of a synthetic local
-    // identity. Vault and delegated environments remain project-independent.
+    // identity. Vault, delegated and provider environments remain
+    // project-independent.
     let resolve_environment =
         |project: Option<(&str, &Path)>| -> anyhow::Result<EnvironmentAuthority> {
             Ok(match &policy.environment {
@@ -301,6 +381,8 @@ pub fn resolve_execution_project_authority(
                         ),
                         source_identity: format!("dotenv:{}", root.join(".env").display()),
                         include_operator_vault: *include_operator_vault,
+                        recipient_principal: provider_environment.principal.to_owned(),
+                        recipient_scopes: capability_ceiling.clone(),
                         name_authority: resolve_name_authority(name_policy),
                     }
                 }
@@ -309,6 +391,8 @@ pub fn resolve_execution_project_authority(
                     name_policy,
                 } => EnvironmentAuthority::Vault {
                     namespace: namespace.clone(),
+                    recipient_principal: provider_environment.principal.to_owned(),
+                    recipient_scopes: capability_ceiling.clone(),
                     name_authority: resolve_name_authority(name_policy),
                 },
                 ExecutionEnvironmentPolicy::Delegated {
@@ -320,6 +404,17 @@ pub fn resolve_execution_project_authority(
                     grant_id: grant_id.clone(),
                     name_authority: resolve_name_authority(name_policy),
                 },
+                // Seal the declared names admitted for this principal and
+                // the canonical scopes they were admitted under; every later
+                // delivery under this authority judges exactly these.
+                ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy } => {
+                    EnvironmentAuthority::ProviderEnvironment {
+                        declared_names: provider_environment_names.clone(),
+                        recipient_principal: provider_environment.principal.to_owned(),
+                        recipient_scopes: capability_ceiling.clone(),
+                        name_authority: resolve_name_authority(name_policy),
+                    }
+                }
             })
         };
 
@@ -441,7 +536,15 @@ pub fn resolve_execution_project_authority(
             )
         }
     }?;
-    authority.with_child_policy(child_policy)
+    let authority = authority.with_child_policy(child_policy)?;
+    match &policy.project {
+        ProjectExecutionPolicy::LiveDirect { intent, .. } => {
+            authority.with_live_intent((*intent).into())
+        }
+        ProjectExecutionPolicy::Projectless | ProjectExecutionPolicy::Pinned { .. } => {
+            Ok(authority)
+        }
+    }
 }
 
 /// Closed execution authority resolved at the HTTP admission boundary.
@@ -455,7 +558,6 @@ pub struct ResolvedExecutionContract {
     pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_execution_contract(
     policy: &ExecutionPolicy,
     project_source: &ProjectSource,
@@ -466,7 +568,40 @@ pub fn resolve_execution_contract(
     caller_scopes: &[String],
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<ResolvedExecutionContract> {
+    resolve_execution_contract_with_posture(
+        policy,
+        project_source,
+        project_ctx,
+        workspace_lifeline,
+        state_root,
+        acting_principal,
+        caller_scopes,
+        state,
+        ryeos_engine::contracts::ExecutionPosture::Confined,
+    )
+}
+
+/// [`resolve_execution_contract`] for an admitted execution posture. A
+/// host-direct launch seals its live project as `unconfined_host`, because
+/// that is what runs; only read-write live and projectless policies can be
+/// true for it.
+pub fn resolve_execution_contract_with_posture(
+    policy: &ExecutionPolicy,
+    project_source: &ProjectSource,
+    project_ctx: &project_source::ResolvedProjectContext,
+    workspace_lifeline: Option<Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
+    state_root: Option<PathBuf>,
+    acting_principal: &str,
+    caller_scopes: &[String],
+    state: &ryeos_app::state::AppState,
+    posture: ryeos_engine::contracts::ExecutionPosture,
+) -> anyhow::Result<ResolvedExecutionContract> {
     policy.validate()?;
+    ryeos_app::execution_policy::authorize_operator_vault_exposure(
+        state.authorizer.as_ref(),
+        caller_scopes,
+        &policy.environment,
+    )?;
     if let ProjectExecutionPolicy::LiveDirect { access, .. } = &policy.project {
         let required_capability = access.required_capability();
         ryeos_app::execution_policy::authorize_live_project_access(
@@ -532,7 +667,16 @@ pub fn resolve_execution_contract(
         state.threads.site_id(),
         &state.isolation,
         caller_scopes,
+        ProviderEnvironmentRecipient {
+            environment: &state.provider_env,
+            principal: acting_principal,
+        },
     )?;
+    let authority = if posture.is_host_direct() {
+        authority.into_unconfined_host()?
+    } else {
+        authority
+    };
     authorize_terminal_publication(
         policy,
         &project_ctx.original_path,
@@ -591,6 +735,120 @@ pub fn resolve_execution_contract(
         provenance,
         lifecycle_authority,
     })
+}
+
+/// Admission-time check of a root that declares host authority.
+///
+/// Returns `None` for every ordinary root (its kind has no host-authority
+/// projection, or the item does not declare it). For a host-direct root it
+/// refuses, with a typed code, any project policy a host process cannot honour
+/// and any caller other than the configured local operator, then admits the
+/// item against the operator's grant. The runtime pin is checked at launch,
+/// where the executor chain is resolved.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn admit_host_direct_execution(
+    state: &ryeos_app::state::AppState,
+    policy: &ExecutionPolicy,
+    root: &ryeos_engine::canonical_ref::CanonicalRef,
+    no_project_requested: bool,
+    project_ctx: &project_source::ResolvedProjectContext,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    principal: &crate::handler_context::HandlerContext,
+    target_site_id: Option<&str>,
+    origin_site_id: &str,
+) -> Result<
+    Option<ryeos_app::host_access::AdmittedHostAccess>,
+    ryeos_executor::dispatch_error::DispatchError,
+> {
+    use ryeos_app::host_access::{HostAccessCaller, HostAccessRefusal, HostAccessSubject};
+    let refused = |refusal: HostAccessRefusal| {
+        ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+            code: refusal.code.to_owned(),
+            message: refusal.message,
+            binding: None,
+        }
+    };
+    let engine = project_ctx.request_engine.clone();
+    let Some(execution) = engine
+        .kinds
+        .get(&root.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .filter(|execution| execution.host_authority.is_some())
+    else {
+        return Ok(None);
+    };
+    // A root that does not resolve here is left to dispatch, which reports
+    // its own error and re-judges host access at launch. That stays fail
+    // closed: a host-direct launch whose authority was sealed confined is
+    // refused by the launch-time gate or the disabled-shape compile.
+    let Ok((_, output)) =
+        engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: provenance.logical_project_root(state.threads.site_id()),
+            item_ref: root.clone(),
+            expected_kind: Some(root.kind.clone()),
+            project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
+            subject_resolution_authority: provenance.subject_resolution_authority(),
+        })
+    else {
+        return Ok(None);
+    };
+    let posture = execution
+        .project_execution_posture(&output.composed.composed)
+        .map_err(
+            |error| ryeos_executor::dispatch_error::DispatchError::SchemaMisconfigured {
+                kind: root.kind.clone(),
+                detail: error.to_string(),
+            },
+        )?;
+    if !posture.is_host_direct() {
+        return Ok(None);
+    }
+    let honourable = match &policy.project {
+        ProjectExecutionPolicy::Projectless => true,
+        ProjectExecutionPolicy::LiveDirect { access, .. } => {
+            *access == ryeos_app::execution_policy::LiveAccess::ReadWrite
+        }
+        ProjectExecutionPolicy::Pinned { .. } => false,
+    };
+    if !honourable {
+        return Err(refused(HostAccessRefusal::new(
+            HostAccessRefusal::PROJECT_REFUSED,
+            format!(
+                "`{}` runs unconfined on the host, so only a read-write live project or a projectless execution can be true for it; this request's project policy cannot be enforced",
+                output.root.resolved_ref
+            ),
+        )));
+    }
+    let source_closure = ryeos_app::host_access::source_closure_digest(
+        output
+            .composed
+            .derived
+            .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY),
+    )
+    .map_err(ryeos_executor::dispatch_error::DispatchError::Internal)?;
+    let subject = HostAccessSubject {
+        item: &output.root.resolved_ref,
+        signer: output.root.signer_fingerprint.as_deref(),
+        source_closure: source_closure.as_deref(),
+        runtime: None,
+    };
+    let current_site_id = state.threads.site_id();
+    ryeos_app::host_access::admit(
+        state,
+        &engine,
+        &subject,
+        &HostAccessCaller {
+            acting_principal: &principal.fingerprint,
+            handler_context: Some(principal),
+            target_site_id: target_site_id.filter(|target| *target != current_site_id),
+            current_site_id,
+            origin_site_id,
+            parent_thread_id: None,
+            scheduled: false,
+        },
+    )
+    .map(Some)
+    .map_err(refused)
 }
 
 /// Project capture and checkout perform blocking filesystem/CAS work. Keep
@@ -687,6 +945,10 @@ pub(crate) fn map_project_source_error(
             DispatchError::ProjectSourceCheckoutFailed(detail)
         }
         project_source::ProjectSourceError::Other(detail) => DispatchError::ProjectSource(detail),
+        error @ (project_source::ProjectSourceError::AiOnlyBaseNotMutable { .. }
+        | project_source::ProjectSourceError::SnapshotNotCurrentHead { .. }) => {
+            DispatchError::ProjectSource(error.to_string())
+        }
     }
 }
 
@@ -764,11 +1026,29 @@ pub fn preauthorize_execution_policy(
     caller_scopes: &[String],
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<()> {
+    preauthorize_execution_policy_with(policy, caller_scopes, state.authorizer.as_ref())
+}
+
+/// [`preauthorize_execution_policy`] over the authorizer alone, for callers
+/// that hold no [`ryeos_app::state::AppState`].
+pub fn preauthorize_execution_policy_with(
+    policy: &ExecutionPolicy,
+    caller_scopes: &[String],
+    authorizer: &ryeos_runtime::authorizer::Authorizer,
+) -> anyhow::Result<()> {
     policy.validate()?;
+    // An environment that reads the operator's vault is operator authority,
+    // not a consequence of holding execute rights on the item. Refuse it here,
+    // before any capture, launch reservation, or secret read.
+    ryeos_app::execution_policy::authorize_operator_vault_exposure(
+        authorizer,
+        caller_scopes,
+        &policy.environment,
+    )?;
     if let ProjectExecutionPolicy::LiveDirect { access, .. } = &policy.project {
         let required_capability = access.required_capability();
         ryeos_app::execution_policy::authorize_live_project_access(
-            state.authorizer.as_ref(),
+            authorizer,
             caller_scopes,
             *access,
         )
@@ -787,8 +1067,7 @@ pub fn preauthorize_execution_policy(
             ..
         }
     ) {
-        state
-            .authorizer
+        authorizer
             .authorize(
                 caller_scopes,
                 &AuthorizationPolicy::require(
@@ -803,6 +1082,24 @@ pub fn preauthorize_execution_policy(
             })?;
     }
     Ok(())
+}
+
+/// The typed 403 for an operator-vault preauthorization refusal, naming the
+/// missing capability. Any other refusal returns `None` and keeps the
+/// caller's existing route error shape.
+pub(crate) fn operator_vault_route_error(error: &anyhow::Error) -> Option<RouteDispatchError> {
+    use ryeos_app::execution_policy::OperatorVaultCapabilityRequired;
+    let refusal = error.downcast_ref::<OperatorVaultCapabilityRequired>()?;
+    Some(RouteDispatchError::Structured {
+        code: OperatorVaultCapabilityRequired::CODE.to_owned(),
+        status: StatusCode::FORBIDDEN.as_u16(),
+        body: json!({
+            "error": refusal.to_string(),
+            "error_code": OperatorVaultCapabilityRequired::CODE,
+            "required_capability": refusal.required_capability(),
+        }),
+        thread_id: None,
+    })
 }
 
 // ── Mode ──────────────────────────────────────────────────────────────────
@@ -866,6 +1163,13 @@ impl ResponseMode for ExecuteMode {
 
         match raw.request.body {
             RawRequestBody::Json => {}
+            RawRequestBody::ObjectsPutV1 => {
+                return Err(RouteConfigError::InvalidResponseSpec {
+                    id: raw.id.clone(),
+                    mode: "execute".into(),
+                    reason: "execute mode does not accept the objects_put_v1 body profile".into(),
+                });
+            }
             _ => {
                 return Err(RouteConfigError::InvalidResponseSpec {
                     id: raw.id.clone(),
@@ -899,24 +1203,59 @@ impl CompiledResponseMode for CompiledExecuteMode {
     ) -> Result<axum::response::Response, RouteDispatchError> {
         let request: ExecuteRequest = ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
+        // A forwarding node asks for a result signed for this exact request.
+        // The request was verified by the `ryeos_signed` invoker; recompute
+        // its digest from the same bytes.
+        let attestation_binding = if request.attest_result {
+            let request_digest = crate::auth::signed_request_digest(
+                &ctx.state.identity.principal_id(),
+                ctx.request_parts.method.as_str(),
+                &ctx.request_parts.uri,
+                &ctx.request_parts.headers,
+                &ctx.body_raw,
+            )
+            .ok_or_else(|| {
+                RouteDispatchError::BadRequest(
+                    "attest_result requires a ryeos_signed request".to_string(),
+                )
+            })?;
+            Some((request_digest, request.item_ref.clone()))
+        } else {
+            None
+        };
         // This assertion belongs to the authenticated wire ingress. Nested
         // admission consumes verified handler authority, not a second proof.
-        ryeos_app::identity::validate_forwarding_origin_assertion(
+        ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
             request.required_origin_site_id.as_deref(),
             ctx.principal.authorized_key_class,
             ctx.principal.authenticated_origin_site_id.as_deref(),
         )
-        .map_err(|e| RouteDispatchError::Forbidden(e.to_string()))?;
+        .map_err(|e| RouteDispatchError::Forbidden(format!("{e:#}")))?;
         // HTTP only owns ingress/response adaptation, never a second admission.
         let accepted = ctx.request_parts.uri.path() == "/execute/launch";
-        let outcome = admit_execution(
+        let identity = ctx.state.identity.clone();
+        let mut outcome = admit_execution_with_publication(
             request,
             ctx.principal.handler_context(),
             ctx.state,
             accepted,
             ctx.launch_timings,
+            ctx.publication,
         )
         .await?;
+        if let Some((request_digest, item_ref)) = attestation_binding
+            && outcome.status.is_success()
+        {
+            crate::remote::result_attestation::attest(
+                &mut outcome.body,
+                &identity,
+                &request_digest,
+                &item_ref,
+            )
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!("sign remote execute result: {error}"))
+            })?;
+        }
         Ok((outcome.status, axum::Json(outcome.body)).into_response())
     }
 }
@@ -946,11 +1285,30 @@ impl From<(StatusCode, Value)> for AdmissionOutcome {
 /// not reconstructed principals or synthetic HTTP requests. A nested call
 /// retains identity/grants/origin but receives its own service-local root.
 pub(crate) async fn admit_execution(
+    request: ExecuteRequest,
+    principal: crate::handler_context::HandlerContext,
+    state: ryeos_app::state::AppState,
+    accepted_ingress: bool,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<AdmissionOutcome, RouteDispatchError> {
+    admit_execution_with_publication(
+        request,
+        principal,
+        state,
+        accepted_ingress,
+        launch_timings,
+        None,
+    )
+    .await
+}
+
+async fn admit_execution_with_publication(
     mut request: ExecuteRequest,
     principal: crate::handler_context::HandlerContext,
     state: ryeos_app::state::AppState,
     accepted_ingress: bool,
     launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
 ) -> Result<AdmissionOutcome, RouteDispatchError> {
     principal
         .require_verified()
@@ -962,13 +1320,13 @@ pub(crate) async fn admit_execution(
             state.threads.site_id(),
             &execution_origin_site_id,
         )
-        .map_err(|e| RouteDispatchError::Forbidden(e.to_string()))?;
+        .map_err(|e| RouteDispatchError::Forbidden(format!("{e:#}")))?;
     let caller_principal_id = principal.fingerprint.clone();
     let caller_scopes = principal.scopes.clone();
     request
         .execution_policy
         .validate()
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
     request.launch_mode = match request.execution_policy.response {
         ExecutionResponse::Wait => "wait".to_string(),
         ExecutionResponse::Accepted => "accepted".to_string(),
@@ -1021,7 +1379,7 @@ pub(crate) async fn admit_execution(
         return Ok(dispatch_error_response(error));
     }
     request.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(request.product_selections)
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
     let no_project_requested = matches!(
         &request.execution_policy.project,
         ProjectExecutionPolicy::Projectless
@@ -1073,8 +1431,8 @@ pub(crate) async fn admit_execution(
     }
 
     // Capability check: derive the required cap from the item_ref
-    // (e.g. "directive:apps/tv-tracker/ai_chat" →
-    //  "ryeos.execute.directive.apps/tv-tracker/ai_chat") and check
+    // (e.g. "directive:apps/example-app/ai_chat" →
+    //  "ryeos.execute.directive.apps/example-app/ai_chat") and check
     // via the unified Authorizer. This replaces the old ad-hoc
     // `s == "*" || s == "execute"` check, supporting fine-grained
     // `ryeos.execute.<kind>.<subject>` scopes and wildcards like
@@ -1120,7 +1478,7 @@ pub(crate) async fn admit_execution(
     let usage_subject_asserted_by = if let Some(subject) = &usage_subject {
         subject
             .validate()
-            .map_err(|e| RouteDispatchError::BadRequest(e.to_string()))?;
+            .map_err(|e| RouteDispatchError::BadRequest(format!("{e:#}")))?;
         let required_cap = format!("ryeos.execute.on_behalf_of.{}", subject.namespace);
         let policy = AuthorizationPolicy::require(&required_cap);
         state
@@ -1143,7 +1501,32 @@ pub(crate) async fn admit_execution(
     if let Err(error) =
         preauthorize_execution_policy(&request.execution_policy, &caller_scopes, &state)
     {
-        return Err(RouteDispatchError::BadRequest(error.to_string()));
+        return Err(operator_vault_route_error(&error)
+            .unwrap_or_else(|| RouteDispatchError::BadRequest(error.to_string())));
+    }
+
+    // This authenticated read-side control returns before project realization,
+    // product selection or any accepted-launch/CAS/thread owner is created.
+    if request.validation_scope == ryeos_runtime::command::ValidationScope::SourceObservation {
+        request
+            .require_source_observation_shape()
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_owned()))?;
+        let observation_state = state.clone();
+        let observation_ref = request.item_ref.clone();
+        let observation = tokio::task::spawn_blocking(move || {
+            ryeos_app::source_closure_admission::observe_bundle_structured_source(
+                &observation_state,
+                &observation_ref,
+            )
+        })
+        .await
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("source observation task failed: {error}"))
+        })?
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
+        let value = serde_json::to_value(observation)
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        return Ok(json!({"result": value}).into());
     }
 
     // The caller retained `launch_id` before sending the request. Reserve
@@ -1425,7 +1808,41 @@ pub(crate) async fn admit_execution(
         &caller_scopes,
         &state,
     )
-    .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+    .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
+    // A tool that declares host authority is admitted here, before anything
+    // runs: the node lane, the operator's exact grant and the configured
+    // local operator. Its project authority is then sealed as what actually
+    // runs (`unconfined_host`). The executor checks again at launch.
+    let host_access = match admit_host_direct_execution(
+        &state,
+        &request.execution_policy,
+        &root_canonical,
+        no_project_requested,
+        &project_ctx,
+        &resolved_contract.provenance,
+        &principal,
+        request.target_site_id.as_deref(),
+        &execution_origin_site_id,
+    ) {
+        Ok(admitted) => admitted,
+        Err(error) => return Ok(dispatch_error_response(error)),
+    };
+    let resolved_contract = if host_access.is_some() {
+        resolve_execution_contract_with_posture(
+            &request.execution_policy,
+            &project_source,
+            &project_ctx,
+            no_project_lifeline.clone(),
+            state_root.clone(),
+            &caller_principal_id,
+            &caller_scopes,
+            &state,
+            ryeos_engine::contracts::ExecutionPosture::HostDirect,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?
+    } else {
+        resolved_contract
+    };
     let ResolvedExecutionContract {
         provenance,
         lifecycle_authority,
@@ -1435,6 +1852,7 @@ pub(crate) async fn admit_execution(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
     let plan_ctx = PlanContext {
+        logical_project_root: provenance.logical_project_root(site_id),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: caller_principal_id.clone(),
             scopes: caller_scopes.clone(),
@@ -1570,7 +1988,9 @@ pub(crate) async fn admit_execution(
             let _preflight_work_timer = preflight_timings
                 .as_ref()
                 .map(|timings| timings.nested("preflight_admission", "preflight_blocking_work"));
-            ryeos_executor::dispatch::preflight_root_dispatch(
+            // The caller must cover what the item declares; an accepted launch
+            // refuses that here, before a thread id exists.
+            let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
                 &preflight_item_ref,
                 &preflight_kind,
                 &preflight_parameters,
@@ -1582,7 +2002,12 @@ pub(crate) async fn admit_execution(
                 &preflight_exec_ctx,
                 &preflight_state,
                 preflight_timings.as_ref(),
-            )
+            )?;
+            ryeos_executor::dispatch::require_preflight_caller_coverage(
+                &preflight,
+                &preflight_exec_ctx,
+            )?;
+            Ok(preflight)
         })
         .await
         .map_err(|error| {
@@ -1620,9 +2045,11 @@ pub(crate) async fn admit_execution(
                     .into());
             }
         }
-        if let Err(err) = ryeos_app::vault::read_required_secrets_with_authority(
-            state.vault.as_ref(),
-            &caller_principal_id,
+        if let Err(err) = ryeos_app::vault::check_secret_availability(
+            &state.secret_sources(),
+            ryeos_app::vault::SecretRecipient {
+                principal: &caller_principal_id,
+            },
             &accepted_preflight
                 .requested_subject
                 .resolved
@@ -1630,6 +2057,18 @@ pub(crate) async fn admit_execution(
                 .required_secrets,
             provenance.project_authority(),
         ) {
+            if let ryeos_app::vault::VaultReadError::NameRefused(refusal) = &err {
+                return Ok((
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "error": refusal.message(),
+                        "error_code": refusal.code(),
+                        "name": refusal.name,
+                        "principal": refusal.principal,
+                    }),
+                )
+                    .into());
+            }
             return Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({
@@ -1656,7 +2095,8 @@ pub(crate) async fn admit_execution(
             RouteDispatchError::Internal(format!(
                 "validated accepted-launch policy rejected at dispatch boundary: {error:#}"
             ))
-        })?;
+        })?
+        .with_application_publication(publication.clone());
         launch_options.usage_subject = usage_subject.clone();
         launch_options.usage_subject_asserted_by = usage_subject_asserted_by.clone();
         launch_options.call = request.call().cloned();
@@ -1750,18 +2190,27 @@ pub(crate) async fn admit_execution(
         && request.method().is_none()
         && request.args().is_none();
     let remotes = if remote_target_requested && request_can_need_remote_config {
-        let project_for_layering: Option<&std::path::Path> = if no_project_requested {
-            None
-        } else {
-            Some(project_ctx.original_path.as_ref())
-        };
         Some(
-            crate::remote::config::load_remotes_layered_report(
-                &state.config.app_root,
-                project_for_layering,
-            )
-            .map(|report| report.remotes)
-            .map_err(|e| RouteDispatchError::Internal(format!("load remotes: {e:#}")))?,
+            crate::remote::config::load_remotes_report(&state.config.app_root)
+                .map(|report| report.remotes)
+                .map_err(|e| {
+                    match crate::remote::config::typed_load_error_or(e, |e| {
+                        crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
+                    }) {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
+                        }
+                        crate::handler_error::HandlerError::Internal(message) => {
+                            RouteDispatchError::Internal(message)
+                        }
+                        other => RouteDispatchError::Internal(other.to_string()),
+                    }
+                })?,
         )
     } else {
         None
@@ -1827,17 +2276,43 @@ pub(crate) async fn admit_execution(
                 return Ok(dispatch_error_response(error));
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote);
-            let remote_ignore = IgnoreMatcher::from_config(&plan.remote.remote.ingest_ignore)
-                .map_err(|e| {
-                    RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+                crate::handlers::remote_push::OutboundPrincipal::resolve(None, &state, &principal)
+                    .client(&state, &plan.remote.remote, &principal)
+                    .map_err(|error| match error {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
+                        }
+                        other => RouteDispatchError::Forbidden(other.to_string()),
+                    })?;
+            let rules = plan
+                .remote
+                .remote
+                .ingest_rules()
+                .map_err(|refusal| match refusal {
+                    crate::handler_error::HandlerError::Structured { code, status, body } => {
+                        RouteDispatchError::Structured {
+                            code,
+                            status,
+                            body,
+                            thread_id: None,
+                        }
+                    }
+                    other => RouteDispatchError::Internal(other.to_string()),
                 })?;
+            let remote_ignore = IgnoreMatcher::from_config(rules).map_err(|e| {
+                RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+            })?;
             let state_arc = Arc::new(state.clone());
             let mut destination_policy = request.execution_policy.clone();
             destination_policy.target = ExecutionTarget::Here;
             destination_policy.validate().map_err(|error| {
                 RouteDispatchError::BadRequest(format!(
-                    "invalid destination execution policy: {error}"
+                    "invalid destination execution policy: {error:#}"
                 ))
             })?;
             let forward_req = crate::remote::forward::RemoteForwardRequest {
@@ -1897,7 +2372,7 @@ pub(crate) async fn admit_execution(
         let preflight_state = state.clone();
         let preflight_timings = launch_timings.clone();
         let preflight = tokio::task::spawn_blocking(move || {
-            ryeos_executor::dispatch::preflight_root_dispatch(
+            let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
                 &preflight_item_ref,
                 &preflight_kind,
                 &preflight_parameters,
@@ -1909,7 +2384,12 @@ pub(crate) async fn admit_execution(
                 &preflight_exec_ctx,
                 &preflight_state,
                 preflight_timings.as_ref(),
-            )
+            )?;
+            ryeos_executor::dispatch::require_preflight_caller_coverage(
+                &preflight,
+                &preflight_exec_ctx,
+            )?;
+            Ok(preflight)
         })
         .await
         .map_err(|error| {
@@ -1971,6 +2451,7 @@ pub(crate) async fn admit_execution(
         usage_subject,
         usage_subject_asserted_by,
         previous_thread_id: None,
+        initial_facets: Default::default(),
         root_admission: local_root_admission,
         root_dispatch_evidence: local_root_dispatch_evidence,
         parent_execution_context: None,
@@ -1978,14 +2459,29 @@ pub(crate) async fn admit_execution(
     };
 
     let handler_context = principal.clone();
-    let dispatch_result = ryeos_executor::dispatch::dispatch_with_handler_context(
-        item_ref,
-        handler_context,
-        &dispatch_req,
-        &exec_ctx,
-        &state,
-    )
-    .await;
+    let dispatch_result = match publication.as_ref() {
+        Some(publication) => {
+            ryeos_executor::dispatch::dispatch_with_application_publication(
+                item_ref,
+                publication,
+                Some(handler_context),
+                &dispatch_req,
+                &exec_ctx,
+                None,
+            )
+            .await
+        }
+        None => {
+            ryeos_executor::dispatch::dispatch_with_handler_context(
+                item_ref,
+                handler_context,
+                &dispatch_req,
+                &exec_ctx,
+                &state,
+            )
+            .await
+        }
+    };
 
     match dispatch_result {
         Ok(mut value) => {
@@ -2243,6 +2739,13 @@ fn map_forward_error_to_dispatch(
                 detail: detail.clone(),
             }
         }
+        RemoteForwardError::ResultUnsigned
+        | RemoteForwardError::ResultAttestationInvalid { .. } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
+                target_site_id: target_site_id.to_string(),
+                detail: format!("[{}] {e}", e.code()),
+            }
+        }
         RemoteForwardError::MissingSnapshotHash => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
                 target_site_id: target_site_id.to_string(),
@@ -2283,6 +2786,610 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use ryeos_app::route_raw::{RawLimits, RawRequest, RawResponseSpec};
+    use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName;
+    use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
+
+    static NO_PROVIDER_ENVIRONMENT: ryeos_app::vault::ProviderEnvironment =
+        ryeos_app::vault::ProviderEnvironment::none();
+
+    fn scopes(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn operator_vault_namespace_policy() -> ExecutionPolicy {
+        ExecutionPolicy {
+            environment: ExecutionEnvironmentPolicy::Vault {
+                namespace: ryeos_app::execution_policy::OPERATOR_VAULT_NAMESPACE.to_owned(),
+                name_policy:
+                    ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
+            },
+            ..ExecutionPolicy::projectless(ExecutionResponse::Wait)
+        }
+    }
+
+    #[test]
+    fn preauthorization_refuses_operator_vault_exposure_without_the_fixed_capability() {
+        use ryeos_app::execution_policy::{
+            LIVE_PROJECT_WRITE_CAPABILITY, OPERATOR_VAULT_CAPABILITY,
+            OperatorVaultCapabilityRequired,
+        };
+        let (_state_root, _store_owner, state) = crate::test_support::build_test_state();
+        let live = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+        let pinned = ExecutionPolicy::local_pinned_capture(ExecutionResponse::Wait);
+        let vault = operator_vault_namespace_policy();
+        for (policy, narrow) in [
+            // Live write authority, and execute rights on the item, are not
+            // operator-vault authority.
+            (
+                &live,
+                scopes(&[LIVE_PROJECT_WRITE_CAPABILITY, "ryeos.execute.*"]),
+            ),
+            (&pinned, scopes(&["ryeos.execute.directive.*"])),
+            (&vault, scopes(&["ryeos.get.vault.*"])),
+            (&vault, Vec::new()),
+        ] {
+            let error = preauthorize_execution_policy(policy, &narrow, &state).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<OperatorVaultCapabilityRequired>(),
+                Some(&OperatorVaultCapabilityRequired),
+                "{policy:?} under {narrow:?}: {error:#}"
+            );
+            assert!(error.to_string().contains(OPERATOR_VAULT_CAPABILITY));
+            let Some(RouteDispatchError::Structured {
+                code, status, body, ..
+            }) = operator_vault_route_error(&error)
+            else {
+                panic!("operator-vault refusal must map to a typed route error");
+            };
+            assert_eq!(code, OperatorVaultCapabilityRequired::CODE);
+            assert_eq!(status, StatusCode::FORBIDDEN.as_u16());
+            assert_eq!(body["error_code"], OperatorVaultCapabilityRequired::CODE);
+            assert_eq!(body["required_capability"], OPERATOR_VAULT_CAPABILITY);
+        }
+    }
+
+    #[test]
+    fn preauthorization_admits_operator_vault_exposure_with_the_capability_or_operator_wildcard() {
+        use ryeos_app::execution_policy::{
+            LIVE_PROJECT_WRITE_CAPABILITY, OPERATOR_VAULT_CAPABILITY,
+        };
+        let (_state_root, _store_owner, state) = crate::test_support::build_test_state();
+        let live = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+        let pinned = ExecutionPolicy::local_pinned_capture(ExecutionResponse::Wait);
+        let vault = operator_vault_namespace_policy();
+        // The configured operator's bootstrap grant.
+        for policy in [&live, &pinned, &vault] {
+            preauthorize_execution_policy(policy, &scopes(&["*"]), &state).unwrap();
+        }
+        preauthorize_execution_policy(
+            &live,
+            &scopes(&[LIVE_PROJECT_WRITE_CAPABILITY, OPERATOR_VAULT_CAPABILITY]),
+            &state,
+        )
+        .unwrap();
+        preauthorize_execution_policy(&pinned, &scopes(&[OPERATOR_VAULT_CAPABILITY]), &state)
+            .unwrap();
+        preauthorize_execution_policy(&vault, &scopes(&[OPERATOR_VAULT_CAPABILITY]), &state)
+            .unwrap();
+
+        // Without operator-vault exposure the capability is not required.
+        preauthorize_execution_policy(
+            &live.clone().exclude_operator_vault(),
+            &scopes(&[LIVE_PROJECT_WRITE_CAPABILITY]),
+            &state,
+        )
+        .unwrap();
+        preauthorize_execution_policy(
+            &ExecutionPolicy::projectless(ExecutionResponse::Wait),
+            &[],
+            &state,
+        )
+        .unwrap();
+
+        // Any other refusal keeps its own route error shape.
+        let live_refusal =
+            preauthorize_execution_policy(&live, &scopes(&[OPERATOR_VAULT_CAPABILITY]), &state)
+                .unwrap_err();
+        assert!(operator_vault_route_error(&live_refusal).is_none());
+    }
+
+    fn no_provider_environment() -> ProviderEnvironmentRecipient<'static> {
+        ProviderEnvironmentRecipient {
+            environment: &NO_PROVIDER_ENVIRONMENT,
+            principal: "fp:test",
+        }
+    }
+
+    #[test]
+    fn vault_namespace_admission_seals_the_callers_principal_and_canonical_scopes() {
+        // A projectless launch has an empty project ceiling; the recipient
+        // sealed here is the caller and its own scopes, in canonical form.
+        let authority = resolve_execution_project_authority(
+            &operator_vault_namespace_policy(),
+            None,
+            None,
+            None,
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            &scopes(&[
+                "ryeos.receive.vault.b",
+                "ryeos.receive.vault.a",
+                "ryeos.receive.vault.b",
+            ]),
+            ProviderEnvironmentRecipient {
+                environment: &NO_PROVIDER_ENVIRONMENT,
+                principal: "fp:caller",
+            },
+        )
+        .unwrap();
+        let ryeos_state::objects::EnvironmentAuthority::Vault {
+            recipient_principal,
+            recipient_scopes,
+            ..
+        } = authority.environment()
+        else {
+            panic!("expected a vault authority");
+        };
+        assert_eq!(recipient_principal, "fp:caller");
+        assert_eq!(
+            recipient_scopes,
+            &scopes(&["ryeos.receive.vault.a", "ryeos.receive.vault.b"])
+        );
+        assert!(authority.capability_ceiling().is_empty());
+        authority.validate().unwrap();
+    }
+
+    const OPENAI_VALUE: &str = "sk-node-provider-value";
+    const ANTHROPIC_VALUE: &str = "sk-node-anthropic-value";
+    const RECEIVE_ANTHROPIC: &str = "ryeos.receive.provider_env.anthropic_api_key";
+
+    /// A node delivering `OPENAI_API_KEY` to the listed principals only, and
+    /// `ANTHROPIC_API_KEY` to holders of a dedicated receive capability.
+    fn recipient_bound_provider_environment() -> ryeos_app::vault::ProviderEnvironment {
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+        ryeos_app::vault::ProviderEnvironment::captured(
+            vec![
+                ProviderEnvironmentName {
+                    name: "ANTHROPIC_API_KEY".to_owned(),
+                    recipients: NameRecipients {
+                        principals: Vec::new(),
+                        capabilities: strings(&[RECEIVE_ANTHROPIC]),
+                    },
+                },
+                ProviderEnvironmentName {
+                    name: "OPENAI_API_KEY".to_owned(),
+                    recipients: NameRecipients {
+                        principals: strings(&["fp:alice", "route:fixed-handler"]),
+                        capabilities: Vec::new(),
+                    },
+                },
+            ],
+            vec![
+                (
+                    "ANTHROPIC_API_KEY".to_owned(),
+                    zeroize::Zeroizing::new(ANTHROPIC_VALUE.to_owned()),
+                ),
+                (
+                    "OPENAI_API_KEY".to_owned(),
+                    zeroize::Zeroizing::new(OPENAI_VALUE.to_owned()),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn provider_policy(
+        name_policy: ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy,
+    ) -> ExecutionPolicy {
+        ExecutionPolicy {
+            schema_version: 2,
+            ownership: ryeos_app::execution_policy::ExecutionOwnership::DaemonOwned,
+            recovery: ryeos_app::execution_policy::ExecutionRecovery::RestartRecoverable,
+            response: ExecutionResponse::Accepted,
+            target: ryeos_app::execution_policy::ExecutionTarget::Here,
+            environment: ExecutionEnvironmentPolicy::ProviderEnvironment { name_policy },
+            project: ProjectExecutionPolicy::Projectless,
+        }
+    }
+
+    fn exact(names: &[&str]) -> ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy {
+        ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::Exact {
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
+    fn admit_provider(
+        environment: &ryeos_app::vault::ProviderEnvironment,
+        policy: &ExecutionPolicy,
+        principal: &str,
+        scopes: &[String],
+    ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
+        resolve_execution_project_authority(
+            policy,
+            None,
+            None,
+            None,
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            scopes,
+            ProviderEnvironmentRecipient {
+                environment,
+                principal,
+            },
+        )
+    }
+
+    fn sealed_provider(
+        authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> (Vec<String>, String) {
+        let ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+            declared_names,
+            recipient_principal,
+            recipient_scopes: _,
+            name_authority: _,
+        } = authority.environment()
+        else {
+            panic!("expected provider-environment authority");
+        };
+        (declared_names.clone(), recipient_principal.clone())
+    }
+
+    fn assert_plain_refusal(error: &anyhow::Error, name: &str, principal: &str) {
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!("provider-environment name `{name}`"))
+                && message.contains(&format!("principal `{principal}`")),
+            "{message}"
+        );
+        assert!(
+            !message.contains(OPENAI_VALUE) && !message.contains(ANTHROPIC_VALUE),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn provider_environment_admission_seals_names_for_a_listed_principal() {
+        let environment = recipient_bound_provider_environment();
+        let authority = admit_provider(
+            &environment,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "fp:alice",
+            &[],
+        )
+        .unwrap();
+        authority.validate().unwrap();
+        assert_eq!(
+            sealed_provider(&authority),
+            (vec!["OPENAI_API_KEY".to_owned()], "fp:alice".to_owned())
+        );
+        // A fixed route principal is a principal like any other.
+        let authority = admit_provider(
+            &environment,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "route:fixed-handler",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(sealed_provider(&authority).1, "route:fixed-handler");
+    }
+
+    #[test]
+    fn provider_environment_admission_refuses_an_unlisted_principal_by_name() {
+        let environment = recipient_bound_provider_environment();
+        for principal in ["fp:mallory", "daemon:scheduler"] {
+            let error = admit_provider(
+                &environment,
+                &provider_policy(exact(&["OPENAI_API_KEY"])),
+                principal,
+                &["ryeos.execute.tool.*".to_owned()],
+            )
+            .unwrap_err();
+            assert_plain_refusal(&error, "OPENAI_API_KEY", principal);
+        }
+        // A wide operator grant does not make a principal a listed recipient.
+        let error = admit_provider(
+            &environment,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "fp:operator",
+            &["*".to_owned()],
+        )
+        .unwrap_err();
+        assert_plain_refusal(&error, "OPENAI_API_KEY", "fp:operator");
+    }
+
+    #[test]
+    fn provider_environment_admission_honours_capability_recipients() {
+        let environment = recipient_bound_provider_environment();
+        let policy = provider_policy(exact(&["ANTHROPIC_API_KEY"]));
+        let authority = admit_provider(
+            &environment,
+            &policy,
+            "fp:bob",
+            &[RECEIVE_ANTHROPIC.to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            sealed_provider(&authority),
+            (vec!["ANTHROPIC_API_KEY".to_owned()], "fp:bob".to_owned())
+        );
+        // Wildcard grants covering the listed capability are refused by name.
+        for wildcard in [
+            "*",
+            "ryeos.*",
+            "ryeos.receive.*",
+            "ryeos.receive.provider_env.*",
+        ] {
+            let error = admit_provider(&environment, &policy, "fp:bob", &[wildcard.to_owned()])
+                .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&format!(
+                    "provider environment ANTHROPIC_API_KEY requires the exact recipient \
+                     capability {RECEIVE_ANTHROPIC}; wildcard grants do not satisfy it"
+                )),
+                "{wildcard}: {message}"
+            );
+            assert!(!message.contains(ANTHROPIC_VALUE), "{message}");
+        }
+        let error = admit_provider(&environment, &policy, "fp:bob", &[]).unwrap_err();
+        assert_plain_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
+        // Holding the capability for one name does not reach another.
+        let error = admit_provider(
+            &environment,
+            &provider_policy(exact(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"])),
+            "fp:bob",
+            &[RECEIVE_ANTHROPIC.to_owned()],
+        )
+        .unwrap_err();
+        assert_plain_refusal(&error, "OPENAI_API_KEY", "fp:bob");
+    }
+
+    #[test]
+    fn provider_environment_admission_puts_every_name_in_play_for_declared_required() {
+        let environment = recipient_bound_provider_environment();
+        let policy = provider_policy(
+            ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
+        );
+        let error = admit_provider(&environment, &policy, "fp:alice", &[]).unwrap_err();
+        assert_plain_refusal(&error, "ANTHROPIC_API_KEY", "fp:alice");
+        let authority = admit_provider(
+            &environment,
+            &policy,
+            "fp:alice",
+            &[RECEIVE_ANTHROPIC.to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            sealed_provider(&authority),
+            (
+                vec!["ANTHROPIC_API_KEY".to_owned(), "OPENAI_API_KEY".to_owned()],
+                "fp:alice".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn provider_environment_admitted_for_one_principal_is_not_delivered_to_another() {
+        let environment = recipient_bound_provider_environment();
+        let authority = admit_provider(
+            &environment,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "fp:alice",
+            &[],
+        )
+        .unwrap();
+        let vault = ryeos_app::vault::EmptyVault;
+        let sources = ryeos_app::vault::SecretSources {
+            vault: &vault,
+            provider_env: &environment,
+            ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:alice"),
+        };
+        let names = vec!["OPENAI_API_KEY".to_owned()];
+        // A child acting for another principal under the inherited authority.
+        let error = ryeos_app::vault::authorize_secret_delivery(
+            &sources,
+            ryeos_app::vault::SecretRecipient {
+                principal: "fp:child",
+            },
+            &names,
+            &authority,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("OPENAI_API_KEY") && message.contains("principal `fp:child`"),
+            "{message}"
+        );
+        assert!(!message.contains(OPENAI_VALUE), "{message}");
+        let delivered = ryeos_app::vault::authorize_secret_delivery(
+            &sources,
+            ryeos_app::vault::SecretRecipient {
+                principal: "fp:alice",
+            },
+            &names,
+            &authority,
+        )
+        .unwrap();
+        assert_eq!(delivered.get("OPENAI_API_KEY"), Some(OPENAI_VALUE));
+    }
+
+    /// The same node declaration and values with different recipient
+    /// rules, as after an operator edits the policy and restarts.
+    fn provider_environment_with_recipients(
+        openai_principals: &[&str],
+        anthropic_capabilities: &[&str],
+    ) -> ryeos_app::vault::ProviderEnvironment {
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+        ryeos_app::vault::ProviderEnvironment::captured(
+            vec![
+                ProviderEnvironmentName {
+                    name: "ANTHROPIC_API_KEY".to_owned(),
+                    recipients: NameRecipients {
+                        principals: strings(&["fp:placeholder"]),
+                        capabilities: strings(anthropic_capabilities),
+                    },
+                },
+                ProviderEnvironmentName {
+                    name: "OPENAI_API_KEY".to_owned(),
+                    recipients: NameRecipients {
+                        principals: strings(openai_principals),
+                        capabilities: Vec::new(),
+                    },
+                },
+            ],
+            vec![
+                (
+                    "ANTHROPIC_API_KEY".to_owned(),
+                    zeroize::Zeroizing::new(ANTHROPIC_VALUE.to_owned()),
+                ),
+                (
+                    "OPENAI_API_KEY".to_owned(),
+                    zeroize::Zeroizing::new(OPENAI_VALUE.to_owned()),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn deliver(
+        environment: &ryeos_app::vault::ProviderEnvironment,
+        principal: &str,
+        name: &str,
+        authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<ryeos_engine::contracts::DeliveredSecretEnv, ryeos_app::vault::VaultReadError> {
+        let vault = ryeos_app::vault::EmptyVault;
+        ryeos_app::vault::authorize_secret_delivery(
+            &ryeos_app::vault::SecretSources {
+                vault: &vault,
+                provider_env: environment,
+                ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:alice"),
+            },
+            ryeos_app::vault::SecretRecipient { principal },
+            &[name.to_owned()],
+            authority,
+        )
+    }
+
+    fn assert_plain_delivery_refusal(
+        error: &ryeos_app::vault::VaultReadError,
+        name: &str,
+        principal: &str,
+    ) {
+        assert!(
+            matches!(
+                error,
+                ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+            ),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(name) && message.contains(&format!("principal `{principal}`")),
+            "{message}"
+        );
+        assert!(
+            !message.contains(OPENAI_VALUE) && !message.contains(ANTHROPIC_VALUE),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn provider_environment_delivery_rejudges_the_current_recipient_rules() {
+        let admitted_under = recipient_bound_provider_environment();
+        let authority = admit_provider(
+            &admitted_under,
+            &provider_policy(exact(&["OPENAI_API_KEY"])),
+            "fp:alice",
+            &[],
+        )
+        .unwrap();
+        // Still listed after a restart: the recovered launch is delivered.
+        let unchanged = provider_environment_with_recipients(&["fp:alice"], &[RECEIVE_ANTHROPIC]);
+        let delivered = deliver(&unchanged, "fp:alice", "OPENAI_API_KEY", &authority).unwrap();
+        assert_eq!(delivered.get("OPENAI_API_KEY"), Some(OPENAI_VALUE));
+        // The operator removed the principal and restarted: the recovered
+        // launch under the sealed authority receives nothing.
+        let removed = provider_environment_with_recipients(&["fp:bob"], &[RECEIVE_ANTHROPIC]);
+        let error = deliver(&removed, "fp:alice", "OPENAI_API_KEY", &authority).unwrap_err();
+        assert_plain_delivery_refusal(&error, "OPENAI_API_KEY", "fp:alice");
+
+        // A capability recipient removed after admission is refused alike.
+        let authority = admit_provider(
+            &admitted_under,
+            &provider_policy(exact(&["ANTHROPIC_API_KEY"])),
+            "fp:bob",
+            &[RECEIVE_ANTHROPIC.to_owned()],
+        )
+        .unwrap();
+        let narrowed_rule = provider_environment_with_recipients(
+            &["fp:alice"],
+            &["ryeos.receive.provider_env.other_key"],
+        );
+        let error = deliver(&narrowed_rule, "fp:bob", "ANTHROPIC_API_KEY", &authority).unwrap_err();
+        assert_plain_delivery_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
+    }
+
+    #[test]
+    fn provider_environment_delivery_judges_the_scopes_sealed_at_admission() {
+        let environment = recipient_bound_provider_environment();
+        // Admission canonicalizes and seals the requesting principal's own
+        // scopes alongside the admitted names.
+        let authority = admit_provider(
+            &environment,
+            &provider_policy(exact(&["ANTHROPIC_API_KEY"])),
+            "fp:bob",
+            &[
+                RECEIVE_ANTHROPIC.to_owned(),
+                "ryeos.execute.tool.*".to_owned(),
+                RECEIVE_ANTHROPIC.to_owned(),
+            ],
+        )
+        .unwrap();
+        let ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+            declared_names: _,
+            recipient_principal: _,
+            recipient_scopes,
+            name_authority: _,
+        } = authority.environment()
+        else {
+            panic!("expected provider-environment authority");
+        };
+        assert_eq!(
+            recipient_scopes,
+            &[
+                "ryeos.execute.tool.*".to_owned(),
+                RECEIVE_ANTHROPIC.to_owned()
+            ]
+        );
+        // Delivery takes no scopes from the delivering execution: the root
+        // launch, a child narrowed away from the receive capability and a
+        // provider-attempt callback all deliver under the sealed set.
+        let delivered = deliver(&environment, "fp:bob", "ANTHROPIC_API_KEY", &authority).unwrap();
+        assert_eq!(delivered.get("ANTHROPIC_API_KEY"), Some(ANTHROPIC_VALUE));
+        // An authority whose sealed scopes lack the receive capability is
+        // refused by name, whoever presents it.
+        let unsealed = ryeos_state::objects::ExecutionProjectAuthority::projectless(
+            ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+                declared_names: vec!["ANTHROPIC_API_KEY".to_owned()],
+                recipient_principal: "fp:bob".to_owned(),
+                recipient_scopes: vec!["ryeos.execute.tool.*".to_owned()],
+                name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+            },
+        )
+        .unwrap();
+        let error = deliver(&environment, "fp:bob", "ANTHROPIC_API_KEY", &unsealed).unwrap_err();
+        assert_plain_delivery_refusal(&error, "ANTHROPIC_API_KEY", "fp:bob");
+    }
 
     #[test]
     fn project_source_is_derived_only_from_execution_policy() {
@@ -2371,6 +3478,7 @@ mod tests {
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &capability_ceiling,
+            no_provider_environment(),
         )
         .unwrap();
 
@@ -2400,6 +3508,7 @@ mod tests {
                 ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_owned(),
                 "*".to_owned(),
             ],
+            no_provider_environment(),
         )
         .unwrap();
 
@@ -2453,6 +3562,7 @@ mod tests {
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &[],
+            no_provider_environment(),
         )
         .unwrap();
         let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
@@ -2486,6 +3596,7 @@ mod tests {
                 "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
+                no_provider_environment(),
             )
             .is_err()
         );
@@ -2502,6 +3613,7 @@ mod tests {
                 "site:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
                 &[],
+                no_provider_environment(),
             )
             .is_err()
         );
@@ -2544,6 +3656,7 @@ mod tests {
             "site:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             &[],
+            no_provider_environment(),
         )
         .unwrap();
 
@@ -2663,6 +3776,7 @@ mod tests {
             execute: None,
             request: RawRequest { body },
             source_file: std::path::PathBuf::from("/test/execute.yaml"),
+            authority: None,
         }
     }
 
@@ -2701,6 +3815,14 @@ mod tests {
         };
         let msg = format!("{err}");
         assert!(msg.contains("request.body = json"), "got: {msg}");
+    }
+
+    #[test]
+    fn compile_rejects_objects_put_profile() {
+        assert!(matches!(
+            ExecuteMode.compile(&make_raw("ryeos_signed", RawRequestBody::ObjectsPutV1)),
+            Err(RouteConfigError::InvalidResponseSpec { .. })
+        ));
     }
 
     #[test]
@@ -2778,11 +3900,62 @@ mod tests {
             launch_mode: "wait".into(),
             target_site_id: target_site_id.map(String::from),
             validate_only: false,
+            validation_scope: Default::default(),
             call: None,
             usage_subject: None,
             debug_raw: false,
             state_root: None,
+            attest_result: false,
         }
+    }
+
+    #[test]
+    fn source_observation_scope_refuses_execution_and_project_controls() {
+        fn observation() -> ExecuteRequest {
+            let mut request = target_request(None);
+            request.execution_policy = ExecutionPolicy::projectless(ExecutionResponse::Wait);
+            request.project_path = None;
+            request.validate_only = true;
+            request.validation_scope = ryeos_runtime::command::ValidationScope::SourceObservation;
+            request
+        }
+        assert!(observation().require_source_observation_shape().is_ok());
+        let mutations: &[fn(&mut ExecuteRequest)] = &[
+            |r| r.validate_only = false,
+            |r| r.execution_policy.response = ExecutionResponse::Accepted,
+            |r| r.execution_policy = ExecutionPolicy::local_live(ExecutionResponse::Wait),
+            |r| {
+                r.execution_policy.target = ExecutionTarget::Site {
+                    site_id: "foreign".into(),
+                }
+            },
+            |r| r.project_path = Some("/tmp/project".into()),
+            |r| r.launch_id = Some("L-00000000000000000000000000000000".into()),
+            |r| r.state_root = Some("/tmp/state".into()),
+            |r| {
+                r.call = Some(ryeos_engine::method_call::MethodCall {
+                    method: Some("run".into()),
+                    args: None,
+                })
+            },
+            |r| {
+                r.ref_bindings
+                    .insert("extra".into(), "tool:example/run".into());
+            },
+            |r| r.parameters = json!({"source_only": true}),
+            |r| r.debug_raw = true,
+        ];
+        for change in mutations {
+            let mut request = observation();
+            change(&mut request);
+            assert!(request.require_source_observation_shape().is_err());
+        }
+        assert!(
+            serde_json::from_value::<ryeos_runtime::command::ValidationScope>(json!(
+                "admitted_source"
+            ))
+            .is_err()
+        );
     }
 
     fn make_remote(name: &str, site_id: &str) -> crate::remote::config::RemoteConfig {
@@ -2790,7 +3963,8 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         crate::remote::config::RemoteConfig {
             name: name.to_string(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&verifying_key)),
             signing_key: format!(
                 "ed25519:{}",
@@ -2798,7 +3972,7 @@ mod tests {
             ),
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".into(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }
@@ -2806,8 +3980,9 @@ mod tests {
     fn loaded(remote: crate::remote::config::RemoteConfig) -> LoadedRemote {
         LoadedRemote {
             config: remote,
-            scope: crate::remote::config::RemoteConfigScope::Operator,
             config_path: PathBuf::new(),
+            pin_source: crate::remote::config::PinSource::ExpectedFingerprint,
+            pinned_at: String::new(),
         }
     }
 

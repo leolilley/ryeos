@@ -1,5 +1,5 @@
-use ryeos_handler_bins::{directive_launch, run_handler};
-use ryeos_handler_protocol::HandlerRequest;
+use ryeos_handler_bins::directive_launch;
+use ryeos_handler_protocol::{HandlerRequest, run_handler};
 
 fn main() {
     std::process::exit(run_handler(|request| match request {

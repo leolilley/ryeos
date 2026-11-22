@@ -64,7 +64,7 @@ impl NodeConfigSection for RouteSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node_config::NodeItemContext;
+    use ryeos_node_runtime::node_config_source::NodeItemContext;
 
     fn ctx(id: &str) -> NodeItemContext {
         NodeItemContext {

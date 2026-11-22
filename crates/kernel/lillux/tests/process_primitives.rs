@@ -14,8 +14,8 @@ use std::io::{Read as _, Write as _};
 use lillux::{
     CooperativeChildTermination, OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
     configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd,
-    sealed_memfd, spawn, spawn_detached, spawn_detached_from_executable,
-    supervised_launcher_status_pipe, validate_subprocess_limits,
+    sealed_executable_memfd_from_reader, sealed_memfd, spawn, spawn_detached,
+    spawn_detached_from_executable, supervised_launcher_status_pipe, validate_subprocess_limits,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -50,6 +50,30 @@ fn run_captures_stdout_and_zero_exit() {
     assert_eq!(r.exit_code, 0);
     assert_eq!(r.stdout, "hello");
     assert!(!r.timed_out);
+}
+
+/// A child that writes and exits at once races the capture drain's stop
+/// against its final read. Every run must return the whole output on both
+/// streams.
+#[test]
+fn run_never_loses_output_of_a_child_that_exits_immediately() {
+    for round in 0..200 {
+        let r = run(sh(&["-c", "printf hello; printf oops >&2"]));
+        assert_eq!(r.stdout, "hello", "stdout lost on round {round}");
+        assert_eq!(r.stderr, "oops", "stderr lost on round {round}");
+        assert!(r.success);
+    }
+}
+
+#[test]
+fn run_never_loses_the_tail_of_larger_output_from_an_immediate_exit() {
+    for round in 0..20 {
+        let mut request = sh(&["-c", "head -c 300000 /dev/zero | tr '\\0' x; printf END"]);
+        request.envs = path_env();
+        let r = run(request);
+        assert_eq!(r.stdout.len(), 300_003, "short capture on round {round}");
+        assert!(r.stdout.ends_with("xEND"), "tail lost on round {round}");
+    }
 }
 
 #[test]
@@ -323,10 +347,13 @@ fn run_installs_max_open_files_before_exec() {
 
 #[test]
 fn run_installs_memory_cpu_and_process_limits_before_exec() {
-    // Inspect installed limits using shell builtins, without command-substitution
-    // forks. RLIMIT_NPROC counts this UID's other host tasks too; observing the
+    // Read the installed soft limits from the kernel's own report of the
+    // exec'd process, which needs no shell-specific `ulimit` option.
+    // RLIMIT_NPROC counts this UID's other host tasks too; observing the
     // installed value must not depend on the developer's current process count.
-    let mut request = sh(&["-c", "ulimit -v; ulimit -t; ulimit -u"]);
+    let mut request = sh(&[]);
+    request.cmd = "/bin/cat".to_string();
+    request.args = vec!["/proc/self/limits".to_string()];
     request.limits = Some(SubprocessLimits {
         max_address_space_bytes: Some(256 * 1024 * 1024),
         max_cpu_seconds: Some(3),
@@ -337,9 +364,22 @@ fn run_installs_memory_cpu_and_process_limits_before_exec() {
     let result = run(request);
 
     assert!(result.success, "stderr: {}", result.stderr);
+    let soft_limit = |label: &str| -> String {
+        result
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_else(|| panic!("no `{label}` row in {:?}", result.stdout))
+            .to_owned()
+    };
     assert_eq!(
-        result.stdout.lines().collect::<Vec<_>>(),
-        ["262144", "3", "512"]
+        [
+            soft_limit("Max address space"),
+            soft_limit("Max cpu time"),
+            soft_limit("Max processes"),
+        ],
+        ["268435456", "3", "512"]
     );
 }
 
@@ -577,6 +617,63 @@ fn sealed_executable_memfd_is_owner_executable_and_not_permission_writable() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn streamed_executable_memfd_requires_exact_digest_size_and_seals() {
+    let bytes = b"exact retained executable";
+    let hash = lillux::sha256_hex(bytes);
+    let mut source = bytes.as_slice();
+    let handle = sealed_executable_memfd_from_reader(
+        c"lillux-streamed-executable",
+        &mut source,
+        bytes.len() as u64,
+        &hash,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(handle.file_identity().unwrap().mode() & 0o777, 0o500);
+    let observation = handle.regular_file_observation().unwrap();
+    assert_eq!(
+        handle
+            .digest_regular_file_stable_exact(&observation)
+            .unwrap(),
+        hash
+    );
+    let mut truncated = &bytes[..bytes.len() - 1];
+    assert!(
+        sealed_executable_memfd_from_reader(
+            c"lillux-streamed-truncated",
+            &mut truncated,
+            bytes.len() as u64,
+            &hash,
+            1024
+        )
+        .is_err()
+    );
+    let mut extra = b"exact retained executable!".as_slice();
+    assert!(
+        sealed_executable_memfd_from_reader(
+            c"lillux-streamed-extra",
+            &mut extra,
+            bytes.len() as u64,
+            &hash,
+            1024
+        )
+        .is_err()
+    );
+    let mut wrong = bytes.as_slice();
+    assert!(
+        sealed_executable_memfd_from_reader(
+            c"lillux-streamed-wrong",
+            &mut wrong,
+            bytes.len() as u64,
+            &"0".repeat(64),
+            1024
+        )
+        .is_err()
+    );
+}
+
+#[test]
 #[cfg(not(target_os = "linux"))]
 fn sealed_memfd_fails_closed_off_linux() {
     let error = sealed_memfd(c"lillux-test", b"payload").unwrap_err();
@@ -587,6 +684,17 @@ fn sealed_memfd_fails_closed_off_linux() {
 
 #[cfg(target_os = "linux")]
 fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
+    supervised_launcher_protocol_shell_after(script, timeout, "0")
+}
+
+/// Like the protocol shell, but the launcher reports its target PID only
+/// after `report_delay_secs` (a `sleep` argument).
+#[cfg(target_os = "linux")]
+fn supervised_launcher_protocol_shell_after(
+    script: &str,
+    timeout: f64,
+    report_delay_secs: &str,
+) -> SubprocessRequest {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
     // Like the real isolation launch, the mock target inherits the retained
@@ -594,8 +702,8 @@ fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessR
     // the target for accounting, while the wrapper keeps the shared PGID owned.
     let wrapper_script = format!(
         "/bin/sh -c 'exec /bin/sh -c \"$1\"' \
-         ryeos-target '{script}' & target=$!; \
-         printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
+         ryeos-target '{script}' & target=$!; sleep {report_delay_secs}; \
+         printf '{{\"child-pid\":%s}}\\n' \"$target\" > /proc/self/fd/{status_fd}; wait \"$target\""
     );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
@@ -603,6 +711,51 @@ fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessR
     request.inherited_fds.push(status.writer);
     request.supervised_status = Some(status.reader);
     request
+}
+
+// A real multi-second sleep is unavoidable here: the old fixed 5 s setup
+// limit can only be shown gone by a launcher that reports later than 5 s.
+#[test]
+#[cfg(target_os = "linux")]
+fn slow_launcher_report_within_request_deadline_succeeds() {
+    let started = std::time::Instant::now();
+    let running = spawn(supervised_launcher_protocol_shell_after(
+        "sleep 30", 8.0, "6",
+    ))
+    .unwrap_or_else(|failure| panic!("slow launcher must succeed: {}", failure.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(6));
+    assert_ne!(running.pid, 0);
+    // The request deadline (8 s) still ends the run and cleans up.
+    assert!(running.wait().timed_out);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn silent_launcher_fails_at_request_deadline_with_bound_named() {
+    let started = std::time::Instant::now();
+    let failure = match spawn(supervised_launcher_protocol_shell_after(
+        "sleep 30", 1.0, "30",
+    )) {
+        Ok(running) => {
+            drop(running.wait());
+            panic!("launcher that never reports must not spawn");
+        }
+        Err(failure) => failure,
+    };
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+    assert!(
+        failure
+            .stderr
+            .contains("did not report its target PID after waiting"),
+        "{}",
+        failure.stderr
+    );
+    assert!(
+        failure.stderr.contains("bound: request deadline"),
+        "{}",
+        failure.stderr
+    );
 }
 
 #[test]
@@ -706,7 +859,7 @@ fn reported_target_exit_still_cleans_up_same_group_descendants() {
 fn malformed_launcher_status_fails_closed_and_kills_wrapper() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
-    let wrapper_script = format!("printf 'not-json\\n' >&{status_fd}; sleep 30");
+    let wrapper_script = format!("printf 'not-json\\n' > /proc/self/fd/{status_fd}; sleep 30");
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
     request.inherited_fds.push(status.writer);
@@ -729,7 +882,7 @@ fn launcher_namespace_identity_fields_are_accepted_but_remain_closed() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
     let wrapper_script = format!(
-        "sleep 30 & target=$!; printf '{{\"child-pid\":%s,\"ipc-namespace\":1,\"mnt-namespace\":2,\"net-namespace\":3,\"uts-namespace\":4}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
+        "sleep 30 & target=$!; printf '{{\"child-pid\":%s,\"ipc-namespace\":1,\"mnt-namespace\":2,\"net-namespace\":3,\"uts-namespace\":4}}\\n' \"$target\" > /proc/self/fd/{status_fd}; wait \"$target\""
     );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
@@ -741,8 +894,9 @@ fn launcher_namespace_identity_fields_are_accepted_but_remain_closed() {
 
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
-    let wrapper_script =
-        format!("printf '{{\"child-pid\":123,\"unexpected-namespace\":1}}\\n' >&{status_fd}");
+    let wrapper_script = format!(
+        "printf '{{\"child-pid\":123,\"unexpected-namespace\":1}}\\n' > /proc/self/fd/{status_fd}"
+    );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
     request.inherited_fds.push(status.writer);
@@ -778,8 +932,9 @@ fn launcher_stderr_is_retained_when_status_closes_before_target_identity() {
 fn duplicate_launcher_status_keys_fail_closed() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
-    let wrapper_script =
-        format!("printf '%s\\n' '{{\"child-pid\":123,\"child-pid\":124}}' >&{status_fd}; sleep 30");
+    let wrapper_script = format!(
+        "printf '%s\\n' '{{\"child-pid\":123,\"child-pid\":124}}' > /proc/self/fd/{status_fd}; sleep 30"
+    );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
     request.inherited_fds.push(status.writer);
@@ -801,7 +956,7 @@ fn nested_duplicate_launcher_status_keys_fail_closed() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
     let wrapper_script = format!(
-        "printf '%s\\n' '{{\"refused\":{{\"code\":\"one\",\"code\":\"two\"}}}}' >&{status_fd}; sleep 30"
+        "printf '%s\\n' '{{\"refused\":{{\"code\":\"one\",\"code\":\"two\"}}}}' > /proc/self/fd/{status_fd}; sleep 30"
     );
     let mut request = sh(&["-c", &wrapper_script]);
     request.envs = path_env();
@@ -824,7 +979,7 @@ fn typed_launcher_refusal_is_retained_without_starting_a_target() {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_descriptor().unwrap() as i32;
     let wrapper_script = format!(
-        "printf '%s\\n' '{{\"refused\":{{\"code\":\"launch_refused\",\"message\":\"policy refused\",\"details\":{{}}}}}}' >&{status_fd}"
+        "printf '%s\\n' '{{\"refused\":{{\"code\":\"launch_refused\",\"message\":\"policy refused\",\"details\":{{}}}}}}' > /proc/self/fd/{status_fd}"
     );
     let mut request = sh(&["-c", &wrapper_script]);
     request.inherited_fds.push(status.writer);

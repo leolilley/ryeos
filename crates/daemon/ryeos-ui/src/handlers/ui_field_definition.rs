@@ -40,32 +40,32 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             HandlerError::BadRequest("invalid field definition thread_id".to_string()).into(),
         );
     }
-    crate::thread_authorization::authorize_exact_thread_subjects(
+    let signed = crate::thread_authorization::authorize_exact_thread_subjects(
         &ctx,
         &state,
         &caller,
         &[&request.thread_id],
-    )?;
-    let Some(thread) = state.threads.get_thread_view(&request.thread_id)? else {
-        return Err(HandlerError::NotFound.into());
-    };
-    let run_identity = state
+    )?
+    .pop()
+    .expect("one exact signed subject requested");
+    let admitted = state
         .state_store
-        .graph_run_list_identities(std::slice::from_ref(&request.thread_id))?
-        .remove(&request.thread_id);
+        .admitted_program_evidence(&request.thread_id);
+    let verified_admitted = admitted
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .filter(|evidence| {
+            signed.admitted_launch_capsule_hash.as_deref()
+                == Some(evidence.admitted_launch_capsule_hash.as_str())
+        });
     let expected_ref = request
         .definition_ref
         .clone()
-        .or_else(|| {
-            run_identity
-                .as_ref()
-                .map(|identity| identity.definition_ref.clone())
-        })
-        .unwrap_or_else(|| thread.thread.item_ref.clone());
+        .or_else(|| verified_admitted.map(|evidence| evidence.subject.canonical_ref.clone()))
+        .unwrap_or_else(|| signed.item_ref.clone());
     let expected_digest = request.effective_definition_digest.clone().or_else(|| {
-        run_identity
-            .as_ref()
-            .map(|identity| identity.effective_definition_digest.clone())
+        verified_admitted.map(|evidence| evidence.effective_definition_digest.as_str().to_string())
     });
     let subject = FieldFactSubject {
         kind: "thread".to_string(),
@@ -75,11 +75,24 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     };
     let mut builder = FieldFactsBuilder::new("definition", SERVICE_REF, subject);
 
-    let evidence = match state
-        .state_store
-        .admitted_program_evidence(&request.thread_id)
-    {
-        Ok(Some(evidence)) => evidence,
+    let evidence = match admitted {
+        Ok(Some(evidence))
+            if signed.admitted_launch_capsule_hash.as_deref()
+                == Some(evidence.admitted_launch_capsule_hash.as_str()) =>
+        {
+            evidence
+        }
+        Ok(Some(_)) => {
+            add_definition_shell(
+                &mut builder,
+                &request.thread_id,
+                &expected_ref,
+                expected_digest.as_deref(),
+                "admitted_program_invalid",
+                "authorized thread and admitted capsule identity disagree",
+            )?;
+            return serde_json::to_value(builder.finish()?).map_err(Into::into);
+        }
         Ok(None) => {
             add_definition_shell(
                 &mut builder,
@@ -133,7 +146,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         return serde_json::to_value(builder.finish()?).map_err(Into::into);
     }
 
-    let topology = match super::ui_graph_topology::build_effective_graph_topology(
+    let topology = match super::signed_item_topology::build_effective_graph_topology(
         &evidence.subject.canonical_ref,
         &evidence.resolution.composed.composed,
     ) {
@@ -169,7 +182,7 @@ fn add_definition_shell(
     builder.add_entity(FieldFactEntity {
         id,
         kind: "graph_definition".to_string(),
-        label: super::ui_graph_topology::label_for_bare_id(
+        label: super::signed_item_topology::label_for_bare_id(
             definition_ref
                 .split_once(':')
                 .map_or(definition_ref, |(_, bare)| bare),
@@ -195,7 +208,7 @@ fn add_exact_definition(
     builder: &mut FieldFactsBuilder,
     thread_id: &str,
     evidence: &ryeos_app::state_store::AdmittedProgramEvidence,
-    topology: super::ui_graph_topology::TopologyGraph,
+    topology: super::signed_item_topology::TopologyGraph,
 ) -> Result<()> {
     let digest = evidence.effective_definition_digest.as_str();
     let ids = add_effective_definition_core(
@@ -251,7 +264,7 @@ pub(crate) fn add_current_effective_definition(
     canonical_ref: &str,
     effective_definition_digest: &str,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
-    topology: super::ui_graph_topology::TopologyGraph,
+    topology: super::signed_item_topology::TopologyGraph,
 ) -> Result<BTreeMap<String, String>> {
     add_effective_definition_core(
         builder,
@@ -267,11 +280,11 @@ fn add_effective_definition_core(
     canonical_ref: &str,
     digest: &str,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
-    topology: super::ui_graph_topology::TopologyGraph,
+    topology: super::signed_item_topology::TopologyGraph,
 ) -> Result<BTreeMap<String, String>> {
     let family_id = format!("definition-family:{canonical_ref}");
     let definition_id = format!("definition:{canonical_ref}@{digest}");
-    let label = super::ui_graph_topology::label_for_bare_id(
+    let label = super::signed_item_topology::label_for_bare_id(
         canonical_ref
             .split_once(':')
             .map_or(canonical_ref, |(_, bare)| bare),
@@ -410,7 +423,7 @@ fn add_definition_sources(
         builder.add_entity(FieldFactEntity {
             id: source_id.clone(),
             kind: "source_version".to_string(),
-            label: super::ui_graph_topology::label_for_bare_id(
+            label: super::signed_item_topology::label_for_bare_id(
                 source
                     .resolved_ref
                     .split_once(':')
@@ -471,7 +484,7 @@ fn add_definition_sources(
             builder.add_entity(FieldFactEntity {
                 id: source_id.clone(),
                 kind: "policy_source".to_string(),
-                label: super::ui_graph_topology::label_for_bare_id(
+                label: super::signed_item_topology::label_for_bare_id(
                     source
                         .canonical_ref
                         .split_once(':')
@@ -688,7 +701,7 @@ mod tests {
             effective_definition_digest: effective_definition_digest.clone(),
             resolution: resolution.clone(),
         };
-        let topology = super::super::ui_graph_topology::build_effective_graph_topology(
+        let topology = super::super::signed_item_topology::build_effective_graph_topology(
             "graph:test/build",
             &composed,
         )
@@ -763,7 +776,7 @@ mod tests {
                 && source.starts_with("source-version:graph:test/base@")
         }));
 
-        let current_topology = super::super::ui_graph_topology::build_effective_graph_topology(
+        let current_topology = super::super::signed_item_topology::build_effective_graph_topology(
             "graph:test/build",
             &composed,
         )

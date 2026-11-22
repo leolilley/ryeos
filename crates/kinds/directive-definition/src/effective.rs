@@ -20,6 +20,8 @@ pub struct DirectiveHeader {
     #[serde(default)]
     pub effects: DirectiveEffectClass,
     #[serde(default)]
+    pub provider_contact: ProviderContact,
+    #[serde(default)]
     pub limits: Option<LimitsSpec>,
     #[serde(default)]
     pub outputs: Option<Vec<OutputSpec>>,
@@ -71,11 +73,82 @@ impl DirectiveEffectClass {
     }
 }
 
+/// Author declaration about issuing this directive's model calls more than
+/// once. `Repeatable` vouches that a second identical call has no effect
+/// beyond its charge (no provider-hosted tools, no server-side state). It is
+/// independent of [`DirectiveEffectClass`], which describes durable record and
+/// replay of the answer.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderContact {
+    #[default]
+    Once,
+    Repeatable,
+}
+
+/// Classes of provider failure after which it is unknown whether the provider
+/// acted on the request. Closed set: each member is a classification outcome
+/// of the runtime's provider stream.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum UnknownOutcomeClass {
+    Timeout,
+    Send,
+    MidStream,
+}
+
+/// Signed execution-config policy for retrying after an unknown provider
+/// outcome. Absence of the block means such outcomes are never retried.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UnknownOutcomeRetryPolicy {
+    /// The first N retries of a turn may follow an unknown outcome.
+    pub max_retries: u32,
+    pub on: Vec<UnknownOutcomeClass>,
+}
+
+impl UnknownOutcomeRetryPolicy {
+    pub fn validate(&self) -> Result<()> {
+        if self.on.is_empty() {
+            anyhow::bail!("execution.unknown_outcome_retry.on must name at least one class");
+        }
+        let mut seen = Vec::with_capacity(self.on.len());
+        for class in &self.on {
+            if seen.contains(class) {
+                anyhow::bail!("execution.unknown_outcome_retry.on lists a class twice");
+            }
+            seen.push(*class);
+        }
+        Ok(())
+    }
+}
+
+/// Number of leading retries of one turn that may follow an unknown provider
+/// outcome. Zero unless the directive declares [`ProviderContact::Repeatable`],
+/// the selected provider is a remote transport, and the signed policy admits
+/// retries. The launch preparer seals this value and the runtime derives the
+/// same value, so both sides share one implementation.
+pub fn unknown_outcome_retry_ceiling(
+    header: &DirectiveHeader,
+    provider: &crate::ProviderConfig,
+    policy: Option<&UnknownOutcomeRetryPolicy>,
+) -> u32 {
+    match (header.provider_contact, &provider.transport, policy) {
+        (
+            ProviderContact::Repeatable,
+            crate::ProviderTransportConfig::RemoteHttp { .. },
+            Some(policy),
+        ) => policy.max_retries,
+        _ => 0,
+    }
+}
+
 /// Top-level composed fields that form the execution-facing directive header.
 pub const DIRECTIVE_EFFECTIVE_HEADER_KEYS: &[&str] = &[
     "name",
     "extends",
     "effects",
+    "provider_contact",
     "limits",
     "outputs",
     "context",
@@ -114,6 +187,7 @@ pub fn parse_effective_header(composed: &Value) -> Result<DirectiveHeader> {
 pub fn resolve_external_effect_authority(
     header: &DirectiveHeader,
     provider: &crate::ProviderConfig,
+    unknown_outcome_policy: Option<&UnknownOutcomeRetryPolicy>,
 ) -> Result<ryeos_effect_contract::AdmittedExternalEffectAuthority> {
     let admitted_effect_class = header.effects.admitted();
     if admitted_effect_class
@@ -130,6 +204,11 @@ pub fn resolve_external_effect_authority(
     let authority = ryeos_effect_contract::AdmittedExternalEffectAuthority {
         authority_family: family.to_owned(),
         admitted_effect_class,
+        unknown_outcome_retry_ceiling: unknown_outcome_retry_ceiling(
+            header,
+            provider,
+            unknown_outcome_policy,
+        ),
     };
     authority.validate()?;
     Ok(authority)
@@ -190,6 +269,22 @@ pub struct LimitsSpec {
     pub depth: Option<u32>,
     #[serde(default)]
     pub duration_seconds: Option<u64>,
+    /// Seconds before the run deadline's hard stop at which the model is told
+    /// time is short. `0` omits the wrap-up notice.
+    #[serde(default)]
+    pub wrap_up_seconds: Option<u64>,
+    /// This directive's share of the run deadline.
+    #[serde(default)]
+    pub deadline: Option<DeadlineSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeadlineSpec {
+    /// Seconds this directive keeps for its own settling after its
+    /// descendants are due.
+    #[serde(default)]
+    pub reserve_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -244,6 +339,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn limits_accept_the_run_deadline_share_and_reject_unknown_deadline_keys() {
+        let parsed = parse_effective_header(&json!({
+            "limits": {
+                "turns": 4,
+                "wrap_up_seconds": 45,
+                "deadline": {"reserve_seconds": 20},
+            },
+        }))
+        .unwrap();
+        let limits = parsed.limits.unwrap();
+        assert_eq!(limits.wrap_up_seconds, Some(45));
+        assert_eq!(limits.deadline.unwrap().reserve_seconds, Some(20));
+
+        assert!(
+            parse_effective_header(&json!({"limits": {"deadline": {"hold_back_ms": 5}}})).is_err(),
+            "the hold-back is daemon-derived and not authorable"
+        );
+    }
+
+    #[test]
     fn parser_projects_engine_owned_fields_and_keeps_strict_owned_shapes() {
         let parsed = parse_effective_header(&json!({
             "body": "engine-owned",
@@ -283,14 +398,14 @@ mod tests {
             }
         }))
         .unwrap();
-        let authority = resolve_external_effect_authority(&header, &provider).unwrap();
+        let authority = resolve_external_effect_authority(&header, &provider, None).unwrap();
         assert_eq!(
             authority.admitted_effect_class,
             Some(ryeos_effect_contract::EffectClass::Recorded)
         );
 
         let sealed = parse_effective_header(&json!({"effects": "sealed"})).unwrap();
-        let error = resolve_external_effect_authority(&sealed, &provider).unwrap_err();
+        let error = resolve_external_effect_authority(&sealed, &provider, None).unwrap_err();
         assert!(error.to_string().contains("exceeds"));
     }
 
@@ -367,5 +482,91 @@ mod tests {
         }))
         .unwrap_err();
         assert!(disabled.to_string().contains("continuation is disabled"));
+    }
+
+    fn provider_with(transport: serde_json::Value) -> crate::ProviderConfig {
+        serde_json::from_value(json!({
+            "family": "chat_completions",
+            "transport": transport,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn provider_contact_parses_and_defaults_to_once() {
+        assert_eq!(
+            parse_effective_header(&json!({})).unwrap().provider_contact,
+            ProviderContact::Once
+        );
+        assert_eq!(
+            parse_effective_header(&json!({"provider_contact": "repeatable"}))
+                .unwrap()
+                .provider_contact,
+            ProviderContact::Repeatable
+        );
+        let error = parse_effective_header(&json!({"provider_contact": "twice"})).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn unknown_outcome_ceiling_truth_table() {
+        let remote =
+            provider_with(json!({"kind": "remote_http", "base_url": "https://example.test"}));
+        let local = provider_with(json!({
+            "kind": "admitted_local_worker",
+            "execute": "worker:fixtures/local",
+            "effect_class_ceiling": "recorded"
+        }));
+        let policy = UnknownOutcomeRetryPolicy {
+            max_retries: 2,
+            on: vec![UnknownOutcomeClass::MidStream],
+        };
+        let once = parse_effective_header(&json!({})).unwrap();
+        let repeatable =
+            parse_effective_header(&json!({"provider_contact": "repeatable"})).unwrap();
+
+        assert_eq!(
+            unknown_outcome_retry_ceiling(&once, &remote, Some(&policy)),
+            0
+        );
+        assert_eq!(
+            unknown_outcome_retry_ceiling(&repeatable, &remote, Some(&policy)),
+            2
+        );
+        assert_eq!(unknown_outcome_retry_ceiling(&repeatable, &remote, None), 0);
+        assert_eq!(
+            unknown_outcome_retry_ceiling(&repeatable, &local, Some(&policy)),
+            0
+        );
+        let authority =
+            resolve_external_effect_authority(&repeatable, &remote, Some(&policy)).unwrap();
+        assert_eq!(authority.unknown_outcome_retry_ceiling, 2);
+        let authority = resolve_external_effect_authority(&once, &remote, Some(&policy)).unwrap();
+        assert_eq!(authority.unknown_outcome_retry_ceiling, 0);
+    }
+
+    #[test]
+    fn unknown_outcome_policy_validation() {
+        let empty = UnknownOutcomeRetryPolicy {
+            max_retries: 1,
+            on: vec![],
+        };
+        assert!(empty.validate().is_err());
+        let duplicate = UnknownOutcomeRetryPolicy {
+            max_retries: 1,
+            on: vec![UnknownOutcomeClass::Send, UnknownOutcomeClass::Send],
+        };
+        assert!(duplicate.validate().is_err());
+        let ok = UnknownOutcomeRetryPolicy {
+            max_retries: 1,
+            on: vec![UnknownOutcomeClass::Timeout, UnknownOutcomeClass::MidStream],
+        };
+        ok.validate().unwrap();
+        assert!(
+            serde_json::from_value::<UnknownOutcomeRetryPolicy>(
+                json!({"max_retries": 1, "on": ["nope"]})
+            )
+            .is_err()
+        );
     }
 }

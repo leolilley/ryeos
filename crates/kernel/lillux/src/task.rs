@@ -142,9 +142,11 @@ mod tests {
 
     #[test]
     fn deadline_join_preserves_panic_as_failure() {
+        // The subject is that a panic settles as a failure, not how fast a
+        // loaded runner unwinds and prints a backtrace: allow for the slowest.
         let task = spawn_host_task("deadline-panic", || panic!("fixture failure")).unwrap();
         assert!(matches!(
-            task.join_until(MonotonicDeadline::after(Duration::from_secs(2))),
+            task.join_until(MonotonicDeadline::after(Duration::from_secs(30))),
             Ok(Err(_))
         ));
     }

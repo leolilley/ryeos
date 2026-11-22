@@ -26,6 +26,7 @@
 use anyhow::Context;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ryeos_app::state::AppState;
 use ryeos_executor::dispatch_error::DispatchError;
@@ -83,9 +84,9 @@ fn map_launch_planning_check_error(error: anyhow::Error) -> LaunchSpawnError {
         .chain()
         .any(|cause| cause.is::<ryeos_app::state_store::LaunchPlanningInactive>())
     {
-        LaunchSpawnError::PlanningCancelled(error.to_string())
+        LaunchSpawnError::PlanningCancelled(format!("{error:#}"))
     } else {
-        LaunchSpawnError::PlanningStateCheckFailed(error.to_string())
+        LaunchSpawnError::PlanningStateCheckFailed(format!("{error:#}"))
     }
 }
 
@@ -211,6 +212,8 @@ pub(crate) struct DispatchLaunchOptions {
     /// Chained-resume turn: daemon-internal callers only (the
     /// thread-input service); never populated from raw HTTP bodies.
     pub previous_thread_id: Option<String>,
+    /// Thread facets committed with the new root thread as its first events.
+    pub initial_facets: BTreeMap<String, String>,
     /// Optional request-local observability, never execution authority.
     pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
@@ -230,6 +233,9 @@ pub(crate) struct DispatchLaunchOptions {
     /// released only after dispatch has either committed the captured snapshot
     /// into authoritative history or failed without exposing a root.
     captured_generation: Option<ryeos_executor::execution::CapturedProjectGeneration>,
+    /// Immutable App/Executor availability captured by HTTP ingress. This does
+    /// not classify the request as selected.
+    application_publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
 }
 
 impl DispatchLaunchOptions {
@@ -296,13 +302,28 @@ impl DispatchLaunchOptions {
             usage_subject_asserted_by: None,
             call: None,
             previous_thread_id: None,
+            initial_facets: BTreeMap::new(),
             launch_timings: None,
             lifecycle_authority,
             root_admission,
             root_dispatch_evidence,
             project_path,
             captured_generation: None,
+            application_publication: None,
         })
+    }
+
+    pub(crate) fn with_application_publication(
+        mut self,
+        publication: Option<Arc<ryeos_executor::SelectedApplicationPublication>>,
+    ) -> Self {
+        self.application_publication = publication;
+        self
+    }
+
+    pub(crate) fn with_initial_facets(mut self, facets: BTreeMap<String, String>) -> Self {
+        self.initial_facets = facets;
+        self
     }
 
     pub(crate) fn retain_captured_generation(
@@ -319,7 +340,6 @@ impl DispatchLaunchOptions {
 /// exposed or authoritatively published. This is the public-route admission
 /// boundary shared by launch, stream, and thread-input callers; it deliberately
 /// understands no kind or service name.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn preflight_dispatch_launch(
     state: &AppState,
     item_ref: &crate::routes::parsed_ref::ParsedItemRef,
@@ -358,6 +378,7 @@ pub(crate) fn preflight_dispatch_launch(
         usage_subject_asserted_by,
         launch_timings,
         pinned_project_snapshot: None,
+        remote_consumer: None,
     })
 }
 
@@ -381,6 +402,7 @@ struct BorrowedDispatchPreflight<'a> {
     usage_subject_asserted_by: Option<&'a str>,
     launch_timings: Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
     pinned_project_snapshot: Option<&'a str>,
+    remote_consumer: Option<&'a ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
 }
 
 fn preflight_dispatch_launch_core(
@@ -431,6 +453,9 @@ fn preflight_dispatch_launch_core(
         ProjectContext::LocalPath { path: project_path }
     };
     let plan_ctx = PlanContext {
+        logical_project_root: request
+            .provenance
+            .logical_project_root(request.state.threads.site_id()),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: request.principal_id.to_string(),
             scopes: request.principal_scopes.to_vec(),
@@ -456,20 +481,44 @@ fn preflight_dispatch_launch_core(
         request.provenance,
     )
     .map_err(DispatchError::Internal)?;
-    ryeos_executor::dispatch::preflight_root_dispatch_for_provenance(
-        request.item_ref.as_str(),
-        request.item_ref.kind(),
-        request.parameters,
-        request.ref_bindings,
-        request.product_selections,
-        request.usage_subject,
-        request.usage_subject_asserted_by,
-        &project_binding,
-        &exec_ctx,
-        request.provenance,
-        request.state,
-        request.launch_timings,
-    )
+    let preflight =
+        ryeos_executor::dispatch::preflight_root_dispatch_for_provenance_with_remote_consumer(
+            request.item_ref.as_str(),
+            request.item_ref.kind(),
+            request.parameters,
+            request.ref_bindings,
+            request.product_selections,
+            request.usage_subject,
+            request.usage_subject_asserted_by,
+            &project_binding,
+            request.remote_consumer,
+            &exec_ctx,
+            request.provenance,
+            request.state,
+            request.launch_timings,
+        )?;
+    // The caller must cover what the item declares. Refusing here is the
+    // synchronous admission answer, before any thread id is exposed or any
+    // row exists.
+    ryeos_executor::dispatch::require_preflight_caller_coverage(&preflight, &exec_ctx)?;
+    Ok(preflight)
+}
+
+/// The typed route refusal for a launch-policy admission failure (for example
+/// `caller_capability_not_covered`), carrying the dispatch error's own stable
+/// code, HTTP status and body. `None` for every other admission failure, which
+/// each route frames in its own way.
+pub(crate) fn typed_launch_policy_refusal(
+    error: &DispatchError,
+) -> Option<crate::route_error::RouteDispatchError> {
+    matches!(error, DispatchError::LaunchPolicyForbidden { .. }).then(|| {
+        crate::route_error::RouteDispatchError::Structured {
+            code: error.code().to_string(),
+            status: error.http_status().as_u16(),
+            body: ryeos_executor::structured_error::dispatch_error_value(error),
+            thread_id: None,
+        }
+    })
 }
 
 pub(crate) struct OwnedDispatchPreflight {
@@ -494,6 +543,9 @@ pub(crate) struct OwnedDispatchPreflight {
     /// Internal daemon-only marker for protected pinned qualification. It is
     /// never sourced from the public launch request or a project path.
     pub pinned_project_snapshot: Option<String>,
+    /// Typed proof that this launch is a remote-consumer qualification
+    /// verifier. Only the protected qualification launch sets it.
+    pub remote_consumer: Option<ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
 }
 
 /// Keep verified resolution/composition off the async HTTP executor. Every
@@ -530,6 +582,7 @@ pub(crate) async fn preflight_dispatch_launch_off_thread(
             usage_subject_asserted_by: request.usage_subject_asserted_by.as_deref(),
             launch_timings: request.launch_timings.as_ref(),
             pinned_project_snapshot: request.pinned_project_snapshot.as_deref(),
+            remote_consumer: request.remote_consumer.as_ref(),
         })
     })
     .await
@@ -558,7 +611,6 @@ pub(crate) async fn preflight_dispatch_launch_off_thread(
 // not simplify. Restructure with a compiler in the loop, not here.
 /// Spawn an acknowledged subprocess launch. The receiver resolves only after
 /// durable execution authority has been handed to the scheduled task.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_dispatch_launch_with_handoff(
     state: &AppState,
     item_ref: crate::routes::parsed_ref::ParsedItemRef,
@@ -617,7 +669,6 @@ pub(crate) fn retain_launch_workspace_until_task_terminal(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_dispatch_launch_inner(
     state: &AppState,
     item_ref: crate::routes::parsed_ref::ParsedItemRef,
@@ -629,7 +680,11 @@ fn spawn_dispatch_launch_inner(
     options: DispatchLaunchOptions,
     launch_handoff: Option<ryeos_executor::execution::launch::LaunchHandoff>,
 ) -> tokio::task::JoinHandle<Result<(), LaunchSpawnError>> {
-    let state_clone = state.clone();
+    let application_publication = options.application_publication;
+    let state_clone = application_publication
+        .as_ref()
+        .map(|publication| publication.app().as_ref().clone())
+        .unwrap_or_else(|| state.clone());
     let project_path_buf = options.project_path.clone();
     assert_eq!(
         provenance.effective_path(),
@@ -651,6 +706,7 @@ fn spawn_dispatch_launch_inner(
     let usage_subject_asserted_by = options.usage_subject_asserted_by;
     let call = options.call;
     let previous_thread_id = options.previous_thread_id;
+    let initial_facets = options.initial_facets;
     let launch_timings = options.launch_timings;
     let lifecycle_authority = options.lifecycle_authority;
     let root_admission = options.root_admission;
@@ -719,45 +775,58 @@ fn spawn_dispatch_launch_inner(
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id,
+            initial_facets,
             root_admission: Some(root_admission.clone()),
             root_dispatch_evidence: Some(root_dispatch_evidence),
             parent_execution_context: None,
             effect_authority: None,
         };
 
-        let dispatched = match launch_handoff.as_ref() {
-            Some(handoff) => {
-                ryeos_executor::dispatch::dispatch_with_launch_handoff(
-                    item_ref.as_str(),
-                    handler_context,
-                    &dispatch_req,
-                    &exec_ctx,
-                    &state_clone,
-                    handoff,
-                )
-                .await
+        let dispatched = if let Some(publication) = application_publication.as_ref() {
+            ryeos_executor::dispatch::dispatch_with_application_publication(
+                item_ref.as_str(),
+                publication,
+                handler_context,
+                &dispatch_req,
+                &exec_ctx,
+                launch_handoff.as_ref(),
+            )
+            .await
+        } else {
+            match launch_handoff.as_ref() {
+                Some(handoff) => {
+                    ryeos_executor::dispatch::dispatch_with_launch_handoff(
+                        item_ref.as_str(),
+                        handler_context,
+                        &dispatch_req,
+                        &exec_ctx,
+                        &state_clone,
+                        handoff,
+                    )
+                    .await
+                }
+                None => match handler_context {
+                    Some(context) => {
+                        ryeos_executor::dispatch::dispatch_with_handler_context(
+                            item_ref.as_str(),
+                            context,
+                            &dispatch_req,
+                            &exec_ctx,
+                            &state_clone,
+                        )
+                        .await
+                    }
+                    None => {
+                        ryeos_executor::dispatch::dispatch(
+                            item_ref.as_str(),
+                            &dispatch_req,
+                            &exec_ctx,
+                            &state_clone,
+                        )
+                        .await
+                    }
+                },
             }
-            None => match handler_context {
-                Some(context) => {
-                    ryeos_executor::dispatch::dispatch_with_handler_context(
-                        item_ref.as_str(),
-                        context,
-                        &dispatch_req,
-                        &exec_ctx,
-                        &state_clone,
-                    )
-                    .await
-                }
-                None => {
-                    ryeos_executor::dispatch::dispatch(
-                        item_ref.as_str(),
-                        &dispatch_req,
-                        &exec_ctx,
-                        &state_clone,
-                    )
-                    .await
-                }
-            },
         };
         if dispatched.is_err()
             && let Some(timings) = launch_timings.as_ref()
@@ -836,7 +905,7 @@ fn spawn_dispatch_launch_inner(
                             Err(error) => {
                                 tracing::error!(
                                     thread_id = %pre_minted_thread_id,
-                                    error = %error,
+                                    error = %format!("{error:#}"),
                                     "refusing to persist a failed root without exact executor-route authority"
                                 );
                                 return Err(LaunchSpawnError::Dispatch(e));
@@ -863,7 +932,7 @@ fn spawn_dispatch_launch_inner(
                                 // request to finalize somebody else's row.
                                 tracing::error!(
                                     thread_id = %pre_minted_thread_id,
-                                    error = %error,
+                                    error = %format!("{error:#}"),
                                     "failed to persist admitted launch failure row"
                                 );
                                 false

@@ -1,0 +1,20 @@
+# ryeos:signed:2026-10-30T04:33:51Z:0375dc84367f76c1890f1f1d30056f9ef25c6aa29350034dc4644b522932072e:wFeLF/CcDPnj5piewpPFU6nbeV/MR2HEelmw16WHzG9SLPEPyyL5/01nnf3RBf3KANk6k+wpyHEHBY2HiA5JCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-execution, admit-product-program]
+description: Derive the admitted candidate program of a captured-product worker for exact product selections, including the selections digest, without writing state
+arguments:
+  - name: product_selections
+    kind: json
+    positional: 2
+    required: true
+    arity: one
+    description: JSON array of product selections (declaration_id, witness_hash, witness_source, qualification_hash, remote_testimony), one per signed product slot; passed as --product-selections <json>
+forms:
+  - slots:
+      - field: consumer_ref
+help:
+  usage: ryeos external-execution admit-product-program <consumer-ref> --product-selections <json>
+  examples:
+    - ryeos external-execution admit-product-program worker:codex/external-hosted-authoring --product-selections '[{"declaration_id":"guest-runtime","witness_hash":"<witness-hash>","witness_source":{"kind":"received","acceptance_hash":"<hash>"},"qualification_hash":"<origin-attestation-hash>","remote_testimony":{"acceptance_hash":"<acceptance-hash>","acceptance_policy_ref":"config:codex/<acceptance-policy>"}}]'
+dispatch:
+  kind: execute_ref
+  execute: service:external-execution/admit-product-program

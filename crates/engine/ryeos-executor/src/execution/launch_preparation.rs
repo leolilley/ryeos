@@ -221,89 +221,7 @@ pub(crate) fn require_prepared_project_result(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreparedEvidenceAttachment {
-    pub binding_id: String,
-    pub bundle_id: String,
-    pub event_kind: String,
-    pub chain_id: String,
-    pub event_hash: String,
-    pub attachment_name: String,
-    pub blob_hash: String,
-    pub size_bytes: u64,
-    pub media_type: Option<String>,
-    pub target: String,
-    pub destination_path: String,
-    pub access: ryeos_handler_protocol::EvidenceAttachmentAccessWire,
-    pub manifest_hash: String,
-    pub binding_digest: String,
-}
-
-impl PreparedEvidenceAttachment {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if !valid_ref_binding_name(&self.binding_id) {
-            anyhow::bail!("prepared evidence attachment binding_id is not canonical");
-        }
-        for (label, value) in [
-            ("bundle_id", self.bundle_id.as_str()),
-            ("event_kind", self.event_kind.as_str()),
-            ("chain_id", self.chain_id.as_str()),
-            ("attachment_name", self.attachment_name.as_str()),
-        ] {
-            ryeos_state::objects::validate_bundle_identifier(label, value)?;
-        }
-        for (label, value) in [
-            ("event_hash", self.event_hash.as_str()),
-            ("blob_hash", self.blob_hash.as_str()),
-            ("manifest_hash", self.manifest_hash.as_str()),
-            ("binding_digest", self.binding_digest.as_str()),
-        ] {
-            if !lillux::valid_hash(value) {
-                anyhow::bail!("prepared evidence attachment {label} is not a canonical hash");
-            }
-        }
-        if self.size_bytes > ryeos_state::objects::MAX_BUNDLE_EVENT_ATTACHMENT_BYTES {
-            anyhow::bail!("prepared evidence attachment exceeds the bundle-event file bound");
-        }
-        ryeos_state::objects::validate_canonical_project_relative_path(&self.destination_path)?;
-        if self.target.is_empty()
-            || !self.target.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-            })
-        {
-            anyhow::bail!("prepared evidence attachment target is not canonical");
-        }
-        if self.access != ryeos_handler_protocol::EvidenceAttachmentAccessWire::ReadOnly {
-            anyhow::bail!("prepared evidence attachment is not read-only");
-        }
-        if self.binding_digest != self.reproduce_binding_digest()? {
-            anyhow::bail!("prepared evidence attachment binding digest changed");
-        }
-        Ok(())
-    }
-
-    pub fn reproduce_binding_digest(&self) -> anyhow::Result<String> {
-        let value = serde_json::json!({
-            "schema": "ryeos.evidence_attachment_binding.v1",
-            "binding_id": self.binding_id,
-            "bundle_id": self.bundle_id,
-            "event_kind": self.event_kind,
-            "chain_id": self.chain_id,
-            "event_hash": self.event_hash,
-            "attachment_name": self.attachment_name,
-            "blob_hash": self.blob_hash,
-            "size_bytes": self.size_bytes,
-            "media_type": self.media_type,
-            "target": self.target,
-            "destination_path": self.destination_path,
-            "access": self.access,
-            "manifest_hash": self.manifest_hash,
-        });
-        let canonical = lillux::canonical_json(&value)?;
-        Ok(lillux::sha256_hex(canonical.as_bytes()))
-    }
-}
+pub use ryeos_app::prepared_evidence_attachment::PreparedEvidenceAttachment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -444,6 +362,11 @@ fn validate_launch_environment_binding(
                 anyhow::bail!("prepared runtime-view environment path is not canonical");
             }
         }
+        LaunchEnvironmentValueWire::DeliveredSecret { name } => {
+            if ryeos_state::objects::validate_session_process_environment_name(name).is_err() {
+                anyhow::bail!("prepared delivered-secret name is protected or invalid");
+            }
+        }
     }
     Ok(())
 }
@@ -531,6 +454,7 @@ impl PreparedExecutionDependency {
         let canonical_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.canonical_ref)?;
         Ok(ryeos_engine::contracts::VerifiedItem {
             resolved: ryeos_engine::contracts::ResolvedItem {
+                logical_project_root: None,
                 canonical_ref: canonical_ref.clone(),
                 kind: canonical_ref.kind,
                 source_path: self.subject.source_path.clone(),
@@ -583,6 +507,12 @@ pub struct PrepareRuntimeLaunchRequest<'a> {
     pub resolution_cache: Option<PreparedResolutionCacheContext<'a>>,
     pub ref_binding_resolution_timings:
         Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    /// Current node policy, whose launch_trust section widens the runtime's
+    /// primary trust list within what the primary's kind lets an operator
+    /// admit. Diagnostics without a node pass `None` and judge against the
+    /// runtime's own list.
+    pub node_policy:
+        Option<&'a std::sync::Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot>>,
 }
 
 #[derive(Clone, Copy)]
@@ -670,6 +600,7 @@ struct OwnedPrepareRuntimeLaunchRequest {
     subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority,
     resolution_cache: Option<OwnedPreparedResolutionCacheContext>,
     ref_binding_resolution_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    node_policy: Option<std::sync::Arc<ryeos_node_runtime::node_policy::NodePolicySnapshot>>,
 }
 
 impl OwnedPrepareRuntimeLaunchRequest {
@@ -694,6 +625,7 @@ impl OwnedPrepareRuntimeLaunchRequest {
                 }
             }),
             ref_binding_resolution_timings: request.ref_binding_resolution_timings.cloned(),
+            node_policy: request.node_policy.cloned(),
         }
     }
 
@@ -720,6 +652,7 @@ impl OwnedPrepareRuntimeLaunchRequest {
             subject_resolution_authority: &self.subject_resolution_authority,
             resolution_cache: cache_context,
             ref_binding_resolution_timings: self.ref_binding_resolution_timings.as_ref(),
+            node_policy: self.node_policy.as_ref(),
         })
     }
 }
@@ -1086,6 +1019,32 @@ fn launch_config_snapshot_cache() -> &'static crate::resolved_config_cache::Snap
     CACHE.get_or_init(crate::resolved_config_cache::SnapshotCache::default)
 }
 
+/// Load launch configuration whose project-space inputs are read through an
+/// exact live project-content authority rather than by walking
+/// `project_root`.
+pub(crate) fn load_launch_config_set_under_project_content(
+    declarations: &BTreeMap<String, ryeos_engine::runtime_registry::LaunchConfigInputDecl>,
+    roots: &ResolutionRoots,
+    parsers: &ParserDispatcher,
+    engine: &ryeos_engine::engine::Engine,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    project_root: &std::path::Path,
+    project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+) -> Result<ryeos_engine::launch_config::LaunchConfigSnapshotSet, DispatchError> {
+    ryeos_engine::launch_config::load_launch_config_snapshots_with_proof_under_project_authority(
+        declarations,
+        roots,
+        parsers,
+        &engine.parser_dispatcher,
+        &engine.kinds,
+        trust_store,
+        &engine.node_trust_store,
+        project_root,
+        project_content,
+    )
+    .map_err(map_launch_config_error)
+}
+
 pub(crate) fn load_launch_config_set_under_current_authority(
     declarations: &BTreeMap<String, ryeos_engine::runtime_registry::LaunchConfigInputDecl>,
     roots: &ResolutionRoots,
@@ -1414,9 +1373,12 @@ async fn launch_config_hit_status(
 /// Resolve the effective ref-binding coordinates under the runtime's signed
 /// source declaration. This performs no item resolution and grants no
 /// authority: the existing binding loop below still parses, authorizes,
-/// resolves, and trust-checks every resulting coordinate.
+/// resolves, and trust-checks every resulting coordinate. `primary_ref` is
+/// the verified primary's canonical ref, the default for a
+/// `caller_or_primary_ref` binding the caller leaves out.
 pub(crate) fn project_effective_ref_bindings(
     declarations: &BTreeMap<String, ryeos_engine::runtime_registry::RefBindingDecl>,
+    primary_ref: &str,
     primary: &Value,
     caller: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, DispatchError> {
@@ -1435,6 +1397,12 @@ pub(crate) fn project_effective_ref_bindings(
         use ryeos_engine::runtime_registry::RefBindingSource;
         let projected = match &declaration.source {
             RefBindingSource::Caller => caller.get(name).cloned(),
+            RefBindingSource::CallerOrPrimaryRef => Some(
+                caller
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| primary_ref.to_owned()),
+            ),
             RefBindingSource::PrimaryField { path } => {
                 let mut value = Some(primary);
                 for field in path {
@@ -1470,10 +1438,10 @@ pub(crate) fn project_effective_ref_bindings(
             }
         };
         match (&declaration.source, projected, caller.get(name)) {
-            (RefBindingSource::Caller, Some(value), _) => {
+            (RefBindingSource::Caller | RefBindingSource::CallerOrPrimaryRef, Some(value), _) => {
                 effective.insert(name.clone(), value);
             }
-            (RefBindingSource::Caller, None, _) => {}
+            (RefBindingSource::Caller | RefBindingSource::CallerOrPrimaryRef, None, _) => {}
             (RefBindingSource::PrimaryField { .. }, Some(projected), Some(supplied))
                 if supplied != &projected =>
             {
@@ -1504,7 +1472,11 @@ pub(crate) fn project_effective_ref_bindings(
         if declaration.required && !effective.contains_key(name) {
             return Err(preparation_error_with_binding(
                 "ref_binding_required",
-                format!("required ref binding `{name}` is missing"),
+                format!(
+                    "required ref binding `{name}` is missing; pass \
+                     `--ref-binding {name}=<item ref>` on the CLI (or `ref_bindings` \
+                     `{{\"{name}\": \"<item ref>\"}}` in the request)"
+                ),
                 LaunchPrepareErrorClass::Caller,
                 Some(name.clone()),
             ));
@@ -1524,11 +1496,33 @@ fn prepare_runtime_launch_inputs(
     .map_err(|error| {
         preparation_error(
             "product_selection_input_invalid",
-            error.to_string(),
+            format!("{error:#}"),
             LaunchPrepareErrorClass::Caller,
         )
     })?;
     let contract = &request.runtime.yaml.launch_contract;
+    let primary_allowed_trust = match request.node_policy {
+        Some(node_policy) => {
+            let primary_kind = ryeos_engine::canonical_ref::CanonicalRef::parse(
+                &request.primary.root.resolved_ref,
+            )
+            .map_err(|error| {
+                DispatchError::InvalidRef(
+                    request.primary.root.resolved_ref.clone(),
+                    error.to_string(),
+                )
+            })?
+            .kind;
+            super::launch_trust_gate::effective_launch_trust(
+                &request.engine.kinds,
+                node_policy,
+                &primary_kind,
+                Some(&contract.primary_allowed_trust),
+            )?
+            .admitted
+        }
+        None => contract.primary_allowed_trust.clone(),
+    };
     validate_prepared_item(
         PreparedItemRole::Primary,
         &request.primary.root.resolved_ref,
@@ -1536,10 +1530,11 @@ fn prepare_runtime_launch_inputs(
         request.primary.effective_trust_class,
         &contract.primary_allowed_kinds,
         &contract.primary_allowed_spaces,
-        &contract.primary_allowed_trust,
+        &primary_allowed_trust,
     )?;
     let effective_ref_bindings = project_effective_ref_bindings(
         &contract.ref_bindings,
+        &request.primary.root.resolved_ref,
         &request.primary.composed.composed,
         request.ref_bindings,
     )?;
@@ -2009,7 +2004,7 @@ fn finish_runtime_launch_preparation_parts(
         request.validate().map_err(|error| {
             preparation_error(
                 "workload_client_request_invalid",
-                error.to_string(),
+                format!("{error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -2021,7 +2016,7 @@ fn finish_runtime_launch_preparation_parts(
     .map_err(|error| {
         preparation_error(
             "workload_execution_product_selection_invalid",
-            error.to_string(),
+            format!("{error:#}"),
             LaunchPrepareErrorClass::Caller,
         )
     })?;
@@ -2117,6 +2112,7 @@ fn resolve_environment_contributions(
     }
     let mut aggregate_bytes = 0usize;
     let mut variables_by_target: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut delivered_secret_names: BTreeSet<String> = BTreeSet::new();
     let mut prepared = BTreeMap::new();
     for (name, request) in requests {
         if !valid_ref_binding_name(&name) {
@@ -2143,7 +2139,7 @@ fn resolve_environment_contributions(
         contribution.validate().map_err(|error| {
             preparation_error(
                 "environment_contribution_invalid",
-                format!("environment contribution `{name}` is invalid: {error}"),
+                format!("environment contribution `{name}` is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -2169,6 +2165,20 @@ fn resolve_environment_contributions(
             }
         }
         for value in contribution.variables.values() {
+            if let ryeos_handler_protocol::LaunchEnvironmentValueWire::DeliveredSecret {
+                name: secret_name,
+            } = value
+            {
+                delivered_secret_names.insert(secret_name.clone());
+                if delivered_secret_names.len() > usize::from(policy.max_delivered_secrets) {
+                    return Err(preparation_error(
+                        "environment_contribution_delivered_secret_limit_exceeded",
+                        "launch preparation exceeded its signed delivered-secret ceiling",
+                        LaunchPrepareErrorClass::Internal,
+                    ));
+                }
+                continue;
+            }
             let ryeos_handler_protocol::LaunchEnvironmentValueWire::ContentPath {
                 content_dependency,
                 ..
@@ -2302,6 +2312,7 @@ fn resolve_execution_dependencies(
         let project_root = None;
         let project_context = ryeos_engine::contracts::ProjectContext::None;
         let plan_context = ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: inputs.principal.clone(),
             project_context,
             subject_resolution_authority:
@@ -2330,6 +2341,7 @@ fn resolve_execution_dependencies(
             })?;
         let resolution = engine
             .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: canonical.clone(),
                 expected_kind: None,
                 project_root,
@@ -2404,7 +2416,7 @@ fn resolve_execution_dependencies(
                 preparation_error(
                     "execution_dependency_authority_invalid",
                     format!(
-                        "execution dependency `{name}` has invalid declaring authority: {error}"
+                        "execution dependency `{name}` has invalid declaring authority: {error:#}"
                     ),
                     LaunchPrepareErrorClass::Configuration,
                 )
@@ -2420,7 +2432,9 @@ fn resolve_execution_dependencies(
         .map_err(|error| {
             preparation_error(
                 "execution_dependency_declaration_invalid",
-                format!("execution dependency `{name}` authored content shape is invalid: {error}"),
+                format!(
+                    "execution dependency `{name}` authored content shape is invalid: {error:#}"
+                ),
                 LaunchPrepareErrorClass::Configuration,
             )
         })?
@@ -2446,7 +2460,7 @@ fn resolve_execution_dependencies(
         dependency.validate().map_err(|error| {
             preparation_error(
                 "execution_dependency_capture_invalid",
-                format!("execution dependency `{name}` capture is invalid: {error}"),
+                format!("execution dependency `{name}` capture is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -2626,7 +2640,7 @@ fn resolve_content_dependencies(
             intersect_content_policy(external_policy, source_contract).map_err(|error| {
                 preparation_error(
                     "content_dependency_kind_contract_denied",
-                    error.to_string(),
+                    format!("{error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2635,7 +2649,9 @@ fn resolve_content_dependencies(
             ryeos_engine::external_content::declaring_authority(resolution).map_err(|error| {
                 preparation_error(
                     "content_dependency_authority_invalid",
-                    format!("content dependency `{name}` has invalid declaring authority: {error}"),
+                    format!(
+                        "content dependency `{name}` has invalid declaring authority: {error:#}"
+                    ),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2647,7 +2663,7 @@ fn resolve_content_dependencies(
         .map_err(|error| {
             preparation_error(
                 "content_dependency_declaration_invalid",
-                format!("content dependency `{name}` authored shape is invalid: {error}"),
+                format!("content dependency `{name}` authored shape is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Configuration,
             )
         })?
@@ -2714,7 +2730,7 @@ fn resolve_content_dependencies(
             .map_err(|error| {
                 preparation_error(
                     "content_dependency_target_contract_missing",
-                    error.to_string(),
+                    format!("{error:#}"),
                     LaunchPrepareErrorClass::Configuration,
                 )
             })?;
@@ -2731,7 +2747,7 @@ fn resolve_content_dependencies(
         dependency.validate().map_err(|error| {
             preparation_error(
                 "content_dependency_capture_invalid",
-                format!("content dependency `{name}` capture is invalid: {error}"),
+                format!("content dependency `{name}` capture is invalid: {error:#}"),
                 LaunchPrepareErrorClass::Internal,
             )
         })?;
@@ -2884,6 +2900,7 @@ mod product_selection_preparation_tests {
             witness_hash: "a".repeat(64),
             witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
             qualification_hash: None,
+            remote_testimony: None,
         }
     }
 
@@ -3049,6 +3066,7 @@ mod ref_binding_projection_tests {
             allowed_kinds: vec!["config".to_owned()],
             allowed_spaces: vec![LaunchItemSpace::Bundle, LaunchItemSpace::Project],
             allowed_trust: vec![TrustClass::TrustedBundle, TrustClass::TrustedProject],
+            continuation_rebind: ryeos_engine::runtime_registry::ContinuationRebind::Never,
         }
     }
 
@@ -3107,7 +3125,7 @@ mod ref_binding_projection_tests {
             signer_fingerprint: "b".repeat(64),
             yaml: serde_yaml::from_str(include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../../bundles/standard/.ai/runtimes/graph-runtime.yaml",
+                "/../../../bundles/graph/.ai/runtimes/graph-runtime.yaml",
             )))
             .unwrap(),
             trust_class: TrustClass::TrustedBundle,
@@ -3276,15 +3294,21 @@ mod ref_binding_projection_tests {
             ),
         )]);
         assert!(
-            project_effective_ref_bindings(&optional, &json!({}), &BTreeMap::new())
-                .unwrap()
-                .is_empty()
+            project_effective_ref_bindings(
+                &optional,
+                "directive:test/primary",
+                &json!({}),
+                &BTreeMap::new()
+            )
+            .unwrap()
+            .is_empty()
         );
         let mut required = optional;
         required.get_mut("recipe").unwrap().required = true;
         assert_eq!(
             code(project_effective_ref_bindings(
                 &required,
+                "directive:test/primary",
                 &json!({}),
                 &BTreeMap::new()
             )),
@@ -3306,6 +3330,7 @@ mod ref_binding_projection_tests {
         assert_eq!(
             code(project_effective_ref_bindings(
                 &declarations,
+                "directive:test/primary",
                 &json!({"selection":{"recipe":42}}),
                 &BTreeMap::new()
             )),
@@ -3318,6 +3343,7 @@ mod ref_binding_projection_tests {
             assert_eq!(
                 code(project_effective_ref_bindings(
                     &declarations,
+                    "directive:test/primary",
                     &primary,
                     &BTreeMap::new()
                 )),
@@ -3327,6 +3353,7 @@ mod ref_binding_projection_tests {
         assert_eq!(
             code(project_effective_ref_bindings(
                 &declarations,
+                "directive:test/primary",
                 &json!({"selection":{"recipe":"config:test/one"}}),
                 &BTreeMap::from([("recipe".to_owned(), "config:test/two".to_owned())])
             )),
@@ -3348,6 +3375,7 @@ mod ref_binding_projection_tests {
         let expected = "config:test/one".to_owned();
         let effective = project_effective_ref_bindings(
             &declarations,
+            "directive:test/primary",
             &json!({"product_recipe":expected}),
             &BTreeMap::from([("recipe".to_owned(), expected.clone())]),
         )
@@ -3356,10 +3384,57 @@ mod ref_binding_projection_tests {
         assert_eq!(
             code(project_effective_ref_bindings(
                 &declarations,
+                "directive:test/primary",
                 &json!({}),
                 &BTreeMap::from([("other".to_owned(), "config:test/one".to_owned())])
             )),
             "invalid_ref_binding"
+        );
+    }
+
+    #[test]
+    fn caller_or_primary_ref_defaults_to_the_primary_and_explicit_wins() {
+        let declarations = BTreeMap::from([(
+            "model".to_owned(),
+            declaration(true, RefBindingSource::CallerOrPrimaryRef),
+        )]);
+        assert_eq!(
+            project_effective_ref_bindings(
+                &declarations,
+                "directive:test/primary",
+                &json!({}),
+                &BTreeMap::new()
+            )
+            .unwrap(),
+            BTreeMap::from([("model".to_owned(), "directive:test/primary".to_owned())])
+        );
+        let explicit = BTreeMap::from([("model".to_owned(), "directive:test/model".to_owned())]);
+        assert_eq!(
+            project_effective_ref_bindings(
+                &declarations,
+                "directive:test/primary",
+                &json!({}),
+                &explicit
+            )
+            .unwrap(),
+            explicit
+        );
+    }
+
+    #[test]
+    fn plain_caller_source_gets_no_primary_default() {
+        let declarations = BTreeMap::from([(
+            "model".to_owned(),
+            declaration(true, RefBindingSource::Caller),
+        )]);
+        assert_eq!(
+            code(project_effective_ref_bindings(
+                &declarations,
+                "directive:test/primary",
+                &json!({}),
+                &BTreeMap::new()
+            )),
+            "ref_binding_required"
         );
     }
 
@@ -3371,7 +3446,13 @@ mod ref_binding_projection_tests {
         )]);
         let expected = BTreeMap::from([("model".to_owned(), "config:test/model".to_owned())]);
         assert_eq!(
-            project_effective_ref_bindings(&declarations, &json!({}), &expected).unwrap(),
+            project_effective_ref_bindings(
+                &declarations,
+                "directive:test/primary",
+                &json!({}),
+                &expected
+            )
+            .unwrap(),
             expected
         );
     }
@@ -3621,23 +3702,7 @@ pub fn validate_ref_bindings(ref_bindings: &BTreeMap<String, String>) -> Result<
 }
 
 fn valid_ref_binding_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > MAX_REF_BINDING_NAME_BYTES {
-        return false;
-    }
-    let mut segments = name.split('_');
-    let Some(first) = segments.next() else {
-        return false;
-    };
-    first.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-        && first
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && segments.all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        })
+    ryeos_app::prepared_evidence_attachment::valid_ref_binding_name(name)
 }
 
 #[derive(Clone, Copy)]
@@ -4010,6 +4075,7 @@ fn map_binding_resolution_error(
         | ResolutionError::IntegrityFailure { .. }
         | ResolutionError::MetadataAnchoringFailed { .. }
         | ResolutionError::KindNotExecutable { .. }
+        | ResolutionError::ProjectShadowsBundleItem { .. }
         | ResolutionError::ComposedValueContractViolation { .. } => preparation_error_with_binding(
             "ref_binding_resolution_failed",
             format!("binding `{binding}` has an invalid definition: {detail}"),
@@ -4021,7 +4087,11 @@ fn map_binding_resolution_error(
 
             let classification = match class {
                 ResolutionFailureClass::InvalidDefinition => LaunchPrepareErrorClass::Configuration,
-                ResolutionFailureClass::DependencyUnavailable => {
+                // Binding resolution may follow admission, so a busy fork
+                // window stays the generic unavailable refusal here and is
+                // never offered for automatic retry.
+                ResolutionFailureClass::DependencyUnavailable
+                | ResolutionFailureClass::ProcessCreationBusy => {
                     return host_preparation_error_with_binding(
                         "ref_binding_resolution_failed",
                         format!(
@@ -4228,5 +4298,75 @@ fn launch_policy_forbidden(
         code: code.into(),
         message: message.into(),
         binding,
+    }
+}
+
+#[cfg(test)]
+mod rebound_continuation_classification_tests {
+    use super::*;
+
+    /// Prepared-launch fields an operator rebind continuation must hold equal
+    /// to its source. Together with the replaced fields the state layer
+    /// declares, and `binding_records` (replaced at the rebound names only),
+    /// this is every field of [`PreparedRuntimeLaunch`].
+    const HELD_EQUAL_ON_REBIND: &[&str] = &[
+        "admitted_sessions",
+        "content_dependencies",
+        "environment_contributions",
+        "evidence_attachments",
+        "execution_dependencies",
+        "filesystem_authority_ceiling",
+        "network_authority_ceiling",
+        "project_result_requirement",
+        "resource_authority_ceiling",
+        "target_requirement",
+    ];
+
+    #[test]
+    fn every_prepared_launch_field_is_classified_for_a_rebound_continuation() {
+        // Built field by field, so a field added to the struct does not
+        // compile here until it is given a place in one of the lists.
+        let prepared = PreparedRuntimeLaunch {
+            project_result_requirement: ProjectResultRequirement::None,
+            filesystem_authority_ceiling:
+                ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling:
+                ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+            target_requirement: None,
+            resource_authority_ceiling:
+                ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
+            runtime_data: Default::default(),
+            required_secrets: Vec::new(),
+            runtime_facts: Default::default(),
+            binding_records: Default::default(),
+            execution_dependencies: Default::default(),
+            content_dependencies: Default::default(),
+            evidence_attachments: Default::default(),
+            environment_contributions: Default::default(),
+            admitted_sessions: Default::default(),
+            config_contributors: Vec::new(),
+            financial_authority: None,
+            external_effect_authority: None,
+        };
+        let value = serde_json::to_value(&prepared).expect("prepared launch value");
+        let fields: BTreeSet<&str> = value
+            .as_object()
+            .expect("prepared launch object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let replaced: BTreeSet<&str> = ryeos_state::objects::REBOUND_PREPARED_LAUNCH_FIELDS
+            .iter()
+            .copied()
+            .collect();
+        let held: BTreeSet<&str> = HELD_EQUAL_ON_REBIND.iter().copied().collect();
+        assert!(replaced.is_disjoint(&held));
+        assert!(!replaced.contains("binding_records") && !held.contains("binding_records"));
+        let classified: BTreeSet<&str> = replaced
+            .union(&held)
+            .copied()
+            .chain(std::iter::once("binding_records"))
+            .collect();
+        assert_eq!(fields, classified);
     }
 }

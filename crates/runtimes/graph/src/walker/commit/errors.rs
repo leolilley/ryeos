@@ -1,5 +1,6 @@
 use super::*;
 use crate::evaluation::GraphRunExpressionContext;
+use ryeos_runtime::graph_result::{ErrorRecord, GraphRunStatus};
 
 impl Walker {
     pub(super) async fn commit_expression_failed(
@@ -253,6 +254,7 @@ impl Walker {
             elapsed_ms,
             cost,
             observation,
+            outcome: worker_outcome,
         } = outcome;
         let item_id = &item_id;
         let error = &error;
@@ -274,23 +276,22 @@ impl Walker {
         )
         .await;
 
-        if let Some(observation) = &observation {
-            if let Err(observation_error) = self
+        if let Some(observation) = &observation
+            && let Err(observation_error) = self
                 .emit_dispatch_observation(graph_run_id, current, step, observation)
                 .await
-            {
-                return self
-                    .commit_observation_failure(
-                        graph_run_id,
-                        step,
-                        state,
-                        suppressed_errors,
-                        guard,
-                        inputs,
-                        observation_error,
-                    )
-                    .await;
-            }
+        {
+            return self
+                .commit_observation_failure(
+                    graph_run_id,
+                    step,
+                    state,
+                    suppressed_errors,
+                    guard,
+                    inputs,
+                    observation_error,
+                )
+                .await;
         }
 
         // A cost-bearing child that then errored (or whose assign
@@ -336,6 +337,18 @@ impl Walker {
             ),
         )
         .await;
+
+        if let Some(worker_outcome) = worker_outcome
+            && !matches!(next_on_error, NextOnError::PolicyFail)
+        {
+            if !state.is_object() {
+                *state = Value::Object(serde_json::Map::new());
+            }
+            state
+                .as_object_mut()
+                .expect("state was just made an object")
+                .insert(FAILED_NODE_OUTCOME_KEY.to_owned(), worker_outcome);
+        }
 
         match next_on_error {
             NextOnError::Redirect(target) => {

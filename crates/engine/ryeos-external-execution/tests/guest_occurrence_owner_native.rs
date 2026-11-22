@@ -1,7 +1,8 @@
-//! Opt-in, single-threaded production source-owner component probe.
-//! `RYEOS_GUEST_OCCURRENCE_NATIVE=1 cargo test ... --test guest_occurrence_owner_native`
-//! requires a host that admits Lillux user/mount namespaces. This is not a
-//! supervisor, Render, or Codex qualification result.
+//! Single-threaded production source-owner component probe.
+//! It runs wherever the host admits Lillux user/mount namespaces and skips
+//! elsewhere; `RYEOS_GUEST_OCCURRENCE_NATIVE=1` makes it required (an
+//! unsupported host fails) and `=0` skips it. This is not a supervisor,
+//! provider, or Codex qualification result.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -38,6 +39,8 @@ fn supervisor_bootstrap(
     inputs: &ExternalGuestInputProjection,
     launcher_hash: &str,
     occurrence_id: &str,
+    resolver_source: &str,
+    hosts_source: &str,
 ) -> Result<Vec<u8>> {
     use ryeos_state::external_execution::admission::{
         AdmittedExternalCandidateProgram, ExternalCandidateExecutionRoute,
@@ -66,7 +69,7 @@ fn supervisor_bootstrap(
     };
     let recipe_digest = recipe.digest()?;
     let requirement = ExternalCandidateRequirement {
-        schema: 6,
+        schema: 7,
         protocol: PROTOCOL.into(),
         connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
         execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -74,6 +77,7 @@ fn supervisor_bootstrap(
         provider_declaration_id: "codex-hosted".into(),
         provider_configuration_destination: "environments.toml".into(),
         runtime_product_declaration_id: "product".into(),
+        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
         runtime_recipe: recipe,
     };
     let qualification_use =
@@ -82,18 +86,20 @@ fn supervisor_bootstrap(
         )?;
     let network_inputs = ExternalNetworkInputPolicy {
         resolver: ExternalNetworkInputSelection {
-            source: "/etc/resolv.conf".into(),
+            source: resolver_source.into(),
             max_bytes: 65_536,
+            required: true,
         },
         hosts: ExternalNetworkInputSelection {
-            source: "/etc/hosts".into(),
+            source: hosts_source.into(),
             max_bytes: 65_536,
+            required: true,
         },
     };
     ExternalSupervisorBootstrap {
-        schema: 7,
+        schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
-            schema: 2,
+            schema: 3,
             network_inputs,
             https_origin: "https://controller.example:7443".into(),
             route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
@@ -101,7 +107,8 @@ fn supervisor_bootstrap(
             connect_timeout_ms: 5_000,
             request_timeout_ms: 10_000,
             maximum_response_bytes: 1024 * 1024,
-        },
+            max_clock_skew_ms: None,
+        }.into(),
         tls_root_certificates_der_base64: roots,
         placement_thread_id: "T-native-test".into(),
         occurrence_id: occurrence_id.into(),
@@ -116,10 +123,16 @@ fn supervisor_bootstrap(
             qualification_use,
             runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
             runtime_manifest_hash: "e".repeat(64),
-            runtime_witness_hash: "1".repeat(64),
+            runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "3".repeat(64),
             runtime_recipe_digest: recipe_digest,
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
         }
         .into(),
         guest_input_identity: inputs.identity_digest()?,
@@ -133,6 +146,15 @@ fn supervisor_bootstrap(
         post_execution_timeout_seconds: 120,
         candidate_export_max_bytes: 512 * 1024,
         channel_max_bytes: 1024 * 1024,
+        native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+            storage_bytes: 67_108_864,
+            allocator_steps: 2_000_000_000,
+            connections: 16,
+            operation_millis: 4_860_000,
+            cleanup_millis: 120_000,
+            cleanup_steps: 3_000_000,
+        },
+        report_capabilities: false,
     }
     .canonical_bytes()
 }
@@ -160,6 +182,7 @@ fn signed_native_assignment(
     assignment: &GuestOccurrenceAssignment<'_>,
     owner: &lillux::crypto::SigningKey,
 ) -> Result<Vec<u8>> {
+    let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
     let document = GuestOccurrenceAssignmentDocument {
         schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
         placement_thread_id: assignment.placement_thread_id.into(),
@@ -172,9 +195,9 @@ fn signed_native_assignment(
         supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
         guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
         owner_public_key_hex: hex::encode(owner.verifying_key().to_bytes()),
+        controller_public_key_hex: hex::encode(root.verifying_key().to_bytes()),
         attachment_deadline_ms: assignment.attachment_deadline_ms,
     };
-    let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
     let signed = sign_guest_occurrence_assignment(document, &root)?;
     ryeos_external_execution_contract::canonical_json(&signed)
 }
@@ -185,10 +208,8 @@ fn verify_native_import(
     installed_runtime_manifest_hash: &str,
 ) -> Result<ryeos_external_execution::guest_import_authorization::VerifiedGuestImportAuthorization>
 {
-    let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
     verify_guest_import_documents(
         &ryeos_external_execution_contract::canonical_json(signed)?,
-        &root.verifying_key(),
         installed_runtime_manifest_hash,
         signed_assignment,
     )
@@ -206,8 +227,14 @@ fn run(
     // /var/tmp is deliberately read-only.
     let state_path = fixture_path.join("state");
     std::fs::create_dir(&state_path)?;
-    let db = ryeos_state::StateDb::open(&state_path, Arc::new(ryeos_state::TrustStore::new()))?;
+    let db = ryeos_state::test_support::TestState::open(
+        &state_path,
+        Arc::new(ryeos_state::TrustStore::new()),
+    )?;
     let authority = db.pinned_authority()?;
+    // Only the pinned authority is needed; close the native test host before
+    // the probe enters namespaces or starts subprocesses.
+    db.close()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let policy = ProjectSnapshotPolicy::new(
@@ -279,6 +306,7 @@ fn run(
     let launcher = b"native-launcher";
     let supervisor = b"native-supervisor";
     let inputs = ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: 56,
@@ -305,8 +333,22 @@ fn run(
         executable_search: Vec::new(),
         environment: BTreeMap::new(),
     };
-    let bootstrap =
-        supervisor_bootstrap(&inputs, &lillux::sha256_hex(launcher), "occ-native-test")?;
+    // The native fixture owns its exact network-input bytes. Provider sandboxes
+    // need not expose /etc/hosts, and this probe tests native installation,
+    // not a host's ambient network configuration.
+    let resolver_source = fixture_path.join("network-resolver");
+    let hosts_source = fixture_path.join("network-hosts");
+    std::fs::write(&resolver_source, b"nameserver 127.0.0.1\n")?;
+    std::fs::write(&hosts_source, b"127.0.0.1 localhost\n")?;
+    let bootstrap = supervisor_bootstrap(
+        &inputs,
+        &lillux::sha256_hex(launcher),
+        "occ-native-test",
+        resolver_source
+            .to_str()
+            .context("non-UTF8 resolver fixture")?,
+        hosts_source.to_str().context("non-UTF8 hosts fixture")?,
+    )?;
     for (path, mode, bytes) in [
         ("bootstrap", 0o600, bootstrap.as_slice()),
         ("input-00", 0o644, configuration.as_slice()),
@@ -339,7 +381,7 @@ fn run(
         supervisor_sha256: &manifest.supervisor_sha256,
         launcher_sha256: &manifest.launcher_sha256,
         maximum_regular_bytes: manifest.total_regular_bytes,
-        maximum_framed_bytes: manifest.framed_bytes()? + 128,
+        maximum_framed_bytes: manifest.framed_bytes_bound()? + 128,
     };
     let mut writer = GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected)?;
     while let Some(entry) = writer.next_file() {
@@ -356,7 +398,7 @@ fn run(
     std::fs::create_dir(&upload_dir)?;
     std::fs::create_dir(&occurrence_dir)?;
     let upload_parent = lillux::PinnedDirectory::open(&upload_dir)?.context("upload vanished")?;
-    let occurrence =
+    let mut occurrence =
         lillux::PinnedDirectory::open(&occurrence_dir)?.context("occurrence vanished")?;
     upload_parent.tighten_owner_private_directory()?;
     occurrence.tighten_owner_private_directory()?;
@@ -403,18 +445,14 @@ fn run(
     let guest_runtime_path = fixture_path.join("guest-runtime");
     std::fs::create_dir(&guest_runtime_path)?;
     std::fs::write(
-        guest_runtime_path.join("controller-root.hex"),
-        hex::encode(
-            lillux::crypto::SigningKey::from_bytes(&[43; 32])
-                .verifying_key()
-                .to_bytes(),
-        ),
-    )?;
-    std::fs::write(
         guest_runtime_path.join("guest-owner-profile.json"),
         ryeos_external_execution_contract::canonical_json(
             &ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile {
-                schema: 1,
+                schema: 2,
+                account: lillux::GuestRuntimeAccount::Unix {
+                    uid: 65534,
+                    gid: 65534,
+                },
                 private_source_max_bytes: 32 * 1024 * 1024,
                 private_source_max_inodes: 1024,
                 owner_timeout_seconds: 10,
@@ -423,11 +461,12 @@ fn run(
     )?;
     let guest_runtime = lillux::PinnedDirectory::open(&guest_runtime_path)?
         .context("installed native fixture runtime vanished")?;
-    let observed_runtime = ObservedGuestRuntime::observe(&guest_runtime)?;
+    let mut observed_runtime = ObservedGuestRuntime::observe(&guest_runtime)?;
+    let runtime_manifest_hash = observed_runtime.manifest_hash().to_owned();
     let assignment = occurrence_assignment(
         &measurement.snapshot_hash,
         parsed_bootstrap.attachment_deadline_ms,
-        observed_runtime.manifest_hash(),
+        &runtime_manifest_hash,
     );
     let authorization = GuestImportAuthorization {
         schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
@@ -442,6 +481,7 @@ fn run(
         guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
         attachment_deadline_ms: assignment.attachment_deadline_ms,
         admission_deadline_ms: assignment.attachment_deadline_ms - 1_000,
+        max_clock_skew_ms: None,
         nonce_sha256: "8".repeat(64),
         ticket: ticket.clone(),
         guest_inputs: inputs.clone(),
@@ -470,6 +510,8 @@ fn run(
         },
     )
     .map_err(anyhow::Error::msg)?;
+    occurrence.rebind_in_current_mount_namespace()?;
+    observed_runtime.rebind_in_current_mount_namespace()?;
     let source_root = source.root().try_clone()?;
     let mut held = if release {
         let verified = verify_native_import(
@@ -523,7 +565,7 @@ fn run(
         let committed = prepared.commit_outer_launch_intent(&context, &inputs)?;
         committed
             .prepare_mounted_sandbox_request(&context, &inputs)?
-            .prepare_held_in_dedicated_owner()?
+            .prepare_held_in_dedicated_owner(None)?
     } else {
         prepare_authorized_held_guest_supervisor_once(
             &occurrence,
@@ -533,12 +575,15 @@ fn run(
             &signed_assignment,
             source,
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            None,
+            None,
+            &mut |_| {},
         )?
     };
     let receipt = held.mount_preparation_receipt()?;
     ensure!(
-        receipt.mount_count == 3,
-        "held native target lacks the stage and two sealed network inputs"
+        receipt.mount_count == 4,
+        "held native target lacks the stage, two sealed network inputs and the candidate-private mount"
     );
     if release {
         let mut released = held.release_once()?;
@@ -638,9 +683,28 @@ fn run(
 }
 
 fn main() {
-    if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE").as_deref() != Ok("1") {
-        println!("native guest occurrence probe skipped (set RYEOS_GUEST_OCCURRENCE_NATIVE=1)");
+    if std::env::args().any(|arg| arg == "--list") {
+        // A harness-free test binary answers the runner's listing request
+        // with its one test and nothing else on stdout.
+        println!("guest_occurrence_owner_native: test");
         return;
+    }
+    let requested = std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE").ok();
+    if requested.as_deref() == Some("0") {
+        eprintln!("native guest occurrence probe skipped (RYEOS_GUEST_OCCURRENCE_NATIVE=0)");
+        return;
+    }
+    if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD").as_deref() != Ok("1") {
+        let host = lillux::process_control::HostFacts::observe(0, &std::env::temp_dir());
+        if !host.unshare_user_pid_mount.allowed() {
+            let reason = format!("{:?}", host.unshare_user_pid_mount);
+            assert!(
+                requested.as_deref() != Some("1"),
+                "native guest occurrence probe required, but this host refuses namespaces: {reason}"
+            );
+            eprintln!("native guest occurrence probe skipped: host namespaces {reason}");
+            return;
+        }
     }
     if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD").as_deref() == Ok("1") {
         let root = std::env::var_os("RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT")
@@ -680,7 +744,6 @@ fn main() {
             args: Vec::new(),
             cwd: None,
             envs: vec![
-                ("RYEOS_GUEST_OCCURRENCE_NATIVE".into(), "1".into()),
                 ("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD".into(), "1".into()),
                 (
                     "RYEOS_GUEST_OCCURRENCE_NATIVE_RELEASE".into(),

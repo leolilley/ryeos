@@ -48,6 +48,7 @@ const ENGINE_PLAN_NAMES: &[&str] = &[
     "RYEOS_CHAIN_ROOT_ID",
     "RYEOS_EXTERNAL_ROOT",
     "RYEOS_EXTERNAL_DELIVERY",
+    "RYEOS_EXTERNAL_DESCRIPTORS",
 ];
 
 const DAEMON_CALLBACK_NAMES: &[&str] = &[
@@ -77,6 +78,25 @@ const PROXY_AND_CA_NAMES: &[&str] = &[
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
 ];
+
+/// Test-only crash-cut selector for the daemon's project apply-snapshot
+/// handler. Read in-process by the daemon itself; never forwarded into any
+/// spawned child environment and absent from production builds.
+#[cfg(feature = "crash-qualification-test-support")]
+pub const PROJECT_APPLY_TEST_CUT_ENV: &str = "RYEOS_PROJECT_APPLY_TEST_CUT";
+
+/// Test-only crash-cut selector for the scheduler execution-history reset
+/// participant, as `<boundary>:<role>`. Read in-process by the offline reset
+/// command; never forwarded into any spawned child environment and absent
+/// from production builds.
+#[cfg(feature = "crash-qualification-test-support")]
+pub const SCHEDULER_RESET_TEST_CUT_ENV: &str = "RYEOS_SCHEDULER_RESET_TEST_CUT";
+
+/// Line prefix a process writes to stderr when it parks at a selected
+/// test-only crash cut, followed by `<site>:<boundary>`. The qualification
+/// harness waits for this line and then SIGKILLs the parked process.
+#[cfg(feature = "crash-qualification-test-support")]
+pub const TEST_CRASH_CUT_REACHED_PREFIX: &str = "ryeos-test-crash-cut-reached ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvSourceKind {
@@ -128,11 +148,27 @@ impl From<EnvSourceKind> for EnvSourceDetail {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EnvBinding {
     pub key: String,
     pub value: String,
     pub source: EnvSourceDetail,
+}
+
+impl std::fmt::Debug for EnvBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("EnvBinding");
+        debug.field("key", &self.key);
+        if matches!(
+            self.source,
+            EnvSourceDetail::DeclaredSecret | EnvSourceDetail::LaunchSecret
+        ) {
+            debug.field("value", &"<elided>");
+        } else {
+            debug.field("value", &self.value);
+        }
+        debug.field("source", &self.source).finish()
+    }
 }
 
 impl EnvBinding {
@@ -241,12 +277,35 @@ impl EnvContractBuilder {
         if matches!(source, EnvSourceKind::ProtocolInjection) {
             panic!("protocol injection env requires with_typed_bindings")
         }
+        if matches!(
+            source,
+            EnvSourceKind::DeclaredSecret | EnvSourceKind::LaunchSecret
+        ) {
+            panic!("secret env carries names only; use with_declared_secret_names")
+        }
         let detail = EnvSourceDetail::from(source);
         self.with_typed_bindings(
             bindings
                 .into_iter()
                 .map(|(key, value)| EnvBinding::new(key, value, detail.clone())),
         )
+    }
+
+    /// Reserve declared secret names in the contract without their values.
+    /// Name validation and collision rules apply; `build` omits them, and the
+    /// authorized values join only the final process request.
+    pub fn with_declared_secret_names<'a, I>(mut self, names: I) -> Result<Self, EnvContractError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        for name in names {
+            self.insert(EnvBinding::new(
+                name,
+                String::new(),
+                EnvSourceDetail::DeclaredSecret,
+            ))?;
+        }
+        Ok(self)
     }
 
     pub fn with_typed_bindings<I>(mut self, bindings: I) -> Result<Self, EnvContractError>
@@ -262,6 +321,7 @@ impl EnvContractBuilder {
     pub fn build(self) -> Vec<(String, String)> {
         self.bindings
             .into_iter()
+            .filter(|(_, binding)| binding.source != EnvSourceDetail::DeclaredSecret)
             .map(|(key, binding)| (key, binding.value))
             .collect()
     }
@@ -412,11 +472,23 @@ fn validate_protocol_injection_name(
                 EnvInjectionSource::ProjectStateScope,
                 "RYEOSD_PROJECT_STATE_SCOPE"
             )
+            | (
+                EnvInjectionSource::RuntimeStateRoot,
+                "RYEOSD_RUNTIME_STATE_ROOT"
+            )
+            | (
+                EnvInjectionSource::BundleStateHome,
+                "RYEOSD_BUNDLE_STATE_HOME"
+            )
             | (EnvInjectionSource::ProjectPath, "RYE_PROJECT_PATH")
             | (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH")
             | (
                 EnvInjectionSource::ThreadAuthToken,
                 "RYEOSD_THREAD_AUTH_TOKEN"
+            )
+            | (
+                EnvInjectionSource::ActingPrincipal,
+                "RYEOSD_ACTING_PRINCIPAL"
             )
     );
     if allowed {
@@ -571,6 +643,21 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "crash-qualification-test-support")]
+    #[test]
+    fn in_process_crash_cut_selectors_are_never_forwarded() {
+        let env = EnvContractBuilder::new()
+            .with_base_allowlist(host_env(&[
+                (PROJECT_APPLY_TEST_CUT_ENV, "ref_published"),
+                (SCHEDULER_RESET_TEST_CUT_ENV, "purge_armed:main"),
+            ]))
+            .unwrap()
+            .build();
+        let map: BTreeMap<_, _> = env.into_iter().collect();
+        assert!(!map.contains_key(PROJECT_APPLY_TEST_CUT_ENV));
+        assert!(!map.contains_key(SCHEDULER_RESET_TEST_CUT_ENV));
+    }
+
     #[test]
     fn daemon_roots_override_host_roots() {
         let env = EnvContractBuilder::new()
@@ -593,10 +680,7 @@ mod tests {
         let err = EnvContractBuilder::new()
             .with_base_allowlist(host_env(&[("PATH", "/bin")]))
             .unwrap()
-            .with_bindings(
-                EnvSourceKind::DeclaredSecret,
-                vec![("PATH".to_string(), "secret".to_string())],
-            )
+            .with_declared_secret_names(["PATH"])
             .unwrap_err();
         assert!(format!("{err:#}").contains("PATH"));
 
@@ -605,26 +689,74 @@ mod tests {
                 app_root: Some("/real-system".to_string()),
             })
             .unwrap()
-            .with_bindings(
-                EnvSourceKind::DeclaredSecret,
-                vec![("RYEOS_APP_ROOT".to_string(), "secret".to_string())],
-            )
+            .with_declared_secret_names(["RYEOS_APP_ROOT"])
             .unwrap_err();
         assert!(format!("{err:#}").contains("RYEOS_APP_ROOT"));
     }
 
     #[test]
-    fn application_controlled_sources_reject_dynamic_loader_env() {
-        for source in [
-            EnvSourceKind::DeclaredSecret,
-            EnvSourceKind::RuntimeDescriptor,
+    fn declared_secret_names_reserve_without_values() {
+        let env = EnvContractBuilder::new()
+            .with_base_allowlist(host_env(&[("PATH", "/bin")]))
+            .unwrap()
+            .with_declared_secret_names(["OPENAI_API_KEY"])
+            .unwrap()
+            .build();
+        let map: BTreeMap<_, _> = env.into_iter().collect();
+        assert!(!map.contains_key("OPENAI_API_KEY"));
+        assert_eq!(map.get("PATH").map(String::as_str), Some("/bin"));
+
+        // A later binding cannot take a reserved secret name.
+        let err = EnvContractBuilder::new()
+            .with_declared_secret_names(["SHARED_NAME"])
+            .unwrap()
+            .with_bindings(
+                EnvSourceKind::RuntimeDescriptor,
+                vec![("SHARED_NAME".to_string(), "x".to_string())],
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("SHARED_NAME"));
+        for reserved in [
+            "RYEOS_TOKEN",
+            "RYEOSD_SOCKET_PATH",
+            "LD_PRELOAD",
+            "HTTPS_PROXY",
         ] {
-            for key in ["LD_AUDIT", "LD_DEBUG", "DYLD_PRINT_LIBRARIES"] {
-                let err = EnvContractBuilder::new()
-                    .with_bindings(source, vec![(key.to_string(), "x".to_string())])
-                    .unwrap_err();
-                assert!(format!("{err:#}").contains(key), "got: {err:#}");
-            }
+            assert!(
+                EnvContractBuilder::new()
+                    .with_declared_secret_names([reserved])
+                    .is_err(),
+                "{reserved}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_binding_debug_elides_value() {
+        let binding = EnvBinding::new("API_KEY", "sk-value", EnvSourceDetail::DeclaredSecret);
+        let rendered = format!("{binding:?}");
+        assert!(
+            rendered.contains("API_KEY") && !rendered.contains("sk-value"),
+            "{rendered}"
+        );
+        let plain = EnvBinding::new("PATH", "/bin", EnvSourceDetail::BaseAllowlist);
+        assert!(format!("{plain:?}").contains("/bin"));
+    }
+
+    #[test]
+    fn application_controlled_sources_reject_dynamic_loader_env() {
+        for key in ["LD_AUDIT", "LD_DEBUG", "DYLD_PRINT_LIBRARIES"] {
+            let err = EnvContractBuilder::new()
+                .with_bindings(
+                    EnvSourceKind::RuntimeDescriptor,
+                    vec![(key.to_string(), "x".to_string())],
+                )
+                .unwrap_err();
+            assert!(format!("{err:#}").contains(key), "got: {err:#}");
+            let err = EnvContractBuilder::new()
+                .with_declared_secret_names([key])
+                .unwrap_err();
+            assert!(format!("{err:#}").contains(key), "got: {err:#}");
         }
     }
 
@@ -644,6 +776,10 @@ mod tests {
                     (
                         "RYEOS_EXTERNAL_DELIVERY".to_string(),
                         "\"private_descriptor_root\"".to_string(),
+                    ),
+                    (
+                        "RYEOS_EXTERNAL_DESCRIPTORS".to_string(),
+                        "{\"schema\":\"ryeos.external_realization_descriptors.v1\",\"realizations\":{\"harness\":7}}".to_string(),
                     ),
                 ],
             )
@@ -713,6 +849,34 @@ mod tests {
     }
 
     #[test]
+    fn acting_principal_protocol_injection_is_admitted() {
+        EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_ACTING_PRINCIPAL",
+                format!("fp:{}", "a".repeat(64)),
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::ActingPrincipal,
+                },
+            )])
+            .unwrap();
+
+        for other in [
+            EnvInjectionSource::ThreadId,
+            EnvInjectionSource::CallbackToken,
+            EnvInjectionSource::ThreadAuthToken,
+        ] {
+            let err = EnvContractBuilder::new()
+                .with_typed_bindings(vec![EnvBinding::new(
+                    "RYEOSD_ACTING_PRINCIPAL",
+                    "fp:forged",
+                    EnvSourceDetail::ProtocolInjection { source: other },
+                )])
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("RYEOSD_ACTING_PRINCIPAL"));
+        }
+    }
+
+    #[test]
     fn protocol_protected_names_require_matching_source() {
         EnvContractBuilder::new()
             .with_typed_bindings(vec![EnvBinding::new(
@@ -754,6 +918,52 @@ mod tests {
             )])
             .unwrap_err();
         assert!(format!("{err:#}").contains("RYEOSD_PROJECT_STATE_SCOPE"));
+
+        EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_RUNTIME_STATE_ROOT",
+                "/state/launch",
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::RuntimeStateRoot,
+                },
+            )])
+            .unwrap();
+        let err = EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_RUNTIME_STATE_ROOT",
+                "/project",
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::ProjectPath,
+                },
+            )])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("RYEOSD_RUNTIME_STATE_ROOT"));
+    }
+
+    #[test]
+    fn bundle_state_home_name_is_bound_to_its_source() {
+        EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_BUNDLE_STATE_HOME",
+                "/run/ryeos/bundle-state",
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::BundleStateHome,
+                },
+            )])
+            .unwrap();
+        for (name, source) in [
+            ("RYEOSD_BUNDLE_STATE_HOME", EnvInjectionSource::ProjectPath),
+            ("RYEOSD_STATE_HOME", EnvInjectionSource::BundleStateHome),
+        ] {
+            let err = EnvContractBuilder::new()
+                .with_typed_bindings(vec![EnvBinding::new(
+                    name,
+                    "/x",
+                    EnvSourceDetail::ProtocolInjection { source },
+                )])
+                .unwrap_err();
+            assert!(format!("{err:#}").contains(name));
+        }
     }
 
     #[test]

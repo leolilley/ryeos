@@ -1,5 +1,5 @@
-use ryeos_handler_bins::{run_handler, scoped_qualification_execution_evidence};
-use ryeos_handler_protocol::HandlerRequest;
+use ryeos_handler_bins::scoped_qualification_execution_evidence;
+use ryeos_handler_protocol::{HandlerRequest, run_handler};
 
 fn main() {
     std::process::exit(run_handler(|request| match request {

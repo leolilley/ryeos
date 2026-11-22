@@ -1,0 +1,57 @@
+# ryeos:signed:2026-11-19T05:15:46Z:19eb85c59c599c0e285b02a8e23b51ab24e4780b4ea469d1c16c1c15035b1715:Ma5/qrmHV2WDy0nikeQhmq0EARgW3dUkbGKczhDfLSfy6FA2D2ZFVF10Wcbe7kj70k2AqQnJkxfAElxk7Yb1DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: node-machines
+title: Machines
+version: "1.0.0"
+description: >-
+  Which of your nodes share a boot, filesystem or account, as each node reports it.
+  A group row names the machine and the grade of the grouping; its node rows say
+  who answered and what each relation measured. A boot is one run of one kernel,
+  not a machine, and a different filesystem may still be the same disk. Machine
+  names are the ones you declared with `ryeos node machine declare`; a
+  declaration that could not be used is its own row. Nothing here changes a
+  machine.
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/node/machines
+    params: {}
+    collection: rows
+projections:
+  hierarchy:
+    id: id
+    parent: parent
+  columns:
+    - { label: machine, field: name }
+    - { label: place, field: place }
+    - { label: state, field: state_text }
+    - label: boot
+      field: facts.boot.text
+      tone:
+        field: facts.boot.grade
+        map: { measured: good, unknown: warn }
+    - label: filesystem
+      field: facts.storage.text
+      tone:
+        field: facts.storage.grade
+        map: { measured: good, unknown: warn }
+    - label: account
+      field: facts.account.text
+      tone:
+        field: facts.account.grade
+        map: { measured: good, unknown: warn }
+    - { label: as of, field: as_of, present: time_date }
+  expand:
+    fields: [label, relations_text, facts_text, disagreeing_text, missing_text, node_id, as_of]
+  tone:
+    field: status
+    map:
+      declared_confirmed: good
+      observed: good
+      declared_contradicted: danger
+      disagrees: danger
+      cannot_tell: warn
+      declaration_invalid: danger
+      did_not_answer: warn
+      not_granted: warn
+    default: neutral

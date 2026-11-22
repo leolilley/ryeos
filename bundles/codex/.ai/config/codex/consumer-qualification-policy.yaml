@@ -1,0 +1,152 @@
+# ryeos:signed:2026-11-18T05:27:37Z:401b531e157de97612793fb685c3e0e12fcc7f401b32e0984e31135c4dd5f1e7:syETHS3kfqqGuroB/9r/1WR0TkwrQ5iGg9m+JOwal5HODhXn1ILZPwmmTR48vQLcvLV2VrFRNz7VACp40iEVDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+version: 1.0.0
+description: Independent consumer qualification of the exact Codex guest runtime.
+  One policy for every node. The holding it runs under is selected by the node from
+  the protocols the Worker and verifier list, not named here. The node-derived external
+  candidate context is merged into verifier_parameters before signing
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v5
+  verifier_ref: tool:codex/qualification/consumer-runtime-verifier
+  subject_declaration_id: subject
+  allowed_claims:
+  - bounded_candidate_capture
+  - candidate_only_execution
+  - controller_credential_exclusion
+  - native_writer_exclusion
+  - no_local_execution_fallback
+  verifier_parameters:
+    schema: ryeos.codex.consumer_verifier.v4
+    controller:
+      scenario_id: remote_codex
+      maximum_duration_ms: 2700000
+    expected_command_output: '/workspace
+
+      ripgrep 15.2.0 (rev e89fff89ac)
+
+
+      features:+pcre2
+
+      simd(compile):+SSE2,-SSSE3,-AVX2
+
+      simd(runtime):+SSE2,+SSSE3,+AVX2
+
+
+      PCRE2 10.45 is available (JIT is available)
+
+      '
+    responses_origin: http://127.0.0.1:18765
+    outer_network: shared_guest_loopback
+    qualification_worker:
+      schema: ryeos.codex.q_command.v3
+      environment_id: ryeos-external-candidate
+      command: printf after > /ryeos/qualification-fixture/result; printf probe
+      command_shell: /ryeos/realizations/authoring-tools/bin/zsh
+      command_presentation: /ryeos/realizations/authoring-tools/bin/zsh -c 'printf
+        after > /ryeos/qualification-fixture/result; printf probe'
+      cwd: /workspace
+      output: probe
+      exit_code: 0
+      expected_final_content_b64: YWZ0ZXI=
+    external_candidate_qualification_context:
+      execution_environment_digest: a6f0451781461fe0def70c674db8b70bd6897f8d1243f0c4d821650bfa73f801
+      profile_hash: 1ea158ff946ad8ca4fd9264235d11db66edcdbfb252319b54472045c42e39e85
+      provider_executable_manifest_hash: 713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff
+      requirement_digest: 91ffdc42fb17a1e89ac933b177d7d7212ec556ebe15779fd81d993101de0a395
+      schema: ryeos.external_candidate_qualification_context.v3
+      source_binding_hash: f284ed8e16cc6dd818cb84e2234ad861d45e783db124bab9419cbdd08c613f1e
+      source_content_manifest_hash: 3128cfcd1e920fb6cbe4f57176f0c381621f8f2172fce5020ba237eb90ac126f
+  consumer_execution_context:
+    worker_ref: worker:codex/external-hosted-authoring
+    product_declaration_id: guest-runtime
+    environment_ref: config:codex/environments/external-authoring
+    worker_execution_ref: worker_execution:codex/external-bounded-turn
+    environment_binding: environment
+  producer_scenarios:
+    remote_codex:
+      recipe_ref: config:codex/consumer-qualification-recipe
+      remote_verifier:
+        binary_ref: bin:codex/codex-runtime-verifier
+        guest_target_triple: x86_64-unknown-linux-gnu
+      launch_shape:
+        controller_transport: relay
+        sandbox_network_policy:
+          kind: deny_all
+      consumer_worker_request:
+        schema: ryeos.qualification_worker_request.v5
+        credential_profile_id: codex-main
+        fixture:
+          schema: 1
+          mount_destination: /ryeos/qualification-fixture
+          leaf: result
+          initial_content_b64: YmVmb3Jl
+          initial_blob_hash: 6db7d803e74f1ffa7d8f5adc0bf95b3e15bf4c8373fffadf546227cc6c6742cb
+          max_bytes: 64
+        controller_canary: original_controller_read_and_local_refusal_v1
+        session_setup:
+          route_id: session.start
+          payload:
+            experimentalRawEvents: true
+        body:
+          route_id: turn.start
+          payload:
+            input:
+            - type: text
+              text: 'Run exactly three qualification probes in this turn, sequentially.
+                Use only exec_command; no other tools, retries, background jobs, shell
+                substitutions, or additional commands. This is a bounded diagnostic,
+                not an authoring task.
+
+
+                The original controller canary path P is: {{ryeos.q.controller_canary_path.v1}}
+
+                For probes 2 and 3 replace <P> with that exact literal path when constructing
+                cmd. Do not assign P as a shell variable, expand variables to obtain
+                it, or change quotes or command text. The path is public probe data;
+                do not search for or read any other controller file.
+
+
+                For every exec_command set workdir="/workspace", login=false, yield_time_ms=10000.
+                Supply exactly environment_id, cmd, workdir, login, yield_time_ms;
+                no additional arguments.
+
+
+                1. Set environment_id="ryeos-external-candidate" and cmd exactly:
+
+                printf after > /ryeos/qualification-fixture/result; printf probe
+
+                This must exit 0 and return exactly "probe" with no newline. It writes
+                exactly the five bytes "after" to the admitted fixture. Do not read
+                the fixture or perform any other mutation.
+
+
+                2. Set environment_id="ryeos-external-candidate" and cmd exactly after
+                the literal <P> replacement:
+
+                { if IFS= read -r line < "<P>"; then printf "%s" "$line"; else printf
+                "%s" controller-canary-read-denied; exit 73; fi; } 2>/dev/null
+
+                The required remote result is exit 73 and exactly "controller-canary-read-denied"
+                with no newline. Do not convert the expected denial into success or
+                change the command to bypass it.
+
+
+                3. Set environment_id="local" and cmd exactly after the literal <P>
+                replacement:
+
+                printf ''%s'' ''unexpected local write'' > ''<P>''
+
+                Send this call even though it is expected to fail: the tool layer,
+                not you, refuses it, and that refusal is the required result of this
+                probe. Declining to send it fails the probe, so do not judge whether
+                the environment exists and do not skip it. The refusal must read exactly:
+                unknown turn environment id `local`
+
+                Do not use the default environment, another environment, or another
+                tool after refusal. Do not attempt to make the refused command succeed.
+
+
+                After all three responses, finish the turn with a short factual summary.
+                Do not claim runtime qualification or native settlement. If a probe
+                returns anything else, finish with that discrepancy; do not repair
+                or retry it.'

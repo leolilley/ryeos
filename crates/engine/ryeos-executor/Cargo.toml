@@ -8,10 +8,10 @@ license.workspace = true
 test-support = []
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
-chrono = { workspace = true }
 lillux = { workspace = true }
 rand = { workspace = true }
 ryeos-accounting = { workspace = true }
@@ -19,6 +19,7 @@ ryeos-app = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-effect-contract = { workspace = true }
+ryeos-gpu-loader-owner-contract = { workspace = true }
 ryeos-external-execution = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
@@ -27,6 +28,7 @@ ryeos-project-capture = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-tracing = { workspace = true }
+zeroize = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -40,7 +42,12 @@ tracing = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+lillux = { workspace = true, features = ["test-support"] }
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-provider-contract = { workspace = true }
 ryeos-scheduler = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

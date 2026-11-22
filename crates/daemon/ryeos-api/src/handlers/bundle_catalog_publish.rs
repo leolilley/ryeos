@@ -49,7 +49,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-catalog/publish",
-    endpoint: "bundle_catalog.publish",
+    endpoint: "bundle-catalog.publish",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle-catalog/publish"],
     handler: |params, context, state| {

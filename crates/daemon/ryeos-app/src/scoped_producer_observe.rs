@@ -21,9 +21,8 @@ use crate::state::AppState;
 use ryeos_handler_protocol::ExecutionEvidenceCandidateScopedAttemptWire;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
-use ryeos_state::external_content::products::qualification::{
-    ProductQualificationLaunchPurpose, ProductQualificationScopedAttemptProof,
-};
+use ryeos_state::external_content::products::qualification::ProductQualificationScopedAttemptProof;
+use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
 
 const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v7";
 const MAX_OBSERVATION_RESPONSE_BYTES: usize = 9 * 1024 * 1024;
@@ -116,6 +115,10 @@ impl ScopedProducerObservation {
                         ),
                 "scoped relay handoff differs from retained process and producer source"
             );
+            require_applied_launch_commitment_digest(
+                &handoff.expected_applied_launch_digest,
+                &self.applied_launch,
+            )?;
         }
         ensure!(
             self.producer_source.recipe_digest == self.recipe_digest
@@ -159,6 +162,14 @@ impl ScopedProducerObservation {
             &self.prepared_immutable_sha256,
             &mount_evidence.prepared_immutable_sha256,
         )?;
+        mount_evidence.validate_applied_launch(&self.applied_launch)?;
+        if let Some(handoff) = &self.relay_handoff {
+            ensure!(
+                handoff.expected_applied_launch_digest
+                    == digest_json(&mount_evidence.expected_launch)?,
+                "scoped relay handoff differs from journaled target commitments"
+            );
+        }
         ensure!(
             self.applied_launch
                 .matches_post_release_mounts(&mount_evidence.expected),
@@ -216,6 +227,72 @@ impl ScopedProducerObservation {
             "observation misclassifies producer exit"
         );
         Ok(())
+    }
+}
+
+/// Recheck the held target plan against the retained post-release receipt.
+/// The live launch checked this before observing the child; qualification and
+/// replay must not accept a CAS observation whose target bytes contradict the
+/// daemon-authored relay handoff.
+fn require_applied_launch_commitment_digest(
+    expected: &str,
+    actual: &lillux::LinuxSandboxAppliedLaunchReceipt,
+) -> Result<()> {
+    let target = lillux::LinuxSandboxAppliedLaunchCommitments {
+        executable_sha256: actual.executable_sha256,
+        argv_sha256: actual.argv_sha256,
+        environment_sha256: actual.environment_sha256,
+        cwd_sha256: actual.cwd_sha256,
+    };
+    ensure!(
+        digest_json(&target)? == expected,
+        "scoped observation applied target differs from retained relay handoff"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod applied_launch_commitment_tests {
+    use super::*;
+
+    #[test]
+    fn retained_relay_target_rejects_each_changed_applied_field() {
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [5; 32],
+            },
+        };
+        let expected = digest_json(&lillux::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: receipt.executable_sha256,
+            argv_sha256: receipt.argv_sha256,
+            environment_sha256: receipt.environment_sha256,
+            cwd_sha256: receipt.cwd_sha256,
+        })
+        .unwrap();
+        require_applied_launch_commitment_digest(&expected, &receipt).unwrap();
+
+        for field in 0..4 {
+            let mut changed = receipt.clone();
+            match field {
+                0 => changed.executable_sha256[0] ^= 1,
+                1 => changed.argv_sha256[0] ^= 1,
+                2 => changed.environment_sha256[0] ^= 1,
+                _ => changed.cwd_sha256[0] ^= 1,
+            }
+            assert!(require_applied_launch_commitment_digest(&expected, &changed).is_err());
+        }
     }
 }
 
@@ -360,7 +437,7 @@ fn observe_owned_scoped_producer(
         .min(callback_deadline.remaining());
     if wait == Duration::ZERO {
         let abort = child.process.abort_and_reap_checked();
-        let settlement = settle_cleanup_only(state, &record);
+        let settlement = settle_cleanup_only(state, record);
         bail!(
             "scoped producer observation deadline elapsed; abort={abort:?}; cleanup={settlement:?}"
         );
@@ -402,13 +479,13 @@ fn observe_owned_scoped_producer(
     }
     let (result, receipt) = match ScopedChildNaturalEmptyReceipt::observe(
         child.process,
-        &record,
+        record,
         wait,
     ) {
         Ok(observed) => observed,
         Err(running) => {
             let abort = running.abort_and_reap_checked();
-            let settlement = settle_cleanup_only(state, &record);
+            let settlement = settle_cleanup_only(state, record);
             bail!(
                 "scoped producer did not prove natural scope emptiness; abort={abort:?}; cleanup={settlement:?}"
             );
@@ -509,7 +586,7 @@ fn observe_owned_scoped_producer(
         Ok(())
     })();
     if let Err(error) = observed {
-        let settlement = settle_cleanup_only(state, &record);
+        let settlement = settle_cleanup_only(state, record);
         return Err(error.context(format!(
             "scoped natural observation could not commit; cleanup={settlement:?}"
         )));
@@ -623,7 +700,7 @@ fn replay_observation(
     let _guard = authority.acquire_shared_guard()?;
     let value = authority
         .cas_store()?
-        .get_object(hash)?
+        .get_object_bounded(hash, MAX_OBSERVATION_RESPONSE_BYTES as u64)?
         .context("committed scoped observation CAS object absent")?;
     let observation: ScopedProducerObservation =
         serde_json::from_value(value.clone()).context("decode committed scoped observation")?;
@@ -642,24 +719,22 @@ fn replay_observation(
 pub(crate) fn qualification_scoped_attempt_proof(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
-    _guard: &ryeos_state::CasMutationGuard,
     owner: &LaunchOwner,
-    purpose: &ProductQualificationLaunchPurpose,
+    purpose: &QualificationExecutionPurposeView<'_>,
     candidate: &ExecutionEvidenceCandidateScopedAttemptWire,
 ) -> Result<ProductQualificationScopedAttemptProof> {
-    purpose.validate()?;
     let scenario = purpose
-        .policy_source
+        .policy_source()
         .policy
         .producer_scenarios
         .get(&candidate.scenario_id)
         .context("projected scoped attempt has no signed scenario")?;
     let source = purpose
-        .producer_recipe_sources
+        .producer_recipe_sources()
         .get(&candidate.scenario_id)
         .context("projected scoped attempt has no pinned recipe source")?;
     ensure!(
-        scenario.recipe_ref == source.canonical_ref,
+        scenario.recipe_ref.as_deref() == Some(source.canonical_ref.as_str()),
         "projected scoped scenario recipe differs from pinned source"
     );
     let current = crate::operator_external_content::product_qualification::resolve_current_bundle_producer_recipe_for_purpose(
@@ -701,17 +776,48 @@ pub(crate) fn qualification_scoped_attempt_proof(
             && record.retirement_evidence_digest.is_some(),
         "projected scoped attempt differs from settled daemon journal"
     );
-    let value = authority
-        .cas_store()?
-        .get_object(
-            record
-                .observation_object_hash
-                .as_deref()
-                .context("settled scoped attempt has no retained observation")?,
-        )?
-        .context("settled scoped observation CAS object is missing")?;
+    // Producer recipe resolution above starts handler processes, so the
+    // caller holds no CAS guard. The retained observation is read under a
+    // short guard of its own that covers only this exact-hash CAS read.
+    let value = {
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
+            .cas_store()?
+            .get_object_bounded(
+                record
+                    .observation_object_hash
+                    .as_deref()
+                    .context("settled scoped attempt has no retained observation")?,
+                MAX_OBSERVATION_RESPONSE_BYTES as u64,
+            )?
+            .context("settled scoped observation CAS object is missing")?;
+        authority.ensure_guard(&guard)?;
+        value
+    };
     let observation: ScopedProducerObservation = serde_json::from_value(value)?;
     observation.validate_against(&record)?;
+    match (&current.recipe.loopback_ingress, &observation.relay_handoff) {
+        (Some(ingress), Some(handoff)) => handoff.validate_for_verifier(
+            &owner.thread_id,
+            &candidate.scenario_id,
+            source,
+            ingress,
+        )?,
+        (None, None) => {}
+        _ => bail!("scoped observation relay handoff differs from signed producer recipe"),
+    }
+    if purpose
+        .policy_source()
+        .policy
+        .consumer_execution_context
+        .is_some()
+    {
+        require_applied_consumer_executable(
+            &current.recipe.executable_source,
+            &observation.applied_launch.executable_sha256,
+        )?;
+    }
     ensure!(
         observation.producer_exit_clean
             && observation.producer_source == *source
@@ -762,6 +868,52 @@ pub(crate) fn qualification_scoped_attempt_proof(
     };
     proof.validate()?;
     Ok(proof)
+}
+
+/// Corroborate the recipe's admitted executable member against the owned
+/// target's pre-exec observation. This is one parity check, not proof of
+/// protocol, route, environment, guest execution or runtime qualification.
+fn require_applied_consumer_executable(
+    source: &ryeos_state::external_content::products::producer_recipe::ProducerExecutableSource,
+    observed_sha256: &[u8; 32],
+) -> Result<()> {
+    use ryeos_state::external_content::products::producer_recipe::ProducerExecutableSource;
+    let ProducerExecutableSource::AdmittedRealizationMember {
+        executable_sha256, ..
+    } = source
+    else {
+        bail!("consumer qualification observation has no admitted subject executable");
+    };
+    ensure!(
+        hex::encode(observed_sha256) == *executable_sha256,
+        "applied consumer executable differs from signed subject member"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod consumer_executable_tests {
+    use super::*;
+    use ryeos_state::external_content::products::producer_recipe::ProducerExecutableSource;
+
+    #[test]
+    fn applied_member_must_match_and_verifier_target_cannot_substitute() {
+        let member = ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id: "runtime".into(),
+            manifest_hash: "a".repeat(64),
+            relative_path: "bin/codex".into(),
+            executable_sha256: "bb".repeat(32),
+        };
+        require_applied_consumer_executable(&member, &[0xbb; 32]).unwrap();
+        assert!(require_applied_consumer_executable(&member, &[0xcc; 32]).is_err());
+        assert!(
+            require_applied_consumer_executable(
+                &ProducerExecutableSource::AdmittedVerifierExecutable,
+                &[0xbb; 32]
+            )
+            .is_err()
+        );
+    }
 }
 
 fn digest_json(value: &impl Serialize) -> Result<String> {

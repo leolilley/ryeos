@@ -33,7 +33,133 @@ CREATE TRIGGER runtime_snapshot_qualification_immutable_occurrence
 BEFORE UPDATE ON runtime_snapshot_qualification
 WHEN OLD.occurrence_json IS NOT NULL AND NEW.occurrence_json!=OLD.occurrence_json
 BEGIN SELECT RAISE(ABORT, 'snapshot qualification occurrence is immutable'); END;
+CREATE TABLE runtime_snapshot_qualification_authority (
+    operation_id TEXT PRIMARY KEY REFERENCES runtime_snapshot_qualification(operation_id),
+    production_binding_json TEXT NOT NULL,
+    qualification_binding_json TEXT NOT NULL,
+    lifecycle_root_hash TEXT NOT NULL CHECK (length(lifecycle_root_hash)=64)
+);
+CREATE TRIGGER runtime_snapshot_qualification_authority_immutable
+BEFORE UPDATE ON runtime_snapshot_qualification_authority
+BEGIN SELECT RAISE(ABORT, 'qualification retained generation is immutable'); END;
+CREATE TRIGGER runtime_snapshot_qualification_authority_no_delete
+BEFORE DELETE ON runtime_snapshot_qualification_authority
+BEGIN SELECT RAISE(ABORT, 'qualification retained generation is retained'); END;
 "#;
+
+/// The signed generation one qualification occurrence was created under:
+/// its producer and qualification bindings and the protected CAS closure of
+/// the producer's lifecycle artifacts (adapter, supervisor, launcher,
+/// restoration verifier, provider and snapshot specs). Retained at
+/// reservation, so terminating the occurrence never depends on what node
+/// config or the installed bundles pin now. The closure stays a CAS root only
+/// while the occurrence is open (see `snapshot_qualification_lifecycle_roots`).
+#[derive(Clone)]
+pub(crate) struct RetainedQualificationGeneration {
+    pub(crate) production:
+        crate::node_config::sections::runtime_snapshot_production::RetainedRuntimeSnapshotProductionBinding,
+    pub(crate) qualification:
+        crate::node_config::sections::runtime_snapshot_qualification::RetainedRuntimeSnapshotQualificationBinding,
+    pub(crate) lifecycle_root_hash: String,
+}
+
+impl RetainedQualificationGeneration {
+    /// The generation is exactly the one the intent names.
+    pub(crate) fn validate_for(&self, intent: &RuntimeSnapshotQualificationIntent) -> Result<()> {
+        ensure!(
+            lillux::valid_hash(&self.lifecycle_root_hash),
+            "qualification lifecycle root is not a SHA-256 digest"
+        );
+        let producer = self.production.recovered_binding()?;
+        let qualification = self.qualification.recovered_binding()?;
+        ensure!(
+            qualification.digest() == intent.qualification_profile_digest
+                && qualification.production_binding_id() == producer.id()
+                && qualification.production_binding_digest() == producer.digest()
+                && qualification.provider_spec_digest() == intent.provider_spec_digest
+                && qualification.settings_digest() == intent.settings_digest
+                && qualification.verifier_artifact_hash() == intent.verifier_artifact_hash
+                && producer.backend() == intent.provider_id
+                && producer.provider_group_id() == intent.provider_group_id
+                && producer.adapter_artifact_hash() == intent.adapter_artifact_hash,
+            "qualification retained generation differs from its intent"
+        );
+        Ok(())
+    }
+}
+
+/// What kind of open snapshot work references a retained generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotWorkKind {
+    QualificationOccurrence,
+    BootstrapSource,
+}
+
+/// One open operation and the retained binding generation it references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenSnapshotGenerationReference {
+    /// `runtime_snapshot_production` or `runtime_snapshot_qualification`.
+    pub section: &'static str,
+    pub binding_id: String,
+    pub binding_digest: String,
+    pub kind: SnapshotWorkKind,
+    pub operation_id: String,
+    pub occurrence_bound: bool,
+}
+
+/// A qualification is open, and its retained generation referenced, until
+/// its termination is terminal. An attempt that never bound an occurrence
+/// is open until its attempt deadline plus its maximum lifetime: any
+/// occurrence an uncertain attempt created has outlived its lifetime by then.
+const OPEN_QUALIFICATION_SQL: &str = "SELECT q.operation_id FROM runtime_snapshot_qualification q
+     JOIN runtime_snapshot_qualification_authority a ON a.operation_id=q.operation_id
+     WHERE NOT EXISTS (
+         SELECT 1 FROM runtime_snapshot_qualification_termination t
+         WHERE t.qualification_operation_id=q.operation_id AND t.phase='terminal'
+     )
+     AND (
+         q.occurrence_json IS NOT NULL
+         OR json_extract(q.intent_json,'$.attempt_deadline_ms')
+            + 1000 * json_extract(q.intent_json,'$.maximum_lifetime_seconds') > ?1
+     )
+     ORDER BY q.operation_id";
+
+fn read_authority(
+    conn: &Connection,
+    operation_id: &str,
+) -> Result<Option<RetainedQualificationGeneration>> {
+    let raw: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT production_binding_json,qualification_binding_json,lifecycle_root_hash
+             FROM runtime_snapshot_qualification_authority WHERE operation_id=?1",
+            [operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((production_json, qualification_json, lifecycle_root_hash)) = raw else {
+        return Ok(None);
+    };
+    let bound = ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize + 16 * 1024;
+    ensure!(
+        production_json.len() <= bound && qualification_json.len() <= bound,
+        "qualification retained generation exceeds bound"
+    );
+    let generation = RetainedQualificationGeneration {
+        production: serde_json::from_str(&production_json)?,
+        qualification: serde_json::from_str(&qualification_json)?,
+        lifecycle_root_hash,
+    };
+    ensure!(
+        canonical(&generation.production)? == production_json
+            && canonical(&generation.qualification)? == qualification_json,
+        "qualification retained generation is noncanonical"
+    );
+    let record = read(conn, operation_id)?
+        .context("qualification retained generation lost its operation")?;
+    generation.validate_for(&record.intent)?;
+    Ok(Some(generation))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -155,6 +281,15 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     for id in ids {
         read(conn, &id)?.context("snapshot qualification row disappeared")?;
     }
+    let mut statement = conn.prepare(
+        "SELECT operation_id FROM runtime_snapshot_qualification_authority ORDER BY operation_id",
+    )?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in ids {
+        read_authority(conn, &id)?.context("qualification retained generation disappeared")?;
+    }
     Ok(())
 }
 
@@ -163,192 +298,361 @@ impl RuntimeDb {
         &self,
         operation_id: &str,
     ) -> Result<Option<SnapshotQualificationRecord>> {
-        read(&self.conn, operation_id)
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
+    /// Journal-only fixture: reserves without a retained generation, so the
+    /// reservation cannot be terminated. Production reserves through
+    /// `reserve_snapshot_qualification_with_generation`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn reserve_snapshot_qualification(
         &self,
         intent: &RuntimeSnapshotQualificationIntent,
     ) -> Result<SnapshotQualificationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
-            ensure!(
-                existing.intent == *intent,
-                "snapshot qualification reservation replay changed"
-            );
-            tx.commit()?;
-            return Ok(existing);
+        self.reserve_snapshot_qualification_inner(intent, None)
+    }
+
+    /// Reserve one qualification attempt together with the signed generation
+    /// it is made under. The generation is retained for the occurrence's
+    /// termination, whatever node config pins later.
+    pub(crate) fn reserve_snapshot_qualification_with_generation(
+        &self,
+        intent: &RuntimeSnapshotQualificationIntent,
+        generation: &RetainedQualificationGeneration,
+    ) -> Result<SnapshotQualificationRecord> {
+        generation.validate_for(intent)?;
+        self.reserve_snapshot_qualification_inner(intent, Some(generation))
+    }
+
+    /// The retained generation of one qualification, if it has one.
+    pub(crate) fn retained_snapshot_qualification_generation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<RetainedQualificationGeneration>> {
+        self.conn
+            .with_sql(|conn| read_authority(conn, operation_id))
+    }
+
+    /// Lifecycle closures of every open qualification. A closure leaves the
+    /// root set when its occurrence settles and the next CAS sweep reclaims
+    /// whatever no other open operation still roots.
+    pub(crate) fn snapshot_qualification_lifecycle_roots(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        Ok(self
+            .open_snapshot_qualification_generations(now_ms)?
+            .into_iter()
+            .map(|(_, generation)| generation.lifecycle_root_hash)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
+    /// Both binding generations of every open qualification.
+    pub(crate) fn open_snapshot_qualification_references(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<OpenSnapshotGenerationReference>> {
+        let mut references = Vec::new();
+        for (record, generation) in self.open_snapshot_qualification_generations(now_ms)? {
+            let occurrence_bound = record.occurrence.is_some();
+            references.push(OpenSnapshotGenerationReference {
+                section: crate::node_config::sections::runtime_snapshot_qualification::SECTION_NAME,
+                binding_id: generation.qualification.id().to_owned(),
+                binding_digest: generation.qualification.digest().to_owned(),
+                kind: SnapshotWorkKind::QualificationOccurrence,
+                operation_id: record.intent.operation_id.clone(),
+                occurrence_bound,
+            });
+            references.push(OpenSnapshotGenerationReference {
+                section: crate::node_config::sections::runtime_snapshot_production::SECTION_NAME,
+                binding_id: generation.production.id().to_owned(),
+                binding_digest: generation.production.digest().to_owned(),
+                kind: SnapshotWorkKind::QualificationOccurrence,
+                operation_id: record.intent.operation_id,
+                occurrence_bound,
+            });
         }
-        let source = super::runtime_snapshot::read(&tx, &intent.snapshot_operation_id)?
-            .context("snapshot qualification source was not retained")?;
-        let locator = source
-            .locator
-            .as_ref()
-            .context("snapshot qualification source has no locator")?;
-        ensure!(
-            source.readiness.is_some(),
-            "snapshot qualification source is not ready"
-        );
-        intent.validate_for(&source.intent, locator)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-            "snapshot qualification deadline is outside its admission window"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_qualification
+        Ok(references)
+    }
+
+    fn open_snapshot_qualification_generations(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<(SnapshotQualificationRecord, RetainedQualificationGeneration)>> {
+        ensure!(now_ms > 0, "qualification retention clock is invalid");
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(OPEN_QUALIFICATION_SQL)?;
+            let ids = statement
+                .query_map([now_ms], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut open = Vec::with_capacity(ids.len());
+            for id in ids {
+                let record = read(conn, &id)?.context("open qualification disappeared")?;
+                let generation = read_authority(conn, &id)?
+                    .context("open qualification lost its retained generation")?;
+                open.push((record, generation));
+            }
+            Ok(open)
+        })
+    }
+
+    fn reserve_snapshot_qualification_inner(
+        &self,
+        intent: &RuntimeSnapshotQualificationIntent,
+        generation: Option<&RetainedQualificationGeneration>,
+    ) -> Result<SnapshotQualificationRecord> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
+                ensure!(
+                    existing.intent == *intent,
+                    "snapshot qualification reservation replay changed"
+                );
+                if let Some(generation) = generation {
+                    let retained = read_authority(&tx, &intent.operation_id)?
+                        .context("qualification replay lost its retained generation")?;
+                    ensure!(
+                        canonical(&retained.production)? == canonical(&generation.production)?
+                            && canonical(&retained.qualification)?
+                                == canonical(&generation.qualification)?
+                            && retained.lifecycle_root_hash == generation.lifecycle_root_hash,
+                        "qualification replay changed its retained generation"
+                    );
+                }
+                tx.commit()?;
+                return Ok(existing);
+            }
+            let source = super::runtime_snapshot::read(&tx, &intent.snapshot_operation_id)?
+                .context("snapshot qualification source was not retained")?;
+            let locator = source
+                .locator
+                .as_ref()
+                .context("snapshot qualification source has no locator")?;
+            ensure!(
+                source.readiness.is_some(),
+                "snapshot qualification source is not ready"
+            );
+            intent.validate_for(&source.intent, locator)?;
+            let now = lillux::time::timestamp_millis();
+            ensure!(
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                "snapshot qualification deadline is outside its admission window"
+            );
+            tx.execute(
+                "INSERT INTO runtime_snapshot_qualification
              (operation_id,snapshot_operation_id,intent_json,phase,occurrence_json,created_at_ms,updated_at_ms)
              VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
-            params![intent.operation_id, intent.snapshot_operation_id, canonical(intent)?, now],
-        )?;
-        let record = read(&tx, &intent.operation_id)?
-            .context("snapshot qualification reservation vanished")?;
-        tx.commit()?;
-        Ok(record)
+                params![intent.operation_id, intent.snapshot_operation_id, canonical(intent)?, now],
+            )?;
+            if let Some(generation) = generation {
+                tx.execute(
+                    "INSERT INTO runtime_snapshot_qualification_authority
+                 (operation_id,production_binding_json,qualification_binding_json,lifecycle_root_hash)
+                 VALUES(?1,?2,?3,?4)",
+                    params![
+                        intent.operation_id,
+                        canonical(&generation.production)?,
+                        canonical(&generation.qualification)?,
+                        generation.lifecycle_root_hash,
+                    ],
+                )?;
+            }
+            let record = read(&tx, &intent.operation_id)?
+                .context("snapshot qualification reservation vanished")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub fn claim_snapshot_qualification_attempt(
         &self,
         operation_id: &str,
     ) -> Result<SnapshotQualificationAttemptClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, operation_id)?.context("snapshot qualification was not reserved")?;
-        match record.phase {
-            SnapshotQualificationPhase::OccurrenceBound => {
-                tx.commit()?;
-                return Ok(SnapshotQualificationAttemptClaim::OccurrenceBound(record));
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let record =
+                read(&tx, operation_id)?.context("snapshot qualification was not reserved")?;
+            match record.phase {
+                SnapshotQualificationPhase::OccurrenceBound => {
+                    tx.commit()?;
+                    return Ok(SnapshotQualificationAttemptClaim::OccurrenceBound(record));
+                }
+                SnapshotQualificationPhase::AttemptPending
+                | SnapshotQualificationPhase::Quarantined => {
+                    tx.commit()?;
+                    return Ok(SnapshotQualificationAttemptClaim::Reconcile(record));
+                }
+                SnapshotQualificationPhase::Reserved => {}
             }
-            SnapshotQualificationPhase::AttemptPending
-            | SnapshotQualificationPhase::Quarantined => {
-                tx.commit()?;
-                return Ok(SnapshotQualificationAttemptClaim::Reconcile(record));
-            }
-            SnapshotQualificationPhase::Reserved => {}
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms,
-            "snapshot qualification deadline expired"
-        );
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_qualification SET phase='attempt_pending',updated_at_ms=?2
+            let now = lillux::time::timestamp_millis();
+            ensure!(
+                now < record.intent.attempt_deadline_ms,
+                "snapshot qualification deadline expired"
+            );
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_qualification SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "snapshot qualification attempt lost durable CAS"
-        );
-        let current =
-            read(&tx, operation_id)?.context("snapshot qualification attempt vanished")?;
-        tx.commit()?;
-        Ok(SnapshotQualificationAttemptClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "snapshot qualification attempt lost durable CAS"
+            );
+            let current =
+                read(&tx, operation_id)?.context("snapshot qualification attempt vanished")?;
+            tx.commit()?;
+            Ok(SnapshotQualificationAttemptClaim::StartAttempt(current))
+        })
     }
 
     pub fn bind_snapshot_qualification_occurrence(
         &self,
         occurrence: &RuntimeSnapshotQualificationOccurrence,
     ) -> Result<SnapshotQualificationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &occurrence.operation_id)?
-            .context("snapshot qualification has no attempt claim")?;
-        occurrence.validate_for(&record.intent)?;
-        if record.phase == SnapshotQualificationPhase::OccurrenceBound {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &occurrence.operation_id)?
+                .context("snapshot qualification has no attempt claim")?;
+            occurrence.validate_for(&record.intent)?;
+            if record.phase == SnapshotQualificationPhase::OccurrenceBound {
+                ensure!(
+                    record.occurrence.as_ref() == Some(occurrence),
+                    "snapshot qualification occurrence replay changed"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
             ensure!(
-                record.occurrence.as_ref() == Some(occurrence),
-                "snapshot qualification occurrence replay changed"
+                matches!(
+                    record.phase,
+                    SnapshotQualificationPhase::AttemptPending
+                        | SnapshotQualificationPhase::Quarantined
+                ),
+                "snapshot qualification occurrence did not follow attempt"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
-                record.phase,
-                SnapshotQualificationPhase::AttemptPending
-                    | SnapshotQualificationPhase::Quarantined
-            ),
-            "snapshot qualification occurrence did not follow attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_qualification SET phase='occurrence_bound',occurrence_json=?2,updated_at_ms=?3
+            let now = lillux::time::timestamp_millis();
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_qualification SET phase='occurrence_bound',occurrence_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![occurrence.operation_id, canonical(occurrence)?, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "snapshot qualification occurrence bind lost durable CAS"
-        );
-        let current = read(&tx, &occurrence.operation_id)?
-            .context("snapshot qualification occurrence vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![occurrence.operation_id, canonical(occurrence)?, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "snapshot qualification occurrence bind lost durable CAS"
+            );
+            let current = read(&tx, &occurrence.operation_id)?
+                .context("snapshot qualification occurrence vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn quarantine_snapshot_qualification_attempt(
         &self,
         operation_id: &str,
     ) -> Result<SnapshotQualificationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record =
-            read(&tx, operation_id)?.context("snapshot qualification attempt is absent")?;
-        if record.phase == SnapshotQualificationPhase::Quarantined {
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            record.phase == SnapshotQualificationPhase::AttemptPending,
-            "snapshot qualification quarantine requires pending attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "UPDATE runtime_snapshot_qualification SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let record =
+                read(&tx, operation_id)?.context("snapshot qualification attempt is absent")?;
+            if record.phase == SnapshotQualificationPhase::Quarantined {
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                record.phase == SnapshotQualificationPhase::AttemptPending,
+                "snapshot qualification quarantine requires pending attempt"
+            );
+            let now = lillux::time::timestamp_millis();
+            tx.execute(
+                "UPDATE runtime_snapshot_qualification SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
-            params![operation_id, now],
-        )?;
-        let current =
-            read(&tx, operation_id)?.context("snapshot qualification quarantine vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![operation_id, now],
+            )?;
+            let current =
+                read(&tx, operation_id)?.context("snapshot qualification quarantine vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
-        RESTORED_OWNER_MEASUREMENT_PROTOCOL, RestoredOwnerChallenge, RestoredOwnerMeasurement,
-        RestoredVerifierAdapterObservation, RestoredVerifierAttemptIntent,
+        ConsumerRuntimeVerificationCoordinate, RESTORED_OWNER_MEASUREMENT_PROTOCOL,
+        RestoredOwnerChallenge, RestoredOwnerMeasurement, RestoredVerifierAdapterObservation,
+        RestoredVerifierAttemptIntent,
     };
     use ryeos_external_execution_contract::runtime_snapshot::{
         RUNTIME_SNAPSHOT_INTENT_SCHEMA, RUNTIME_SNAPSHOT_RESULT_SCHEMA, RuntimeSnapshotIntent,
         RuntimeSnapshotLocator, RuntimeSnapshotQualificationTerminalObservation,
         RuntimeSnapshotQualificationTerminationIntent, RuntimeSnapshotReadinessObservation,
     };
+    use sha2::{Digest, Sha256};
 
-    #[test]
-    fn qualified_sandbox_create_has_one_durable_contact_attempt() {
-        let db = RuntimeDb::new_in_memory().unwrap();
-        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+    // Shared retained testimony fixture. All snapshot/prerequisite transitions use
+    // their real journal APIs; this does not supply a compiler admission token.
+    pub(crate) fn retained_owner_measurement_fixture() -> (
+        crate::runtime_db::test_native::TestRuntime,
+        RuntimeSnapshotIntent,
+        RuntimeSnapshotLocator,
+        RuntimeSnapshotReadinessObservation,
+        RuntimeSnapshotQualificationIntent,
+        RuntimeSnapshotQualificationOccurrence,
+        RestoredVerifierAttemptIntent,
+        RestoredVerifierAdapterObservation,
+    ) {
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let (source, locator, readiness, intent, occurrence, verifier, observation) =
+            populate_retained_owner_measurement_fixture(&db);
+        (
+            db,
+            source,
+            locator,
+            readiness,
+            intent,
+            occurrence,
+            verifier,
+            observation,
+        )
+    }
+
+    pub(crate) fn populate_retained_owner_measurement_fixture(
+        db: &RuntimeDb,
+    ) -> (
+        RuntimeSnapshotIntent,
+        RuntimeSnapshotLocator,
+        RuntimeSnapshotReadinessObservation,
+        RuntimeSnapshotQualificationIntent,
+        RuntimeSnapshotQualificationOccurrence,
+        RestoredVerifierAttemptIntent,
+        RestoredVerifierAdapterObservation,
+    ) {
+        let now = lillux::time::timestamp_millis();
         let mut source = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "2".repeat(64)),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             source_occurrence_id: "sbx-source".into(),
+            source_bootstrap_operation_id: None,
+            source_created_at: None,
+            source_timeout_seconds: None,
             provider_group_id: "sbg-group".into(),
             production_profile_digest: "3".repeat(64),
             adapter_artifact_hash: "4".repeat(64),
             provider_spec_digest: "5".repeat(64),
             settings_digest: "6".repeat(64),
-            product_witness_hash: "7".repeat(64),
+            source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "7".repeat(64),
+            },
             guest_runtime_manifest_hash: "8".repeat(64),
             owner_executable_sha256: "9".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])
-            ),
             upload_sha256: "a".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,
@@ -368,7 +672,7 @@ mod tests {
             provider_creation_observation: serde_json::json!({"schema":1}),
             adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
         };
-        db.bind_runtime_snapshot_locator(&locator).unwrap();
+        db.bind_runtime_snapshot_locator(&locator, false).unwrap();
         let readiness = RuntimeSnapshotReadinessObservation {
             schema: 1,
             operation_id: source.operation_id.clone(),
@@ -383,7 +687,7 @@ mod tests {
         };
         db.bind_runtime_snapshot_readiness(&readiness).unwrap();
         let mut intent = RuntimeSnapshotQualificationIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
             operation_id: String::new(),
             owner_principal: source.owner_principal.clone(),
             snapshot_operation_id: source.operation_id.clone(),
@@ -397,8 +701,7 @@ mod tests {
             settings_digest: "1".repeat(64),
             verifier_artifact_hash: "2".repeat(64),
             maximum_lifetime_seconds: 900,
-            attempt_deadline_ms: now + 60_000,
-        };
+            attempt_deadline_ms: now + 60_000, launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
         intent.operation_id = intent.derived_operation_id().unwrap();
         db.reserve_snapshot_qualification(&intent).unwrap();
         assert!(matches!(
@@ -432,6 +735,509 @@ mod tests {
                 .unwrap(),
             SnapshotQualificationAttemptClaim::OccurrenceBound(_)
         ));
+
+        let mut verifier = RestoredVerifierAttemptIntent {
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
+            operation_id: String::new(),
+            qualification_operation_id: intent.operation_id.clone(),
+            restored_occurrence_id: "sbx-restored".into(),
+            verifier_artifact_hash: intent.verifier_artifact_hash.clone(),
+            upload_sha256: "4".repeat(64),
+            upload_bytes: 1024,
+            purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge: RestoredOwnerChallenge {
+                schema: 1,
+                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+                operation_id: source.operation_id.clone(),
+                snapshot_id: locator.snapshot_id.clone(),
+                restored_occurrence_id: "sbx-restored".into(),
+                nonce_hex: "5".repeat(64),
+            } },
+            attempt_deadline_ms: now + 60_000,
+        };
+        verifier.operation_id = verifier.derived_operation_id().unwrap();
+        db.reserve_restored_verifier_attempt(&verifier).unwrap();
+        assert!(matches!(
+            db.claim_restored_verifier_attempt(&verifier.operation_id)
+                .unwrap(),
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::StartAttempt(_)
+        ));
+        assert!(matches!(
+            db.claim_restored_verifier_attempt(&verifier.operation_id)
+                .unwrap(),
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Reconcile(_)
+        ));
+        db.quarantine_restored_verifier_attempt(&verifier.operation_id)
+            .unwrap();
+        assert!(matches!(
+            db.claim_restored_verifier_attempt(&verifier.operation_id)
+                .unwrap(),
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Reconcile(_)
+        ));
+        let mut reminted = verifier.clone();
+        let ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge } = &mut reminted.purpose else { unreachable!() };
+        challenge.nonce_hex = "6".repeat(64);
+        assert_eq!(
+            reminted.derived_operation_id().unwrap(),
+            verifier.operation_id
+        );
+        assert!(db.reserve_restored_verifier_attempt(&reminted).is_err());
+        let observation = RestoredVerifierAdapterObservation {
+            schema: 1,
+            operation_id: verifier.operation_id.clone(),
+            occurrence_id: verifier.restored_occurrence_id.clone(),
+            upload_token_execution_id: "exe-upload".into(),
+            run_token_execution_id: "exe-run".into(),
+            upload_response_sha256: "7".repeat(64),
+            run_stream_sha256: "8".repeat(64),
+            measurement: RestoredOwnerMeasurement {
+                schema: 1,
+                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+                challenge_digest: verifier.owner_challenge().unwrap().digest().unwrap(),
+                manifest_hash: source.guest_runtime_manifest_hash.clone(),
+                owner_executable_sha256: source.owner_executable_sha256.clone(),
+            },
+            contact_deadline_exceeded: false,
+        };
+        (
+            source,
+            locator,
+            readiness,
+            intent,
+            occurrence,
+            verifier,
+            observation,
+        )
+    }
+
+    /// A ready snapshot under the signed producer fixture and one
+    /// qualification intent under a signed qualification fixture, with the
+    /// generation that intent names.
+    fn retained_generation_fixture(
+        db: &RuntimeDb,
+        lifecycle_root_hash: &str,
+    ) -> (
+        RuntimeSnapshotQualificationIntent,
+        RetainedQualificationGeneration,
+    ) {
+        use crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding;
+        use crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding;
+        let producer = InstalledRuntimeSnapshotProductionBinding::test_fixture();
+        let qualification = InstalledRuntimeSnapshotQualificationBinding::signed_test_fixture(
+            producer.id(),
+            producer.digest(),
+            &"5".repeat(64),
+            &"2".repeat(64),
+        );
+        let now = lillux::time::timestamp_millis();
+        let mut source = RuntimeSnapshotIntent {
+            schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: format!("fp:{}", "2".repeat(64)),
+            provider_id: producer.backend().to_owned(),
+            source_occurrence_id: "sbx-source".into(),
+            source_bootstrap_operation_id: None,
+            source_created_at: None,
+            source_timeout_seconds: None,
+            provider_group_id: producer.provider_group_id().to_owned(),
+            production_profile_digest: producer.digest().to_owned(),
+            adapter_artifact_hash: producer.adapter_artifact_hash().to_owned(),
+            provider_spec_digest: producer.snapshot_spec_sha256().to_owned(),
+            settings_digest: producer.settings_digest().to_owned(),
+            source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "7".repeat(64),
+            },
+            guest_runtime_manifest_hash: "8".repeat(64),
+            owner_executable_sha256: "9".repeat(64),
+            upload_sha256: "a".repeat(64),
+            upload_bytes: 1024,
+            attempt_deadline_ms: now + 60_000,
+        };
+        source.operation_id = source.derived_operation_id().unwrap();
+        db.reserve_runtime_snapshot(&source).unwrap();
+        db.claim_runtime_snapshot_attempt(&source.operation_id, &source.digest().unwrap())
+            .unwrap();
+        let locator = RuntimeSnapshotLocator {
+            schema: RUNTIME_SNAPSHOT_RESULT_SCHEMA,
+            operation_id: source.operation_id.clone(),
+            intent_digest: source.digest().unwrap(),
+            source_occurrence_id: source.source_occurrence_id.clone(),
+            provider_group_id: source.provider_group_id.clone(),
+            snapshot_id: "snp-exact".into(),
+            provider_response_sha256: "b".repeat(64),
+            provider_creation_observation: serde_json::json!({"schema":1}),
+            adapter_observation_sha256: lillux::sha256_hex(br#"{"schema":1}"#),
+        };
+        db.bind_runtime_snapshot_locator(&locator, false).unwrap();
+        db.bind_runtime_snapshot_readiness(&RuntimeSnapshotReadinessObservation {
+            schema: 1,
+            operation_id: source.operation_id.clone(),
+            intent_digest: source.digest().unwrap(),
+            snapshot_id: locator.snapshot_id.clone(),
+            source_occurrence_id: source.source_occurrence_id.clone(),
+            provider_group_id: source.provider_group_id.clone(),
+            creation_response_sha256: locator.provider_response_sha256.clone(),
+            readiness_response_sha256: "c".repeat(64),
+            captured_at: "2026-11-14T00:01:00Z".into(),
+            size_bytes: 4096,
+        })
+        .unwrap();
+        let mut intent = RuntimeSnapshotQualificationIntent {
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
+            operation_id: String::new(),
+            owner_principal: source.owner_principal.clone(),
+            snapshot_operation_id: source.operation_id.clone(),
+            snapshot_intent_digest: source.digest().unwrap(),
+            snapshot_id: locator.snapshot_id.clone(),
+            provider_id: source.provider_id.clone(),
+            provider_group_id: source.provider_group_id.clone(),
+            qualification_profile_digest: qualification.digest().to_owned(),
+            adapter_artifact_hash: producer.adapter_artifact_hash().to_owned(),
+            provider_spec_digest: qualification.provider_spec_digest().to_owned(),
+            settings_digest: qualification.settings_digest().to_owned(),
+            verifier_artifact_hash: qualification.verifier_artifact_hash().to_owned(),
+            maximum_lifetime_seconds: qualification.maximum_lifetime_seconds(),
+            attempt_deadline_ms: now + 60_000, launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let generation = RetainedQualificationGeneration {
+            production: producer.retained_generation().unwrap(),
+            qualification: qualification.retained_generation().unwrap(),
+            lifecycle_root_hash: lifecycle_root_hash.to_owned(),
+        };
+        (intent, generation)
+    }
+
+    fn bind_fixture_occurrence(
+        db: &RuntimeDb,
+        intent: &RuntimeSnapshotQualificationIntent,
+    ) -> RuntimeSnapshotQualificationOccurrence {
+        assert!(matches!(
+            db.claim_snapshot_qualification_attempt(&intent.operation_id)
+                .unwrap(),
+            SnapshotQualificationAttemptClaim::StartAttempt(_)
+        ));
+        let occurrence = RuntimeSnapshotQualificationOccurrence {
+            schema: 1,
+            operation_id: intent.operation_id.clone(),
+            occurrence_id: "sbx-restored".into(),
+            provider_response_sha256: "3".repeat(64),
+            contact_deadline_exceeded: false,
+        };
+        db.bind_snapshot_qualification_occurrence(&occurrence)
+            .unwrap();
+        occurrence
+    }
+
+    fn terminate_fixture_occurrence(
+        db: &RuntimeDb,
+        intent: &RuntimeSnapshotQualificationIntent,
+        occurrence: &RuntimeSnapshotQualificationOccurrence,
+    ) {
+        let mut termination = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: intent.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            owner_principal: intent.owner_principal.clone(),
+            provider_id: intent.provider_id.clone(),
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            attempt_deadline_ms: lillux::time::timestamp_millis() + 60_000,
+        };
+        termination.operation_id = termination.derived_operation_id().unwrap();
+        db.reserve_qualification_termination(&termination).unwrap();
+        db.claim_qualification_termination_attempt(&termination.operation_id)
+            .unwrap();
+        db.bind_qualification_terminal_observation(
+            &RuntimeSnapshotQualificationTerminalObservation {
+                schema: 1,
+                operation_id: termination.operation_id.clone(),
+                occurrence_id: occurrence.occurrence_id.clone(),
+                provider_response_sha256: "a".repeat(64),
+                terminated_at: "2026-11-14T00:02:00Z".into(),
+                contact_deadline_exceeded: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn open_qualification_retains_its_generation_until_terminated_across_reopen() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let root = "d".repeat(64);
+        let now = lillux::time::timestamp_millis();
+        let (intent, generation, occurrence) = {
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+            let (intent, generation) = retained_generation_fixture(&db, &root);
+            db.reserve_snapshot_qualification_with_generation(&intent, &generation)
+                .unwrap();
+            // A replay with the same generation converges; a changed one refuses.
+            db.reserve_snapshot_qualification_with_generation(&intent, &generation)
+                .unwrap();
+            let mut moved = generation.clone();
+            moved.lifecycle_root_hash = "e".repeat(64);
+            assert!(
+                db.reserve_snapshot_qualification_with_generation(&intent, &moved)
+                    .is_err()
+            );
+            let occurrence = bind_fixture_occurrence(&db, &intent);
+            (intent, generation, occurrence)
+        };
+        // The retained generation survives a restart and still roots its closure.
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+        let retained = db
+            .retained_snapshot_qualification_generation(&intent.operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.lifecycle_root_hash, root);
+        assert_eq!(
+            retained.qualification.recovered_binding().unwrap().digest(),
+            intent.qualification_profile_digest
+        );
+        assert_eq!(retained.production.digest(), generation.production.digest());
+        assert_eq!(
+            db.snapshot_qualification_lifecycle_roots(now).unwrap(),
+            vec![root.clone()]
+        );
+        // A bound occurrence stays open past its lifetime: only its terminal
+        // termination settles it.
+        let far =
+            intent.attempt_deadline_ms + 1000 * i64::from(intent.maximum_lifetime_seconds) + 1;
+        assert_eq!(
+            db.snapshot_qualification_lifecycle_roots(far).unwrap(),
+            vec![root.clone()]
+        );
+        let references = db.open_snapshot_qualification_references(now).unwrap();
+        assert_eq!(references.len(), 2);
+        assert!(references.iter().all(|reference| {
+            reference.kind == SnapshotWorkKind::QualificationOccurrence
+                && reference.operation_id == intent.operation_id
+                && reference.occurrence_bound
+        }));
+        assert!(references.iter().any(|reference| {
+            reference.section
+                == crate::node_config::sections::runtime_snapshot_qualification::SECTION_NAME
+                && reference.binding_digest == intent.qualification_profile_digest
+        }));
+        // The retained generation is immutable.
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
+            "UPDATE runtime_snapshot_qualification_authority SET lifecycle_root_hash=?2 WHERE operation_id=?1",
+            params![intent.operation_id, "e".repeat(64)],
+        )?)).is_err());
+        assert!(
+            db.conn
+                .with_sql(|connection| Ok(connection.execute(
+                    "DELETE FROM runtime_snapshot_qualification_authority WHERE operation_id=?1",
+                    [&intent.operation_id],
+                )?))
+                .is_err()
+        );
+
+        // Termination settles the occurrence: its closure leaves the root set
+        // and no reference remains, while the signed journal row stays.
+        terminate_fixture_occurrence(&db, &intent, &occurrence);
+        assert!(
+            db.snapshot_qualification_lifecycle_roots(now)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.open_snapshot_qualification_references(now)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.retained_snapshot_qualification_generation(&intent.operation_id)
+                .unwrap()
+                .is_some()
+        );
+        drop(db);
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+        assert!(
+            db.snapshot_qualification_lifecycle_roots(now)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unbound_qualification_releases_its_generation_after_deadline_and_lifetime() {
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let root = "d".repeat(64);
+        let (intent, generation) = retained_generation_fixture(&db, &root);
+        db.reserve_snapshot_qualification_with_generation(&intent, &generation)
+            .unwrap();
+        db.claim_snapshot_qualification_attempt(&intent.operation_id)
+            .unwrap();
+        db.quarantine_snapshot_qualification_attempt(&intent.operation_id)
+            .unwrap();
+        let expiry = intent.attempt_deadline_ms + 1000 * i64::from(intent.maximum_lifetime_seconds);
+        assert_eq!(
+            db.snapshot_qualification_lifecycle_roots(expiry - 1)
+                .unwrap(),
+            vec![root]
+        );
+        let references = db
+            .open_snapshot_qualification_references(expiry - 1)
+            .unwrap();
+        assert!(
+            references
+                .iter()
+                .all(|reference| !reference.occurrence_bound)
+        );
+        assert!(
+            db.snapshot_qualification_lifecycle_roots(expiry)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.open_snapshot_qualification_references(expiry)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retained_generation_must_be_the_one_the_intent_names() {
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let (intent, generation) = retained_generation_fixture(&db, &"d".repeat(64));
+        let mut other_verifier = intent.clone();
+        other_verifier.verifier_artifact_hash = "4".repeat(64);
+        other_verifier.operation_id = other_verifier.derived_operation_id().unwrap();
+        assert!(
+            db.reserve_snapshot_qualification_with_generation(&other_verifier, &generation)
+                .is_err()
+        );
+        let mut other_profile = intent.clone();
+        other_profile.qualification_profile_digest = "6".repeat(64);
+        other_profile.operation_id = other_profile.derived_operation_id().unwrap();
+        assert!(
+            db.reserve_snapshot_qualification_with_generation(&other_profile, &generation)
+                .is_err()
+        );
+        let mut bad_root = generation.clone();
+        bad_root.lifecycle_root_hash = "not-a-root".into();
+        assert!(
+            db.reserve_snapshot_qualification_with_generation(&intent, &bad_root)
+                .is_err()
+        );
+        // A journal-only reservation has no generation to terminate through.
+        db.reserve_snapshot_qualification(&intent).unwrap();
+        assert!(
+            db.retained_snapshot_qualification_generation(&intent.operation_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn qualified_sandbox_create_has_one_durable_contact_attempt() {
+        let (db, source, locator, readiness, intent, occurrence, verifier, observation) =
+            retained_owner_measurement_fixture();
+        let now = lillux::time::timestamp_millis();
+        let invocation = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
+            scenario_id: "codex-runtime".into(),
+            qualification_operation_id: intent.operation_id.clone(),
+            prerequisite_measurement_attempt_id: verifier.operation_id.clone(),
+        };
+        // Prelaunch selectors require actual observed owner evidence. No
+        // accepted-root/capsule identifiers have been minted at this point.
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+                .is_err()
+        );
+        db.bind_restored_verifier_observation(&observation).unwrap();
+        let admitted_occurrence = db
+            .observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+            .unwrap();
+        assert_eq!(admitted_occurrence.intent, intent);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&"0".repeat(64), &invocation)
+                .is_err()
+        );
+        let mut wrong_operation = invocation.clone();
+        wrong_operation.qualification_operation_id = "0".repeat(64);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(&intent.owner_principal, &wrong_operation)
+                .is_err()
+        );
+        let mut absent_measurement = invocation.clone();
+        absent_measurement.prerequisite_measurement_attempt_id = "0".repeat(64);
+        assert!(
+            db.observed_consumer_invocation_prerequisite(
+                &intent.owner_principal,
+                &absent_measurement
+            )
+            .is_err()
+        );
+        let expires_at =
+            admitted_occurrence.created_at_ms + i64::from(intent.maximum_lifetime_seconds) * 1000;
+        assert!(
+            db.conn
+                .with_sql(|connection| {
+                    super::super::restored_verifier_attempt::require_live_occurrence(
+                        connection,
+                        &admitted_occurrence,
+                        expires_at,
+                    )
+                })
+                .is_err()
+        );
+        assert!(db.restored_verifier_blob_roots().unwrap().is_empty());
+        assert!(
+            db.restored_verifier_attempt(&verifier.operation_id)
+                .unwrap()
+                .unwrap()
+                .consumer_input_blob_hash
+                .is_none()
+        );
+        // A verifier reservation is not permission to contact after a
+        // termination intent is retained, even if its own deadline is live.
+        let mut racing_qualification = intent.clone();
+        racing_qualification.qualification_profile_digest = "6".repeat(64);
+        racing_qualification.operation_id = racing_qualification.derived_operation_id().unwrap();
+        db.reserve_snapshot_qualification(&racing_qualification)
+            .unwrap();
+        db.claim_snapshot_qualification_attempt(&racing_qualification.operation_id)
+            .unwrap();
+        let mut racing_occurrence = occurrence.clone();
+        racing_occurrence.operation_id = racing_qualification.operation_id.clone();
+        racing_occurrence.occurrence_id = "sbx-termination-race".into();
+        db.bind_snapshot_qualification_occurrence(&racing_occurrence)
+            .unwrap();
+        let mut racing_verifier = verifier.clone();
+        racing_verifier.qualification_operation_id = racing_qualification.operation_id.clone();
+        racing_verifier.restored_occurrence_id = racing_occurrence.occurrence_id.clone();
+        let ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { challenge } = &mut racing_verifier.purpose else {
+            panic!("fixture requires owner measurement");
+        };
+        challenge.restored_occurrence_id = racing_occurrence.occurrence_id.clone();
+        racing_verifier.operation_id = racing_verifier.derived_operation_id().unwrap();
+        db.reserve_restored_verifier_attempt(&racing_verifier)
+            .unwrap();
+        let mut racing_termination = RuntimeSnapshotQualificationTerminationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            qualification_operation_id: racing_qualification.operation_id.clone(),
+            occurrence_id: racing_occurrence.occurrence_id.clone(),
+            owner_principal: racing_qualification.owner_principal.clone(),
+            provider_id: racing_qualification.provider_id.clone(),
+            provider_spec_digest: racing_qualification.provider_spec_digest.clone(),
+            attempt_deadline_ms: now + 60_000,
+        };
+        racing_termination.operation_id = racing_termination.derived_operation_id().unwrap();
+        db.reserve_qualification_termination(&racing_termination)
+            .unwrap();
+        let refused = db
+            .claim_restored_verifier_attempt(&racing_verifier.operation_id)
+            .unwrap_err();
+        assert!(refused.to_string().contains("retained termination intent"));
+        assert_eq!(
+            db.restored_verifier_attempt(&racing_verifier.operation_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            super::super::restored_verifier_attempt::RestoredVerifierAttemptPhase::Reserved
+        );
         let mut termination = RuntimeSnapshotQualificationTerminationIntent {
             schema: 1,
             operation_id: String::new(),
@@ -444,6 +1250,14 @@ mod tests {
         };
         termination.operation_id = termination.derived_operation_id().unwrap();
         db.reserve_qualification_termination(&termination).unwrap();
+        let refused_invocation = db
+            .observed_consumer_invocation_prerequisite(&intent.owner_principal, &invocation)
+            .unwrap_err();
+        assert!(
+            refused_invocation
+                .to_string()
+                .contains("retained termination intent")
+        );
         assert!(matches!(
             db.claim_qualification_termination_attempt(&termination.operation_id).unwrap(),
             super::super::runtime_snapshot_qualification_termination::QualificationTerminationClaim::StartAttempt(_)
@@ -484,77 +1298,295 @@ mod tests {
             db.bind_qualification_terminal_observation(&changed_terminal)
                 .is_err()
         );
-        assert!(db.conn.execute(
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
             "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
             [&termination.operation_id],
-        ).is_err());
-        let mut changed = occurrence;
+        )?)).is_err());
+        let mut changed = occurrence.clone();
         changed.occurrence_id = "sbx-other".into();
         assert!(db.bind_snapshot_qualification_occurrence(&changed).is_err());
-
-        let mut verifier = RestoredVerifierAttemptIntent {
+        // This checks retained evidence content only. The occurrence above has
+        // already been terminated: this helper must not authorize new contact.
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
             schema: 1,
-            operation_id: String::new(),
-            qualification_operation_id: intent.operation_id.clone(),
-            restored_occurrence_id: "sbx-restored".into(),
-            verifier_artifact_hash: intent.verifier_artifact_hash.clone(),
-            upload_sha256: "4".repeat(64),
-            upload_bytes: 1024,
-            challenge: RestoredOwnerChallenge {
-                schema: 1,
-                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
-                operation_id: source.operation_id.clone(),
-                snapshot_id: locator.snapshot_id.clone(),
-                restored_occurrence_id: "sbx-restored".into(),
-                nonce_hex: "5".repeat(64),
-            },
-            attempt_deadline_ms: now + 60_000,
+            accepted_root_id: "T-consumer-fixture".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "codex-runtime".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: verifier.operation_id.clone(),
+            prerequisite_measurement_observation_digest: observation.digest().unwrap(),
         };
-        verifier.operation_id = verifier.derived_operation_id().unwrap();
-        db.reserve_restored_verifier_attempt(&verifier).unwrap();
-        assert!(matches!(
-            db.claim_restored_verifier_attempt(&verifier.operation_id)
-                .unwrap(),
-            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::StartAttempt(_)
-        ));
-        assert!(matches!(
-            db.claim_restored_verifier_attempt(&verifier.operation_id)
-                .unwrap(),
-            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Reconcile(_)
-        ));
-        db.quarantine_restored_verifier_attempt(&verifier.operation_id)
-            .unwrap();
-        assert!(matches!(
-            db.claim_restored_verifier_attempt(&verifier.operation_id)
-                .unwrap(),
-            super::super::restored_verifier_attempt::RestoredVerifierAttemptClaim::Reconcile(_)
-        ));
-        let mut reminted = verifier.clone();
-        reminted.challenge.nonce_hex = "6".repeat(64);
+        // Consumer validation is a data join, not contact permission. This
+        // occurrence is already terminated; journal admission still refuses.
+        let selection = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: coordinate.scenario_source_digest.clone(),
+            verifier_artifact_hash: "9".repeat(64),
+            archive_budget: ryeos_external_execution_contract::restored_runtime_measurement::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+        };
+        let mut consumer = verifier.clone();
+        consumer.verifier_artifact_hash = selection.verifier_artifact_hash.clone();
+        consumer.purpose = ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate: coordinate.clone(), nonce_hex: "8".repeat(64),
+            guest_runtime_manifest_hash: source.guest_runtime_manifest_hash.clone(), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
+        consumer.operation_id = consumer.derived_operation_id().unwrap();
+        // The owner-measurement entry point supplies neither retained consumer
+        // input nor root admission. The input-lane check refuses first.
+        let refused = db.reserve_restored_verifier_attempt(&consumer).unwrap_err();
         assert_eq!(
-            reminted.derived_operation_id().unwrap(),
-            verifier.operation_id
+            refused.to_string(),
+            "verifier reservation requires its matching consumer input lane"
         );
-        assert!(db.reserve_restored_verifier_attempt(&reminted).is_err());
-        let observation = RestoredVerifierAdapterObservation {
+        assert!(
+            db.restored_verifier_attempt(&consumer.operation_id)
+                .unwrap()
+                .is_none()
+        );
+        // A null owner selection is immutable, not an empty slot that may
+        // later be converted into consumer placement authority.
+        assert!(
+            db.conn
+                .with_sql(|connection| {
+                    Ok(connection.execute(
+            "UPDATE restored_verifier_attempt SET consumer_selection_json=?2 WHERE operation_id=?1",
+            params![verifier.operation_id, serde_json::to_string(&selection).unwrap()],
+        )?)
+                })
+                .is_err()
+        );
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
+            "UPDATE restored_verifier_attempt SET consumer_input_blob_hash=?2 WHERE operation_id=?1",
+            params![verifier.operation_id, "f".repeat(64)],
+        )?)).is_err());
+        consumer
+            .validate_consumer_for(
+                &source,
+                &locator,
+                &intent,
+                &occurrence,
+                &selection,
+                &coordinate,
+            )
+            .unwrap();
+        // Storage-owner fixture only: this deliberately bypasses root
+        // admission and does not authorize provider contact or qualification.
+        // The already terminated occurrence must remain readable as evidence.
+        let now = lillux::time::timestamp_millis();
+        let consumer_input_blob_hash = "f".repeat(64);
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
+            "INSERT INTO restored_verifier_attempt
+             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,NULL,'reserved',NULL,?5,?5)",
+            params![consumer.operation_id, consumer.qualification_operation_id,
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&consumer).unwrap()).unwrap(),
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&selection).unwrap()).unwrap(), now],
+        )?)).is_err());
+        db.conn.with_sql(|connection| Ok(connection.execute(
+            "INSERT INTO restored_verifier_attempt
+             (operation_id,qualification_operation_id,intent_json,consumer_selection_json,consumer_input_blob_hash,phase,observation_json,created_at_ms,updated_at_ms)
+             VALUES(?1,?2,?3,?4,?5,'reserved',NULL,?6,?6)",
+            params![consumer.operation_id, consumer.qualification_operation_id,
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&consumer).unwrap()).unwrap(),
+                String::from_utf8(ryeos_external_execution_contract::canonical_json(&selection).unwrap()).unwrap(), consumer_input_blob_hash, now],
+        )?)).unwrap();
+        let mut consumer_as_prerequisite = invocation.clone();
+        consumer_as_prerequisite.prerequisite_measurement_attempt_id =
+            consumer.operation_id.clone();
+        let refused_consumer = db
+            .observed_consumer_invocation_prerequisite(
+                &intent.owner_principal,
+                &consumer_as_prerequisite,
+            )
+            .unwrap_err();
+        assert!(
+            refused_consumer
+                .to_string()
+                .contains("not owner measurement")
+        );
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        db.conn.with_sql(|connection| Ok(connection.execute("UPDATE restored_verifier_attempt SET phase='attempt_pending' WHERE operation_id=?1", [&consumer.operation_id])?)).unwrap();
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        db.quarantine_restored_verifier_attempt(&consumer.operation_id)
+            .unwrap();
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![consumer_input_blob_hash.clone()]
+        );
+        assert!(db.conn.with_sql(|connection| Ok(connection.execute(
+            "UPDATE restored_verifier_attempt SET consumer_input_blob_hash=?2 WHERE operation_id=?1",
+            params![consumer.operation_id, "e".repeat(64)],
+        )?)).is_err());
+        let evidence = b"{}";
+        let observed_consumer = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerifierAdapterObservation {
             schema: 1,
-            operation_id: verifier.operation_id.clone(),
-            occurrence_id: verifier.restored_occurrence_id.clone(),
-            upload_token_execution_id: "exe-upload".into(),
-            run_token_execution_id: "exe-run".into(),
-            upload_response_sha256: "7".repeat(64),
-            run_stream_sha256: "8".repeat(64),
-            measurement: RestoredOwnerMeasurement {
-                schema: 1,
-                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
-                challenge_digest: verifier.challenge.digest().unwrap(),
-                manifest_hash: source.guest_runtime_manifest_hash.clone(),
-                owner_executable_sha256: source.owner_executable_sha256.clone(),
-                controller_public_root: source.controller_public_root.clone(),
-            },
+            operation_id: consumer.operation_id.clone(),
+            occurrence_id: consumer.restored_occurrence_id.clone(),
+            verifier_artifact_hash: consumer.verifier_artifact_hash.clone(),
+            challenge_digest: consumer.consumer_challenge_digest().unwrap(),
+            upload_token_execution_id: "exe-consumer-upload".into(),
+            run_token_execution_id: "exe-consumer-run".into(),
+            upload_response_sha256: "a".repeat(64),
+            run_stream_sha256: "b".repeat(64),
+            evidence_sha256: hex::encode(Sha256::digest(evidence)),
+            evidence_bytes: evidence.len() as u64,
             contact_deadline_exceeded: false,
         };
-        db.bind_restored_verifier_observation(&observation).unwrap();
+        assert!(
+            db.bind_consumer_verifier_observation(&observed_consumer, b"{\"changed\":true}")
+                .is_err()
+        );
+        let retained_consumer = db
+            .bind_consumer_verifier_observation(&observed_consumer, evidence)
+            .unwrap();
+        assert_eq!(
+            retained_consumer,
+            db.bind_consumer_verifier_observation(&observed_consumer, evidence)
+                .unwrap()
+        );
+        assert_eq!(
+            db.restored_verifier_blob_roots().unwrap(),
+            vec![
+                observed_consumer.evidence_sha256.clone(),
+                consumer_input_blob_hash
+            ]
+        );
+        assert!(
+            db.claim_restored_verifier_attempt(&consumer.operation_id)
+                .is_err()
+        );
+        assert!(
+            consumer
+                .validate_for(&source, &locator, &intent, &occurrence)
+                .is_err()
+        );
+        assert!(
+            verifier
+                .validate_consumer_for(
+                    &source,
+                    &locator,
+                    &intent,
+                    &occurrence,
+                    &selection,
+                    &coordinate
+                )
+                .is_err()
+        );
+        let mut wrong_selection = selection.clone();
+        wrong_selection.verifier_artifact_hash = "a".repeat(64);
+        assert!(
+            consumer
+                .validate_consumer_for(
+                    &source,
+                    &locator,
+                    &intent,
+                    &occurrence,
+                    &wrong_selection,
+                    &coordinate
+                )
+                .is_err()
+        );
+        let mut wrong_coordinate = coordinate.clone();
+        wrong_coordinate.accepted_capsule_hash = "f".repeat(64);
+        assert!(
+            consumer
+                .validate_consumer_for(
+                    &source,
+                    &locator,
+                    &intent,
+                    &occurrence,
+                    &selection,
+                    &wrong_coordinate
+                )
+                .is_err()
+        );
+        let mut reminted_consumer = consumer.clone();
+        reminted_consumer.attempt_deadline_ms += 1;
+        reminted_consumer.upload_sha256 = "7".repeat(64);
+        assert_eq!(
+            reminted_consumer.derived_operation_id().unwrap(),
+            consumer.operation_id
+        );
+        assert_ne!(reminted_consumer, consumer);
+        let check_prerequisite =
+            |observed: &RestoredVerifierAdapterObservation,
+             proposed: &ConsumerRuntimeVerificationCoordinate| {
+                observed.validate_consumer_prerequisite(
+                    &verifier,
+                    proposed,
+                    &source,
+                    &locator,
+                    &readiness,
+                    &intent,
+                    &occurrence,
+                )
+            };
+        // The shared owner, callback author and retained journal reader must
+        // commit the exact typed protocol bytes, not the tagged journal
+        // envelope. RyeOS has one canonical encoding, so the protocol bytes
+        // and the observation's state-object digest agree.
+        assert_eq!(
+            observation.digest().unwrap(),
+            hex::encode(Sha256::digest(
+                ryeos_external_execution_contract::canonical_json(&observation).unwrap(),
+            ))
+        );
+        check_prerequisite(&observation, &coordinate).unwrap();
+        let mut object_coordinate = coordinate.clone();
+        object_coordinate.prerequisite_measurement_observation_digest =
+            ryeos_state::objects::canonical_value_digest(
+                &serde_json::to_value(&observation).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            object_coordinate.prerequisite_measurement_observation_digest,
+            coordinate.prerequisite_measurement_observation_digest
+        );
+        check_prerequisite(&observation, &object_coordinate).unwrap();
+        let mut envelope_coordinate = coordinate.clone();
+        envelope_coordinate.prerequisite_measurement_observation_digest =
+            ryeos_state::objects::canonical_value_digest(
+                &serde_json::to_value(
+                    ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierObservation::OwnerMeasurement {
+                        observation: observation.clone(),
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(check_prerequisite(&observation, &envelope_coordinate).is_err());
+        // Unlike the content-only validator, the journal-owned read refuses
+        // this occurrence because termination has already been retained.
+        let refusal = db
+            .observed_consumer_verification_prerequisite(
+                &intent.operation_id,
+                &intent.owner_principal,
+                &coordinate,
+            )
+            .unwrap_err();
+        assert!(refusal.to_string().contains("retained termination intent"));
+        let mut wrong_attempt = coordinate.clone();
+        wrong_attempt.prerequisite_measurement_attempt_id = "f".repeat(64);
+        assert!(check_prerequisite(&observation, &wrong_attempt).is_err());
+        let mut wrong_digest = coordinate.clone();
+        wrong_digest.prerequisite_measurement_observation_digest = "f".repeat(64);
+        assert!(check_prerequisite(&observation, &wrong_digest).is_err());
+        let mut altered_observation = observation.clone();
+        altered_observation.run_stream_sha256 = "f".repeat(64);
+        assert!(check_prerequisite(&altered_observation, &coordinate).is_err());
+        let mut late_observation = observation.clone();
+        late_observation.contact_deadline_exceeded = true;
+        let mut late_coordinate = coordinate.clone();
+        late_coordinate.prerequisite_measurement_observation_digest =
+            late_observation.digest().unwrap();
+        assert!(check_prerequisite(&late_observation, &late_coordinate).is_err());
         assert!(matches!(
             db.claim_restored_verifier_attempt(&verifier.operation_id)
                 .unwrap(),
@@ -567,10 +1599,10 @@ mod tests {
                 .is_err()
         );
         assert!(
-            db.conn.execute(
+            db.conn.with_sql(|connection| Ok(connection.execute(
                 "UPDATE restored_verifier_attempt SET phase='attempt_pending',observation_json=NULL WHERE operation_id=?1",
                 [&verifier.operation_id],
-            ).is_err()
+            )?)).is_err()
         );
     }
 }

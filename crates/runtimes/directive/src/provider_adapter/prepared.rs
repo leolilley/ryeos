@@ -8,6 +8,8 @@
 //! send time. The credential VALUE stays outside every digest — only its
 //! declared header name participates.
 
+#[cfg(feature = "latency-profiling")]
+use crate::directive::ProviderMessageExt as _;
 use anyhow::{Result, anyhow, bail};
 #[cfg(feature = "latency-profiling")]
 use std::time::Instant;
@@ -48,9 +50,7 @@ pub struct PreparedProviderRequest {
     /// Behavior-bearing public headers for provider effect identity. Values
     /// are committed by digest; credential-bearing headers remain a separate
     /// name-only set so secret values can never enter durable evidence.
-    #[allow(dead_code)] // consumed by durable provider-effect publication
     pub public_header_coordinates: Vec<ryeos_provider_contract::PublicHeaderCoordinate>,
-    #[allow(dead_code)] // consumed by durable provider-effect publication
     pub credential_header_names: Vec<String>,
     /// Exact serialized body bytes; transport sends these bytes verbatim.
     pub body_bytes: Vec<u8>,
@@ -109,8 +109,45 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     let model = input.model;
 
     let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
-    let (converted_messages, system_prompt) =
-        super::messages::convert_messages(input.messages, &schemas.cloned());
+    let reasoning_schema = provider
+        .schemas
+        .as_ref()
+        .and_then(|schemas| schemas.reasoning.as_ref());
+    // A history that owes a replayable value and holds none (a resumed or
+    // re-grouped chain) is refused before any request is made.
+    if let Some(reasoning) = reasoning_schema
+        && let Some(missing) = super::reasoning_replay::owed_missing(input.messages, reasoning)
+    {
+        bail!("{missing}");
+    }
+    // Images are checked before conversion: a history that holds one the
+    // model's entry cannot send fails the attempt with no provider request.
+    let image_render = super::images::ImageRender::prepare(
+        provider.image_input.as_ref(),
+        input.images,
+        input.messages,
+    )?;
+    let (mut converted_messages, system_prompt) = super::messages::convert_messages(
+        input.messages,
+        &schemas.cloned(),
+        &super::messages::ConvertOptions {
+            reasoning: reasoning_schema,
+            images: image_render.as_ref(),
+        },
+    );
+    // Marks are written last, over exactly the messages the request sends.
+    let cache_mark_outcome = provider
+        .cache_marks
+        .as_ref()
+        .map(|marks| super::cache_marks::apply_cache_marks(&mut converted_messages, marks))
+        .unwrap_or_default();
+    if provider.cache_marks.is_some() {
+        tracing::debug!(
+            placed = cache_mark_outcome.placed,
+            skipped = cache_mark_outcome.skipped,
+            "provider:cache_marks"
+        );
+    }
 
     let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
     let tools_val = super::tools::serialize_tools(input.tools, &tool_schema);
@@ -137,7 +174,7 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         let mut reasoning_replay_bytes = 0_u64;
         for message in input.messages {
             let bytes = serialized_len(message);
-            match message.role.as_str() {
+            match message.role() {
                 "system" => system_message_bytes = system_message_bytes.saturating_add(bytes),
                 "user" => user_message_bytes = user_message_bytes.saturating_add(bytes),
                 "assistant" => {
@@ -146,12 +183,10 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
                 "tool" => tool_message_bytes = tool_message_bytes.saturating_add(bytes),
                 _ => {}
             }
-            reasoning_replay_bytes = reasoning_replay_bytes.saturating_add(
-                message
-                    .reasoning_content
-                    .as_ref()
-                    .map_or(0, |reasoning| reasoning.len() as u64),
-            );
+        }
+        if let Some(reasoning) = reasoning_schema {
+            reasoning_replay_bytes =
+                super::reasoning_replay::replayed_bytes(&converted_messages, reasoning);
         }
         (
             converted_messages_bytes,
@@ -166,24 +201,10 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
     };
 
     let transport = match &provider.transport {
-        ryeos_directive_definition::ProviderTransportConfig::RemoteHttp { base_url } => {
-            let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
-            // Resolve {model} template in base_url (e.g. gemini profiles use
-            // `{model}:streamGenerateContent`).
-            let base_resolved = base_url.replace("{model}", model);
-            let url = match stream_url {
-                Some("") => base_resolved,
-                Some(su) => format!(
-                    "{}{}",
-                    base_resolved.trim_end_matches('/'),
-                    if su.starts_with('/') {
-                        su.to_string()
-                    } else {
-                        format!("/{}", su)
-                    }
-                ),
-                None => format!("{}/chat/completions", base_resolved.trim_end_matches('/')),
-            };
+        ryeos_directive_definition::ProviderTransportConfig::RemoteHttp { .. } => {
+            let url = provider.effective_request_url(model).ok_or_else(|| {
+                anyhow::anyhow!("remote HTTP provider transport has no request URL")
+            })?;
             PreparedProviderTransport::RemoteHttp {
                 method: reqwest::Method::POST,
                 url,
@@ -344,7 +365,7 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         provider_tool_schema_sha256,
     };
     #[cfg(not(feature = "latency-profiling"))]
-    let request_metrics = PreparedRequestMetrics::default();
+    let request_metrics = PreparedRequestMetrics;
 
     Ok(PreparedProviderRequest {
         transport,
@@ -372,7 +393,7 @@ fn serialized_len(value: &impl serde::Serialize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::{ExecutionConfig, ProviderMessage};
+    use crate::directive::{ExecutionConfig, ProviderMessage, ProviderMessageExt};
     use ryeos_directive_definition::{ProviderConfig, ReasoningConfig, ReasoningMode};
     use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::EnvelopeCallback;
@@ -411,13 +432,7 @@ mod tests {
         let provider = provider();
         let client = reqwest::Client::new();
         let execution = ExecutionConfig::default();
-        let messages = [ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hello")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = [ProviderMessage::user("hello")];
         let callback_config = EnvelopeCallback {
             socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
             token: "unused".to_string(),
@@ -430,6 +445,7 @@ mod tests {
             provider_id: "fixture",
             matched_profile: None,
             config_hash: "0",
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &execution,
             model: "fixture-model",
             messages: &messages,
@@ -484,13 +500,7 @@ mod tests {
         let client = reqwest::Client::new();
         let provider = provider();
         let execution = ExecutionConfig::default();
-        let messages = [ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hello")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = [ProviderMessage::user("hello")];
         let callback_config = EnvelopeCallback {
             socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
             token: "unused".to_string(),
@@ -503,6 +513,7 @@ mod tests {
             provider_id: "fixture",
             matched_profile: None,
             config_hash: "0",
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &execution,
             model: "fixture-model",
             messages: &messages,
@@ -523,5 +534,170 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("provider_request_body_limit_exceeded"));
         assert!(message.contains("zero provider requests"));
+    }
+
+    fn image_history() -> Vec<ProviderMessage> {
+        use ryeos_provider_contract::{ImagePart, Message, Part, Role, ToolResultStatus};
+        vec![
+            ProviderMessage::user("look"),
+            ProviderMessage::assistant(
+                None,
+                vec![crate::directive::ToolCall {
+                    id: Some("call_1".to_string()),
+                    name: "shot".to_string(),
+                    arguments: json!({}),
+                }],
+                None,
+            ),
+            Message::new(
+                Role::Tool,
+                vec![Part::tool_result(
+                    "call_1",
+                    vec![
+                        Part::text("captured"),
+                        Part::Image(ImagePart {
+                            media_type: "image/png".to_string(),
+                            attachment: "a".repeat(64),
+                            byte_length: 6,
+                            width: Some(2),
+                            height: Some(2),
+                        }),
+                    ],
+                    ToolResultStatus::Ok,
+                )],
+            ),
+        ]
+    }
+
+    fn prepare_images(
+        provider: &ProviderConfig,
+        images: &crate::provider_adapter::images::ImageStore,
+    ) -> Result<PreparedProviderRequest> {
+        let client = reqwest::Client::new();
+        let execution = ExecutionConfig::default();
+        let messages = image_history();
+        let callback_config = EnvelopeCallback {
+            socket_path: std::path::PathBuf::from("/nonexistent/ryeos-callback.sock"),
+            token: "unused".to_string(),
+        };
+        let callback = CallbackClient::new(&callback_config, "T-image-fixture", "unused");
+        prepare_provider_request(&StreamingCallInput {
+            client: &client,
+            provider,
+            provider_id: "fixture",
+            matched_profile: None,
+            config_hash: "0",
+            images,
+            execution: &execution,
+            model: "fixture-model",
+            messages: &messages,
+            tools: &[],
+            callback: &callback,
+            turn: 1,
+            attempt: 1,
+            sampling: None,
+            reasoning: None,
+            provider_request_body_bytes_limit: 0,
+            cancel_flag: None,
+            interrupt_flag: None,
+        })
+    }
+
+    fn image_provider() -> ProviderConfig {
+        let mut value = serde_json::to_value(provider()).expect("provider value");
+        value["image_input"] = json!({
+            "accepts": {
+                "media_types": ["image/png"],
+                "max_bytes_per_image": 1000,
+                "max_images_per_request": 4,
+                "text_part_template": {"type": "text", "text": "{text}"},
+                "image_part_template": {"type": "image_url", "image_url": {"url": "{data_url}"}},
+                "tool_result_note": "[{count} image(s) follow]",
+                "deferred_label": "Image {index} from {call_id}:",
+                "omitted_note": "[omitted]",
+                "cost": {"pixels_per_token": 750, "max_tokens": 1600, "unknown_dimensions_tokens": 1600}
+            }
+        });
+        serde_json::from_value(value).expect("image provider")
+    }
+
+    #[test]
+    fn a_history_with_an_image_for_a_model_that_takes_none_is_refused_before_any_request() {
+        let mut store = crate::provider_adapter::images::ImageStore::default();
+        store.insert(&"a".repeat(64), "image/png", b"pixels");
+        let error = match prepare_images(&provider(), &store) {
+            Ok(_) => panic!("an image must not be dropped silently"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("image_input_unsupported"), "{message}");
+        assert!(message.contains("zero provider requests"), "{message}");
+    }
+
+    #[test]
+    fn the_prepared_body_moves_the_image_into_a_user_message_after_the_tool_results() {
+        let mut store = crate::provider_adapter::images::ImageStore::default();
+        store.insert(&"a".repeat(64), "image/png", b"pixels");
+        let prepared = prepare_images(&image_provider(), &store).expect("prepared");
+        let body: Value = serde_json::from_slice(&prepared.body_bytes).expect("body");
+        let messages = body["messages"].as_array().expect("messages");
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|message| message["role"].as_str().expect("role"))
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "user"]);
+        assert_eq!(messages[2]["content"], "captured\n[1 image(s) follow]");
+        assert_eq!(
+            messages[3]["content"],
+            json!([
+                {"type": "text", "text": "Image 1 from call_1:"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,cGl4ZWxz"}}
+            ])
+        );
+        let missing = crate::provider_adapter::images::ImageStore::default();
+        let error = match prepare_images(&image_provider(), &missing) {
+            Ok(_) => panic!("missing bytes must refuse"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("image_attachment_missing"));
+    }
+    fn marks() -> Value {
+        json!({
+            "mark": {"cache_control": {"type": "ephemeral"}},
+            "text_part_template": {"type": "text", "text": "{text}"},
+            "max_marks": 4,
+            "positions": ["system", "newest", "previous_tail"]
+        })
+    }
+
+    #[test]
+    fn marks_land_on_the_lowered_image_message_and_an_entry_without_marks_sends_none() {
+        let mut store = crate::provider_adapter::images::ImageStore::default();
+        store.insert(&"a".repeat(64), "image/png", b"pixels");
+        let plain = prepare_images(&image_provider(), &store).expect("prepared");
+        assert!(!String::from_utf8_lossy(&plain.body_bytes).contains("cache_control"));
+
+        let mut value = serde_json::to_value(image_provider()).expect("provider value");
+        value["cache_marks"] = marks();
+        let provider: ProviderConfig = serde_json::from_value(value).expect("marked provider");
+        let prepared = prepare_images(&provider, &store).expect("prepared");
+        let body: Value = serde_json::from_slice(&prepared.body_bytes).expect("body");
+        let messages = body["messages"].as_array().expect("messages");
+        // The mark rides the last part of the synthetic image message, which
+        // is the newest wire message; the earlier user message is the
+        // previous tail.
+        let newest = messages.last().expect("newest")["content"]
+            .as_array()
+            .expect("parts")
+            .last()
+            .expect("last part")
+            .clone();
+        assert_eq!(newest["type"], "image_url");
+        assert_eq!(newest["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(
+            messages[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(!messages[1].to_string().contains("cache_control"));
     }
 }

@@ -2,6 +2,7 @@
 //! full-width selection.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::TextSurface;
 use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsRowVm};
 
@@ -69,7 +70,7 @@ pub fn draw_rows(
         let glyph = if row.expandable {
             if row.expanded { "▾" } else { "▸" }
         } else {
-            tone_glyph(row.tone)
+            row.glyph.as_deref().unwrap_or_else(|| tone_glyph(row.tone))
         };
         surface.draw_text(rect.x as usize, y, glyph, glyph_style);
 
@@ -77,13 +78,22 @@ pub fn draw_rows(
         let meta_width = if meta.is_empty() {
             0
         } else {
-            display_width(meta).min(width / 3)
+            display_width(meta).min(width / LAYOUT.cells.meta_divisor)
         };
         let primary_width = width.saturating_sub(3 + meta_width + usize::from(meta_width > 0));
         let mut primary = row.primary.clone();
-        if let Some(secondary) = &row.secondary {
+        // A launcher record that cannot be chosen says why in place of its
+        // description, and sits dim.
+        let reason = row
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.reason.as_deref());
+        if let Some(second) = reason.or(row.secondary.as_deref()) {
             primary.push_str("  ");
-            primary.push_str(secondary);
+            primary.push_str(second);
+        }
+        if reason.is_some() && !row.selected {
+            style = style_muted();
         }
         surface.draw_text(
             rect.x as usize + 2,
@@ -124,5 +134,43 @@ pub(super) fn draw_detail(
     if x < left + width {
         let style = detail.tone.map(tone_style).unwrap_or_else(style_fg);
         surface.draw_text(x, y, &truncate(&detail.value, left + width - x), style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_client_base::ui::view_model::RyeOsTone;
+
+    #[test]
+    fn projected_glyph_precedes_the_tone_fallback() {
+        let mut surface = TextSurface::new(48, 2);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 48,
+            h: 2,
+        };
+        let row = RyeOsRowVm {
+            id: "unavailable".into(),
+            cursor: 0,
+            glyph: Some("×".into()),
+            primary: "Close view set".into(),
+            secondary: Some("Unavailable — keep one view set open".into()),
+            meta: None,
+            kind: Some("unavailable".into()),
+            intent: None,
+            tone: RyeOsTone::Neutral,
+            selected: true,
+            expandable: false,
+            expanded: false,
+            detail: Vec::new(),
+            launch: None,
+            changed_at_ms: None,
+            changed_tone: None,
+        };
+
+        draw_rows(&mut surface, rect, &[], &[row], 0);
+        assert_eq!(surface.get(0, 0).rune, '×');
     }
 }

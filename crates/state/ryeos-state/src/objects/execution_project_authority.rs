@@ -79,6 +79,17 @@ pub enum LiveProjectAccess {
     ReadWrite,
 }
 
+/// What the request asked of the live project. `Default` accepts whatever
+/// root the daemon selects for the tool shape; `Live` demands the live project
+/// and is refused (`live_project_unavailable_to_sourced_runtime`) wherever the
+/// resolved root is not live. Children inherit the parent's intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveProjectIntent {
+    Default,
+    Live,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveSymlinkPolicy {
@@ -121,6 +132,7 @@ impl LiveFilesystemConfinement {
 #[serde(deny_unknown_fields)]
 pub struct LiveAccessAuthority {
     pub access: LiveProjectAccess,
+    pub intent: LiveProjectIntent,
     pub authorized_write_namespaces: Vec<String>,
     pub confinement: LiveFilesystemConfinement,
 }
@@ -217,14 +229,31 @@ impl EnvironmentNameAuthority {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EnvironmentAuthority {
     None,
+    /// A project's `.env` overlay, optionally joined with the operator vault.
+    /// `recipient_principal` and `recipient_scopes` are the admitted
+    /// caller and its own canonical (sorted, unique) capability scopes at
+    /// admission, sealed whether or not the operator vault is included.
+    /// When `include_operator_vault` is set, every operator-vault name
+    /// delivered under this authority, to the admitted launch or to a child
+    /// or continuation that inherits it, is judged against exactly this
+    /// principal and scope set, and any other principal receives none.
     ProjectOverlay {
         project_authority_id: String,
         source_identity: String,
         include_operator_vault: bool,
+        recipient_principal: String,
+        recipient_scopes: Vec<String>,
         name_authority: EnvironmentNameAuthority,
     },
+    /// A vault namespace. `recipient_principal` and `recipient_scopes` are
+    /// the admitted caller and its own canonical (sorted, unique) capability
+    /// scopes at admission; every delivery under this authority judges the
+    /// node's name ceilings against exactly this set, and refuses any other
+    /// principal, including a child acting for someone else.
     Vault {
         namespace: String,
+        recipient_principal: String,
+        recipient_scopes: Vec<String>,
         name_authority: EnvironmentNameAuthority,
     },
     Delegated {
@@ -232,9 +261,39 @@ pub enum EnvironmentAuthority {
         grant_id: String,
         name_authority: EnvironmentNameAuthority,
     },
+    /// Values the executing node took from its own environment at startup.
+    /// `declared_names` are the names of the node's signed declaration that
+    /// admission found `recipient_principal` allowed to receive.
+    /// `recipient_scopes` are that principal's own capability scopes at
+    /// admission, canonical (sorted, unique); every delivery under this
+    /// authority, whether to the admitted launch, a child that inherits it,
+    /// or a provider-attempt callback, judges the node's current recipient
+    /// rules against exactly this set and never against a launch's narrowed
+    /// or item-declared capabilities. Delivery also requires the name in the
+    /// node's live startup declaration and refuses any other principal.
+    ProviderEnvironment {
+        declared_names: Vec<String>,
+        recipient_principal: String,
+        recipient_scopes: Vec<String>,
+        name_authority: EnvironmentNameAuthority,
+    },
 }
 
 impl EnvironmentAuthority {
+    /// Whether delivery under this admitted authority reads the node
+    /// operator's vault: a project overlay that includes it, or the
+    /// `operator` vault namespace.
+    pub fn exposes_operator_vault(&self) -> bool {
+        match self {
+            Self::ProjectOverlay {
+                include_operator_vault,
+                ..
+            } => *include_operator_vault,
+            Self::Vault { namespace, .. } => namespace == "operator",
+            Self::None | Self::Delegated { .. } | Self::ProviderEnvironment { .. } => false,
+        }
+    }
+
     pub fn validate(&self, project_backed: bool) -> anyhow::Result<()> {
         match self {
             Self::None => Ok(()),
@@ -242,6 +301,8 @@ impl EnvironmentAuthority {
                 project_authority_id,
                 source_identity,
                 include_operator_vault: _,
+                recipient_principal,
+                recipient_scopes,
                 name_authority,
             } => {
                 if !project_backed {
@@ -257,13 +318,33 @@ impl EnvironmentAuthority {
                     source_identity,
                     false,
                 )?;
+                validate_trimmed_control_free(
+                    "project environment recipient principal",
+                    recipient_principal,
+                    false,
+                )?;
+                validate_sorted_capabilities(
+                    "project environment recipient scope",
+                    recipient_scopes,
+                )?;
                 name_authority.validate()
             }
             Self::Vault {
                 namespace,
+                recipient_principal,
+                recipient_scopes,
                 name_authority,
             } => {
                 validate_trimmed_control_free("vault namespace", namespace, false)?;
+                validate_trimmed_control_free(
+                    "vault environment recipient principal",
+                    recipient_principal,
+                    false,
+                )?;
+                validate_sorted_capabilities(
+                    "vault environment recipient scope",
+                    recipient_scopes,
+                )?;
                 name_authority.validate()
             }
             Self::Delegated {
@@ -273,6 +354,24 @@ impl EnvironmentAuthority {
             } => {
                 validate_trimmed_control_free("delegated environment provider", provider, false)?;
                 validate_trimmed_control_free("delegated environment grant", grant_id, false)?;
+                name_authority.validate()
+            }
+            Self::ProviderEnvironment {
+                declared_names,
+                recipient_principal,
+                recipient_scopes,
+                name_authority,
+            } => {
+                validate_allowed_names(declared_names)?;
+                validate_trimmed_control_free(
+                    "provider environment recipient principal",
+                    recipient_principal,
+                    false,
+                )?;
+                validate_sorted_capabilities(
+                    "provider environment recipient scope",
+                    recipient_scopes,
+                )?;
                 name_authority.validate()
             }
         }
@@ -318,6 +417,34 @@ pub enum ExecutionProjectAuthority {
 }
 
 impl ExecutionProjectAuthority {
+    /// The project this authority belongs to, as the node knows it: the
+    /// absolute project path that signer project scopes name.
+    ///
+    /// A live project is its own logical root. A pinned generation is
+    /// materialized at a per-generation checkout, so its logical root is the
+    /// original project path, but only when the stable project identity says
+    /// the project is local to this node: `local:<path>`, or
+    /// `<site_id>:<path>` where `site_id` is this node's own site (the form a
+    /// pinned head launched on this node is stamped with). A pinned generation
+    /// whose identity names another site has no logical root here, so a
+    /// signer scoped to specific projects never admits its content.
+    pub fn logical_project_root(&self, site_id: &str) -> Option<PathBuf> {
+        match self {
+            Self::Projectless { .. } => None,
+            Self::LiveProject { canonical_root, .. } => Some(canonical_root.clone()),
+            Self::PinnedGeneration {
+                stable_project_identity,
+                display_path: Some(path),
+                ..
+            } if stable_project_identity == &format!("local:{}", path.display())
+                || stable_project_identity == &format!("{site_id}:{}", path.display()) =>
+            {
+                Some(path.clone())
+            }
+            Self::PinnedGeneration { .. } => None,
+        }
+    }
+
     pub const PROJECTLESS: Self = Self::Projectless {
         environment: EnvironmentAuthority::None,
     };
@@ -610,6 +737,28 @@ impl ExecutionProjectAuthority {
         Ok(self)
     }
 
+    /// Record whether the request demanded the live project. Only a live
+    /// authority has an intent to record.
+    pub fn with_live_intent(mut self, intent: LiveProjectIntent) -> anyhow::Result<Self> {
+        match &mut self {
+            Self::LiveProject { live_access, .. } => live_access.intent = intent,
+            Self::Projectless { .. } | Self::PinnedGeneration { .. } => {
+                anyhow::bail!("only a live project authority carries a live-project intent")
+            }
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// True when the request explicitly demanded the live project.
+    pub fn demands_live_project(&self) -> bool {
+        matches!(
+            self,
+            Self::LiveProject { live_access, .. }
+                if live_access.intent == LiveProjectIntent::Live
+        )
+    }
+
     pub fn child_policy(&self) -> ChildProjectAuthorityPolicy {
         match self {
             Self::Projectless { .. } => ChildProjectAuthorityPolicy::Inherit,
@@ -662,6 +811,7 @@ impl ExecutionProjectAuthority {
         };
         let live_access = LiveAccessAuthority {
             access,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces,
             confinement,
         };
@@ -1006,6 +1156,50 @@ impl ExecutionProjectAuthority {
         }
     }
 
+    /// The same authority for a host-direct launch: the process runs on the
+    /// host, unconfined, so the live project is recorded as `unconfined_host`
+    /// instead of a descriptor-rooted view nobody enforces. Only a read-write
+    /// live project or a projectless launch can be true under host access; a
+    /// read-only or pinned project cannot be enforced against a host process
+    /// and is refused.
+    pub fn into_unconfined_host(self) -> anyhow::Result<Self> {
+        let authority = match self {
+            Self::Projectless { .. } => self,
+            Self::LiveProject {
+                authority_id,
+                authored_project_identity,
+                canonical_root,
+                live_access,
+                environment,
+                capability_ceiling,
+                child_policy,
+            } => {
+                if live_access.access != LiveProjectAccess::ReadWrite {
+                    anyhow::bail!(
+                        "a host-direct launch runs unconfined on the host and cannot honour a read-only live project; request read-write live project access"
+                    );
+                }
+                Self::LiveProject {
+                    authority_id,
+                    authored_project_identity,
+                    canonical_root,
+                    live_access: LiveAccessAuthority {
+                        confinement: LiveFilesystemConfinement::UnconfinedHost,
+                        ..live_access
+                    },
+                    environment,
+                    capability_ceiling,
+                    child_policy,
+                }
+            }
+            Self::PinnedGeneration { .. } => anyhow::bail!(
+                "a host-direct launch runs unconfined on the host and cannot honour a pinned project generation; use a live read-write or projectless execution policy"
+            ),
+        };
+        authority.validate()?;
+        Ok(authority)
+    }
+
     pub fn live_access(&self) -> Option<&LiveAccessAuthority> {
         match self {
             Self::LiveProject { live_access, .. } => Some(live_access),
@@ -1197,11 +1391,15 @@ fn validate_allowed_names(names: &[String]) -> anyhow::Result<()> {
 }
 
 fn validate_capability_ceiling(capabilities: &[String]) -> anyhow::Result<()> {
+    validate_sorted_capabilities("capability ceiling", capabilities)
+}
+
+fn validate_sorted_capabilities(label: &str, capabilities: &[String]) -> anyhow::Result<()> {
     let mut previous: Option<&str> = None;
     for capability in capabilities {
-        validate_trimmed_control_free("capability ceiling entry", capability, false)?;
+        validate_trimmed_control_free(&format!("{label} entry"), capability, false)?;
         if previous.is_some_and(|value| value >= capability.as_str()) {
-            anyhow::bail!("capability ceiling must be strictly sorted and unique");
+            anyhow::bail!("{label} must be strictly sorted and unique");
         }
         previous = Some(capability);
     }
@@ -1210,7 +1408,82 @@ fn validate_capability_ceiling(capabilities: &[String]) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vault_environment_recipient_is_validated_and_canonical() {
+        let vault = |principal: &str, scopes: &[&str]| EnvironmentAuthority::Vault {
+            namespace: "operator".to_owned(),
+            recipient_principal: principal.to_owned(),
+            recipient_scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            name_authority: EnvironmentNameAuthority::DeclaredRequired,
+        };
+        vault("fp:a", &["a", "b"]).validate(false).unwrap();
+        assert!(vault("", &[]).validate(false).is_err());
+        assert!(vault("fp:a", &["b", "a"]).validate(false).is_err());
+        assert!(vault("fp:a", &["a", "a"]).validate(false).is_err());
+        let overlay = EnvironmentAuthority::ProjectOverlay {
+            project_authority_id: "id".to_owned(),
+            source_identity: "dotenv:/p/.env".to_owned(),
+            include_operator_vault: true,
+            recipient_principal: "fp:a".to_owned(),
+            recipient_scopes: vec!["b".to_owned(), "a".to_owned()],
+            name_authority: EnvironmentNameAuthority::DeclaredRequired,
+        };
+        assert!(overlay.validate(true).is_err());
+    }
+
     use super::*;
+
+    fn pinned_for(identity: &str, display: Option<&str>) -> ExecutionProjectAuthority {
+        ExecutionProjectAuthority::pinned(
+            identity.to_owned(),
+            display.map(PathBuf::from),
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn logical_project_root_is_the_local_project_path() {
+        const HERE: &str = "site:here";
+        // A legacy local identity.
+        assert_eq!(
+            pinned_for("local:/srv/projects/alpha", Some("/srv/projects/alpha"))
+                .logical_project_root(HERE),
+            Some(PathBuf::from("/srv/projects/alpha"))
+        );
+        // A pinned head launched on this node is stamped with its own site.
+        assert_eq!(
+            pinned_for("site:here:/srv/projects/alpha", Some("/srv/projects/alpha"))
+                .logical_project_root(HERE),
+            Some(PathBuf::from("/srv/projects/alpha"))
+        );
+        // A project another site names is not a project of this node.
+        assert_eq!(
+            pinned_for(
+                "site:other:/srv/projects/alpha",
+                Some("/srv/projects/alpha")
+            )
+            .logical_project_root(HERE),
+            None
+        );
+        // The site prefix must name the whole site, not a prefix of it.
+        assert_eq!(
+            pinned_for("site:her:/srv/projects/alpha", Some("/srv/projects/alpha"))
+                .logical_project_root(HERE),
+            None
+        );
+        assert_eq!(
+            pinned_for("local:/srv/projects/alpha", None).logical_project_root(HERE),
+            None
+        );
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS.logical_project_root(HERE),
+            None
+        );
+    }
 
     fn output_partition() -> super::super::WorkspaceOutputPartition {
         let bounds = crate::external_content::products::ProductBounds {
@@ -1260,6 +1533,7 @@ mod tests {
     fn live_access_schema_requires_explicit_confinement() {
         let missing = serde_json::json!({
             "access": "read_write",
+            "intent": "default",
             "authorized_write_namespaces": ["project"]
         });
         let error = serde_json::from_value::<LiveAccessAuthority>(missing).unwrap_err();
@@ -1353,6 +1627,7 @@ mod tests {
     fn live_access_schema_preserves_exact_confinement() {
         let unconfined = LiveAccessAuthority {
             access: LiveProjectAccess::ReadWrite,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces: vec!["project".to_string()],
             confinement: LiveFilesystemConfinement::UnconfinedHost,
         };
@@ -1365,6 +1640,7 @@ mod tests {
 
         let confined = LiveAccessAuthority {
             access: LiveProjectAccess::ReadOnly,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces: Vec::new(),
             confinement: LiveFilesystemConfinement::DescriptorRootedFixedParents {
                 denied_control_paths: vec![".ai".to_string()],
@@ -1383,10 +1659,34 @@ mod tests {
 
         let false_read_only = LiveAccessAuthority {
             access: LiveProjectAccess::ReadOnly,
+            intent: LiveProjectIntent::Default,
             authorized_write_namespaces: Vec::new(),
             confinement: LiveFilesystemConfinement::UnconfinedHost,
         };
         assert!(false_read_only.validate().is_err());
+    }
+
+    #[test]
+    fn host_direct_records_unconfined_host_and_refuses_what_it_cannot_honour() {
+        let root = tempfile::tempdir().unwrap();
+        let writable = live_authority(root.path(), LiveProjectAccess::ReadWrite)
+            .into_unconfined_host()
+            .unwrap();
+        assert_eq!(
+            writable.live_access().unwrap().confinement,
+            LiveFilesystemConfinement::UnconfinedHost
+        );
+        let error = live_authority(root.path(), LiveProjectAccess::ReadOnly)
+            .into_unconfined_host()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("read-only"), "{error}");
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS
+                .into_unconfined_host()
+                .unwrap(),
+            ExecutionProjectAuthority::PROJECTLESS
+        );
     }
 
     #[test]

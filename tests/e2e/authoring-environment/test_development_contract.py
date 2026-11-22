@@ -1,3 +1,4 @@
+# ryeos:signed:2026-11-16T08:18:29Z:d8f550efe6c7f18a1f73ee93dd3434f23d42df9f3ce123724bcb9bf5164711c5:P+863BS71g3Ip1i033hI7g5DX15K6GKwzaSlwiEisMh5jeX8YIu3lwG4FcCSMG4sTekMJlCSnxBZVaUcdw8rAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Source composition checks, not a claim of installed worker qualification."""
 
 from pathlib import Path
@@ -7,6 +8,23 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+BUNDLE_OWNED_CONFIGS = {
+    "config/development/ryeos/authoring-environment-products.yaml",
+    "config/development/ryeos/authoring-prepared-input-products.yaml",
+}
+
+
+def owned_config(config_path):
+    """Path of a development config in its single owner: the
+    environment-qualification bundle for the native-verifier products, the
+    project for everything else. A copy in the other place is an error."""
+    bundle = f"bundles/environment-qualification/.ai/{config_path}"
+    project = f".ai/{config_path}"
+    owner, other = (bundle, project) if config_path in BUNDLE_OWNED_CONFIGS else (project, bundle)
+    assert not (ROOT / other).exists(), f"{config_path} has a competing copy at {other}"
+    return owner
 
 
 def load(relative):
@@ -25,7 +43,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
                          4096)
 
     def test_graph_owned_product_inputs_fit_the_signed_kind_contract(self):
-        kind = load("bundles/standard/.ai/node/engine/kinds/graph/graph.kind-schema.yaml")
+        kind = load("bundles/graph/.ai/node/engine/kinds/graph/graph.kind-schema.yaml")
         contract = kind["execution"]["external_content"]
         self.assertEqual(contract["max_declarations"], 4)
         for name in ("authoring-environment-production", "authoring-built-utilities-production",
@@ -36,7 +54,8 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
                                  contract["max_declarations"])
             for slot in slots:
                 self.assertIn(slot["mount_root"], contract["allowed_mount_roots"])
-                recipe = load(".ai/config/" + slot["relationship_ref"].removeprefix("config:") + ".yaml")
+                config_path = "config/" + slot["relationship_ref"].removeprefix("config:") + ".yaml"
+                recipe = load(owned_config(config_path))
                 relationship = next(item for item in recipe["product_relationships"]["relationships"]
                                     if item["name"] == slot["relationship"])
                 product = relationship["required_product"]
@@ -46,7 +65,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
 
     def test_root_composes_authoring_product_and_protocol_ingress_not_child_compiler(self):
         baseline = load("bundles/codex/.ai/config/codex/environments/authoring.yaml")
-        self.assertEqual(self.environment["schema"], "ryeos.worker_environment.v6")
+        self.assertEqual(self.environment["schema"], "ryeos.worker_environment.v7")
         self.assertEqual(self.environment["schema"], baseline["schema"])
         self.assertEqual(self.environment["worker_ref"], baseline["worker_ref"])
         declarations = {entry["id"]: entry for entry in self.environment["external_content"]}
@@ -63,12 +82,12 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
             "kind": "tree", "mount_root": "execution_runtime", "mount": "authoring-tools",
         }})
         self.assertEqual(baseline["external_content"][0]["digest"],
-                         "1ca7a7fe9ecc1d19c38c986ba9df435ff7bbe6d4ba020f2643564b8bba0c84e6")
+                         "462135d8fd8f9df1101b9100ba3661baaba4a07c7070288262d7dd8b22a50050")
         self.assertNotIn("client", self.environment["workload_client"])
         self.assertIsNone(baseline["workload_client"])
 
     def test_native_runtime_adoption_requires_the_independent_bundle_policy(self):
-        products = load(".ai/config/development/ryeos/authoring-environment-products.yaml")
+        products = load("bundles/environment-qualification/.ai/config/development/ryeos/authoring-environment-products.yaml")
         relationships = {item["name"]: item for item in
                          products["product_relationships"]["relationships"]}
         verifier = relationships["runtime_to_native_authoring_qualification"]
@@ -90,17 +109,19 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertNotIn("expected_manifest_hash", str(verifier) + str(worker))
 
     def test_installed_native_verifier_ships_its_product_relationships(self):
-        """Projectless verification must resolve both selected slots from Standard."""
+        """Projectless verification must resolve both selected slots from environment-qualification."""
         for name in ("authoring-environment-products", "authoring-prepared-input-products"):
-            source = load(f".ai/config/development/ryeos/{name}.yaml")
-            installed = load(
-                f"bundles/standard/.ai/config/development/ryeos/{name}.yaml")
-            self.assertEqual(installed, source)
+            installed = load(f"bundles/environment-qualification/.ai/config/development/ryeos/{name}.yaml")
+            self.assertEqual(installed["product_relationships"]["schema"],
+                             "ryeos.product_relationships.v1")
+            self.assertTrue(installed["product_relationships"]["relationships"])
+            self.assertFalse((ROOT / f".ai/config/development/ryeos/{name}.yaml").exists(),
+                             "project must not carry a competing copy")
 
     def test_installed_native_verifier_runtime_is_projectless(self):
         """Qualification consumes sealed products and must not require a project."""
         runtime = load(
-            "bundles/standard/.ai/tools/ryeos/environments/qualification/"
+            "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/"
             "native-authoring/runtime.yaml")
         self.assertNotIn("${project_path}", runtime["config"]["args"])
         source = next(arg["literal"] for arg in runtime["config"]["args"]
@@ -176,8 +197,11 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         self.assertIn("#   category: ryeos/development/cargo-vendor-finalize", finalizer_source)
         self.assertIn("#   executor_id: tool:ryeos/development/authoring-environment-production/runtime",
                       finalizer_source)
-        self.assertIn("9e8e1a93918f8e229cdbb8a037aa1a4fbbccbe5efe1257519396bb8fc3103f09",
-                      finalizer_source)
+        self.assertIn("#     type: strict_signed_project_bundle", finalizer_source)
+        self.assertIn("#     bundle_name: environment-qualification", finalizer_source)
+        intent_path = "bundles/environment-qualification/.ai/config/development/ryeos/cargo-vendor-lock-intent.yaml"
+        self.assertIn("#     config_path: " + intent_path, finalizer_source)
+        self.assertRegex(load(intent_path)["expected_sha256"], r"^[0-9a-f]{64}$")
         self.assertIn('OUTPUT = Path("products/cargo-vendor/Cargo.lock")', finalizer_source)
         execution = load(".ai/config/execution/execution.yaml")["items"]
         self.assertEqual(execution["graph"]["ryeos/development/cargo-vendor-production"]["timeout"], 360)
@@ -418,7 +442,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         ]
         for case in cases:
             with self.subTest(case=case["relationship"]):
-                recipe = load(f".ai/config/development/ryeos/{case['recipe']}.yaml")
+                recipe = load(owned_config(f"config/development/ryeos/{case['recipe']}.yaml"))
                 relationships = recipe["product_relationships"]
                 self.assertEqual(relationships["schema"], "ryeos.product_relationships.v1")
                 relationship = next(entry for entry in relationships["relationships"]
@@ -460,7 +484,8 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
     def test_recorded_wrappers_forward_only_explicit_authenticated_root_selections(self):
         cases = {
             "authoring-built-utilities-production": [
-                ("build_support_selection", "authoring-build-support")],
+                ("build_support_selection", "authoring-build-support"),
+                ("platform_selection", "platform")],
             "authoring-environment-production": [
                 ("assembly_inputs_selection", "assembly-inputs"),
                 ("built_utilities_selection", "built-utilities")],
@@ -477,11 +502,15 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
                     value = schema["properties"][parameter]
                     self.assertEqual(value["required"], [
                         "declaration_id", "witness_hash", "qualification_hash",
-                        "witness_source"])
+                        "witness_source", "remote_testimony"])
                     self.assertEqual(value["properties"]["declaration_id"]["enum"],
                                      [declaration])
-                    self.assertEqual(value["properties"]["qualification_hash"]["type"],
-                                     "null")
+                    if declaration == "platform":
+                        self.assertEqual(value["properties"]["qualification_hash"], {
+                            "type": "string", "pattern": "^[0-9a-f]{64}$"})
+                    else:
+                        self.assertEqual(
+                            value["properties"]["qualification_hash"]["type"], "null")
                     source_schema = value["properties"]["witness_source"]
                     self.assertEqual(source_schema, {"oneOf": [
                         {

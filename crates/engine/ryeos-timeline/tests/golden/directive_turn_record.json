@@ -1,0 +1,401 @@
+{
+  "items": [
+    {
+      "item": "entry",
+      "id": "msg:4/0",
+      "type": "message",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:4/0",
+      "counts_as": null,
+      "text_streamed": true,
+      "slots": {
+        "body": "<scrubbed launch stimulus 300 chars>"
+      },
+      "seq": [
+        4,
+        4
+      ],
+      "ts": [
+        "2026-11-17T01:00:02Z",
+        "2026-11-17T01:00:02Z"
+      ]
+    },
+    {
+      "item": "recap",
+      "id": "rc:tho:7/0",
+      "exchange": "msg:4/0",
+      "work": 0,
+      "duration_s": 0,
+      "members": [
+        {
+          "item": "entry",
+          "id": "tho:7/0",
+          "type": "thought",
+          "state": null,
+          "tone": null,
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:4/0",
+          "counts_as": null,
+          "slots": {
+            "body": "<scrubbed reasoning 200 chars>"
+          },
+          "seq": [
+            7,
+            7
+          ],
+          "ts": [
+            "2026-11-17T01:00:05Z",
+            "2026-11-17T01:00:05Z"
+          ]
+        }
+      ],
+      "seq": 17
+    },
+    {
+      "item": "entry",
+      "id": "pro:7/1",
+      "type": "prose",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:4/0",
+      "counts_as": null,
+      "text_streamed": true,
+      "slots": {
+        "body": "<scrubbed text 40 chars>"
+      },
+      "seq": [
+        7,
+        7
+      ],
+      "ts": [
+        "2026-11-17T01:00:05Z",
+        "2026-11-17T01:00:05Z"
+      ]
+    },
+    {
+      "item": "recap",
+      "id": "rc:act:0000000000000000000000000000000000000000000000000000000000000001",
+      "exchange": "msg:4/0",
+      "work": 1,
+      "duration_s": 1,
+      "members": [
+        {
+          "item": "entry",
+          "id": "act:0000000000000000000000000000000000000000000000000000000000000001",
+          "type": "activity",
+          "state": "done",
+          "tone": "warn",
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:4/0",
+          "counts_as": "other",
+          "slots": {
+            "badge": "87.9 KiB · result_guard",
+            "detail": "{\"path\":\"a.txt\"}",
+            "headline": "test_read"
+          },
+          "seq": [
+            8,
+            11
+          ],
+          "ts": [
+            "2026-11-17T01:00:06Z",
+            "2026-11-17T01:00:07Z"
+          ]
+        }
+      ],
+      "seq": 17
+    },
+    {
+      "item": "entry",
+      "id": "act:0000000000000000000000000000000000000000000000000000000000000002",
+      "type": "activity",
+      "state": "failed",
+      "tone": "danger",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:4/0",
+      "counts_as": "other",
+      "slots": {
+        "badge": "60 B",
+        "detail": "{\"path\":\"b.txt\"}",
+        "headline": "test_write"
+      },
+      "seq": [
+        9,
+        12
+      ],
+      "ts": [
+        "2026-11-17T01:00:06Z",
+        "2026-11-17T01:00:08Z"
+      ]
+    },
+    {
+      "item": "recap",
+      "id": "rc:act:0000000000000000000000000000000000000000000000000000000000000003",
+      "exchange": "msg:4/0",
+      "work": 1,
+      "duration_s": 3,
+      "members": [
+        {
+          "item": "entry",
+          "id": "act:0000000000000000000000000000000000000000000000000000000000000003",
+          "type": "activity",
+          "state": "done",
+          "tone": "good",
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:4/0",
+          "counts_as": "other",
+          "slots": {
+            "badge": "4.9 KiB · same as earlier cccccccc",
+            "detail": "{\"path\":\"a.txt\"}",
+            "headline": "test_read"
+          },
+          "seq": [
+            10,
+            13
+          ],
+          "ts": [
+            "2026-11-17T01:00:06Z",
+            "2026-11-17T01:00:09Z"
+          ]
+        }
+      ],
+      "seq": 17
+    },
+    {
+      "item": "entry",
+      "id": "mrk:14",
+      "type": "marker",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:4/0",
+      "counts_as": null,
+      "slots": {
+        "headline": "harness · nudge"
+      },
+      "seq": [
+        14,
+        14
+      ],
+      "ts": [
+        "2026-11-17T01:00:10Z",
+        "2026-11-17T01:00:10Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "pro:16/0",
+      "type": "prose",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:4/0",
+      "counts_as": null,
+      "text_streamed": true,
+      "slots": {
+        "body": "<scrubbed answer 30 chars>"
+      },
+      "seq": [
+        16,
+        16
+      ],
+      "ts": [
+        "2026-11-17T01:00:12Z",
+        "2026-11-17T01:00:12Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "msg:17/0",
+      "type": "message",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:17/0",
+      "counts_as": null,
+      "text_streamed": true,
+      "slots": {
+        "body": "<scrubbed steer 50 chars>"
+      },
+      "seq": [
+        17,
+        17
+      ],
+      "ts": [
+        "2026-11-17T01:00:20Z",
+        "2026-11-17T01:00:20Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "mrk:17/1",
+      "type": "marker",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:17/0",
+      "counts_as": null,
+      "slots": {
+        "headline": "image · image/png · 20.0 KiB · w 800 · h 600"
+      },
+      "seq": [
+        17,
+        17
+      ],
+      "ts": [
+        "2026-11-17T01:00:20Z",
+        "2026-11-17T01:00:20Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "pro:17/2",
+      "type": "prose",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:17/0",
+      "counts_as": null,
+      "text_streamed": true,
+      "slots": {
+        "body": "<scrubbed steer addendum 25 chars>"
+      },
+      "seq": [
+        17,
+        17
+      ],
+      "ts": [
+        "2026-11-17T01:00:20Z",
+        "2026-11-17T01:00:20Z"
+      ]
+    },
+    {
+      "item": "recap",
+      "id": "rc:tho:19/0",
+      "exchange": "msg:17/0",
+      "work": 0,
+      "duration_s": 0,
+      "members": [
+        {
+          "item": "entry",
+          "id": "tho:19/0",
+          "type": "thought",
+          "state": null,
+          "tone": null,
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:17/0",
+          "counts_as": null,
+          "slots": {
+            "body": "<scrubbed partial reasoning 90 chars>"
+          },
+          "seq": [
+            19,
+            19
+          ],
+          "ts": [
+            "2026-11-17T01:00:24Z",
+            "2026-11-17T01:00:24Z"
+          ]
+        }
+      ],
+      "seq": 20
+    },
+    {
+      "item": "entry",
+      "id": "pro:19/1",
+      "type": "prose",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:17/0",
+      "counts_as": null,
+      "text_streamed": true,
+      "slots": {
+        "body": "<scrubbed partial text 15 chars>"
+      },
+      "seq": [
+        19,
+        19
+      ],
+      "ts": [
+        "2026-11-17T01:00:24Z",
+        "2026-11-17T01:00:24Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "mrk:T-0001/3",
+      "type": "marker",
+      "state": null,
+      "tone": "warn",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:17/0",
+      "counts_as": null,
+      "slots": {
+        "headline": "turn interrupted · 3"
+      },
+      "seq": [
+        19,
+        19
+      ],
+      "ts": [
+        "2026-11-17T01:00:24Z",
+        "2026-11-17T01:00:24Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "out:T-0001",
+      "type": "outcome",
+      "state": "failed",
+      "tone": "danger",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:17/0",
+      "counts_as": null,
+      "slots": {
+        "headline": "interrupted",
+        "reason": "<scrubbed message 40 chars>",
+        "retry_input": "<scrubbed steer 50 chars>"
+      },
+      "seq": [
+        20,
+        20
+      ],
+      "ts": [
+        "2026-11-17T01:00:25Z",
+        "2026-11-17T01:00:25Z"
+      ]
+    }
+  ],
+  "undeclared": {},
+  "notice_noun": {
+    "key": "system_event",
+    "one": "system event",
+    "many": "system events"
+  },
+  "lane_matches": [
+    {
+      "label": "Working",
+      "entry": null,
+      "status": "running"
+    }
+  ]
+}

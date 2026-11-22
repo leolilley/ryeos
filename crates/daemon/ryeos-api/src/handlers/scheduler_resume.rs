@@ -26,47 +26,96 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let _mutation_guard = state.scheduler_runtime_gate.clone().write_owned().await;
-    ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-    let spec = state
-        .scheduler_db
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let _mutation_guard = scheduler
+        .acquire_mutation()
+        .await
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let scheduler_db = scheduler.scheduler_db();
+    ryeos_scheduler_contract::validate_schedule_id(&req.schedule_id)
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
+    let spec = scheduler_db
         .get_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     // Same operator carve-out as scheduler_pause: node-owned schedules are
     // controllable by any verified local operator; everyone else controls
     // only their own.
-    if spec.execution.principal_id() == state.identity.principal_id() {
+    if spec.execution.principal_id() == scheduler.identity().principal_id() {
         ctx.require_verified()?;
     } else {
         ctx.require_owner(Some(spec.execution.principal_id()))?;
     }
 
     if spec.enabled {
-        super::scheduler_register::verify_schedule_enabled(&state, &spec, true)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        super::scheduler_register::verify_schedule_enabled(&scheduler, &spec, true)
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         return Ok(serde_json::json!({
             "schedule_id": req.schedule_id,
             "enabled": true,
         }));
     }
 
-    let rec = super::scheduler_register::rewrite_schedule_enabled(&state, &spec, true)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    state
-        .scheduler_db
-        .upsert_spec(&rec)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
-
-    if let Some(ref tx) = state.scheduler_reload_tx
-        && let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
-            schedule_id: Some(req.schedule_id.clone()),
-        })
+    // A schedule whose signed lifetime is used up would only be paused again
+    // on the timer's next pass; refuse instead, naming the bound. Extending
+    // the lifetime is a new registration.
+    let mut resumed = spec.clone();
+    resumed.enabled = true;
+    let last_fire = scheduler_db
+        .get_last_fire(&req.schedule_id)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    if let Some(reason) = ryeos_scheduler::planning::plan_schedule(
+        &resumed,
+        last_fire.as_ref(),
+        lillux::time::timestamp_millis(),
+    )
+    .lifetime_exhausted
     {
-        tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
+        return Err(HandlerError::Structured {
+            code: "schedule_lifetime_exhausted".to_string(),
+            status: 409,
+            body: serde_json::json!({
+                "code": "schedule_lifetime_exhausted",
+                "schedule_id": req.schedule_id,
+                "reason": reason,
+                "message": format!(
+                    "schedule {} cannot resume: its lifetime bound is reached ({reason}); register it again with a new bound",
+                    req.schedule_id
+                ),
+            }),
+        });
     }
+
+    // Resume only a schedule whose retained authority holds now. A schedule
+    // paused because its grant was revoked or replaced resumes after
+    // `scheduler.reauthorize` (or a new registration) re-pins it.
+    let authority =
+        super::scheduler_explain::schedule_authority_view(state.as_ref(), &spec.execution);
+    if authority["valid"] != true {
+        return Err(HandlerError::Structured {
+            code: "schedule_authority_invalid".to_string(),
+            status: 409,
+            body: serde_json::json!({
+                "code": "schedule_authority_invalid",
+                "schedule_id": req.schedule_id,
+                "authority": authority,
+                "message": format!(
+                    "schedule {} cannot resume: its retained authority no longer holds; reauthorize it first",
+                    req.schedule_id
+                ),
+            }),
+        });
+    }
+
+    let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, true, None)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    scheduler_db
+        .upsert_spec(&rec)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+
+    scheduler.notify_reload(Some(req.schedule_id.clone()));
 
     Ok(serde_json::json!({
         "schedule_id": req.schedule_id,

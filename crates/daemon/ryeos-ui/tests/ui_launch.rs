@@ -2,11 +2,10 @@
 //
 // Pins current behavior so Slice 3 can refactor with a net.
 
-mod test_state;
+use ryeos_ui::test_support as test_state;
 use test_state::{build_test_state, launch_context, mint_launch};
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +20,7 @@ fn test_context() -> ryeos_ui::browser_session::LaunchContext {
 
 #[tokio::test]
 async fn invalid_token_rejected() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let result = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
         serde_json::json!({ "token": "nonexistent-token" }),
@@ -40,7 +39,7 @@ async fn invalid_token_rejected() {
 
 #[tokio::test]
 async fn valid_token_consumed_and_session_returned() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let (session_id, token) = mint_launch(&state, test_context());
 
@@ -59,7 +58,7 @@ async fn valid_token_consumed_and_session_returned() {
 
 #[tokio::test]
 async fn committed_activation_replays_the_same_session() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
 
     let (session_id, token) = mint_launch(&state, test_context());
 
@@ -85,13 +84,16 @@ async fn committed_activation_replays_the_same_session() {
 
 #[tokio::test]
 async fn expired_token_rejected() {
-    let short_store = ryeos_ui::BrowserSessionStore::new_with_short_ttl(
+    let short_store = ryeos_ui::BrowserSessionStore::new();
+    let mut context = test_context();
+    context.timing = ryeos_ui::SessionTiming::new(
+        Duration::from_millis(1),
         Duration::from_millis(1),
         Duration::from_millis(1),
     );
 
     let (_, token, _) = short_store
-        .mint_token(test_context(), 16, &"22".repeat(32))
+        .mint_token(context, 16, &"22".repeat(32))
         .expect("mint short-lived session");
 
     std::thread::sleep(Duration::from_millis(5));
@@ -112,4 +114,42 @@ async fn browser_session_auth_rejects_missing_cookie() {
         extract_session_cookie_for_test(&headers).is_none(),
         "missing cookie should produce None"
     );
+}
+
+async fn activated_cookie(state: ryeos_app::state::AppState) -> serde_json::Value {
+    let (session_id, token) = mint_launch(&state, test_context());
+    let val = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
+        serde_json::json!({ "token": token }),
+        HandlerContext::anonymous(),
+        Arc::new(state),
+    )
+    .await
+    .expect("valid token should succeed");
+    assert_eq!(val["session_id"], session_id);
+    val["cookie"].clone()
+}
+
+#[tokio::test]
+async fn cookie_is_not_secure_without_a_public_origin() {
+    let (_tmp, _owner, state) = build_test_state();
+    let cookie = activated_cookie(state).await;
+    assert_eq!(cookie["secure"], false);
+}
+
+#[tokio::test]
+async fn cookie_is_not_secure_for_a_plain_http_public_origin() {
+    let (_tmp, _owner, state) =
+        test_state::build_test_state_with_public_origin("http://localhost:8080");
+    let cookie = activated_cookie(state).await;
+    assert_eq!(cookie["secure"], false);
+}
+
+#[tokio::test]
+async fn cookie_is_secure_for_an_https_public_origin() {
+    let (_tmp, _owner, state) =
+        test_state::build_test_state_with_public_origin("https://node.example.org");
+    let cookie = activated_cookie(state).await;
+    assert_eq!(cookie["secure"], true);
+    assert_eq!(cookie["same_site"], "Strict");
+    assert_eq!(cookie["http_only"], true);
 }

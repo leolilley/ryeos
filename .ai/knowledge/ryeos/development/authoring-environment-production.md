@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T06:55:47Z:41b17e9b321350eafb73000091ec19af593f5d33b2e993cbd6aee7531a433c7f:n3wktf7iTlMzU7gTB7T5a5e8liKt7AabmaRz0WRnOr4cY9OLcYy8qEa3HzbLDfKLBbXzXfNfafy19YG9k6c4BA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-11-11T09:41:52Z:9667cc19f7a979c2e1c4543d54ec41be370479d5036d6690cdbecaf97b0d87af:NU6pXbu6wI2I2MRtBzdqK+Q9YCjRGJhuNgCoM4Mq+Np96kvgepDdaM47CWMVgGA23ubsxaNkmrQC9v7k3j9EDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, authoring, external-content, production]
@@ -206,10 +206,27 @@ Product selections explicitly name their witness source: `local_capture`, or
 `received` with the exact local acceptance hash. Receipt uses the existing
 configured-remote admission transport; it does not transfer a consumer binding
 or turn an origin qualification into local qualification. A receiving consumer
-must satisfy its own admitted verifier and current policy. Full receipt proof
-is retained for authorization, recovery and storage ownership, but the receipt
-coordinate alone does not change semantic program identity. The immutable
-product witness, selected content, relationship and qualification still do.
+must satisfy its own admitted verifier and current policy, or accept a remote
+qualification testimony under its own policy as described next. Full receipt
+proof is retained for authorization, recovery and storage ownership, but the
+receipt coordinate alone does not change semantic program identity. The
+immutable product witness, selected content, relationship and qualification
+still do.
+
+A remote qualification testimony is a distinct record kind. The origin
+operator signs it over the origin's node-signed qualification attestation, and
+the receiver publishes its own node-signed acceptance in a separate namespace.
+The receiver admits it only when its signed acceptance policy names the
+attesting operator and origin site, the required and allowed claims, and the
+accepted verifier identities. The receiver re-derives every digest and
+coordinate it can: the attestation hash, the qualification coordinate, the
+claims, the subject manifest hash and the received product. It never executes
+the verifier and never reads the origin's retained execution as its own. The
+testimony stays testimony. It is never published as, loaded as, or counted as a
+local qualification, and a binding must name it explicitly as a remote
+testimony. What the receiver trusts is the named attester's isolation and
+verifier run, and that trust lives in signed policy data, not in code. A
+receiver that has not named an attester gains nothing from a testimony.
 Current receipt transports ordinary CAS blobs; an actual large-object sidecar
 is refused, not treated as transferred merely because its manifest arrived.
 
@@ -301,7 +318,7 @@ an alias for a present mismatch.
 
 The producer retains a bounded canonical ELF inventory and its digest as
 reproduction evidence. Neither that inventory nor the relocation receipt is
-independent qualification testimony. The Standard Bundle qualifier instead
+independent qualification testimony. The environment-qualification Bundle qualifier instead
 runs the exact selected interpreter, rejects ambient loader overrides, reads
 its actual bounded process mappings, and requires the mapped
 `libgcc_s.so.1` and `libpthread.so.0` objects to be the exact product members.

@@ -1,8 +1,38 @@
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const EXECUTOR_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("executor");
+
 pub mod augmentations;
 pub mod dispatch;
 pub mod dispatch_error;
 pub mod dispatch_role;
 pub mod execution;
+pub use execution::{
+    SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence,
+    abandoned_selected_compositions,
+};
+/// Immutable daemon publication. Attachment presence never admits a worker.
+pub struct SelectedApplicationPublication {
+    pub(crate) app: std::sync::Arc<ryeos_app::state::AppState>,
+    pub(crate) attachment: SelectedInvocationAttachment,
+}
+
+impl SelectedApplicationPublication {
+    pub fn app(&self) -> &std::sync::Arc<ryeos_app::state::AppState> {
+        &self.app
+    }
+    pub fn attachment(&self) -> &SelectedInvocationAttachment {
+        &self.attachment
+    }
+}
+
+/// Positive closure means no ambiguous (contended or poisoned) storage lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectedRootClose {
+    Closed,
+    Unresolved,
+}
+
 pub mod executor;
 pub(crate) mod resolved_config_cache;
 pub mod structured_error;
@@ -103,11 +133,14 @@ pub mod test_support {
         selected_products: ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
         external_candidate_requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
         qualification_use: ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+        placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
+        qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
     ) -> Result<String> {
         let tls_roots = vec!["Zml4dHVyZSBjb250cm9sbGVyIFRMUyByb290".to_owned()];
+        let operator_inputs = ryeos_external_execution_contract::operator_network_inputs();
         let controller =
             ryeos_state::external_execution::transport::ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 https_origin: "https://controller.example:7443".to_owned(),
                 route_contract:
                     ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
@@ -119,14 +152,17 @@ pub mod test_support {
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
+                max_clock_skew_ms: None,
                 network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
                     resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/resolv.conf".into(),
-                        max_bytes: 64 * 1024,
+                        source: operator_inputs.resolver_source.into(),
+                        max_bytes: operator_inputs.resolver_max_bytes,
+                        required: operator_inputs.resolver_required,
                     },
                     hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/hosts".into(),
-                        max_bytes: 64 * 1024,
+                        source: operator_inputs.hosts_source.into(),
+                        max_bytes: operator_inputs.hosts_max_bytes,
+                        required: operator_inputs.hosts_required,
                     },
                 },
             };
@@ -140,15 +176,16 @@ pub mod test_support {
             selected_products,
             external_candidate_requirement,
             qualification_use,
+            placement,
             controller,
             tls_roots,
             serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
             "fixture-secret",
+            qualification,
         )
         .map(|fixture| fixture.capsule_hash)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn admit_worker_session_with_selected_products_and_placement(
         state: &mut ryeos_app::state::AppState,
         worker_execution_ref: &str,
@@ -159,10 +196,52 @@ pub mod test_support {
         selected_products: ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
         external_candidate_requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
         qualification_use: ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+        placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
         controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
         tls_roots: Vec<String>,
         placement_settings: serde_json::Value,
         placement_credential: &str,
+        qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
+    ) -> Result<AdmittedWorkerSessionFixture> {
+        admit_worker_session_with_selected_products_and_placement_and_binding_timeout(
+            state,
+            worker_execution_ref,
+            project_root,
+            project_snapshot_hash,
+            environment,
+            materialization,
+            selected_products,
+            external_candidate_requirement,
+            qualification_use,
+            placement,
+            controller,
+            tls_roots,
+            placement_settings,
+            placement_credential,
+            qualification,
+            60,
+        )
+    }
+
+    /// The same admission with the placement binding's execution timeout, the
+    /// lease lifetime of a leased session, stated.
+    pub fn admit_worker_session_with_selected_products_and_placement_and_binding_timeout(
+        state: &mut ryeos_app::state::AppState,
+        worker_execution_ref: &str,
+        project_root: &std::path::Path,
+        project_snapshot_hash: &str,
+        environment: Option<(&str, &str)>,
+        materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+        selected_products: ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
+        external_candidate_requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
+        qualification_use: ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+        placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
+        controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
+        tls_roots: Vec<String>,
+        placement_settings: serde_json::Value,
+        placement_credential: &str,
+        qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
+        binding_timeout_seconds: u32,
     ) -> Result<AdmittedWorkerSessionFixture> {
         use ryeos_engine::contracts::{
             EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
@@ -171,8 +250,9 @@ pub mod test_support {
         use ryeos_state::external_content::products::composition::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY;
 
         ryeos_app::external_placement::test_support::install_test_placement_vault(state);
-        let operator =
-            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )?;
         let scopes = vec!["*".to_owned()];
         let site = state.threads.site_id().to_owned();
         let context = crate::executor::ExecutionContext {
@@ -180,6 +260,7 @@ pub mod test_support {
             caller_scopes: scopes.clone(),
             engine: state.engine.clone(),
             plan_ctx: PlanContext {
+                logical_project_root: None,
                 requested_by: EffectivePrincipal::Local(Principal {
                     fingerprint: operator.principal_id(),
                     scopes,
@@ -204,8 +285,11 @@ pub mod test_support {
             worker_execution_ref,
             Some("worker_execution"),
         )?;
-        let applicability =
-            crate::dispatch::launch_contract_applicability(worker_execution_ref, &context)?;
+        let applicability = crate::dispatch::launch_contract_applicability(
+            worker_execution_ref,
+            &context,
+            state.isolation.as_ref(),
+        )?;
         let ref_bindings = environment
             .map(|(reference, _)| {
                 BTreeMap::from([("environment".to_owned(), reference.to_owned())])
@@ -326,6 +410,7 @@ pub mod test_support {
                 .with_context(|| format!("fixture selection omits signed slot `{}`", slot.id))?;
             let relationship_resolution = state.engine.effective_resolution_output(
                 ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                         &slot.relationship_ref,
                     )?,
@@ -361,6 +446,10 @@ pub mod test_support {
             selection.relationship_name = slot.relationship.clone();
             selection.relationship_raw_content_digest =
                 relationship_resolution.root.raw_content_digest.clone();
+            selection.relationship_project_dependent =
+                ryeos_app::external_content_admission::resolution_has_project_contributor(
+                    &relationship_resolution,
+                );
             selection.relationship = relationship;
             selection.consumer_source = selection_consumer_source.clone();
             selection.pre_selection_effective_definition_digest = pre_selection_digest.clone();
@@ -371,15 +460,20 @@ pub mod test_support {
             selection.declaration.mount = slot.mount;
         }
         let selected_products = ryeos_state::external_content::products::composition::ResolvedExternalProductSelections::new(selection_map)?;
-        let program = external_candidate_requirement
-            .resolve_for_use(Some(&selected_products), &qualification_use)?;
-        ryeos_app::external_placement::test_support::install_precontact_binding_with_settings(
+        let program = external_candidate_requirement.resolve_for_use(
+            Some(&selected_products),
+            &qualification_use,
+            placement,
+        )?;
+        ryeos_app::external_placement::test_support::install_precontact_binding_with_settings_and_timeout(
             state,
             &program,
             controller,
             tls_roots,
             placement_settings,
             placement_credential.as_bytes(),
+            qualification,
+            binding_timeout_seconds,
         )?;
         dependency.resolution.composed.derived.insert(
             EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),
@@ -401,7 +495,7 @@ pub mod test_support {
             .context("fixture selected products omit the admitted external runtime")?
             .manifest_hash
             .clone();
-        let operator_grant = ryeos_app::identity::load_verified_authorized_key(
+        let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
             operator.fingerprint(),
             &state.config.authorized_keys_dir,
             &state.identity,
@@ -494,9 +588,10 @@ pub mod test_support {
                 &dependency.resolution.restore(),
                 subject,
             )?;
-        let operator =
-            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
-        let operator_grant = ryeos_app::identity::load_verified_authorized_key(
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )?;
+        let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
             operator.fingerprint(),
             &state.config.authorized_keys_dir,
             &state.identity,

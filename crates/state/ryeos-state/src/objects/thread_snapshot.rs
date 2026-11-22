@@ -8,7 +8,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::validate_object_kind;
@@ -201,9 +200,9 @@ pub struct ThreadUsage {
 impl ThreadUsage {
     pub fn validate(&self) -> anyhow::Result<()> {
         let started_at = parse_canonical_timestamp(&self.started_at)
-            .map_err(|error| anyhow::anyhow!("invalid thread usage started_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid thread usage started_at: {error:#}"))?;
         let settled_at = parse_canonical_timestamp(&self.settled_at)
-            .map_err(|error| anyhow::anyhow!("invalid thread usage settled_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid thread usage settled_at: {error:#}"))?;
         if settled_at < started_at {
             anyhow::bail!("thread usage settled_at must not precede started_at");
         }
@@ -215,8 +214,9 @@ impl ThreadUsage {
 /// Parse the one canonical timestamp spelling accepted by authoritative state:
 /// whole-second UTC `YYYY-MM-DDTHH:MM:SSZ`, from the Unix epoch through year
 /// 9999 inclusive. Callers compare the returned values for chronology rather
-/// than reparsing timestamps with a broader RFC 3339 grammar.
-pub fn parse_canonical_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
+/// than reparsing timestamps with a broader RFC 3339 grammar. The result is
+/// the instant as Unix seconds.
+pub fn parse_canonical_timestamp(value: &str) -> anyhow::Result<i64> {
     let bytes = value.as_bytes();
     let separators_are_canonical = bytes.len() == 20
         && bytes[4] == b'-'
@@ -237,10 +237,9 @@ pub fn parse_canonical_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
         anyhow::bail!("timestamp seconds must be within 00..=59");
     }
 
-    let naive = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ").map_err(|error| {
+    let timestamp = ryeos_effect_contract::rfc3339::parse_unix_seconds(value).map_err(|error| {
         anyhow::anyhow!("timestamp is not a valid UTC calendar instant: {error}")
     })?;
-    let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
     let year: u16 = value[..4]
         .parse()
         .map_err(|_| anyhow::anyhow!("timestamp year is invalid"))?;
@@ -550,7 +549,7 @@ impl CapturedThreadHistoryPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
         self.retention.validate()?;
         validate_canonical_item_ref(&self.canonical_item_ref).map_err(|error| {
-            anyhow::anyhow!("invalid captured history canonical_item_ref: {error}")
+            anyhow::anyhow!("invalid captured history canonical_item_ref: {error:#}")
         })?;
         for (label, value) in [
             ("item_content_hash", self.item_content_hash.as_str()),
@@ -913,9 +912,9 @@ impl ThreadSnapshot {
             anyhow::bail!("base_project_snapshot_hash projection contradicts project_authority");
         }
         let created_at = parse_canonical_timestamp(&self.created_at)
-            .map_err(|error| anyhow::anyhow!("invalid created_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid created_at: {error:#}"))?;
         let updated_at = parse_canonical_timestamp(&self.updated_at)
-            .map_err(|error| anyhow::anyhow!("invalid updated_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid updated_at: {error:#}"))?;
         if updated_at < created_at {
             anyhow::bail!("updated_at must not precede created_at");
         }
@@ -924,13 +923,13 @@ impl ThreadSnapshot {
             .as_deref()
             .map(parse_canonical_timestamp)
             .transpose()
-            .map_err(|error| anyhow::anyhow!("invalid started_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid started_at: {error:#}"))?;
         let finished_at = self
             .finished_at
             .as_deref()
             .map(parse_canonical_timestamp)
             .transpose()
-            .map_err(|error| anyhow::anyhow!("invalid finished_at: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid finished_at: {error:#}"))?;
         if started_at
             .as_ref()
             .is_some_and(|started_at| *started_at < created_at || *started_at > updated_at)
@@ -1033,15 +1032,36 @@ impl ThreadSnapshot {
         &self,
         cas: &lillux::CasStore,
     ) -> anyhow::Result<()> {
+        self.verify_result_workspace_output_capture_inner(cas, None)
+    }
+
+    pub(crate) fn verify_result_workspace_output_capture_with_budget(
+        &self,
+        cas: &lillux::CasStore,
+        budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+    ) -> anyhow::Result<()> {
+        self.verify_result_workspace_output_capture_inner(cas, Some(budget))
+    }
+
+    fn verify_result_workspace_output_capture_inner(
+        &self,
+        cas: &lillux::CasStore,
+        mut budget: Option<&mut crate::object_closure::BoundedCasObjectReadBudget>,
+    ) -> anyhow::Result<()> {
         self.validate_result_workspace_output_shape()?;
         let Some(hash) = self.result_workspace_output_capture_hash.as_deref() else {
             return Ok(());
         };
-        let value = crate::object_closure::load_exact_cas_object_with_cas(
-            cas,
-            hash,
-            super::workspace_output_capture::MAX_WORKSPACE_OUTPUT_CAPTURE_BYTES as u64,
-        )?;
+        let capture_maximum =
+            super::workspace_output_capture::MAX_WORKSPACE_OUTPUT_CAPTURE_BYTES as u64;
+        let value = match budget.as_deref_mut() {
+            Some(budget) => budget
+                .get_object(cas, hash, capture_maximum)?
+                .ok_or_else(|| anyhow::anyhow!("workspace output capture {hash} is missing"))?,
+            None => {
+                crate::object_closure::load_exact_cas_object_with_cas(cas, hash, capture_maximum)?
+            }
+        };
         let capture = super::WorkspaceOutputCapture::from_value(&value)?;
         let admitted = self
             .project_authority
@@ -1061,20 +1081,47 @@ impl ThreadSnapshot {
                 "terminal workspace output capture contradicts its exact admitted producer or generation"
             );
         }
-        let base = crate::project_materialization::load_project_snapshot_bounded(
-            cas,
-            &capture.base_project_snapshot_hash,
-        )?
+        let base = match budget.as_deref_mut() {
+            Some(budget) => {
+                crate::project_materialization::load_project_snapshot_bounded_with_budget(
+                    cas,
+                    &capture.base_project_snapshot_hash,
+                    budget,
+                )?
+            }
+            None => crate::project_materialization::load_project_snapshot_bounded(
+                cas,
+                &capture.base_project_snapshot_hash,
+            )?,
+        }
         .context("terminal workspace output base snapshot is missing")?;
-        let result = crate::project_materialization::load_project_snapshot_bounded(
-            cas,
-            &capture.result_project_snapshot_hash,
-        )?
+        let result = match budget.as_deref_mut() {
+            Some(budget) => {
+                crate::project_materialization::load_project_snapshot_bounded_with_budget(
+                    cas,
+                    &capture.result_project_snapshot_hash,
+                    budget,
+                )?
+            }
+            None => crate::project_materialization::load_project_snapshot_bounded(
+                cas,
+                &capture.result_project_snapshot_hash,
+            )?,
+        }
         .context("terminal workspace output result snapshot is missing")?;
-        let policy = crate::project_materialization::load_project_policy_bounded(
-            cas,
-            &capture.partition.project_snapshot_policy_hash,
-        )?
+        let policy = match budget {
+            Some(budget) => {
+                crate::project_materialization::load_project_policy_bounded_with_budget(
+                    cas,
+                    &capture.partition.project_snapshot_policy_hash,
+                    budget,
+                )?
+            }
+            None => crate::project_materialization::load_project_policy_bounded(
+                cas,
+                &capture.partition.project_snapshot_policy_hash,
+            )?,
+        }
         .context("terminal workspace output policy is missing")?;
         capture
             .partition
@@ -1572,8 +1619,21 @@ mod tests {
 
     #[test]
     fn canonical_timestamp_accepts_only_whole_second_utc_epoch_domain() {
-        assert!(parse_canonical_timestamp("1970-01-01T00:00:00Z").is_ok());
-        assert!(parse_canonical_timestamp("9999-12-31T23:59:59Z").is_ok());
+        assert_eq!(
+            parse_canonical_timestamp("1970-01-01T00:00:00Z").unwrap(),
+            0
+        );
+        assert_eq!(
+            parse_canonical_timestamp("9999-12-31T23:59:59Z").unwrap(),
+            253_402_300_799
+        );
+        assert_eq!(
+            parse_canonical_timestamp("2026-11-15T00:10:00Z").unwrap(),
+            1_794_701_400
+        );
+        assert!(parse_canonical_timestamp("2026-02-30T00:00:00Z").is_err());
+        assert!(parse_canonical_timestamp("2025-02-29T00:00:00Z").is_err());
+        assert!(parse_canonical_timestamp("2024-02-29T00:00:00Z").is_ok());
         for invalid in [
             "1969-12-31T23:59:59Z",
             "2026-04-21T12:00:00.000Z",

@@ -1,0 +1,35 @@
+# ryeos:signed:2026-11-18T23:23:10Z:9060888623fcd70f41116de94f99122a5a8b2e10d2c9c22f0071b79cc051728b:5jvilDwKDEp/Jyo25NPt29hApRwDqAgVtKShsdLtgow1wx0cRUjLIBJ1fjcLmr1dK4rRY0NvRPJNjusV52DnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/ui
+version: "1.1.0"
+description: Which sources raise operator attention, and how thread statuses group for presentation.
+
+# Each source names one store query the attention service implements
+# (approvals_pending, candidates_ready, runs_failed) and the words its items
+# carry. `statuses` lists the thread statuses runs_failed treats as failed;
+# cancelled is left out because the operator asked for it. `count_label` is the
+# noun the bars show beside the kind's count. `acknowledgeable` says whether an
+# operator may hide the kind's items until they have new activity; an approval
+# blocks work and has no activity to renew, so it can only be decided, never
+# hidden.
+sources:
+  - { kind: approval, query: approvals_pending, title: Approval requested, tone: warn, count_label: approvals, acknowledgeable: false }
+  - { kind: candidate, query: candidates_ready, title: Candidate ready for review, tone: warn, count_label: candidates, acknowledgeable: true }
+  - { kind: failed_run, query: runs_failed, title: Run failed, tone: danger, count_label: failed, acknowledgeable: true, statuses: [failed, timed_out] }
+
+# The running list: chain heads the principal launched or follows (never
+# scheduled or child runs) whose status `phase_categories` maps to `running`.
+# `title` and `tone` are the words its items carry; `count_label` is the noun
+# the bars show beside its count.
+running: { title: Running, tone: accent, count_label: running }
+
+# Thread status to presentation category; a status not listed is unknown.
+phase_categories:
+  created: running
+  accepted: running
+  running: running
+  continued: blocked
+  completed: completed
+  failed: failed
+  cancelled: failed
+  killed: failed
+  timed_out: failed

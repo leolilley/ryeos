@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-17T06:36:51Z:e712b85d413b5b103736b9d580947f41fff9d852ad9c9ee6b76af311cfe34637:I2U8puUgwiiNeXNipq9nBJHFBdq8fv/t04oc2AFo5eETpvZ5jz3KoIoPsDP8e5A1YzeIOt4fKhx+282YbBz4CQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-11-11T02:56:41Z:b2284ad5f69abaeb3229457c00b4dd8457ecf41ac177090b8d990badc4fed847:u+2ux8ppfnAdPBicY1gMCo0EMcbjyxVwYdEiQKrITLEZJQ7+MjQxoanKu3Upifj7cXYu+8/OtgeW2vuql0nTDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 
 # Verify and optionally materialize one Stage-0 development compiler payload.
 # This verifies transport and publisher testimony only. RyeOS's ordinary

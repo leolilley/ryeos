@@ -10,19 +10,413 @@ use sha2::{Digest as _, Sha256};
 
 use crate::canonical_json;
 use crate::runtime_snapshot::{
-    RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotIntent, RuntimeSnapshotLocator,
-    RuntimeSnapshotQualificationIntent, RuntimeSnapshotQualificationOccurrence,
-    RuntimeSnapshotReadinessObservation, RuntimeSnapshotReadinessRequest,
+    LaunchShape, RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotIntent,
+    RuntimeSnapshotLocator, RuntimeSnapshotQualificationIntent,
+    RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotReadinessObservation,
+    RuntimeSnapshotReadinessRequest,
 };
 
-pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-measurement.v1";
+pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-measurement.v2";
 pub const RESTORATION_VERIFIER_REMOTE_DIRECTORY: &str = "/ryeos/qualification";
 pub const RESTORATION_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-restoration-verifier";
+pub const CONSUMER_VERIFIER_REMOTE_NAME: &str = "ryeos-external-guest-consumer-verifier";
+/// One opaque record authored by the admitted verifier. The transport fixes
+/// its member and allowance; only the product edge interprets its language.
+pub const CONSUMER_INPUT_RECORD_NAME: &str = "consumer-input.json";
+pub const MAX_CONSUMER_INPUT_RECORD_BYTES: usize = 96 * 1024;
 pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
-pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v1";
+/// Schema of a retained verifier attempt intent.
+pub const RESTORED_VERIFIER_ATTEMPT_SCHEMA: u32 = 3;
+/// Schema of the consumer runtime challenge handed to the guest.
+pub const CONSUMER_RUNTIME_CHALLENGE_SCHEMA: u32 = 2;
+pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v4";
 pub const MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES: usize = 32 * 1024;
+// Complete canonical product-verifier evidence, not decoded transcript size.
+pub const MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES: u64 = 5 * 1024 * 1024;
+pub const MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES: usize =
+    MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES as usize + 8 * 1024;
+
+/// Closed observation payload for the existing verifier-attempt journal.
+/// A consumer result cannot serve as prerequisite owner-tree measurement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RestoredVerifierObservation {
+    OwnerMeasurement {
+        observation: RestoredVerifierAdapterObservation,
+    },
+    ConsumerRuntime {
+        observation: ConsumerVerifierAdapterObservation,
+    },
+}
+
+impl RestoredVerifierObservation {
+    pub fn owner_measurement(&self) -> Result<&RestoredVerifierAdapterObservation> {
+        match self {
+            Self::OwnerMeasurement { observation } => Ok(observation),
+            Self::ConsumerRuntime { .. } => {
+                anyhow::bail!("consumer result is not owner measurement")
+            }
+        }
+    }
+}
+
+/// Adapter-observed consumer run commitments, not semantic qualification or
+/// writer-settlement authority. Evidence bytes must be independently retained
+/// and interpreted by the admitted product verifier after native settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerVerifierAdapterObservation {
+    pub schema: u32,
+    pub operation_id: String,
+    pub occurrence_id: String,
+    pub verifier_artifact_hash: String,
+    pub challenge_digest: String,
+    pub upload_token_execution_id: String,
+    pub run_token_execution_id: String,
+    pub upload_response_sha256: String,
+    pub run_stream_sha256: String,
+    pub evidence_sha256: String,
+    pub evidence_bytes: u64,
+    /// Replaced with daemon-observed timing before retention.
+    pub contact_deadline_exceeded: bool,
+}
+
+impl ConsumerVerifierAdapterObservation {
+    /// Data agreement only. Caller must authenticate source, occurrence,
+    /// accepted root, protected selection and adapter execution separately.
+    pub fn validate_for_intent(&self, intent: &RestoredVerifierAttemptIntent) -> Result<()> {
+        ensure!(
+            self.schema == 1
+                && self.operation_id == intent.operation_id
+                && self.occurrence_id == intent.restored_occurrence_id
+                && self.verifier_artifact_hash == intent.verifier_artifact_hash
+                && self.challenge_digest == intent.consumer_challenge_digest()?
+                && self.evidence_bytes > 0
+                && self.evidence_bytes <= MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES,
+            "consumer observation differs from retained attempt or evidence bound"
+        );
+        for id in [
+            &self.upload_token_execution_id,
+            &self.run_token_execution_id,
+        ] {
+            ensure!(
+                id.starts_with("exe-")
+                    && id.len() > 4
+                    && id.len() <= 128
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+                "consumer adapter execution identity is invalid"
+            );
+        }
+        for (label, digest) in [
+            ("consumer upload response", &self.upload_response_sha256),
+            ("consumer run stream", &self.run_stream_sha256),
+            ("consumer evidence", &self.evidence_sha256),
+        ] {
+            require_hash(digest, label)?;
+        }
+        ensure!(
+            canonical_json(self)?.len() <= 4096,
+            "consumer observation exceeds its bound"
+        );
+        Ok(())
+    }
+
+    /// Exact canonical evidence transport; parsing does not confer semantic
+    /// truth, namespace death, candidate completion or qualification claims.
+    pub fn verify_evidence_bytes(&self, bytes: &[u8]) -> Result<serde_json::Value> {
+        ensure!(
+            self.evidence_bytes > 0
+                && self.evidence_bytes <= MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES
+                && bytes.len() as u64 == self.evidence_bytes
+                && hex::encode(Sha256::digest(bytes)) == self.evidence_sha256,
+            "consumer evidence bytes differ from bounded observation"
+        );
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
+        ensure!(
+            value.is_object() && canonical_json(&value)? == bytes,
+            "consumer evidence is not an exact canonical object"
+        );
+        Ok(value)
+    }
+}
+
+/// Closed static selector for the protected input read. Operation and
+/// prerequisite identities come only from the sealed launch purpose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerVerificationScenarioSelection {
+    pub scenario_id: String,
+}
+
+impl ConsumerVerificationScenarioSelection {
+    pub fn validate(&self) -> Result<()> {
+        validate_consumer_scenario_id(&self.scenario_id)
+    }
+}
+
+fn validate_consumer_scenario_id(scenario_id: &str) -> Result<()> {
+    ensure!(
+        !scenario_id.is_empty()
+            && scenario_id.len() <= 128
+            && scenario_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+        "consumer input scenario selector is invalid"
+    );
+    Ok(())
+}
+
+/// Exact invocation retained in the sealed purpose after owner admission.
+/// These identities confer no contact authority by themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerVerificationInputSelection {
+    pub scenario_id: String,
+    pub qualification_operation_id: String,
+    pub prerequisite_measurement_attempt_id: String,
+}
+
+impl ConsumerVerificationInputSelection {
+    pub fn validate(&self) -> Result<()> {
+        validate_consumer_scenario_id(&self.scenario_id)?;
+        require_hash(&self.qualification_operation_id, "qualification selector")?;
+        require_hash(
+            &self.prerequisite_measurement_attempt_id,
+            "measurement selector",
+        )
+    }
+
+    pub fn require_coordinate(
+        &self,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<()> {
+        self.validate()?;
+        coordinate.validate()?;
+        ensure!(
+            coordinate.scenario_id == self.scenario_id
+                && coordinate.prerequisite_measurement_attempt_id
+                    == self.prerequisite_measurement_attempt_id,
+            "protected consumer inputs changed requested selectors"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod input_selection_tests {
+    use super::*;
+
+    #[test]
+    fn scenario_read_selection_cannot_supply_invocation_identities() {
+        let wire = serde_json::json!({"scenario_id":"consumer"});
+        serde_json::from_value::<ConsumerVerificationScenarioSelection>(wire.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        for field in [
+            "qualification_operation_id",
+            "prerequisite_measurement_attempt_id",
+            "accepted_root_id",
+        ] {
+            let mut changed = wire.clone();
+            changed[field] = "a".repeat(64).into();
+            assert!(
+                serde_json::from_value::<ConsumerVerificationScenarioSelection>(changed).is_err()
+            );
+        }
+        for scenario_id in ["", "consumer/other", &"c".repeat(129)] {
+            assert!(
+                ConsumerVerificationScenarioSelection {
+                    scenario_id: scenario_id.into()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<ConsumerVerificationScenarioSelection>(serde_json::json!({}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn input_selectors_cannot_supply_root_or_observation_authority() {
+        let selection = serde_json::json!({
+            "scenario_id":"consumer", "qualification_operation_id":"a".repeat(64),
+            "prerequisite_measurement_attempt_id":"b".repeat(64),
+        });
+        let parsed: ConsumerVerificationInputSelection =
+            serde_json::from_value(selection.clone()).unwrap();
+        parsed.validate().unwrap();
+        for field in [
+            "accepted_root_id",
+            "accepted_capsule_hash",
+            "qualification_purpose_digest",
+            "prerequisite_measurement_observation_digest",
+        ] {
+            let mut forged = selection.clone();
+            forged[field] = "c".repeat(64).into();
+            assert!(serde_json::from_value::<ConsumerVerificationInputSelection>(forged).is_err());
+        }
+        for scenario in ["", "consumer/another", &"c".repeat(129)] {
+            let mut changed = parsed.clone();
+            changed.scenario_id = scenario.into();
+            assert!(changed.validate().is_err());
+        }
+    }
+}
+
+/// Stable coordinates for a consumer verification on an already measured
+/// qualification occurrence. These are commitments, not authentication or
+/// permission to contact a provider. The daemon must join them to its born
+/// accepted root, signed scenario and same-occurrence measurement journal.
+/// Nonce, deadlines and upload representations deliberately do not belong
+/// here: changing them must not mint another logical verification contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerRuntimeVerificationCoordinate {
+    pub schema: u32,
+    pub accepted_root_id: String,
+    pub accepted_capsule_hash: String,
+    pub qualification_purpose_digest: String,
+    pub scenario_id: String,
+    pub scenario_source_digest: String,
+    pub subject_digest: String,
+    pub use_digest: String,
+    pub prerequisite_measurement_attempt_id: String,
+    pub prerequisite_measurement_observation_digest: String,
+}
+
+/// Protected selection for a consumer-verifier artifact, distinct from the
+/// prerequisite owner-measurement artifact. The artifact must still be
+/// resolved and sealed by the installed runtime owner before contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerRuntimeVerifierSelection {
+    pub scenario_source_digest: String,
+    pub verifier_artifact_hash: String,
+    pub archive_budget: ConsumerArchiveBudget,
+}
+
+/// Protected node resource allowance, not a new logical contact coordinate.
+/// Full selection equality is retained and rechecked by the attempt journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerArchiveBudget {
+    pub maximum_entries: usize,
+    pub maximum_regular_bytes: u64,
+    pub maximum_framed_bytes: u64,
+}
+
+impl ConsumerArchiveBudget {
+    pub fn new(
+        maximum_entries: usize,
+        maximum_regular_bytes: u64,
+        maximum_framed_bytes: u64,
+    ) -> Result<Self> {
+        let budget = Self {
+            maximum_entries,
+            maximum_regular_bytes,
+            maximum_framed_bytes,
+        };
+        budget.validate()?;
+        Ok(budget)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.maximum_entries > 0
+                && self.maximum_entries <= crate::staging_package::MAX_GUEST_STAGING_ENTRIES
+                && self.maximum_regular_bytes > 0
+                && self.maximum_framed_bytes <= 4 * 1024 * 1024 * 1024
+                && self
+                    .maximum_regular_bytes
+                    .checked_add(1024)
+                    .is_some_and(|minimum| minimum <= self.maximum_framed_bytes),
+            "consumer archive budget is outside finite staging bounds"
+        );
+        Ok(())
+    }
+}
+
+impl ConsumerRuntimeVerifierSelection {
+    pub fn validate(&self) -> Result<()> {
+        require_hash(&self.scenario_source_digest, "consumer scenario source")?;
+        require_hash(&self.verifier_artifact_hash, "consumer verifier artifact")?;
+        self.archive_budget.validate()
+    }
+
+    pub fn validate_coordinate(
+        &self,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<()> {
+        self.validate()?;
+        coordinate.validate()?;
+        ensure!(
+            self.scenario_source_digest == coordinate.scenario_source_digest,
+            "consumer verifier selection differs from accepted scenario source"
+        );
+        Ok(())
+    }
+}
+
+impl ConsumerRuntimeVerificationCoordinate {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1,
+            "unsupported consumer verification coordinate"
+        );
+        ensure!(
+            self.accepted_root_id.starts_with("T-")
+                && self.accepted_root_id.len() <= 128
+                && self.accepted_root_id.len() > 2
+                && self
+                    .accepted_root_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+            "consumer verification root coordinate is invalid"
+        );
+        ensure!(
+            !self.scenario_id.is_empty()
+                && self.scenario_id.len() <= 128
+                && self
+                    .scenario_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+            "consumer verification scenario coordinate is invalid"
+        );
+        for (label, digest) in [
+            ("accepted capsule", &self.accepted_capsule_hash),
+            ("qualification purpose", &self.qualification_purpose_digest),
+            ("scenario source", &self.scenario_source_digest),
+            ("subject", &self.subject_digest),
+            ("use", &self.use_digest),
+            (
+                "prerequisite attempt",
+                &self.prerequisite_measurement_attempt_id,
+            ),
+            (
+                "prerequisite observation",
+                &self.prerequisite_measurement_observation_digest,
+            ),
+        ] {
+            require_hash(digest, label)?;
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        self.validate()?;
+        Ok(hex::encode(Sha256::digest(canonical_json(&(
+            "ryeos.consumer-runtime-verification-coordinate.v1",
+            self,
+        ))?)))
+    }
+}
 
 /// Sealed, one-contact handoff. The descriptor number is process-local; the
 /// exact upload bytes and hash remain part of the retained attempt. No field
@@ -32,6 +426,8 @@ pub const MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES: usize = 32 * 1024;
 pub struct RestoredVerifierAdapterRequest {
     pub protocol: String,
     pub intent: RestoredVerifierAttemptIntent,
+    #[serde(deserialize_with = "crate::deserialize_required_nullable")]
+    pub consumer_selection: Option<ConsumerRuntimeVerifierSelection>,
     pub source_intent: RuntimeSnapshotIntent,
     pub locator: RuntimeSnapshotLocator,
     pub readiness: RuntimeSnapshotReadinessObservation,
@@ -43,14 +439,110 @@ pub struct RestoredVerifierAdapterRequest {
     pub upload_sha256: String,
 }
 
-impl RestoredVerifierAdapterRequest {
+/// Bounded guest input for the existing consumer attempt. It carries no token,
+/// credential, descriptor coordinate or replacement execution identity. The
+/// transport owner must authenticate delivery; parsing is data agreement only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsumerRuntimeChallenge {
+    pub schema: u32,
+    pub intent: RestoredVerifierAttemptIntent,
+    pub selection: ConsumerRuntimeVerifierSelection,
+}
+
+impl ConsumerRuntimeChallenge {
     pub fn validate(&self) -> Result<()> {
-        self.intent.validate_for(
-            &self.source_intent,
-            &self.locator,
-            &self.qualification_intent,
-            &self.occurrence,
-        )?;
+        ensure!(
+            self.schema == CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
+            "unsupported consumer runtime challenge"
+        );
+        let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &self.intent.purpose
+        else {
+            anyhow::bail!("owner measurement cannot use consumer runtime challenge");
+        };
+        self.selection.validate_coordinate(coordinate)?;
+        self.intent.consumer_challenge_digest()?;
+        require_hash(&self.intent.upload_sha256, "consumer challenge upload")?;
+        ensure!(
+            self.intent.verifier_artifact_hash == self.selection.verifier_artifact_hash
+                && self.intent.upload_bytes > 0
+                && self.intent.upload_bytes <= self.selection.archive_budget.maximum_framed_bytes
+                && self.intent.attempt_deadline_ms > 0,
+            "consumer runtime challenge differs from retained selection or upload budget"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048,
+            "consumer runtime challenge exceeds its envelope"
+        );
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        canonical_json(self)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048,
+            "consumer runtime challenge exceeds its envelope"
+        );
+        let challenge: Self = serde_json::from_slice(bytes)?;
+        challenge.validate()?;
+        ensure!(
+            canonical_json(&challenge)? == bytes,
+            "consumer runtime challenge is not canonical"
+        );
+        Ok(challenge)
+    }
+}
+
+impl RestoredVerifierAdapterRequest {
+    /// Exact private archive staging mode for this closed protocol lane.
+    /// Consumer delivery is frozen before contact; prerequisite owner uploads
+    /// retain their existing private staging contract. No permissive fallback.
+    pub fn required_upload_mode(&self) -> u32 {
+        match &self.intent.purpose {
+            RemoteVerificationPurpose::OwnerMeasurement { .. } => 0o600,
+            RemoteVerificationPurpose::ConsumerRuntime { .. } => 0o400,
+        }
+    }
+
+    pub fn consumer_challenge(&self) -> Result<ConsumerRuntimeChallenge> {
+        self.validate()?;
+        let challenge = ConsumerRuntimeChallenge {
+            schema: CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
+            intent: self.intent.clone(),
+            selection: self
+                .consumer_selection
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("consumer challenge has no protected selection"))?,
+        };
+        challenge.validate()?;
+        Ok(challenge)
+    }
+    pub fn validate(&self) -> Result<()> {
+        match (&self.intent.purpose, &self.consumer_selection) {
+            (RemoteVerificationPurpose::OwnerMeasurement { .. }, None) => {
+                self.intent.validate_for(
+                    &self.source_intent,
+                    &self.locator,
+                    &self.qualification_intent,
+                    &self.occurrence,
+                )?;
+            }
+            (RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. }, Some(selection)) => {
+                self.intent.validate_consumer_for(
+                    &self.source_intent,
+                    &self.locator,
+                    &self.qualification_intent,
+                    &self.occurrence,
+                    selection,
+                    coordinate,
+                )?;
+            }
+            _ => anyhow::bail!("verifier handoff purpose contradicts selection"),
+        }
         let readiness_request = RuntimeSnapshotReadinessRequest {
             protocol: RUNTIME_SNAPSHOT_READINESS_PROTOCOL.into(),
             intent: self.source_intent.clone(),
@@ -94,6 +586,45 @@ pub struct RestoredVerifierAdapterObservation {
 }
 
 impl RestoredVerifierAdapterObservation {
+    /// Digest of the owner observation's exact typed protocol bytes,
+    /// excluding its journal enum envelope. This is the prerequisite
+    /// coordinate commitment, not a state CAS object's digest.
+    pub fn digest(&self) -> Result<String> {
+        Ok(hex::encode(Sha256::digest(canonical_json(self)?)))
+    }
+
+    /// Bind a prerequisite observation to a proposed consumer coordinate.
+    /// The caller must load the observed journal row and independently admit
+    /// the accepted root and current occurrence; deserialized data is not
+    /// evidence of either ownership or liveness.
+    pub fn validate_consumer_prerequisite(
+        &self,
+        intent: &RestoredVerifierAttemptIntent,
+        coordinate: &ConsumerRuntimeVerificationCoordinate,
+        source: &RuntimeSnapshotIntent,
+        locator: &RuntimeSnapshotLocator,
+        readiness: &RuntimeSnapshotReadinessObservation,
+        qualification: &RuntimeSnapshotQualificationIntent,
+        occurrence: &RuntimeSnapshotQualificationOccurrence,
+    ) -> Result<()> {
+        coordinate.validate()?;
+        self.validate_for_retained(
+            intent,
+            source,
+            locator,
+            readiness,
+            qualification,
+            occurrence,
+        )?;
+        ensure!(
+            !self.contact_deadline_exceeded
+                && coordinate.prerequisite_measurement_attempt_id == intent.operation_id
+                && coordinate.prerequisite_measurement_observation_digest == self.digest()?,
+            "consumer prerequisite differs from timely same-occurrence owner measurement"
+        );
+        Ok(())
+    }
+
     pub fn validate_for(&self, request: &RestoredVerifierAdapterRequest) -> Result<()> {
         request.validate()?;
         self.validate_for_retained(
@@ -147,7 +678,7 @@ impl RestoredVerifierAdapterObservation {
         require_hash(&self.upload_response_sha256, "upload response")?;
         require_hash(&self.run_stream_sha256, "run stream")?;
         self.measurement.validate_content_for_bound_snapshot(
-            &intent.challenge,
+            intent.owner_challenge()?,
             source,
             locator,
             readiness,
@@ -162,8 +693,17 @@ pub enum RestoredVerifierAdapterResponse {
     Observed {
         observation: Box<RestoredVerifierAdapterObservation>,
     },
+    /// Exact bounded evidence content, not a semantic qualification claim.
+    /// Other lifecycle and owner-measurement responses keep their smaller cap.
+    ConsumerObserved {
+        observation: Box<ConsumerVerifierAdapterObservation>,
+        evidence: serde_json::Value,
+    },
     Uncertain {
         operation_id: String,
+        /// Diagnostic only; never alters the uncertain outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::UncertaintyReason>,
     },
 }
 
@@ -171,15 +711,37 @@ impl RestoredVerifierAdapterResponse {
     pub fn validate_for(&self, request: &RestoredVerifierAdapterRequest) -> Result<()> {
         request.validate()?;
         match self {
-            Self::Observed { observation } => observation.validate_for(request),
-            Self::Uncertain { operation_id } => {
+            Self::Observed { observation } => observation.validate_for(request)?,
+            Self::ConsumerObserved {
+                observation,
+                evidence,
+            } => {
+                observation.validate_for_intent(&request.intent)?;
+                observation.verify_evidence_bytes(&canonical_json(evidence)?)?;
+            }
+            Self::Uncertain {
+                operation_id,
+                reason,
+            } => {
                 ensure!(
                     operation_id == &request.intent.operation_id,
                     "uncertain verifier result changed its durable attempt"
                 );
-                Ok(())
+                if let Some(reason) = reason {
+                    reason.validate()?;
+                }
             }
         }
+        ensure!(
+            canonical_json(self)?.len()
+                <= if matches!(self, Self::ConsumerObserved { .. }) {
+                    MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES
+                } else {
+                    crate::MAX_LIFECYCLE_RESPONSE_BYTES
+                },
+            "verifier response exceeds lifecycle envelope"
+        );
+        Ok(())
     }
 }
 
@@ -198,11 +760,225 @@ pub struct RestoredVerifierAttemptIntent {
     pub verifier_artifact_hash: String,
     pub upload_sha256: String,
     pub upload_bytes: u64,
-    pub challenge: RestoredOwnerChallenge,
+    pub purpose: RemoteVerificationPurpose,
     pub attempt_deadline_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RemoteVerificationPurpose {
+    OwnerMeasurement {
+        challenge: RestoredOwnerChallenge,
+    },
+    ConsumerRuntime {
+        coordinate: ConsumerRuntimeVerificationCoordinate,
+        nonce_hex: String,
+        /// Exact installed owner runtime, selected from the retained snapshot
+        /// source. Its manifest commits the account profile used at startup.
+        guest_runtime_manifest_hash: String,
+        /// The launch shape the occurrence was created under, copied from
+        /// its retained qualification intent. The scenario's declared shape
+        /// must equal it before this attempt exists.
+        launch_shape: LaunchShape,
+    },
+}
+
+impl RemoteVerificationPurpose {
+    /// Logical purpose only. Challenge randomness cannot create another
+    /// attempt; the journal compares complete immutable intent separately.
+    fn coordinate_digest(&self) -> Result<String> {
+        let value = match self {
+            Self::OwnerMeasurement { challenge } => {
+                challenge.validate()?;
+                serde_json::json!({"kind": "owner_measurement"})
+            }
+            Self::ConsumerRuntime {
+                coordinate,
+                nonce_hex,
+                guest_runtime_manifest_hash,
+                ..
+            } => {
+                require_hash(nonce_hex, "consumer challenge nonce")?;
+                return consumer_verification_purpose_digest(
+                    coordinate,
+                    guest_runtime_manifest_hash,
+                );
+            }
+        };
+        Ok(hex::encode(Sha256::digest(canonical_json(&value)?)))
+    }
+}
+
+fn consumer_verification_purpose_digest(
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    guest_runtime_manifest_hash: &str,
+) -> Result<String> {
+    coordinate.validate()?;
+    require_hash(guest_runtime_manifest_hash, "consumer owner runtime")?;
+    Ok(hex::encode(Sha256::digest(canonical_json(
+        &serde_json::json!({
+            "kind":"consumer_runtime", "coordinate":coordinate,
+            "guest_runtime_manifest_hash":guest_runtime_manifest_hash,
+        }),
+    )?)))
+}
+
+fn verifier_operation_id(
+    qualification: &str,
+    occurrence: &str,
+    artifact: &str,
+    purpose_digest: &str,
+) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(canonical_json(&(
+        "ryeos.restored-verifier-attempt.v2",
+        qualification,
+        occurrence,
+        artifact,
+        purpose_digest,
+    ))?)))
+}
+
+/// Exact pending journal coordinate, not reservation or contact authority.
+/// The caller must authenticate these stable fields from retained ownership.
+pub fn consumer_verifier_operation_id(
+    qualification: &str,
+    occurrence: &str,
+    artifact: &str,
+    coordinate: &ConsumerRuntimeVerificationCoordinate,
+    guest_runtime_manifest_hash: &str,
+) -> Result<String> {
+    require_hash(qualification, "consumer qualification")?;
+    require_hash(artifact, "consumer verifier artifact")?;
+    ensure!(
+        !occurrence.is_empty() && occurrence.len() <= 256,
+        "consumer occurrence identity is invalid"
+    );
+    verifier_operation_id(
+        qualification,
+        occurrence,
+        artifact,
+        &consumer_verification_purpose_digest(coordinate, guest_runtime_manifest_hash)?,
+    )
+}
+
 impl RestoredVerifierAttemptIntent {
+    /// Exact remote delivery root. Consumer archives never share a directory
+    /// with prerequisite owner measurement or another retained attempt.
+    /// This is a bounded path commitment, not filesystem/provider authority.
+    pub fn remote_upload_directory(&self) -> Result<String> {
+        require_hash(&self.operation_id, "verifier attempt")?;
+        ensure!(
+            self.operation_id == self.derived_operation_id()?,
+            "verifier upload root has no exact attempt identity"
+        );
+        Ok(match &self.purpose {
+            RemoteVerificationPurpose::OwnerMeasurement { .. } => {
+                RESTORATION_VERIFIER_REMOTE_DIRECTORY.into()
+            }
+            RemoteVerificationPurpose::ConsumerRuntime { .. } => format!(
+                "{RESTORATION_VERIFIER_REMOTE_DIRECTORY}/consumer-{}",
+                self.operation_id
+            ),
+        })
+    }
+    /// Fresh result binding, deliberately distinct from logical attempt
+    /// identity. A changed nonce cannot mint contact but must invalidate an
+    /// old consumer response. This commitment grants no execution authority.
+    pub fn consumer_challenge_digest(&self) -> Result<String> {
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            nonce_hex,
+            guest_runtime_manifest_hash,
+            launch_shape,
+        } = &self.purpose
+        else {
+            anyhow::bail!("owner measurement has no consumer challenge");
+        };
+        coordinate.validate()?;
+        launch_shape.validate()?;
+        require_hash(nonce_hex, "consumer challenge nonce")?;
+        require_hash(guest_runtime_manifest_hash, "consumer owner runtime")?;
+        require_hash(&self.verifier_artifact_hash, "consumer verifier artifact")?;
+        ensure!(
+            self.schema == RESTORED_VERIFIER_ATTEMPT_SCHEMA
+                && self.operation_id == self.derived_operation_id()?,
+            "consumer challenge has no exact retained attempt identity"
+        );
+        Ok(hex::encode(Sha256::digest(canonical_json(&(
+            "ryeos.consumer-runtime-challenge.v3",
+            &self.operation_id,
+            &self.verifier_artifact_hash,
+            coordinate,
+            nonce_hex,
+            guest_runtime_manifest_hash,
+            launch_shape,
+        ))?)))
+    }
+
+    /// Consumer-specific data join. This does not grant contact: the journal
+    /// must authenticate the prerequisite on the same live occurrence and the
+    /// application must bind the coordinate to its accepted root and purpose.
+    pub fn validate_consumer_for(
+        &self,
+        source: &RuntimeSnapshotIntent,
+        locator: &RuntimeSnapshotLocator,
+        qualification: &RuntimeSnapshotQualificationIntent,
+        occurrence: &RuntimeSnapshotQualificationOccurrence,
+        selection: &ConsumerRuntimeVerifierSelection,
+        expected_coordinate: &ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<()> {
+        qualification.validate_for(source, locator)?;
+        occurrence.validate_for(qualification)?;
+        selection.validate_coordinate(expected_coordinate)?;
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            nonce_hex,
+            guest_runtime_manifest_hash,
+            launch_shape,
+        } = &self.purpose
+        else {
+            anyhow::bail!("owner measurement cannot use consumer verification admission");
+        };
+        launch_shape.validate()?;
+        ensure!(
+            *launch_shape == qualification.launch_shape,
+            "consumer verifier attempt launch shape differs from its qualification occurrence"
+        );
+        require_hash(nonce_hex, "consumer challenge nonce")?;
+        require_hash(&self.upload_sha256, "consumer upload")?;
+        ensure!(
+            coordinate == expected_coordinate
+                && guest_runtime_manifest_hash == &source.guest_runtime_manifest_hash
+                && self.schema == RESTORED_VERIFIER_ATTEMPT_SCHEMA
+                && self.qualification_operation_id == qualification.operation_id
+                && self.restored_occurrence_id == occurrence.occurrence_id
+                && self.verifier_artifact_hash == selection.verifier_artifact_hash
+                && !occurrence.contact_deadline_exceeded
+                && self.upload_bytes > 0
+                && self.upload_bytes <= selection.archive_budget.maximum_framed_bytes
+                && self.attempt_deadline_ms > 0,
+            "consumer verifier attempt differs from protected occurrence or accepted coordinate"
+        );
+        ensure!(
+            self.operation_id == self.derived_operation_id()?,
+            "consumer verifier attempt changed its durable identity"
+        );
+        ensure!(
+            canonical_json(self)?.len() <= MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048,
+            "consumer verifier attempt exceeds its bound"
+        );
+        Ok(())
+    }
+
+    pub fn owner_challenge(&self) -> Result<&RestoredOwnerChallenge> {
+        match &self.purpose {
+            RemoteVerificationPurpose::OwnerMeasurement { challenge } => Ok(challenge),
+            RemoteVerificationPurpose::ConsumerRuntime { .. } => {
+                anyhow::bail!("consumer verification cannot use owner-measurement contact")
+            }
+        }
+    }
+
     pub fn validate_for(
         &self,
         source: &RuntimeSnapshotIntent,
@@ -212,12 +988,13 @@ impl RestoredVerifierAttemptIntent {
     ) -> Result<()> {
         qualification.validate_for(source, locator)?;
         occurrence.validate_for(qualification)?;
-        self.challenge.validate_for(source, locator)?;
+        let challenge = self.owner_challenge()?;
+        challenge.validate_for(source, locator)?;
         ensure!(
-            self.schema == 1
+            self.schema == RESTORED_VERIFIER_ATTEMPT_SCHEMA
                 && self.qualification_operation_id == qualification.operation_id
                 && self.restored_occurrence_id == occurrence.occurrence_id
-                && self.challenge.restored_occurrence_id == occurrence.occurrence_id
+                && challenge.restored_occurrence_id == occurrence.occurrence_id
                 && self.verifier_artifact_hash == qualification.verifier_artifact_hash
                 && !occurrence.contact_deadline_exceeded
                 && self.upload_bytes > 0
@@ -241,13 +1018,12 @@ impl RestoredVerifierAttemptIntent {
     /// retained attempt data, not coordinates that mint another contact.
     /// Reservation replay compares the entire intent, including those fields.
     pub fn derived_operation_id(&self) -> Result<String> {
-        let coordinates = (
-            "ryeos.restored-verifier-attempt.v1",
+        verifier_operation_id(
             &self.qualification_operation_id,
             &self.restored_occurrence_id,
             &self.verifier_artifact_hash,
-        );
-        Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
+            &self.purpose.coordinate_digest()?,
+        )
     }
 }
 
@@ -320,7 +1096,6 @@ pub struct RestoredOwnerMeasurement {
     pub challenge_digest: String,
     pub manifest_hash: String,
     pub owner_executable_sha256: String,
-    pub controller_public_root: String,
 }
 
 impl RestoredOwnerMeasurement {
@@ -337,8 +1112,7 @@ impl RestoredOwnerMeasurement {
                 && self.challenge_digest == challenge.digest()?
                 && challenge.operation_id == intent.operation_id
                 && self.manifest_hash == intent.guest_runtime_manifest_hash
-                && self.owner_executable_sha256 == intent.owner_executable_sha256
-                && self.controller_public_root == intent.controller_public_root,
+                && self.owner_executable_sha256 == intent.owner_executable_sha256,
             "restored owner measurement differs from exact retained product"
         );
         require_hash(&self.challenge_digest, "challenge")?;
@@ -385,31 +1159,120 @@ fn require_hash(value: &str, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn consumer_archive_budget_is_required_finite_and_checked() {
+        use super::{ConsumerArchiveBudget, ConsumerRuntimeVerifierSelection};
+        let budget = ConsumerArchiveBudget::new(16, 4096, 8192).unwrap();
+        assert_eq!(budget.maximum_regular_bytes, 4096);
+        for (entries, regular, framed) in [
+            (0, 4096, 8192),
+            (16, 0, 8192),
+            (16, u64::MAX, u64::MAX),
+            (16, 8192, 8192),
+            (16, 4096, 4 * 1024 * 1024 * 1024 + 1),
+            (
+                crate::staging_package::MAX_GUEST_STAGING_ENTRIES + 1,
+                4096,
+                8192,
+            ),
+        ] {
+            assert!(ConsumerArchiveBudget::new(entries, regular, framed).is_err());
+        }
+        assert!(
+            serde_json::from_value::<ConsumerRuntimeVerifierSelection>(serde_json::json!({
+                "scenario_source_digest": "a".repeat(64), "verifier_artifact_hash": "b".repeat(64),
+            }))
+            .is_err()
+        );
+    }
+    #[test]
+    fn consumer_coordinate_binds_each_authoritative_identity() {
+        let coordinate = super::ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-fixture-root".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "routed-consumer".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: "f".repeat(64),
+            prerequisite_measurement_observation_digest: "1".repeat(64),
+        };
+        let original = coordinate.digest().unwrap();
+        let selection = super::ConsumerRuntimeVerifierSelection {
+            scenario_source_digest: coordinate.scenario_source_digest.clone(),
+            verifier_artifact_hash: "3".repeat(64),
+            archive_budget: super::ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+        };
+        selection.validate_coordinate(&coordinate).unwrap();
+        let mut mismatched = selection.clone();
+        mismatched.scenario_source_digest = "4".repeat(64);
+        assert!(mismatched.validate_coordinate(&coordinate).is_err());
+        mismatched = selection;
+        mismatched.verifier_artifact_hash.clear();
+        assert!(mismatched.validate().is_err());
+        let value = serde_json::to_value(&coordinate).unwrap();
+        for field in [
+            "accepted_capsule_hash",
+            "qualification_purpose_digest",
+            "scenario_source_digest",
+            "subject_digest",
+            "use_digest",
+            "prerequisite_measurement_attempt_id",
+            "prerequisite_measurement_observation_digest",
+        ] {
+            let mut changed = value.clone();
+            changed[field] = serde_json::json!("2".repeat(64));
+            let changed: super::ConsumerRuntimeVerificationCoordinate =
+                serde_json::from_value(changed).unwrap();
+            assert_ne!(changed.digest().unwrap(), original, "{field}");
+        }
+        let mut changed = coordinate.clone();
+        changed.accepted_root_id = "T-other-root".into();
+        assert_ne!(changed.digest().unwrap(), original);
+        changed = coordinate.clone();
+        changed.scenario_id = "different-scenario".into();
+        assert_ne!(changed.digest().unwrap(), original);
+        changed = coordinate.clone();
+        changed.prerequisite_measurement_observation_digest.clear();
+        assert!(changed.validate().is_err());
+        let mut excess = value;
+        excess["qualified"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<super::ConsumerRuntimeVerificationCoordinate>(excess).is_err()
+        );
+    }
+
     use super::*;
-    use base64::Engine as _;
 
     #[test]
     fn verifier_attempt_identity_cannot_be_reminted_by_nonce_or_deadline() {
         let mut attempt = RestoredVerifierAttemptIntent {
-            schema: 1,
+            schema: RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: "1".repeat(64),
             restored_occurrence_id: "sbx-exact".into(),
             verifier_artifact_hash: "2".repeat(64),
             upload_sha256: "3".repeat(64),
             upload_bytes: 1024,
-            challenge: RestoredOwnerChallenge {
-                schema: 1,
-                protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
-                operation_id: "4".repeat(64),
-                snapshot_id: "snp-exact".into(),
-                restored_occurrence_id: "sbx-exact".into(),
-                nonce_hex: "5".repeat(64),
+            purpose: RemoteVerificationPurpose::OwnerMeasurement {
+                challenge: RestoredOwnerChallenge {
+                    schema: 1,
+                    protocol: RESTORED_OWNER_MEASUREMENT_PROTOCOL.into(),
+                    operation_id: "4".repeat(64),
+                    snapshot_id: "snp-exact".into(),
+                    restored_occurrence_id: "sbx-exact".into(),
+                    nonce_hex: "5".repeat(64),
+                },
             },
             attempt_deadline_ms: 42,
         };
         let identity = attempt.derived_operation_id().unwrap();
-        attempt.challenge.nonce_hex = "6".repeat(64);
+        let RemoteVerificationPurpose::OwnerMeasurement { challenge } = &mut attempt.purpose else {
+            unreachable!()
+        };
+        challenge.nonce_hex = "6".repeat(64);
         attempt.attempt_deadline_ms += 1;
         assert_eq!(attempt.derived_operation_id().unwrap(), identity);
         attempt.restored_occurrence_id = "sbx-other".into();
@@ -417,6 +1280,159 @@ mod tests {
         attempt.restored_occurrence_id = "sbx-exact".into();
         attempt.upload_sha256 = "7".repeat(64);
         assert_eq!(attempt.derived_operation_id().unwrap(), identity);
+        let coordinate = ConsumerRuntimeVerificationCoordinate {
+            schema: 1,
+            accepted_root_id: "T-consumer-root".into(),
+            accepted_capsule_hash: "a".repeat(64),
+            qualification_purpose_digest: "b".repeat(64),
+            scenario_id: "routed-consumer".into(),
+            scenario_source_digest: "c".repeat(64),
+            subject_digest: "d".repeat(64),
+            use_digest: "e".repeat(64),
+            prerequisite_measurement_attempt_id: "f".repeat(64),
+            prerequisite_measurement_observation_digest: "1".repeat(64),
+        };
+        attempt.purpose = RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            nonce_hex: "2".repeat(64),
+            guest_runtime_manifest_hash: "7".repeat(64),
+            launch_shape: LaunchShape {
+                controller_transport: crate::runtime_snapshot::LaunchControllerTransport::Https,
+                sandbox_network_policy:
+                    crate::runtime_snapshot::LaunchSandboxNetworkPolicy::DenyAll,
+                network_inputs: Some(crate::runtime_snapshot::LaunchNetworkInputs::operator()),
+            },
+        };
+        let consumer_identity = attempt.derived_operation_id().unwrap();
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            coordinate,
+            guest_runtime_manifest_hash,
+            ..
+        } = &attempt.purpose
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            consumer_verifier_operation_id(
+                &attempt.qualification_operation_id,
+                &attempt.restored_occurrence_id,
+                &attempt.verifier_artifact_hash,
+                coordinate,
+                guest_runtime_manifest_hash,
+            )
+            .unwrap(),
+            consumer_identity
+        );
+        attempt.operation_id = consumer_identity.clone();
+        let challenge = ConsumerRuntimeChallenge {
+            schema: CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
+            intent: attempt.clone(),
+            selection: ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: "c".repeat(64),
+                verifier_artifact_hash: "2".repeat(64),
+                archive_budget: ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+            },
+        };
+        let encoded = challenge.canonical_bytes().unwrap();
+        assert_eq!(
+            ConsumerRuntimeChallenge::parse(&encoded).unwrap(),
+            challenge
+        );
+        let mut noncanonical = encoded;
+        noncanonical.push(b'\n');
+        assert!(ConsumerRuntimeChallenge::parse(&noncanonical).is_err());
+        let mut substituted = challenge.clone();
+        substituted.selection.verifier_artifact_hash = "9".repeat(64);
+        assert!(substituted.validate().is_err());
+        substituted = challenge;
+        substituted.intent.upload_bytes = 8193;
+        assert!(substituted.validate().is_err());
+        assert_eq!(
+            attempt.remote_upload_directory().unwrap(),
+            format!("{RESTORATION_VERIFIER_REMOTE_DIRECTORY}/consumer-{consumer_identity}")
+        );
+        let fresh_challenge = attempt.consumer_challenge_digest().unwrap();
+        let mut changed_runtime = attempt.clone();
+        let RemoteVerificationPurpose::ConsumerRuntime {
+            guest_runtime_manifest_hash,
+            ..
+        } = &mut changed_runtime.purpose
+        else {
+            unreachable!();
+        };
+        *guest_runtime_manifest_hash = "8".repeat(64);
+        changed_runtime.operation_id = changed_runtime.derived_operation_id().unwrap();
+        assert_ne!(changed_runtime.operation_id, consumer_identity);
+        assert_ne!(
+            changed_runtime.consumer_challenge_digest().unwrap(),
+            fresh_challenge
+        );
+        let mut predecessor = serde_json::to_value(&attempt).unwrap();
+        predecessor["purpose"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guest_runtime_manifest_hash");
+        assert!(serde_json::from_value::<RestoredVerifierAttemptIntent>(predecessor).is_err());
+        assert_ne!(consumer_identity, identity);
+        assert!(attempt.owner_challenge().is_err());
+        let RemoteVerificationPurpose::ConsumerRuntime { nonce_hex, .. } = &mut attempt.purpose
+        else {
+            unreachable!()
+        };
+        *nonce_hex = "3".repeat(64);
+        assert_eq!(attempt.derived_operation_id().unwrap(), consumer_identity);
+        assert_ne!(
+            attempt.consumer_challenge_digest().unwrap(),
+            fresh_challenge
+        );
+        let evidence = canonical_json(&serde_json::json!({"observed": "fixture-only"})).unwrap();
+        let observation = ConsumerVerifierAdapterObservation {
+            schema: 1,
+            operation_id: attempt.operation_id.clone(),
+            occurrence_id: attempt.restored_occurrence_id.clone(),
+            verifier_artifact_hash: attempt.verifier_artifact_hash.clone(),
+            challenge_digest: attempt.consumer_challenge_digest().unwrap(),
+            upload_token_execution_id: "exe-upload-fixture".into(),
+            run_token_execution_id: "exe-run-fixture".into(),
+            upload_response_sha256: "a".repeat(64),
+            run_stream_sha256: "b".repeat(64),
+            evidence_sha256: hex::encode(Sha256::digest(&evidence)),
+            evidence_bytes: evidence.len() as u64,
+            contact_deadline_exceeded: false,
+        };
+        observation.validate_for_intent(&attempt).unwrap();
+        observation.verify_evidence_bytes(&evidence).unwrap();
+        let tagged = RestoredVerifierObservation::ConsumerRuntime {
+            observation: observation.clone(),
+        };
+        assert!(tagged.owner_measurement().is_err());
+        let mut swapped = serde_json::to_value(&tagged).unwrap();
+        swapped["kind"] = serde_json::json!("owner_measurement");
+        assert!(serde_json::from_value::<RestoredVerifierObservation>(swapped).is_err());
+        let mut wrong = observation.clone();
+        wrong.challenge_digest = fresh_challenge;
+        assert!(wrong.validate_for_intent(&attempt).is_err());
+        wrong = observation.clone();
+        wrong.verifier_artifact_hash = "f".repeat(64);
+        assert!(wrong.validate_for_intent(&attempt).is_err());
+        wrong = observation.clone();
+        wrong.evidence_bytes = MAX_CONSUMER_VERIFIER_EVIDENCE_BYTES + 1;
+        assert!(wrong.validate_for_intent(&attempt).is_err());
+        assert!(observation.verify_evidence_bytes(b"{}").is_err());
+        let noncanonical = b"{ \"observed\": \"fixture-only\" }";
+        wrong = observation.clone();
+        wrong.evidence_bytes = noncanonical.len() as u64;
+        wrong.evidence_sha256 = hex::encode(Sha256::digest(noncanonical));
+        assert!(wrong.verify_evidence_bytes(noncanonical).is_err());
+        wrong = observation.clone();
+        wrong.run_token_execution_id = "exe-".into();
+        assert!(wrong.validate_for_intent(&attempt).is_err());
+        let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &mut attempt.purpose
+        else {
+            unreachable!()
+        };
+        coordinate.use_digest = "4".repeat(64);
+        assert_ne!(attempt.derived_operation_id().unwrap(), consumer_identity);
     }
 
     #[test]
@@ -444,23 +1460,24 @@ mod tests {
     #[test]
     fn measurement_must_match_retained_product_and_fresh_challenge() {
         let mut intent = RuntimeSnapshotIntent {
-            schema: 1,
+            schema: crate::runtime_snapshot::RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "1".repeat(64)),
             provider_id: "provider".into(),
             source_occurrence_id: "source".into(),
+            source_bootstrap_operation_id: None,
+            source_created_at: None,
+            source_timeout_seconds: None,
             provider_group_id: "group".into(),
             production_profile_digest: "2".repeat(64),
             adapter_artifact_hash: "3".repeat(64),
             provider_spec_digest: "4".repeat(64),
             settings_digest: "5".repeat(64),
-            product_witness_hash: "6".repeat(64),
+            source: crate::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
+                product_witness_hash: "6".repeat(64),
+            },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode([3u8; 32])
-            ),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 42,
@@ -480,7 +1497,6 @@ mod tests {
             challenge_digest: challenge.digest().unwrap(),
             manifest_hash: intent.guest_runtime_manifest_hash.clone(),
             owner_executable_sha256: intent.owner_executable_sha256.clone(),
-            controller_public_root: intent.controller_public_root.clone(),
         };
         measured.validate_for(&challenge, &intent).unwrap();
         let locator = RuntimeSnapshotLocator {

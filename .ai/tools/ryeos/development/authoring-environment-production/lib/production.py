@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T06:36:51Z:7456daa992ae8a0b98551f2db8d65afbf6799139553df434064db25e1e28e08b:PtWa2EvdZOCz/RIrQqbBFRseLy4d5hLSqHLcqZ/6iKkDz6w0yhibg0gnH7SSpu+oaLQDxpPaZ55D/mgbqkD2CQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-10-26T23:21:33Z:8b3dba20479077d64e0b432b114b4ed3ec1367cee89475f2d196d8196bf77786:VgyBpz+XQUi8xBdReOfADuja93pxA4RWLm8qMyQGLyJRRQbvNQGkf7SOau6hPGPY9d1/DJi/AvbCAWZ4dzf5DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Finite, offline authoring-environment assembly; no acquisition or publication.
 
 RyeOS owns capture, namespaces, result snapshots and import/binding. This code
@@ -335,7 +335,7 @@ class ElfTools:
         return sorted(owners), sorted(functions)
 
 
-def relocate_elf(path: Path, tools: ElfTools, runtime_root: str) -> dict:
+def relocate_elf(path: Path, tools: ElfTools, runtime_root: str, *, runpath: str | None = None) -> dict:
     """One relocation owner shared by authoring and compiler-support production.
 
     The calling signed recipe supplies its exact realization mount. Do not add
@@ -349,7 +349,13 @@ def relocate_elf(path: Path, tools: ElfTools, runtime_root: str) -> dict:
     # longer RUNPATH. On the admitted GNU CPython executable, doing that after
     # --set-interpreter overwrites PT_INTERP. Commit search policy first, then
     # write the exact interpreter into its final location.
-    tools.run("patchelf", "--no-sort", "--set-rpath", runtime_root + "/lib",
+    selected_runpath = runtime_root + "/lib" if runpath is None else runpath
+    if (not isinstance(selected_runpath, str) or not selected_runpath or
+            len(selected_runpath) > 1024 or "\0" in selected_runpath or
+            (selected_runpath != runtime_root + "/lib" and
+             selected_runpath not in {"$ORIGIN", "$ORIGIN/../lib", "$ORIGIN/../.."})):
+        raise ValueError("ELF RUNPATH is outside the finite relocation policies")
+    tools.run("patchelf", "--no-sort", "--set-rpath", selected_runpath,
               "--no-default-lib", str(path))
     if facts["interpreter"]:
         tools.run("patchelf", "--no-sort", "--set-interpreter",

@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 fn sealed_exec_child(name: &str) -> Result<(), String> {
     if !name.starts_with("lillux-private-source-")
         || !name
@@ -98,6 +100,35 @@ fn sandbox_target(name: &str) -> Result<(), String> {
     };
     if remount == 0 {
         return Err("sandbox target restored writable source mount".into());
+    }
+    // This process exists only after trusted setup and explicit held release.
+    // Inspect the actual native limits rather than trusting request metadata.
+    for (resource, expected) in [
+        (libc::RLIMIT_NOFILE, 64_u64),
+        (libc::RLIMIT_AS, 134217728_u64),
+        (libc::RLIMIT_CPU, 3_u64),
+    ] {
+        let mut actual = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(resource, &mut actual) } != 0
+            || actual.rlim_cur != expected
+            || actual.rlim_max != expected
+        {
+            return Err("released native target observed different resource limits".to_owned());
+        }
+    }
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        unsafe { libc::_exit(91) };
+    }
+    if child > 0 {
+        unsafe { libc::waitpid(child, std::ptr::null_mut(), 0) };
+        return Err("released native target created a forbidden child".to_owned());
+    }
+    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+        return Err("target fork refusal did not match installed denial".to_owned());
     }
     writeln!(std::io::stdout(), "TARGET").map_err(|error| error.to_string())?;
     std::io::stdout()
@@ -261,6 +292,13 @@ fn held_source_target(
         contain_process_group: true,
         nested_sandbox: false,
         aggregate_limits: None,
+        target_limits: Some(lillux::SubprocessLimits {
+            max_open_files: Some(64),
+            max_address_space_bytes: Some(134217728),
+            max_cpu_seconds: Some(3),
+            deny_process_creation: true,
+            ..Default::default()
+        }),
     };
     let expected = request.clone();
     let mut held = lillux::sandbox::prepare_linux_sandbox_from_sealed_source(
@@ -268,6 +306,7 @@ fn held_source_target(
         OsStr::new(name),
         std::path::Path::new("/source"),
         request,
+        None,
     );
     let outcome = (|| -> Result<(), String> {
         if unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } != 0 {
@@ -322,16 +361,15 @@ fn held_source_target(
             std::thread::sleep(Duration::from_millis(10));
         }
     })();
-    if let Err(error) = &outcome {
-        if let Err(cleanup) = held
+    if let Err(error) = &outcome
+        && let Err(cleanup) = held
             .held()
             .terminate_namespace_for_export(Duration::from_secs(5))
-        {
-            eprintln!(
-                "held source probe failed ({error}) and exact namespace cleanup failed ({cleanup})"
-            );
-            lillux::sandbox::exit_with_linux_sandbox_status(LinuxSandboxExit::Code(125));
-        }
+    {
+        eprintln!(
+            "held source probe failed ({error}) and exact namespace cleanup failed ({cleanup})"
+        );
+        lillux::sandbox::exit_with_linux_sandbox_status(LinuxSandboxExit::Code(125));
     }
     outcome
 }
@@ -382,7 +420,12 @@ fn child(
         .create_child(OsStr::new(name), 0o700)
         .map_err(|error| error.to_string())?;
     child
-        .atomic_create_pinned_regular(OsStr::new("payload"), b"private-source", 0o600)
+        .atomic_create_pinned_regular(
+            OsStr::new("payload"),
+            b"private-source",
+            0o600,
+            TEST_PURPOSE,
+        )
         .map_err(|error| error.to_string())?
         .ok_or("private source payload already exists")?;
     if wrong_source {
@@ -842,10 +885,15 @@ fn main() {
         sealed_exec_child(args.get(2).map(String::as_str).unwrap_or(""))
     } else if args.get(1).is_some_and(|arg| arg == "child-sandbox-target") {
         sandbox_target(args.get(2).map(String::as_str).unwrap_or(""))
+    } else if args.iter().any(|arg| arg == "--list") {
+        // A harness-free test binary answers the runner's listing request
+        // with its one test and nothing else on stdout.
+        println!("private_source_owner: test");
+        Ok(())
     } else if std::env::var("LILLUX_PRIVATE_SOURCE_NATIVE").as_deref() == Ok("1") {
         parent()
     } else {
-        println!("private source native probe skipped; set LILLUX_PRIVATE_SOURCE_NATIVE=1");
+        eprintln!("private source native probe skipped; set LILLUX_PRIVATE_SOURCE_NATIVE=1");
         Ok(())
     };
     if let Err(error) = result {

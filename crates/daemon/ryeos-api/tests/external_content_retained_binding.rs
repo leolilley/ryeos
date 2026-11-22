@@ -1,40 +1,64 @@
 //! Exact binding reuse keeps source testimony and destination admission separate.
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 
 use base64::Engine as _;
 use ryeos_api::handlers::external_content_import;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
-use ryeos_app::node_policy::sections::external_content::{
-    ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
-};
 use ryeos_app::operator_external_content::{ImportRequest, RetainedBindingImportRequest};
 use ryeos_app::state::AppState;
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+use ryeos_node_runtime::node_policy::sections::external_content::{
+    ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
+};
 use ryeos_state::objects::{ExternalContentBinding, ExternalContentConsumerAuthority};
 use serde_json::json;
 
+/// Returns the Store owner ahead of the application, so the caller's bindings
+/// drop the application before the owner closes the Store.
 fn fixture(
     large_tier: bool,
 ) -> (
     tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
     Arc<AppState>,
     HandlerContext,
     String,
     String,
 ) {
-    let (tmp, mut state) = test_state::build_test_state();
+    fixture_on(large_tier, test_state::build_test_state())
+}
+
+/// The same fixture over a caller-built state, for tests that resolve real
+/// kind contracts (the live-bundle engine).
+fn fixture_on(
+    large_tier: bool,
+    built: (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        AppState,
+    ),
+) -> (
+    tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
+    Arc<AppState>,
+    HandlerContext,
+    String,
+    String,
+) {
+    let (tmp, store_owner, mut state) = built;
     let closure = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
         .unwrap()
         .clone();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
-                schema: 1,
+                schema: 2,
+                declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
                     max_depth: 4,
@@ -51,9 +75,11 @@ fn fixture(
             }),
         ]),
     );
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/import".to_owned()];
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -61,6 +87,7 @@ fn fixture(
         "test operator",
         state.identity.fingerprint(),
         "2026-09-07T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )
@@ -93,7 +120,7 @@ fn fixture(
             "entry_count":1, "total_bytes":11,
         }))
         .unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -130,7 +157,14 @@ fn fixture(
         })
         .unwrap();
     drop(guard);
-    (tmp, Arc::new(state), context, binding_hash, manifest)
+    (
+        tmp,
+        store_owner,
+        Arc::new(state),
+        context,
+        binding_hash,
+        manifest,
+    )
 }
 
 fn request(hash: &str, maximum_bytes: u64) -> ImportRequest {
@@ -155,9 +189,9 @@ fn replace_binding_with_remote_owner(
     binding_hash: &str,
 ) -> (String, String) {
     let remote_origin = format!("site:{}", "c".repeat(64));
-    let remote = NodeIdentity::create(&directory.path().join("remote-operator.pem")).unwrap();
+    let remote = NodeIdentity::create(&directory.path().join("remote-principal.pem")).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         remote.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(remote.verifying_key().as_bytes()),
@@ -165,6 +199,7 @@ fn replace_binding_with_remote_owner(
         "remote binding owner",
         state.identity.fingerprint(),
         "2026-09-07T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &state.identity,
         WildcardPolicy::Reject,
         false,
@@ -172,7 +207,7 @@ fn replace_binding_with_remote_owner(
         false,
     )
     .unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         remote.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -255,36 +290,56 @@ fn fixture_bundle_engine(
     bundle_root: &std::path::Path,
     publisher: &NodeIdentity,
 ) -> Arc<ryeos_engine::engine::Engine> {
-    let mut trust = ryeos_engine::test_support::live_trust_store();
-    trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+    let trusted_signer = |verifying_key: lillux::crypto::VerifyingKey, label: &str| {
         ryeos_engine::trust::TrustedSigner {
-            fingerprint: publisher.fingerprint().to_owned(),
-            verifying_key: *publisher.verifying_key(),
-            label: Some("f05 fixture publisher".to_owned()),
-        },
-    ]));
+            fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+            verifying_key,
+            label: Some(label.to_owned()),
+        }
+    };
+    let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+        trusted_signer(
+            ryeos_engine::test_support::platform_author_verifying_key(),
+            "platform author",
+        ),
+        trusted_signer(
+            ryeos_engine::test_support::dev_publisher_verifying_key(),
+            "dev publisher",
+        ),
+        trusted_signer(*publisher.verifying_key(), "f05 fixture publisher"),
+    ]);
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let ui = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust).unwrap();
+    let mut roots = vec![core];
+    roots.extend(workflow);
+    roots.push(ui);
+    roots.push(bundle_root.to_path_buf());
+    let registered = [
+        "core",
+        "knowledge",
+        "directive",
+        "graph",
+        "ryeos-ui",
+        "f05-fixture",
+    ]
+    .into_iter()
+    .zip(roots.iter().cloned())
+    .map(
+        |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
+            name: name.to_owned(),
+            canonical_root,
+        },
     )
-    .unwrap();
-    let roots = vec![core, standard, ui, bundle_root.to_path_buf()];
-    let registered = ["core", "standard", "ryeos-ui", "f05-fixture"]
-        .into_iter()
-        .zip(roots.iter().cloned())
-        .map(
-            |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
-                name: name.to_owned(),
-                canonical_root,
-            },
-        )
-        .collect();
+    .collect();
     let (parsers, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds).unwrap();
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
@@ -356,6 +411,7 @@ async fn bind_through_managed_activation_owner(
     manifest_value: &serde_json::Value,
 ) -> (
     tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
     Arc<AppState>,
     String,
     String,
@@ -364,17 +420,18 @@ async fn bind_through_managed_activation_owner(
     let manifest_hash = ryeos_state::objects::canonical_value_digest(manifest_value).unwrap();
     write_managed_activation_fixture_bundle(bundle.path(), publisher, &manifest_hash);
     let engine = fixture_bundle_engine(bundle.path(), publisher);
-    let (state_dir, mut state) = test_state::build_test_state_with_engine(engine);
+    let (state_dir, store_owner, mut state) = test_state::build_test_state_with_engine(engine);
     let closure = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
         .unwrap()
         .clone();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
-                schema: 1,
+                schema: 2,
+                declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
                     max_depth: 4,
@@ -391,9 +448,11 @@ async fn bind_through_managed_activation_owner(
             }),
         ]),
     );
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -401,6 +460,7 @@ async fn bind_through_managed_activation_owner(
         "managed activation fixture operator",
         state.identity.fingerprint(),
         "2026-09-18T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )
@@ -464,6 +524,10 @@ async fn bind_through_managed_activation_owner(
                     expected_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND
                         .to_owned(),
                     declaration_kind: ryeos_engine::external_content::ExternalContentKind::Tree,
+                    declaration_mount_root:
+                        ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime,
+                    declaration_mount: "runtime".into(),
+                    qualification_allowance: None,
                     capture_bounds:
                         ryeos_app::managed_external_content::ManagedActivationComponentBounds {
                             maximum_entries: 16,
@@ -497,6 +561,7 @@ async fn bind_through_managed_activation_owner(
     let resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse("tool:test/source").unwrap(),
             expected_kind: Some("tool".to_owned()),
             project_root: None,
@@ -506,6 +571,7 @@ async fn bind_through_managed_activation_owner(
         .unwrap();
     (
         state_dir,
+        store_owner,
         state,
         binding.binding_hash,
         manifest_hash,
@@ -539,7 +605,7 @@ async fn managed_bundle_binding_survives_pinned_preview_but_cannot_substitute_pr
         "entry_count": 0,
         "total_bytes": 0,
     });
-    let (_state_dir, state, installed_binding_hash, _manifest_hash, fixed_bundle) =
+    let (_state_dir, _store_owner, state, installed_binding_hash, _manifest_hash, fixed_bundle) =
         bind_through_managed_activation_owner(&bundle, &publisher, &manifest_value).await;
     let policy = portable_policy();
     let generation = SubjectResolutionAuthority::PinnedGeneration {
@@ -641,7 +707,7 @@ fn portable_content_uses_the_admitted_project_generation_for_preview_and_launch(
         KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
     };
 
-    let (_tmp, state, _context, source_binding_hash, manifest_hash) = fixture(false);
+    let (_tmp, _store_owner, state, _context, source_binding_hash, manifest_hash) = fixture(false);
     let resolution = ResolutionOutput {
         root: ResolvedAncestor {
             requested_id: "test/environment".into(),
@@ -789,7 +855,7 @@ fn portable_content_uses_the_admitted_project_generation_for_preview_and_launch(
 #[tokio::test]
 async fn exact_binding_reuse_preserves_manifest_and_independent_durable_stage() {
     for large_tier in [false, true] {
-        let (_tmp, state, context, binding_hash, manifest_hash) = fixture(large_tier);
+        let (_tmp, _store_owner, state, context, binding_hash, manifest_hash) = fixture(large_tier);
         let first = external_content_import::handle(
             request(&binding_hash, 11),
             context.clone(),
@@ -860,7 +926,7 @@ async fn exact_binding_reuse_preserves_manifest_and_independent_durable_stage() 
 
 #[tokio::test]
 async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
-    let (directory, state, context, original_hash, manifest_hash) = fixture(false);
+    let (directory, _store_owner, state, context, original_hash, manifest_hash) = fixture(false);
     let (remote_principal, binding_hash) =
         replace_binding_with_remote_owner(&directory, &state, &original_hash);
 
@@ -892,8 +958,8 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
     assert_eq!(imported["manifest_hash"], manifest_hash);
 
     let remote_identity =
-        NodeIdentity::load(&directory.path().join("remote-operator.pem")).unwrap();
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+        NodeIdentity::load(&directory.path().join("remote-principal.pem")).unwrap();
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         remote_identity.fingerprint(),
         &base64::engine::general_purpose::STANDARD
@@ -905,6 +971,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
         "changed remote binding owner",
         state.identity.fingerprint(),
         "2026-09-07T00:00:01Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &state.identity,
         WildcardPolicy::Reject,
         false,
@@ -923,7 +990,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
 
     let mut remote_caller = context;
     remote_caller.fingerprint = remote_principal;
-    remote_caller.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
+    remote_caller.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemotePrincipal);
     remote_caller.authenticated_origin_site_id = Some(format!("site:{}", "c".repeat(64)));
     let error = external_content_import::handle(
         request_with_owner(&binding_hash, 11, Some(remote_caller.fingerprint.clone())),
@@ -937,7 +1004,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
 
 #[tokio::test]
 async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims() {
-    let (_tmp, state, context, hash, _) = fixture(false);
+    let (_tmp, _store_owner, state, context, hash, _) = fixture(false);
     for limit in [0, 10, 4097] {
         assert!(
             external_content_import::handle(
@@ -957,7 +1024,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
             .is_err()
     );
     let mut remote = context.clone();
-    remote.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
+    remote.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemotePrincipal);
     remote.authenticated_origin_site_id = Some("site:other".to_owned());
     assert!(
         external_content_import::handle(request(&hash, 11), remote, Arc::clone(&state))
@@ -973,8 +1040,10 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
         .await
         .is_err()
     );
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
-    ryeos_app::identity::write_authorized_key_toml(
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -982,6 +1051,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
         "changed grant",
         state.identity.fingerprint(),
         "2026-09-07T00:00:01Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )
@@ -995,7 +1065,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
 #[tokio::test]
 async fn binding_reuse_rejects_lying_payloads_in_both_manifest_tiers() {
     for large_tier in [false, true] {
-        let (_tmp, state, context, hash, manifest_hash) = fixture(large_tier);
+        let (_tmp, _store_owner, state, context, hash, manifest_hash) = fixture(large_tier);
         let authority = state.state_store.pinned_state_authority().unwrap();
         let cas = authority.cas_store().unwrap();
         let previous =
@@ -1035,4 +1105,313 @@ async fn binding_reuse_rejects_lying_payloads_in_both_manifest_tiers() {
             .unwrap_err();
         assert!(format!("{error:#}").contains("size"));
     }
+}
+
+/// Find the binding-epoch file under the test's state root.
+fn binding_epoch_file(root: &std::path::Path) -> std::path::PathBuf {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if entry.file_name() == "external-content-bindings.epoch" {
+                return entry.path();
+            }
+        }
+    }
+    panic!(
+        "no external-content-bindings.epoch under {}",
+        root.display()
+    );
+}
+
+fn overwrite(path: &std::path::Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = std::fs::metadata(path).unwrap().permissions().mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[tokio::test]
+async fn release_refuses_a_binding_namespace_at_another_epoch() {
+    let (tmp, _store_owner, state, context, binding_hash, _manifest_hash) = fixture(false);
+    external_content_import::handle(
+        request(&binding_hash, 11),
+        context.clone(),
+        Arc::clone(&state),
+    )
+    .await
+    .unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let binding = ExternalContentBinding::from_value(
+        &authority
+            .cas_store()
+            .unwrap()
+            .get_object(&binding_hash)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let release = || {
+        ryeos_app::operator_external_content::release(
+            Arc::clone(&state),
+            context.clone(),
+            ryeos_app::operator_external_content::ReleaseRequest {
+                binding_subject_id: binding.binding_subject_id.clone(),
+            },
+        )
+    };
+
+    let epoch_file = binding_epoch_file(tmp.path());
+    let current = std::fs::read_to_string(&epoch_file).unwrap();
+    let stored: u32 = current.trim().parse().unwrap();
+    // Simulated drift: the namespace claims a predecessor epoch.
+    overwrite(&epoch_file, &format!("{}\n", stored - 1));
+    let error = release().await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("explicit reset is required"),
+        "{error:#}"
+    );
+
+    // Nothing was written: with the epoch restored, the release is a real
+    // first release, not an idempotent replay.
+    overwrite(&epoch_file, &current);
+    let released = release().await.unwrap();
+    assert!(!released.idempotent);
+}
+
+/// A project-rooted consumer declaring one retained manifest, as the
+/// pinned-project materializer would resolve it.
+fn project_consumer(manifest_hash: &str) -> ryeos_engine::resolution::ResolutionOutput {
+    use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
+    use ryeos_engine::resolution::{
+        KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+    };
+    ResolutionOutput {
+        root: ResolvedAncestor {
+            requested_id: "test/environment".into(),
+            resolved_ref: "config:test/environment".into(),
+            source_path: "/fixture/.ai/config/test/environment.yaml".into(),
+            source_space: ItemSpace::Project,
+            source_root: ItemSourceRoot::Project,
+            trust_class: TrustClass::TrustedProject,
+            signer_fingerprint: Some("a".repeat(64)),
+            alias_resolution: None,
+            added_by: ResolutionStepName::PipelineInit,
+            raw_content: String::new(),
+            source_content_digest: "b".repeat(64),
+            raw_content_digest: "c".repeat(64),
+        },
+        ancestors: Vec::new(),
+        references_edges: Vec::new(),
+        referenced_items: Vec::new(),
+        step_outputs: Default::default(),
+        effective_trust_class: TrustClass::TrustedProject,
+        composed: KindComposedView::identity(json!({
+            "external_content": [{
+                "id":"content", "kind":"tree", "mode":"pinned",
+                "digest":manifest_hash, "mount_root":"project", "mount":"content"
+            }]
+        })),
+    }
+}
+
+fn pinned_binding_at(
+    state: &Arc<AppState>,
+    source_binding_hash: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    snapshot_hash: &str,
+) -> String {
+    let consumer = ExternalContentConsumerAuthority::pinned_project(
+        resolution.root.resolved_ref.clone(),
+        "a".repeat(64),
+        snapshot_hash.to_owned(),
+        ryeos_engine::external_content::pre_external_realization_consumer_digest(resolution)
+            .unwrap(),
+        None,
+    )
+    .unwrap();
+    publish_binding_for_consumer(state, source_binding_hash, consumer)
+}
+
+fn bindings_request(
+    snapshot_hash: &str,
+) -> ryeos_app::operator_external_content::rebind::BindingsRequest {
+    serde_json::from_value(json!({
+        "consumer_ref": "config:test/environment",
+        "consumer_kind": "pinned_project",
+        "project_snapshot_hash": snapshot_hash,
+        "project_path": "/fixture",
+    }))
+    .unwrap()
+}
+
+fn rebind_request(
+    prior_binding_hash: &str,
+    snapshot_hash: &str,
+) -> ryeos_app::operator_external_content::rebind::RebindRequest {
+    serde_json::from_value(json!({
+        "prior_binding_hash": prior_binding_hash,
+        "project_snapshot_hash": snapshot_hash,
+        "project_path": "/fixture",
+    }))
+    .unwrap()
+}
+
+#[test]
+fn bindings_lists_the_earlier_snapshot_binding_as_stale_and_names_it() {
+    use ryeos_app::operator_external_content::rebind::inventory;
+
+    let (_tmp, _store_owner, state, context, source_binding_hash, manifest_hash) =
+        fixture_on(false, test_state::build_test_state_with_bundles());
+    let resolution = project_consumer(&manifest_hash);
+    let (first, second) = ("d".repeat(64), "f".repeat(64));
+    let prior = pinned_binding_at(&state, &source_binding_hash, &resolution, &first);
+
+    let at_first = inventory(&state, &context, &bindings_request(&first), &resolution).unwrap();
+    assert!(at_first.ready_for_admission);
+    assert_eq!(at_first.declarations[0].status, "ready");
+    assert_eq!(
+        at_first.declarations[0].binding_hash.as_deref(),
+        Some(prior.as_str())
+    );
+    let entry = at_first
+        .bindings
+        .iter()
+        .find(|entry| entry.binding_hash == prior)
+        .unwrap();
+    assert_eq!(entry.status, "current");
+
+    // A new snapshot is a new consumer authority: the binding is listed as
+    // stale, naming why, and offered as the prior binding to renew.
+    let at_second = inventory(&state, &context, &bindings_request(&second), &resolution).unwrap();
+    assert!(!at_second.ready_for_admission);
+    assert_eq!(at_second.declarations[0].status, "missing_binding");
+    assert_eq!(
+        at_second.declarations[0].prior_binding_hash.as_deref(),
+        Some(prior.as_str())
+    );
+    let entry = at_second
+        .bindings
+        .iter()
+        .find(|entry| entry.binding_hash == prior)
+        .unwrap();
+    assert_eq!(entry.status, "stale");
+    assert_eq!(entry.stale_reasons, vec!["project_snapshot_changed"]);
+    // Another consumer's binding of the same bytes is not this consumer's.
+    assert!(
+        at_second
+            .bindings
+            .iter()
+            .all(|entry| entry.binding_hash != source_binding_hash)
+    );
+}
+
+#[tokio::test]
+async fn rebind_renews_the_binding_for_a_new_snapshot_once() {
+    use ryeos_app::operator_external_content::rebind::{inventory, prior_binding, rebind};
+
+    let (_tmp, _store_owner, state, context, source_binding_hash, manifest_hash) =
+        fixture_on(false, test_state::build_test_state_with_bundles());
+    let resolution = project_consumer(&manifest_hash);
+    let (first, second) = ("d".repeat(64), "f".repeat(64));
+    let prior = pinned_binding_at(&state, &source_binding_hash, &resolution, &first);
+
+    let request = rebind_request(&prior, &second);
+    let checked = prior_binding(&state, &context, &request).unwrap();
+    let renewed = rebind(
+        Arc::clone(&state),
+        context.clone(),
+        request.clone(),
+        checked,
+        &resolution,
+    )
+    .await
+    .unwrap();
+    assert!(!renewed.idempotent);
+    assert_eq!(renewed.prior_binding_hash, prior);
+    assert_eq!(renewed.manifest_hash, manifest_hash);
+    assert_ne!(renewed.binding_hash, prior);
+
+    let at_second = inventory(&state, &context, &bindings_request(&second), &resolution).unwrap();
+    assert!(at_second.ready_for_admission);
+    assert_eq!(
+        at_second.declarations[0].binding_hash.as_deref(),
+        Some(renewed.binding_hash.as_str())
+    );
+    // The earlier generation's binding is left exactly as it was.
+    let earlier = at_second
+        .bindings
+        .iter()
+        .find(|entry| entry.binding_hash == prior)
+        .unwrap();
+    assert_eq!(earlier.status, "stale");
+
+    // Repeating the renewal stages and writes nothing.
+    let checked = prior_binding(&state, &context, &request).unwrap();
+    let again = rebind(
+        Arc::clone(&state),
+        context.clone(),
+        request,
+        checked,
+        &resolution,
+    )
+    .await
+    .unwrap();
+    assert!(again.idempotent);
+    assert_eq!(again.binding_hash, renewed.binding_hash);
+}
+
+#[tokio::test]
+async fn rebind_refuses_a_consumer_that_no_longer_declares_the_manifest() {
+    use ryeos_app::operator_external_content::rebind::{
+        RebindRefused, inventory, prior_binding, rebind,
+    };
+
+    let (_tmp, _store_owner, state, context, source_binding_hash, manifest_hash) =
+        fixture_on(false, test_state::build_test_state_with_bundles());
+    let resolution = project_consumer(&manifest_hash);
+    let (first, second) = ("d".repeat(64), "f".repeat(64));
+    let prior = pinned_binding_at(&state, &source_binding_hash, &resolution, &first);
+    let changed = project_consumer(&"9".repeat(64));
+
+    let request = rebind_request(&prior, &second);
+    let checked = prior_binding(&state, &context, &request).unwrap();
+    let error = rebind(
+        Arc::clone(&state),
+        context.clone(),
+        request,
+        checked,
+        &changed,
+    )
+    .await
+    .expect_err("a consumer that dropped the manifest is not the same consumer");
+    assert_eq!(
+        error.downcast_ref::<RebindRefused>().unwrap().code,
+        RebindRefused::CONSUMER_CHANGED
+    );
+    // Refused before staging or binding: the original consumer still has no
+    // binding at the new snapshot.
+    let at_second = inventory(&state, &context, &bindings_request(&second), &resolution).unwrap();
+    assert!(!at_second.ready_for_admission);
+}
+
+#[test]
+fn rebind_refuses_an_installed_bundle_binding_as_not_generation_scoped() {
+    use ryeos_app::operator_external_content::rebind::{RebindRefused, prior_binding};
+
+    let (_tmp, _store_owner, state, context, source_binding_hash, _manifest_hash) = fixture(false);
+    let error = prior_binding(
+        &state,
+        &context,
+        &rebind_request(&source_binding_hash, &"f".repeat(64)),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<RebindRefused>().unwrap().code,
+        RebindRefused::NOT_GENERATION_SCOPED
+    );
 }

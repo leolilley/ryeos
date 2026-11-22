@@ -1,0 +1,24 @@
+# ryeos:signed:2026-11-14T11:51:10Z:3fc5a569a86ad37f3723ea80518a6e7a0e37ca9e81c73202c3061f841779a800:U7WjjrU5mlzhoZJdrXuayAN+F9FSqYxL1W9M+ubMmh4zuENDMRkvSyNIgEwHvCTm9GjZqEZX+WkfyP6iqTPiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, export-qualification-testimony]
+description: Export a local qualification as a testimony signed with your operator key (made in this CLI, never on the node) and submit it to a configured pinned remote
+arguments:
+  - name: content
+    kind: json
+    positional: 3
+    required: false
+    arity: optional
+    description: Content lane only; JSON object naming the activated content as activation_ref, coordinate_id and manifest_hash. Passed as --content <json>; omitted for a product qualification
+forms:
+  - slots:
+      - field: remote
+      - field: qualification_hash
+      - field: acceptance_policy_ref
+help:
+  usage: "ryeos external-content export-qualification-testimony <remote> <qualification-hash> <acceptance-policy-ref> [--content <json>]"
+  examples:
+    - "ryeos external-content export-qualification-testimony hosted <qualification-hash> config:render/snapshot-acceptance-policy"
+    - "ryeos external-content export-qualification-testimony hosted <qualification-hash> config:codex/runtime-acceptance-policy --content '{\"activation_ref\":\"config:codex/runtime-activation\",\"coordinate_id\":\"<coordinate-id>\",\"manifest_hash\":\"<manifest-hash>\"}'"
+dispatch:
+  kind: local_handler
+  handler: external_content_export_qualification_testimony
+  bootstrap: false

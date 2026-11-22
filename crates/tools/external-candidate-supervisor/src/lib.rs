@@ -4,9 +4,16 @@
 //! bundle from the sealed supervisor bootstrap. It never uses ambient proxy,
 //! CA, credential, redirect, or endpoint configuration.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const SUPERVISOR_TEMP_PURPOSE: lillux::TempPurpose =
+    lillux::TempPurpose::new("supervisor");
+
 pub mod entrypoint;
 mod http_transport;
+pub mod native_host;
+pub mod relay_transport;
 pub mod runtime;
+pub mod stream_transport;
 
 use anyhow::{Context as _, Result, ensure};
 use http_transport::{BoundedHttpClient, HttpResponse};
@@ -40,6 +47,71 @@ pub struct AttachedExternalExecutionChannel {
     occurrence_id: String,
     maximum_response_bytes: u64,
     request_timeout: Duration,
+}
+
+/// Guest control-loop seam. A relay implementation must enter here only
+/// after its private mailbox descriptor and exact response authentication
+/// have been installed. Merely selecting the signed relay policy cannot
+/// construct a transport or fall back to HTTP.
+pub enum AttachedExternalExecutionTransport {
+    HttpJson(AttachedExternalExecutionChannel),
+    ControllerFileRelay(relay_transport::AttachedFileRelayChannel),
+    /// One WebSocket to the same HTTPS origin, carrying the same exchange.
+    ChannelStream(stream_transport::AttachedExternalExecutionStream),
+}
+
+impl From<stream_transport::AttachedExternalExecutionStream>
+    for AttachedExternalExecutionTransport
+{
+    fn from(value: stream_transport::AttachedExternalExecutionStream) -> Self {
+        Self::ChannelStream(value)
+    }
+}
+
+impl From<AttachedExternalExecutionChannel> for AttachedExternalExecutionTransport {
+    fn from(value: AttachedExternalExecutionChannel) -> Self {
+        Self::HttpJson(value)
+    }
+}
+
+impl From<relay_transport::AttachedFileRelayChannel> for AttachedExternalExecutionTransport {
+    fn from(value: relay_transport::AttachedFileRelayChannel) -> Self {
+        Self::ControllerFileRelay(value)
+    }
+}
+
+impl ExternalExecutionChannelTransport for AttachedExternalExecutionTransport {
+    fn fresh_idle_poll_interval(&self) -> Option<lillux::time::Duration> {
+        match self {
+            Self::HttpJson(http) => http.fresh_idle_poll_interval(),
+            Self::ControllerFileRelay(relay) => relay.fresh_idle_poll_interval(),
+            Self::ChannelStream(stream) => stream.fresh_idle_poll_interval(),
+        }
+    }
+
+    fn exchange(&mut self, canonical_supervisor_frame: &[u8]) -> Result<ExternalTransportExchange> {
+        match self {
+            Self::HttpJson(http) => http.exchange(canonical_supervisor_frame),
+            Self::ControllerFileRelay(relay) => relay.exchange(canonical_supervisor_frame),
+            Self::ChannelStream(stream) => stream.exchange(canonical_supervisor_frame),
+        }
+    }
+
+    fn exchange_until(
+        &mut self,
+        canonical_supervisor_frame: &[u8],
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> std::result::Result<ExternalTransportExchange, ExternalTransportStepFailure> {
+        match self {
+            Self::HttpJson(http) => http.exchange_until(canonical_supervisor_frame, deadline),
+            Self::ControllerFileRelay(relay) => {
+                relay.exchange_until(canonical_supervisor_frame, deadline)
+            }
+            Self::ChannelStream(stream) => {
+                stream.exchange_until(canonical_supervisor_frame, deadline)
+            }
+        }
+    }
 }
 
 pub fn attach_external_execution_channel(
@@ -82,11 +154,11 @@ pub fn attach_external_execution_channel_exact(
     let request_bytes = request.canonical_bytes()?;
     let response = client
         .post_json(
-            &bootstrap.controller.attach_url()?,
+            &bootstrap.controller.http()?.attach_url()?,
             request_bytes,
             ATTACH_RESPONSE_BYTES,
             lillux::time::MonotonicDeadline::after(Duration::from_millis(u64::from(
-                bootstrap.controller.request_timeout_ms,
+                bootstrap.controller.http()?.request_timeout_ms,
             ))),
         )
         .map_err(anyhow::Error::new)
@@ -119,17 +191,52 @@ pub fn reconnect_external_execution_channel(
     attached_channel(bootstrap, build_client(bootstrap, network_inputs)?)
 }
 
+/// The exchange transport the signed controller contract selects for an
+/// attached binding. A contract that names the channel stream gets only the
+/// stream; the request/response channel, when one was already built for the
+/// attachment, is dropped unused rather than kept as a fallback.
+pub fn select_exchange_transport(
+    bootstrap: &ExternalSupervisorBootstrap,
+    supervisor_signing_key: &lillux::crypto::SigningKey,
+    binding: &ExecutionChannelBinding,
+    network_inputs: &ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs,
+    window: &ryeos_state::external_execution::guest_window::GuestChannelWindow,
+    request_response: Option<AttachedExternalExecutionChannel>,
+) -> Result<AttachedExternalExecutionTransport> {
+    if bootstrap.controller.http()?.exchanges_on_stream() {
+        return Ok(stream_transport::connect_external_execution_stream(
+            bootstrap,
+            supervisor_signing_key,
+            binding,
+            network_inputs,
+            window,
+        )?
+        .into());
+    }
+    Ok(match request_response {
+        Some(channel) => channel,
+        None => reconnect_external_execution_channel(
+            bootstrap,
+            supervisor_signing_key,
+            binding,
+            network_inputs,
+        )?,
+    }
+    .into())
+}
+
 fn attached_channel(
     bootstrap: &ExternalSupervisorBootstrap,
     client: BoundedHttpClient,
 ) -> Result<AttachedExternalExecutionChannel> {
+    let http = bootstrap.controller.http()?;
     Ok(AttachedExternalExecutionChannel {
         client,
-        exchange_url: bootstrap.controller.exchange_url()?,
+        exchange_url: http.exchange_url()?,
         placement_thread_id: bootstrap.placement_thread_id.clone(),
         occurrence_id: bootstrap.occurrence_id.clone(),
-        maximum_response_bytes: bootstrap.controller.maximum_response_bytes,
-        request_timeout: Duration::from_millis(u64::from(bootstrap.controller.request_timeout_ms)),
+        maximum_response_bytes: http.maximum_response_bytes,
+        request_timeout: Duration::from_millis(u64::from(http.request_timeout_ms)),
     })
 }
 
@@ -137,7 +244,7 @@ fn build_client(
     bootstrap: &ExternalSupervisorBootstrap,
     network_inputs: &ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs,
 ) -> Result<BoundedHttpClient> {
-    network_inputs.validate_for(&bootstrap.controller.network_inputs)?;
+    network_inputs.validate_for(&bootstrap.controller.http()?.network_inputs)?;
     let network = lillux::network::NetworkContext::from_config_bytes(
         &network_inputs.resolver_bytes()?,
         &network_inputs.hosts_bytes()?,
@@ -202,25 +309,32 @@ impl ExternalExecutionChannelTransport for AttachedExternalExecutionChannel {
             deadline.min(lillux::time::MonotonicDeadline::after(self.request_timeout)),
         )?;
         let response = decode_exchange_response(response, self.maximum_response_bytes)?;
-        Ok(ExternalTransportExchange {
-            schema: response.schema,
-            incoming_new: response.incoming_new,
-            incoming_sequence: response.incoming_sequence,
-            incoming_frame_digest: response.incoming_frame_digest,
-            acknowledgement_frame_digest: response.acknowledgement_frame_digest,
-            outbound_frames: response
-                .outbound_frames
-                .into_iter()
-                .map(decode_frame)
-                .collect::<Result<Vec<_>>>()
-                .map_err(ExternalTransportStepFailure::Fatal)?,
-            urgent_revocation_frame: response
-                .urgent_revocation_frame
-                .map(decode_frame)
-                .transpose()
-                .map_err(ExternalTransportStepFailure::Fatal)?,
-        })
+        exchange_from_response(response).map_err(ExternalTransportStepFailure::Fatal)
     }
+}
+
+/// The driver's view of one shape-checked exchange response, with every
+/// carried frame decoded from its canonical base64.
+pub(crate) fn exchange_from_response(
+    response: ExternalChannelExchangeResponse,
+) -> Result<ExternalTransportExchange> {
+    response.validate_shape()?;
+    Ok(ExternalTransportExchange {
+        schema: response.schema,
+        incoming_new: response.incoming_new,
+        incoming_sequence: response.incoming_sequence,
+        incoming_frame_digest: response.incoming_frame_digest,
+        acknowledgement_frame_digest: response.acknowledgement_frame_digest,
+        outbound_frames: response
+            .outbound_frames
+            .into_iter()
+            .map(decode_frame)
+            .collect::<Result<Vec<_>>>()?,
+        urgent_revocation_frame: response
+            .urgent_revocation_frame
+            .map(decode_frame)
+            .transpose()?,
+    })
 }
 
 fn decode_exchange_response(
@@ -291,7 +405,7 @@ mod tests {
         bootstrap: &ExternalSupervisorBootstrap,
     ) -> ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs {
         ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs::from_bytes(
-            &bootstrap.controller.network_inputs,
+            &bootstrap.controller.http().unwrap().network_inputs,
             b"nameserver 127.0.0.1\n",
             b"127.0.0.1 localhost\n",
         )
@@ -315,6 +429,7 @@ mod tests {
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         let guest_inputs = ryeos_external_execution_contract::ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
                 descriptor: 55,
@@ -348,7 +463,7 @@ mod tests {
         };
         let guest_input_identity = guest_inputs.identity_digest().unwrap();
         let requirement = ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             required_lifecycle_capabilities: Default::default(),
             protocol: PROTOCOL.into(),
             connector_protocol:
@@ -357,6 +472,7 @@ mod tests {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "runtime".into(),
+            runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe,
         };
         let qualification_use =
@@ -365,16 +481,18 @@ mod tests {
             )
             .unwrap();
         ExternalSupervisorBootstrap {
-            schema: 7,
+            schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller:
                 ryeos_state::external_execution::transport::ExternalControllerTransportContract {
-                    schema: 2,
+                    schema: 3,
                     network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
                         resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                             source: "/fixture/resolver".into(), max_bytes: 64 * 1024,
+                            required: true,
                         },
                         hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                             source: "/fixture/hosts".into(), max_bytes: 64 * 1024,
+                            required: true,
                         },
                     },
                     https_origin: origin,
@@ -389,7 +507,8 @@ mod tests {
                     connect_timeout_ms: 1_000,
                     request_timeout_ms: 2_000,
                     maximum_response_bytes: 64 * 1024,
-                },
+                    max_clock_skew_ms: None,
+                }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
             occurrence_id: "occurrence-one".into(),
@@ -404,10 +523,16 @@ mod tests {
                 qualification_use,
                 runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
                 runtime_manifest_hash: "e".repeat(64),
-                runtime_witness_hash: "1".repeat(64),
+                runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
                 qualification_attestation_hash: "2".repeat(64),
                 selection_identity_digest: "3".repeat(64),
            runtime_recipe_digest,
+           placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+               workload_class: "fixture.workload".into(),
+               lease: Vec::new(),
+               guest: Vec::new(),
+               ready_timeout_ms: 60_000,
+           },
             }.into(),
            guest_input_identity,
             guest_inputs,
@@ -416,12 +541,21 @@ mod tests {
             )
             .unwrap(),
             bootstrap_capability: STANDARD.encode([52_u8; 32]),
-            attachment_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap()
+            attachment_deadline_ms: lillux::time::timestamp_millis()
                 + 60_000,
             execution_timeout_seconds: 60,
             post_execution_timeout_seconds: 120,
             candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
+            native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+                storage_bytes: 67_108_864,
+                allocator_steps: 2_000_000_000,
+                connections: 16,
+                operation_millis: 4_860_000,
+                cleanup_millis: 120_000,
+                cleanup_steps: 3_000_000,
+            },
+            report_capabilities: false,
         }
     }
 
@@ -555,7 +689,7 @@ mod tests {
             serde_json::from_slice(request_body(request)).unwrap();
         attach.validate_shape().unwrap();
         assert_eq!(attach.bootstrap_capability, bootstrap.bootstrap_capability);
-        let issued_at_ms = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let issued_at_ms = lillux::time::timestamp_millis();
         let binding = ExecutionChannelBinding {
             schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
             execution_mode:
@@ -897,14 +1031,15 @@ mod tests {
 
     #[test]
     fn lost_attach_response_retries_same_key_after_bootstrap_deadline() {
+        use ryeos_state::external_execution::native_journal::testing::{census, retire};
+        let host = ryeos_state::test_support::shared_test_host();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut bootstrap = bootstrap(
             format!("https://localhost:{port}"),
             vec![TEST_CA_DER.to_owned()],
         );
-        bootstrap.attachment_deadline_ms =
-            i64::try_from(lillux::time::timestamp_millis()).unwrap() + 100;
+        bootstrap.attachment_deadline_ms = lillux::time::timestamp_millis() + 100;
         let server_bootstrap = serde_json::to_value(&bootstrap).unwrap();
         let retained_response = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
         let retained_request = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
@@ -951,6 +1086,9 @@ mod tests {
             bootstrap,
             captured_network_inputs,
             lillux::crypto::SigningKey::from_bytes(&[53; 32]),
+            host.factory(),
+            host.destination(),
+            &census(&host),
         )
         .unwrap();
         let store_identity = journal.store_identity().clone();
@@ -959,11 +1097,11 @@ mod tests {
                 journal.bootstrap(),
                 journal.supervisor_signing_key(),
                 journal.attachment_request(),
-                journal.captured_network_inputs(),
+                journal.captured_network_inputs().unwrap(),
             )
             .is_err()
         );
-        drop(journal);
+        retire(&host, journal.close());
         std::thread::sleep(Duration::from_millis(150));
         let ExternalSupervisorJournalRecovery::Prepared(recovered) =
             ExternalSupervisorJournalRecovery::open(
@@ -971,27 +1109,27 @@ mod tests {
                     .unwrap()
                     .unwrap(),
                 &store_identity,
+                host.factory(),
+                host.destination(),
+                &census(&host),
             )
             .unwrap()
         else {
             panic!("ambiguous attachment did not recover its prepared authority")
         };
-        assert!(
-            i64::try_from(lillux::time::timestamp_millis()).unwrap()
-                >= recovered.bootstrap().attachment_deadline_ms
-        );
+        assert!(lillux::time::timestamp_millis() >= recovered.bootstrap().attachment_deadline_ms);
         let (binding, _) = attach_external_execution_channel_exact(
             recovered.bootstrap(),
             recovered.supervisor_signing_key(),
             recovered.attachment_request(),
-            recovered.captured_network_inputs(),
+            recovered.captured_network_inputs().unwrap(),
         )
         .unwrap();
         assert_eq!(
             binding.supervisor_public_key,
             encode_channel_public_key(&recovered.supervisor_signing_key().verifying_key()).unwrap()
         );
-        recovered.record_binding(binding).unwrap();
+        retire(&host, recovered.record_binding(binding).unwrap().close());
         assert_eq!(server.join().unwrap(), 2);
     }
 
@@ -1205,5 +1343,136 @@ mod tests {
             &test_network_inputs(&bootstrap),
         )
         .unwrap();
+    }
+
+    fn stream_binding(
+        bootstrap: &ExternalSupervisorBootstrap,
+        supervisor: &lillux::crypto::SigningKey,
+        issued_at_ms: i64,
+    ) -> ExecutionChannelBinding {
+        ExecutionChannelBinding {
+            schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+            execution_mode:
+                ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
+            placement_thread_id: bootstrap.placement_thread_id.clone(),
+            allocation_request_digest: bootstrap.allocation_request_digest.clone(),
+            occurrence_id: bootstrap.occurrence_id.clone(),
+            admitted_capsule_hash: bootstrap.admitted_capsule_hash.clone(),
+            base_snapshot_hash: bootstrap.base_snapshot_hash.clone(),
+            execution_binding_hash: bootstrap.execution_binding_hash.clone(),
+            supervisor_runtime_hash: bootstrap.supervisor_runtime_hash.clone(),
+            candidate_program_digest: bootstrap.candidate_program.digest().unwrap(),
+            channel_nonce: "f".repeat(64),
+            owner_public_key: bootstrap.owner_public_key.clone(),
+            supervisor_public_key: encode_channel_public_key(&supervisor.verifying_key()).unwrap(),
+            issued_at_ms,
+            execution_deadline_ms: issued_at_ms
+                + i64::from(bootstrap.execution_timeout_seconds) * 1_000,
+            expires_at_ms: issued_at_ms
+                + i64::from(
+                    bootstrap.execution_timeout_seconds + bootstrap.post_execution_timeout_seconds,
+                ) * 1_000,
+            candidate_export_max_bytes: bootstrap.candidate_export_max_bytes,
+            max_frames: bootstrap.binding_max_frames().unwrap(),
+            max_bytes: bootstrap.channel_max_bytes,
+        }
+    }
+
+    #[test]
+    fn the_signed_contract_selects_the_stream_and_never_falls_back() {
+        let mut bootstrap = bootstrap(
+            "https://localhost:8443".into(),
+            vec![TEST_CA_DER.to_owned()],
+        );
+        let inputs = test_network_inputs(&bootstrap);
+        let supervisor = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
+        let binding = stream_binding(&bootstrap, &supervisor, lillux::time::timestamp_millis());
+        let window = ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap();
+        let selected =
+            select_exchange_transport(&bootstrap, &supervisor, &binding, &inputs, &window, None)
+                .unwrap();
+        assert!(matches!(
+            selected,
+            AttachedExternalExecutionTransport::HttpJson(_)
+        ));
+
+        bootstrap.controller.http_mut().unwrap().route_contract =
+            ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_STREAM_CONTRACT.into();
+        let http = reconnect_external_execution_channel(&bootstrap, &supervisor, &binding, &inputs)
+            .unwrap();
+        let selected = select_exchange_transport(
+            &bootstrap,
+            &supervisor,
+            &binding,
+            &inputs,
+            &window,
+            Some(http),
+        )
+        .unwrap();
+        assert!(matches!(
+            selected,
+            AttachedExternalExecutionTransport::ChannelStream(_)
+        ));
+
+        // A stream contract whose binding is not this supervisor's opens
+        // nothing, not even the request/response channel.
+        let other = lillux::crypto::SigningKey::from_bytes(&[44; 32]);
+        assert!(
+            select_exchange_transport(&bootstrap, &other, &binding, &inputs, &window, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn channel_stream_requires_the_exact_live_attached_binding() {
+        let bootstrap = bootstrap(
+            "https://localhost:8443".into(),
+            vec![TEST_CA_DER.to_owned()],
+        );
+        let inputs = test_network_inputs(&bootstrap);
+        let supervisor = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let now = lillux::time::timestamp_millis();
+        let binding = stream_binding(&bootstrap, &supervisor, now);
+        let window = ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap();
+        stream_transport::connect_external_execution_stream(
+            &bootstrap,
+            &supervisor,
+            &binding,
+            &inputs,
+            &window,
+        )
+        .unwrap();
+
+        let other = lillux::crypto::SigningKey::from_bytes(&[42; 32]);
+        assert!(
+            stream_transport::connect_external_execution_stream(
+                &bootstrap, &other, &binding, &inputs, &window,
+            )
+            .is_err(),
+            "a binding attached to another supervisor key must not open a stream"
+        );
+
+        let lifetime_ms = i64::from(
+            bootstrap.execution_timeout_seconds + bootstrap.post_execution_timeout_seconds,
+        ) * 1_000;
+        // A window is measured on the guest's own clock from an anchor taken
+        // before the binding was requested, so a binding is expired exactly
+        // when its anchor is older than the window, whatever its absolute
+        // times say.
+        let mut aged = lillux::time::LocalClockAnchor::capture()
+            .unwrap()
+            .coordinate()
+            .clone();
+        aged.tick_ns -= u64::try_from(lifetime_ms + 1_000).unwrap() * 1_000_000;
+        let expired = stream_binding(&bootstrap, &supervisor, now);
+        let expired_window =
+            ryeos_state::external_execution::guest_window::GuestChannelWindow::derive(
+                &lillux::time::LocalClockAnchor::from_retained(aged).unwrap(),
+                &expired,
+            );
+        assert!(
+            format!("{:#}", expired_window.unwrap_err()).contains("already elapsed"),
+            "an aged anchor must leave no window"
+        );
     }
 }

@@ -1,0 +1,26 @@
+[package]
+name = "modal-guest-launcher"
+version = "0.5.102"
+edition = "2024"
+description = "Guest entrypoint that installs the staged runtime on a Modal sandbox and starts the occurrence owner"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "ryeos-modal-guest-launcher"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+lillux = { workspace = true }
+ryeos-external-execution = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
+serde_json = { workspace = true }
+tar = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

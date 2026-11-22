@@ -1,18 +1,18 @@
-# ryeos:signed:2026-08-04T10:21:25Z:5e9acd00e108c6f2d0ed6ed772a2ef834aafd500f88a2c2e1b28167999bde8d7:LnQv18Yl6kDplszQNyAXUzeyEldQ494k2X37z5xQpbuNQopgl8T1oQRgZtSULUGT8Tn3TqLdqm/Vqnvh8XYvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:1e921194d598e71994b9a87cea3ac0c56506eaa6762b233bdbe765dc675f3a37:C72DrS1wK5kGT5kmjEp6jlIRfM+/14HEJwYbyE8Obou72Y+1mFn+FN+Do3FguH1w5c4+SP61+hrN9+aF1w/vAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-execution-tree
 title: Execution Tree
 version: "1.0.0"
 description: >-
   Focused execution ancestry across continuations and spawned child chains.
   Open it from a thread row; fold branches with left/right and enter any row to
-  inspect that thread's live transcript.
+  inspect that thread's retained execution detail without changing a conversation.
 
 widget: table
 sources:
   default:
     ref: service:ui/ryeos-ui/thread/tree
     params:
-      thread_id: "@facet:input.route.thread"
+      thread_id: "@facet:selection.thread_id"
       max_depth: 32
       max_nodes: 500
     collection: threads
@@ -23,15 +23,18 @@ projections:
   columns:
     - label: execution
       field: item_ref
+      role: ref
       present: leaf
     - label: kind
       field: kind
+      role: kind
       present: words
     - label: relation
       field: tree.relation
       present: words
     - label: status
       field: status
+      role: status
       present: words
     - label: current
       field: current_node.node
@@ -47,6 +50,7 @@ projections:
           resumed: good
     - label: created
       field: created_at
+      role: time
       present: time_date
   expand:
     fields: [thread_id, chain_root_id, tree.parent_thread_id, tree.relation, tree.depth, project.name, project.path, item_ref, requested_by, created_at, updated_at, current_node.node, current_node.step, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected]
@@ -68,14 +72,13 @@ selection:
   activate: watch
 affordances:
   - id: watch
-    label: Watch
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
   - id: inspect
     label: Inspect
@@ -87,4 +90,5 @@ affordances:
       open_view: view:ryeos/threads/detail
 
 refresh:
+  on_facet: selection
   on_hint: [thread, activity]

@@ -3,17 +3,23 @@
 //! This crate owns guest launcher, supervisor and transport behavior. It has
 //! no node application, executor, API, provider-account or cloud dependency.
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const GUEST_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("guest");
+
 pub mod backends;
 pub mod guest_content;
 pub mod guest_import_authorization;
 pub mod guest_inputs;
 pub mod guest_installation;
 pub mod guest_package_producer;
+pub mod guest_relay_loopback;
 pub mod guest_runtime_product;
 pub mod guest_staging;
+pub mod guest_start_rehearsal;
 pub mod launcher;
 pub mod launcher_protocol;
 pub mod lifecycle_adapter;
+pub(crate) mod qualification_fixture;
 pub mod restoration_verifier_delivery;
 pub mod supervisor;
 pub mod transport;

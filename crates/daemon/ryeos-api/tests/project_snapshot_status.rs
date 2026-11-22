@@ -1,17 +1,19 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 
 use ryeos_api::handlers::project_snapshot_status::{DESCRIPTOR, Request};
 use ryeos_api::registry::build_service_registry;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use serde_json::{Value, json};
 
 const CAP: &str = "ryeos.execute.service.project/snapshot-status";
 
 fn local_operator(state: &ryeos_app::state::AppState) -> HandlerContext {
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     HandlerContext::new_with_authority(
         operator.principal_id(),
         vec![CAP.to_owned()],
@@ -123,7 +125,7 @@ fn service_request_requires_explicit_budget_and_refuses_unknown_authority() {
 
 #[tokio::test]
 async fn unauthorized_callers_are_refused_before_project_path_observation() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let local = local_operator(&state);
     let contexts = [
         HandlerContext::anonymous(),
@@ -131,7 +133,7 @@ async fn unauthorized_callers_are_refused_before_project_path_observation() {
             local.fingerprint.clone(),
             vec![CAP.to_owned()],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:remote".into()),
         ),
         HandlerContext::new_with_authority(
@@ -181,7 +183,7 @@ async fn unauthorized_callers_are_refused_before_project_path_observation() {
 
 #[tokio::test]
 async fn local_operator_status_reuses_principal_head_comparison_without_creating_a_head() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let project = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("edited.txt"), b"current workspace edit").unwrap();
     let caller = local_operator(&state);
@@ -224,7 +226,7 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
     use ryeos_state::project_sync::{PROJECT_SNAPSHOT_CONFIG_RELATIVE, ProjectSyncScope};
     use std::collections::BTreeMap;
 
-    let (_tmp, mut state) = test_state::build_test_state();
+    let (_tmp, _state_owner, mut state) = test_state::build_test_state();
     let project = tempfile::tempdir().unwrap();
     for (path, bytes) in [
         (

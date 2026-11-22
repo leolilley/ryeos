@@ -1,16 +1,26 @@
-//! Signed initial view-set composition. This is presentation data inside a
-//! surface, not a second kind, view resolver or execution authority.
+//! View-set composition: the arrangement of views one tab opens with. A
+//! signed `view_set` item carries exactly this body and a Surface names such
+//! items by ref; the daemon resolves them into the Surface's effective
+//! presentation. A view set is arrangement only, never a resolver or an
+//! execution authority.
 
-use super::{SlotsSpec, TilingSpec, ViewKindSpec};
+#[cfg(test)]
+use super::TilingSpec;
+use super::ViewKindSpec;
+#[cfg(test)]
 use crate::ids::ViewGroupId;
+#[cfg(test)]
+use crate::layout::LayoutTree;
 use crate::layout::{
-    LayoutTree, MAX_LAYOUT_DEPTH, MAX_LAYOUT_TILES, MAX_SPLIT_RATIO, MIN_SPLIT_RATIO, SplitAxis,
+    MAX_LAYOUT_DEPTH, MAX_LAYOUT_TILES, MAX_SPLIT_RATIO, MIN_SPLIT_RATIO, SplitAxis,
 };
+#[cfg(test)]
 use crate::view_set::ViewSet;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const MAX_VIEW_SETS: usize = 16;
+pub const VIEW_SET_COMPOSITION_SCHEMA: u32 = 2;
 pub const MAX_VIEW_SET_LABEL_BYTES: usize = 128;
 pub const MAX_SAVED_VIEW_SETS: usize = 64;
 pub const MAX_SAVED_VIEW_SET_ID_BYTES: usize = 64;
@@ -18,17 +28,80 @@ pub const MAX_SAVED_VIEW_SET_LIBRARY_BYTES: usize = 256 * 1024;
 pub const MAX_PARTICULAR_VIEW_SETS: usize = 64;
 pub const MAX_PARTICULAR_VIEW_SET_LIBRARY_BYTES: usize = 256 * 1024;
 pub const MAX_PROJECT_LOCAL_ID_BYTES: usize = 128;
+pub const MAX_VIEW_SET_SEQUENCE_BYTES: usize = 64;
+/// Kind prefix of the item ref a Surface uses to name one view set.
+pub const VIEW_SET_REF_PREFIX: &str = "view_set:";
 pub const MAX_WORK_CHAIN_ROOT_ID_BYTES: usize = 128;
+
+/// How a view set draws its tile tree. The tree itself is the same in both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewSetPresentation {
+    /// Framed tiles (the default).
+    #[default]
+    Tiled,
+    /// An unframed page: the arrangement is read as page content.
+    Page,
+}
+
+impl ViewSetPresentation {
+    pub(crate) fn is_tiled(&self) -> bool {
+        *self == Self::Tiled
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewSetSeedSpec {
+    pub schema: u32,
     pub id: String,
     pub title: String,
     #[serde(default)]
     pub root: Option<LayoutSeedSpec>,
-    #[serde(default)]
-    pub slots: SlotsSpec,
+    /// Tile drawing mode. Absent means tiled.
+    #[serde(default, skip_serializing_if = "ViewSetPresentation::is_tiled")]
+    pub presentation: ViewSetPresentation,
+    /// Page presentations only: the tile tree is read as rows and the page
+    /// scrolls. Absent means false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scroll: bool,
+    /// Opaque step identifier. A view set carrying one is a step of the
+    /// sequence it names; the Surface's list order is the step order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<String>,
+    /// Whether the set is listed where a person adds a tab. Absent means true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub offered: bool,
+}
+
+impl Default for ViewSetSeedSpec {
+    /// A current-schema tiled set with no identity and no layout, for
+    /// struct-update construction; it is not valid until `id` and `title`
+    /// are set.
+    fn default() -> Self {
+        Self {
+            schema: VIEW_SET_COMPOSITION_SCHEMA,
+            id: String::new(),
+            title: String::new(),
+            root: None,
+            presentation: ViewSetPresentation::Tiled,
+            scroll: false,
+            sequence: None,
+            offered: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,8 +116,8 @@ pub enum LayoutSeedSpec {
     Split {
         axis: SplitAxis,
         ratio: f32,
-        first: Box<Self>,
-        second: Box<Self>,
+        first: Box<LayoutSeedSpec>,
+        second: Box<LayoutSeedSpec>,
     },
 }
 
@@ -62,22 +135,12 @@ pub struct SavedViewSetTemplate {
 }
 
 /// Stable address of a mount inside a reusable composition. Tile indices use
-/// the composition's deterministic depth-first view order; slots are named so
-/// runtime mount ids never enter the durable template.
+/// the composition's deterministic depth-first view order. Shared dialogs
+/// never enter a saved view set.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SavedViewMountRef {
     Tile { index: usize },
-    Slot { edge: SavedViewSlotEdge },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SavedViewSlotEdge {
-    Top,
-    Bottom,
-    Left,
-    Right,
 }
 
 /// Portable subject relationship. A required subject records only its input
@@ -121,6 +184,9 @@ pub struct ParticularWorkRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParticularViewSetContext {
+    /// Logical Surface definition selected when this exact set was retained.
+    /// Resume must re-resolve it under current admission; this is not a grant.
+    pub surface_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<ParticularProjectRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +215,20 @@ pub struct ResolvedParticularWork {
     pub chain_root: String,
 }
 
+impl ResolvedParticularWork {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("thread", self.thread.as_str()),
+            ("chain_root", self.chain_root.as_str()),
+        ] {
+            if !bounded_identifier(value, MAX_WORK_CHAIN_ROOT_ID_BYTES) {
+                return Err(format!("resolved particular work {name} is invalid"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Typed result paired with a particular-set renderer transition. The daemon
 /// has already re-resolved its stable config record; the client may use this
 /// only after admitting the accompanying fresh attachment (when present).
@@ -161,6 +241,41 @@ pub struct ResolvedParticularViewSet {
     pub relationships: Vec<SavedViewSelectionRelationship>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_selection_work: Option<ResolvedParticularWork>,
+}
+
+impl ResolvedParticularViewSet {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_saved_view_set_templates(std::slice::from_ref(&SavedViewSetTemplate {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            composition: self.composition.clone(),
+            relationships: self.relationships.clone(),
+        }))?;
+        if self.composition.id != self.id {
+            return Err("resolved particular composition differs from its identity".into());
+        }
+        if let Some(work) = &self.resolved_selection_work {
+            work.validate()?;
+        }
+        let supported_work_facets = [
+            "selection.work",
+            "selection.work.thread",
+            "selection.work.chain_root",
+        ];
+        if self.relationships.iter().any(|relationship| {
+            let SavedViewSelectionSource::RequiredSubject { facets, .. } = &relationship.source
+            else {
+                return false;
+            };
+            self.resolved_selection_work.is_none()
+                || facets
+                    .iter()
+                    .any(|facet| !supported_work_facets.contains(&facet.as_str()))
+        }) {
+            return Err("resolved particular subject differs from its work context".into());
+        }
+        Ok(())
+    }
 }
 
 pub fn validate_particular_view_set_resumes(
@@ -181,6 +296,18 @@ pub fn validate_particular_view_set_resumes(
     let mut ids = BTreeSet::new();
     for (index, resume) in resumes.iter().enumerate() {
         let location = format!("particular_view_sets[{index}]");
+        if resume
+            .context
+            .surface_ref
+            .strip_prefix("surface:")
+            .is_none_or(|path| path.is_empty())
+            || resume.context.surface_ref.trim() != resume.context.surface_ref
+            || resume.context.surface_ref.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "{location}.context.surface_ref must name the retained logical Surface"
+            ));
+        }
         if !bounded_identifier(&resume.id, MAX_SAVED_VIEW_SET_ID_BYTES) || !ids.insert(&resume.id) {
             return Err(format!("{location}.id must be a unique bounded identifier"));
         }
@@ -294,19 +421,9 @@ pub fn validate_saved_view_set_templates(templates: &[SavedViewSetTemplate]) -> 
             .root
             .as_ref()
             .map_or(0, layout_view_count);
-        let mut expected_mounts = (0..tile_count)
+        let expected_mounts = (0..tile_count)
             .map(|index| SavedViewMountRef::Tile { index })
             .collect::<BTreeSet<_>>();
-        for edge in [
-            SavedViewSlotEdge::Top,
-            SavedViewSlotEdge::Bottom,
-            SavedViewSlotEdge::Left,
-            SavedViewSlotEdge::Right,
-        ] {
-            if saved_slot_present(&template.composition, edge) {
-                expected_mounts.insert(SavedViewMountRef::Slot { edge });
-            }
-        }
         for (relationship_index, relationship) in template.relationships.iter().enumerate() {
             let relationship_location = format!("{location}.relationships[{relationship_index}]");
             if !mounts.insert(relationship.mount.clone()) {
@@ -314,11 +431,6 @@ pub fn validate_saved_view_set_templates(templates: &[SavedViewSetTemplate]) -> 
             }
             match &relationship.mount {
                 SavedViewMountRef::Tile { index } if *index >= tile_count => {
-                    return Err(format!("{relationship_location}.mount is not present"));
-                }
-                SavedViewMountRef::Slot { edge }
-                    if !saved_slot_present(&template.composition, *edge) =>
-                {
                     return Err(format!("{relationship_location}.mount is not present"));
                 }
                 _ => {}
@@ -363,7 +475,7 @@ pub fn validate_saved_view_set_templates(templates: &[SavedViewSetTemplate]) -> 
         }
         if mounts != expected_mounts {
             return Err(format!(
-                "{location}.relationships must name every mounted tile and slot exactly once"
+                "{location}.relationships must name every mounted tile exactly once"
             ));
         }
     }
@@ -387,15 +499,6 @@ fn layout_view_count(layout: &LayoutSeedSpec) -> usize {
     }
 }
 
-fn saved_slot_present(composition: &ViewSetSeedSpec, edge: SavedViewSlotEdge) -> bool {
-    match edge {
-        SavedViewSlotEdge::Top => composition.slots.top.is_some(),
-        SavedViewSlotEdge::Bottom => composition.slots.bottom.is_some(),
-        SavedViewSlotEdge::Left => composition.slots.left.is_some(),
-        SavedViewSlotEdge::Right => composition.slots.right.is_some(),
-    }
-}
-
 pub fn validate_seeds(seeds: &[ViewSetSeedSpec]) -> Result<(), String> {
     if seeds.len() > MAX_VIEW_SETS {
         return Err(format!("view_sets exceeds {MAX_VIEW_SETS} entries"));
@@ -404,6 +507,9 @@ pub fn validate_seeds(seeds: &[ViewSetSeedSpec]) -> Result<(), String> {
     let mut total_views = 0;
     for (index, seed) in seeds.iter().enumerate() {
         let location = format!("view_sets[{index}]");
+        if seed.schema != VIEW_SET_COMPOSITION_SCHEMA {
+            return Err(format!("{location}.schema is not current"));
+        }
         if seed.id.is_empty()
             || seed.id.len() > 64
             || !seed
@@ -419,6 +525,18 @@ pub fn validate_seeds(seeds: &[ViewSetSeedSpec]) -> Result<(), String> {
             || seed.title.chars().any(char::is_control)
         {
             return Err(format!("{location}.title must be a nonempty bounded label"));
+        }
+        if seed.scroll && seed.presentation != ViewSetPresentation::Page {
+            return Err(format!("{location}.scroll requires presentation: page"));
+        }
+        if let Some(sequence) = &seed.sequence
+            && (sequence.is_empty()
+                || sequence.len() > MAX_VIEW_SET_SEQUENCE_BYTES
+                || !sequence
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+        {
+            return Err(format!("{location}.sequence must be a bounded identifier"));
         }
         let mut pending = seed
             .root
@@ -473,7 +591,13 @@ pub fn validate_seeds(seeds: &[ViewSetSeedSpec]) -> Result<(), String> {
 }
 
 impl ViewSetSeedSpec {
-    pub fn instantiate(&self, tiling: &TilingSpec) -> Result<ViewSet, String> {
+    #[cfg(test)]
+    pub fn instantiate(
+        &self,
+        tiling: &TilingSpec,
+        presentation: &crate::ids::PresentationId,
+        surface: &crate::ids::SurfaceInstanceId,
+    ) -> Result<ViewSet, String> {
         validate_seeds(std::slice::from_ref(self))?;
         fn collect(node: &LayoutSeedSpec, views: &mut Vec<crate::view_set::ViewSpec>) {
             match node {
@@ -492,7 +616,7 @@ impl ViewSetSeedSpec {
         }
         // Allocate mounted identities once. Authored tree membership references
         // those instances; it never creates a second mutable view collection.
-        let mut view_set = ViewSet::from_tiling(tiling.clone(), views);
+        let mut view_set = ViewSet::from_tiling(tiling.clone(), views, presentation, surface);
         let mut ids: Vec<_> = view_set.tiles.keys().copied().collect();
         ids.sort_by_key(|id| id.0);
         fn instantiate(
@@ -531,7 +655,6 @@ impl ViewSetSeedSpec {
             .as_ref()
             .map(|root| instantiate(root, &mut ids.iter()));
         view_set.title = self.title.clone();
-        view_set.docks = crate::ui::model::RyeOsDockState::from_slots(&self.slots);
         if let Some(root) = &view_set.root {
             root.validate()?;
             let first = root.active_tile_ids()[0];
@@ -541,12 +664,31 @@ impl ViewSetSeedSpec {
     }
 }
 
-/// Shared daemon/client check. Nested references still resolve through the
-/// ordinary surface view collector, including inactive group tabs.
+/// Decode and bound-check the body of one `view_set` item. This is the single
+/// validator for an item body, the saved personal template and the particular
+/// resume: they all carry the same seed.
+pub fn parse_view_set_item(body: &serde_json::Value) -> Result<ViewSetSeedSpec, String> {
+    let seed: ViewSetSeedSpec =
+        serde_json::from_value(body.clone()).map_err(|error| format!("view set: {error}"))?;
+    validate_seeds(std::slice::from_ref(&seed))?;
+    Ok(seed)
+}
+
+/// Shared daemon/client check of an effective Surface's resolved view sets.
+/// Nested references still resolve through the ordinary surface view
+/// collector, including inactive group tabs. An entry still naming a
+/// `view_set:` item was never resolved by the daemon and is refused here.
 pub fn validate_effective_view_sets(value: &serde_json::Value) -> Result<(), String> {
     let Some(raw) = value.get("view_sets") else {
         return Ok(());
     };
+    if let Some(entries) = raw.as_array()
+        && let Some(index) = entries.iter().position(serde_json::Value::is_string)
+    {
+        return Err(format!(
+            "view_sets[{index}] is an unresolved {VIEW_SET_REF_PREFIX} ref; the daemon embeds each named view set before a Surface reaches a client"
+        ));
+    }
     let seeds: Vec<ViewSetSeedSpec> =
         serde_json::from_value(raw.clone()).map_err(|error| format!("view_sets: {error}"))?;
     validate_seeds(&seeds)?;
@@ -571,11 +713,90 @@ mod tests {
     use serde_json::json;
 
     fn seed() -> serde_json::Value {
-        json!({ "id": "work", "title": "Work", "root": {
-            "type": "split", "axis": "horizontal", "ratio": 0.7,
+        json!({ "schema": 2, "id": "work", "title": "Work", "root": {
+            "type": "split", "axis": "horizontal", "ratio": 0.5,
             "first": { "type": "group", "label": "Worker", "views": ["view:test/conversation", "view:test/evidence"], "active": 1 },
             "second": { "type": "group", "label": "Changes", "views": ["view:test/changes"], "active": 0 }
         } })
+    }
+
+    #[test]
+    fn predecessor_compositions_and_slot_addresses_are_rejected() {
+        let mut old = seed();
+        old.as_object_mut().unwrap().remove("schema");
+        assert!(serde_json::from_value::<ViewSetSeedSpec>(old).is_err());
+        let mut stale = seed();
+        stale["schema"] = json!(1);
+        assert!(validate_seeds(&[serde_json::from_value(stale).unwrap()]).is_err());
+        let mut slots = seed();
+        slots["slots"] = json!({});
+        assert!(serde_json::from_value::<ViewSetSeedSpec>(slots).is_err());
+        assert!(
+            serde_json::from_value::<SavedViewMountRef>(json!({"kind":"slot","edge":"left"}))
+                .is_err()
+        );
+        let current: ViewSetSeedSpec = serde_json::from_value(seed()).unwrap();
+        let roundtrip: ViewSetSeedSpec =
+            serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+        assert_eq!(current, roundtrip);
+        assert!(validate_seeds(&[roundtrip]).is_ok());
+    }
+
+    #[test]
+    fn arrangement_fields_default_away_and_round_trip() {
+        let plain: ViewSetSeedSpec = serde_json::from_value(seed()).unwrap();
+        assert_eq!(plain.presentation, ViewSetPresentation::Tiled);
+        assert!(!plain.scroll && plain.offered && plain.sequence.is_none());
+        let encoded = serde_json::to_value(&plain).unwrap();
+        for absent in ["presentation", "scroll", "sequence", "offered"] {
+            assert!(
+                encoded.get(absent).is_none(),
+                "{absent} is not written at its default"
+            );
+        }
+        let mut page = seed();
+        page["presentation"] = json!("page");
+        page["scroll"] = json!(true);
+        page["sequence"] = json!("welcome");
+        page["offered"] = json!(false);
+        let parsed = parse_view_set_item(&page).unwrap();
+        assert_eq!(parsed.presentation, ViewSetPresentation::Page);
+        assert!(parsed.scroll && !parsed.offered);
+        assert_eq!(parsed.sequence.as_deref(), Some("welcome"));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), page);
+    }
+
+    #[test]
+    fn arrangement_fields_are_validated() {
+        let mut scroll_without_page = seed();
+        scroll_without_page["scroll"] = json!(true);
+        assert!(
+            parse_view_set_item(&scroll_without_page)
+                .unwrap_err()
+                .contains("requires presentation: page")
+        );
+        for bad in [json!(""), json!("has space"), json!("x".repeat(65))] {
+            let mut value = seed();
+            value["sequence"] = bad;
+            assert!(
+                parse_view_set_item(&value)
+                    .unwrap_err()
+                    .contains("sequence")
+            );
+        }
+        let mut unknown = seed();
+        unknown["presentation"] = json!("poster");
+        assert!(parse_view_set_item(&unknown).is_err());
+        let mut stray = seed();
+        stray["extends"] = json!("view_set:other");
+        assert!(parse_view_set_item(&stray).is_err());
+    }
+
+    #[test]
+    fn an_unresolved_view_set_ref_is_refused_by_the_shared_check() {
+        let error = validate_effective_view_sets(&json!({"view_sets": ["view_set:test/work"]}))
+            .unwrap_err();
+        assert!(error.contains("view_sets[0]") && error.contains("unresolved"));
     }
 
     #[test]
@@ -614,7 +835,7 @@ mod tests {
         assert!(
             validate_saved_view_set_templates(&[incomplete])
                 .unwrap_err()
-                .contains("every mounted tile and slot")
+                .contains("every mounted tile")
         );
 
         let mut missing_mount = template.clone();
@@ -640,6 +861,7 @@ mod tests {
                 })
                 .collect(),
             context: ParticularViewSetContext {
+                surface_ref: "surface:test/particular".into(),
                 project: Some(ParticularProjectRef {
                     local_id: "prj_example".into(),
                 }),
@@ -698,6 +920,7 @@ mod tests {
         );
         let mut empty = resume.clone();
         empty.context = ParticularViewSetContext {
+            surface_ref: "surface:test/particular".into(),
             project: None,
             work: None,
         };
@@ -741,8 +964,14 @@ mod tests {
     #[test]
     fn authored_groups_preserve_selection_and_allocate_fresh_mounts() {
         let spec: ViewSetSeedSpec = serde_json::from_value(seed()).unwrap();
-        let first = spec.instantiate(&TilingSpec::default()).unwrap();
-        let second = spec.instantiate(&TilingSpec::default()).unwrap();
+        let presentation = crate::ids::PresentationId::try_new("seed-fixture").unwrap();
+        let surface = crate::ids::SurfaceInstanceId::try_new("seed-surface").unwrap();
+        let first = spec
+            .instantiate(&TilingSpec::default(), &presentation, &surface)
+            .unwrap();
+        let second = spec
+            .instantiate(&TilingSpec::default(), &presentation, &surface)
+            .unwrap();
         assert_eq!(first.title, "Work");
         assert_eq!(
             first.tiles[&first.focused_tile].view.view_ref,
@@ -796,35 +1025,27 @@ mod tests {
     }
 
     #[test]
-    fn core_mounts_only_the_named_view_sets_and_their_slots() {
-        let mut work = seed();
-        work["slots"] =
-            json!({ "left": { "content": "view:test/tree", "open": true, "size": 24 } });
-        let effective_surface =
-            json!({ "name": "test", "view_sets": [work, { "id": "review", "title": "Review" }] });
-        let session = crate::ui::model::BrowserSession {
-            surface_attachment_id: "view-sets-test-attachment".into(),
-            binding_attachments: vec![crate::ui::binding::UiBindingAttachment {
-                binding_attachment_id: "view-sets-test-attachment".into(),
-                binding_generation: 1,
-                binding_digest: "view-sets-test-binding".into(),
-                surface_ref: "surface:test/view-sets".into(),
-                surface_generation: "view-sets-test-surface".into(),
-                effective_surface,
-                project_path: None,
-                posture: Default::default(),
-                binding_request_bounds: crate::ui::binding::UiBindingRequestBounds {
-                    max_request_bytes: 64 * 1024,
-                    max_input_bytes: 16 * 1024,
-                },
-            }],
-            ..Default::default()
-        };
-        let core = crate::ui::model::RyeOsCore::new(session, Default::default(), 0);
-        assert_eq!(core.view_sets.len(), 2);
-        assert!(core.view_sets[0].docks.left.is_some());
-        assert!(core.view_sets[1].docks.left.is_none());
-        assert_eq!(core.view_sets[1].title, "Review");
-        assert!(core.view_sets[1].center_is_empty());
+    fn core_mounts_named_view_sets() {
+        use crate::ui::reducer::test_support::{core, session_with_surface};
+        let work = seed();
+        let session = session_with_surface(json!({
+            "name": "test",
+            "view_sets": [work, {"schema":2,"id":"review","title":"Review"}],
+            "views": {
+                "view:test/conversation":{"widget":"text"},
+                "view:test/evidence":{"widget":"rows"},
+                "view:test/changes":{"widget":"rows"}
+            }
+        }));
+        let mut core = core(session);
+        let sets = core.active_surface_view_sets().unwrap();
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[1].title, "Review");
+        assert!(sets[1].center_is_empty());
+        let review = sets[1].id;
+        core.active_surface_mut()
+            .unwrap()
+            .select_view_set(review)
+            .unwrap();
     }
 }

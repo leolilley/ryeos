@@ -17,6 +17,8 @@ pub mod planning;
 pub mod projection;
 pub mod reconcile;
 pub mod result_outcome;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_native;
 pub mod timer;
 pub mod types;
 
@@ -64,8 +66,18 @@ pub trait SchedulerContext: Send + Sync + 'static {
     /// mutations are in progress.
     fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>>;
 
+    /// Refuse dispatch while an in-process project schedule transaction has
+    /// unresolved partial state. Startup recovery must clear this condition
+    /// before the timer or recovered fires are released.
+    fn ensure_dispatch_available(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// The trust store for schedule signature verification.
     fn schedule_trust_store(&self) -> &TrustStore;
+
+    /// The node key fingerprint: the only signer a schedule source may have.
+    fn schedule_signer_fingerprint(&self) -> &str;
 
     /// Check a thread's status. Returns `None` if thread doesn't exist.
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>>;
@@ -110,6 +122,22 @@ pub trait SchedulerContext: Send + Sync + 'static {
         thread_id: &str,
     ) -> impl std::future::Future<Output = Result<ScheduledProjectBinding>> + Send;
 
+    /// Pause one schedule by itself, through the same signed pause write an
+    /// operator's `scheduler.pause` uses, recording `reason` in the signed
+    /// source. The implementation takes the scheduler mutation gate, so the
+    /// caller must not hold the runtime gate.
+    ///
+    /// Returns `false` without writing when the schedule is gone, already
+    /// paused, or no longer the generation `expected_spec_hash` names: a
+    /// schedule its owner changed after the triggering observation is judged
+    /// again on its own next pass instead of being paused for a stale reason.
+    fn auto_pause_schedule(
+        &self,
+        schedule_id: &str,
+        expected_spec_hash: &str,
+        reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
+
     /// Dispatch a scheduled item from an already-durable project binding.
     ///
     /// The daemon constructs the `DispatchRequest` and `ExecutionContext`,
@@ -142,6 +170,10 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
 
     fn schedule_trust_store(&self) -> &TrustStore {
         (**self).schedule_trust_store()
+    }
+
+    fn schedule_signer_fingerprint(&self) -> &str {
+        (**self).schedule_signer_fingerprint()
     }
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {
@@ -184,6 +216,17 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
     ) -> Result<ScheduledProjectBinding> {
         (**self)
             .bind_scheduled_project_authority(spec, fire, thread_id)
+            .await
+    }
+
+    async fn auto_pause_schedule(
+        &self,
+        schedule_id: &str,
+        expected_spec_hash: &str,
+        reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+    ) -> Result<bool> {
+        (**self)
+            .auto_pause_schedule(schedule_id, expected_spec_hash, reason)
             .await
     }
 }

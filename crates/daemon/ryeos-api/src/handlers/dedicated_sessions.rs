@@ -13,14 +13,17 @@ use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::dedicated_session_service::{
-    CandidatePublicationAuthority, candidate_publication_operation_id,
-    candidate_publication_reservation_payload, candidate_publication_result_payload,
+    CANDIDATE_PUBLICATION_SUPERSEDED_EVENT, CandidatePublicationAuthority,
+    candidate_publication_operation_id, candidate_publication_reservation_payload,
+    candidate_publication_result_payload, candidate_publication_superseded_payload,
     verify_candidate_publication_reservation, verify_candidate_publication_result,
+    verify_candidate_publication_superseded,
 };
 use ryeos_app::persistent_session::ExclusiveRetirementOutcome;
 use ryeos_app::state::AppState;
 use ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::refs::ProjectHeadAdvanceRefusal;
 
 const MAX_HANDOFF_TERMINAL_ATTESTATION_BYTES: usize = 512 * 1024;
 
@@ -279,19 +282,53 @@ async fn status(
     Ok(result)
 }
 
+/// Whether a hosted session's pinned terminal publication is consistent with
+/// its recorded disposition. A pin that carries a HEAD destination must name
+/// the owner, the target project and the base snapshot exactly, whichever
+/// disposition the session has: the destination is admitted authority, and a
+/// bounded (review) session may carry one because launch admits it, even though
+/// it never publishes through it. An interactive session needs the destination
+/// to be publishable at all, so it cannot carry a bare retained result.
+fn candidate_publication_pairing_matches(
+    disposition: &ryeos_app::runtime_db::DedicatedCandidateDisposition,
+    terminal_publication: &ryeos_state::objects::PinnedTerminalPublication,
+    owner_principal: &str,
+    target_project_path: &str,
+    base_snapshot_hash: &str,
+) -> anyhow::Result<bool> {
+    use ryeos_app::runtime_db::DedicatedCandidateDisposition::{OwnerDecision, RetainedForReview};
+    use ryeos_state::objects::PinnedTerminalPublication::{RetainCurrentHead, RetainResult};
+    Ok(match (disposition, terminal_publication) {
+        (
+            OwnerDecision | RetainedForReview,
+            RetainCurrentHead {
+                principal_key,
+                project_hash,
+                expected_hash,
+            },
+        ) => {
+            principal_key.as_str() == ryeos_state::refs::principal_storage_key(owner_principal)?
+                && project_hash == &lillux::sha256_hex(target_project_path.as_bytes())
+                && expected_hash == base_snapshot_hash
+        }
+        (RetainedForReview, RetainResult) => true,
+        _ => false,
+    })
+}
+
 async fn candidate_result(
     req: ryeos_app::hosted_candidate_result::HostedCandidateResultRequest,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    ryeos_app::identity::validate_forwarding_origin_assertion(
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
+    ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
         Some(&req.source_site_id),
         ctx.authorized_key_class,
         ctx.authenticated_origin_site_id.as_deref(),
     )
-    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
     let initial = owned_session(&state, &ctx, &req.chain_root_id)?;
     let placement_thread_id = initial.placement_thread_id.clone();
     let operation_lock = disposition_operation_lock(&placement_thread_id);
@@ -318,7 +355,7 @@ async fn candidate_result(
                 &session.placement_thread_id,
             )
             .await
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
         )
     } else {
         None
@@ -389,28 +426,14 @@ async fn candidate_result(
         state.threads.site_id(),
     )
     .map_err(internal)?;
-    let publication_authority_matches = match (&session.candidate_disposition, terminal_publication)
-    {
-        (
-            ryeos_app::runtime_db::DedicatedCandidateDisposition::OwnerDecision,
-            ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                principal_key,
-                project_hash,
-                expected_hash,
-            },
-        ) => {
-            principal_key.as_str()
-                == ryeos_state::refs::principal_storage_key(&session.owner_principal)
-                    .map_err(internal)?
-                && project_hash == &lillux::sha256_hex(target_project_path.as_bytes())
-                && expected_hash == base_snapshot_hash
-        }
-        (
-            ryeos_app::runtime_db::DedicatedCandidateDisposition::RetainedForReview,
-            ryeos_state::objects::PinnedTerminalPublication::RetainResult,
-        ) => true,
-        _ => false,
-    };
+    let publication_authority_matches = candidate_publication_pairing_matches(
+        &session.candidate_disposition,
+        terminal_publication,
+        &session.owner_principal,
+        target_project_path,
+        base_snapshot_hash,
+    )
+    .map_err(internal)?;
     if stable_project_identity != &expected_identity.normalized_logical_key
         || !publication_authority_matches
     {
@@ -427,7 +450,7 @@ async fn candidate_result(
         &session.placement_thread_id,
         completion_fence.command_sequence,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let observed_fence = command
         .get("completion_fence")
         .cloned()
@@ -465,7 +488,7 @@ async fn candidate_result(
             &session.placement_thread_id,
             completion_fence.command_sequence,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
     let capture_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.hosted_candidate_capture_operation.v1",
@@ -640,7 +663,10 @@ fn candidate_result_launch_capsule(
     let cas_read = state.acquire_cas_read().map_err(internal)?;
     let value = cas_read
         .cas()
-        .get_object(&session.admitted_capsule_hash)
+        .get_object_bounded(
+            &session.admitted_capsule_hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )
         .map_err(internal)?
         .ok_or_else(|| internal("hosted candidate session capsule disappeared"))?;
     let capsule =
@@ -1326,10 +1352,7 @@ fn fold_rooted_source_handoff_terminal(
         return Ok(None);
     };
 
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let target =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if target.config.site_id != operation.target_site_id {
@@ -1431,10 +1454,7 @@ fn validate_source_handoff_terminal(
     operation: &ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation,
 ) -> Result<ValidatedSourceHandoffTerminal> {
     validate_source_handoff_job_coordinates(job, operation)?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let target =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if target.config.site_id != operation.target_site_id {
@@ -1890,7 +1910,10 @@ fn load_persistent_session_capsule(
     authority.ensure_guard(&guard)?;
     let value = authority
         .cas_store()?
-        .get_object(capsule_hash)?
+        .get_object_bounded(
+            capsule_hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow::anyhow!("persistent-session capsule is absent from CAS"))?;
     let capsule =
         ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -2152,7 +2175,7 @@ async fn checkpoint(
         &session.placement_thread_id,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &session.credential_profile_id,
     )
@@ -2240,7 +2263,7 @@ async fn checkpoint(
     let settlement_digest = state
         .state_store
         .dedicated_session_checkpoint_settlement_digest(&placement_thread_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if let Some(accounting) = &state.accounting {
         if accounting
             .nonterminal_reservations()
@@ -2323,7 +2346,7 @@ async fn checkpoint(
         &portable_contract,
         upstream_session_id,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let tree_bytes = tree.canonical_bytes().map_err(internal)?;
     let tree_hash = lillux::sha256_hex(&tree_bytes);
     let selector_contract_digest = lillux::sha256_hex(
@@ -2407,7 +2430,7 @@ async fn checkpoint(
                 }),
             },
         })
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     Ok(json!({
         "chain_root_id":session.chain_root_id,
         "placement_thread_id":placement_thread_id,
@@ -2477,7 +2500,7 @@ async fn resume(
         &source_thread_id,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &source.credential_profile_id,
     )
@@ -2497,7 +2520,7 @@ async fn resume(
         ));
     }
     let checkpoint = load_worker_checkpoint(&state, &source.chain_root_id, &req.manifest_ref)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if checkpoint.restore.project_candidate_snapshot_hash != source.candidate_snapshot_hash {
         return Err(HandlerError::BadRequest(
             "checkpoint project candidate differs from the frozen source".into(),
@@ -2525,7 +2548,7 @@ async fn resume(
         state
             .state_store
             .verify_project_snapshot_closure(candidate)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     }
     let profile = state
         .state_store
@@ -2576,7 +2599,7 @@ async fn resume(
         ));
     }
     let predecessor_tree = load_worker_checkpoint_predecessor_tree(&state, &checkpoint.restore)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let portable_install = ryeos_app::private_artifact_home::install_portable_state_conditionally(
         &state.config.runtime_state_dir(),
         &profile.home_id,
@@ -2585,11 +2608,11 @@ async fn resume(
         predecessor_tree.as_ref(),
         &checkpoint.tree,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let settlement = state
         .state_store
         .dedicated_session_checkpoint_settlement_digest(&source_thread_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if settlement != checkpoint.restore.pending_contact_settlement_digest {
         return Err(HandlerError::BadRequest(
             "worker contact frontier changed after checkpoint".into(),
@@ -2727,7 +2750,7 @@ async fn resume(
                 .as_deref(),
             initial_events,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let prepared = prepared.with_persisted_birth_audit();
     drop(profile_operation);
     drop(root_operation);
@@ -2790,7 +2813,7 @@ async fn handoff_preflight(
         &source_thread_id,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &source.credential_profile_id,
     )
@@ -2832,7 +2855,7 @@ async fn handoff_preflight(
     }
     let checkpoint_manifest_hash =
         load_worker_checkpoint_predecessor(&state, &source.chain_root_id)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
             .map(|(manifest_hash, _)| manifest_hash)
             .ok_or_else(|| {
                 HandlerError::BadRequest(
@@ -2844,7 +2867,7 @@ async fn handoff_preflight(
         &source.chain_root_id,
         &format!("cas:{checkpoint_manifest_hash}"),
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if checkpoint.restore.source_position.placement_thread_id != source_thread_id
         || checkpoint.restore.project_candidate_snapshot_hash != source.candidate_snapshot_hash
     {
@@ -2924,12 +2947,10 @@ async fn handoff_preflight(
         .get_launch_metadata(&source_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("preflight source has no launch metadata"))?;
+    // The source's recorded stop policy is node-local and never transferred:
+    // every launch resolves its own from the signed execution config, so the
+    // target records the policy its own config grants when it attaches.
     source_metadata.validate().map_err(internal)?;
-    if source_metadata.cancellation_mode.is_some() {
-        return Err(HandlerError::BadRequest(
-            "portable worker handoff v1 has no rooted cancellation-policy transfer".into(),
-        ));
-    }
     let source_capsule = source_metadata
         .admitted_launch_capsule()
         .map_err(internal)?
@@ -2944,14 +2965,14 @@ async fn handoff_preflight(
         .map_err(internal)?;
     source_capsule
         .validate_durable_handoff_eligibility()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let source_credential_profile_id = sealed
         .validate_worker_handoff_source(
             &source.owner_principal,
             state.threads.site_id(),
             &source_snapshot.origin_site_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if source_credential_profile_id != source.credential_profile_id {
         return Err(HandlerError::BadRequest(
             "source launch capsule contradicts its hosted session authority".into(),
@@ -2964,16 +2985,13 @@ async fn handoff_preflight(
         .ok_or_else(|| {
             HandlerError::BadRequest("preflight source has no stable project endpoint".into())
         })?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(&source_project_path),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let binding =
         crate::remote::config::resolve_loaded_project_binding(&loaded_remote, &source_project_path)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if binding.sync_scope != crate::remote::config::ProjectSyncScope::FullProject {
         return Err(HandlerError::BadRequest(
             "worker handoff preflight requires a configured full_project route".into(),
@@ -3002,7 +3020,7 @@ async fn handoff_preflight(
             &source.owner_principal,
             state.threads.site_id(),
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
         .map(|(hash, _attestation)| hash);
     let preflight_id = ryeos_state::objects::canonical_value_digest(&json!({
         "schema":"ryeos.worker_session_handoff_preflight_operation.v2",
@@ -3046,8 +3064,9 @@ async fn handoff_preflight(
         follow_delivery_reservation_attestation_hash,
     };
     request.validate().map_err(internal)?;
+    retain_preflight_read_grant(&state, &req.remote, &request).map_err(internal)?;
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let target_value = target_client
         .execute_service_result_with_total_timeout(
             ryeos_app::worker_handoff::WORKER_PLACEMENT_PREFLIGHT_SERVICE,
@@ -3072,9 +3091,9 @@ async fn handoff_preflight(
         .map_err(internal)?;
     response
         .validate_against(&request, &target_key)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let target_node_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let target_closure_options =
         crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
             &state,
@@ -3121,7 +3140,10 @@ async fn handoff_preflight(
     };
     let target_closure = target_node_client
         .objects_closure_get_with_total_timeout(
-            &[response.preflight_attestation_hash.clone()],
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: request.preflight_id.clone(),
+            },
+            std::slice::from_ref(&response.preflight_attestation_hash),
             target_fetch_options,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
         )
@@ -3133,7 +3155,7 @@ async fn handoff_preflight(
         &state,
         &target_closure.closure.large_object_hashes,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let mut payload = crate::remote::import::closure_response_to_export_payload(
         &format!("worker-preflight:{preflight_id}"),
         &response.preflight_attestation_hash,
@@ -3146,7 +3168,7 @@ async fn handoff_preflight(
             entry,
             target_closure_options.limits(),
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     }
     let operation = ryeos_app::worker_handoff::WorkerPlacementPreflightJobOperation::from_request(
         ryeos_app::worker_handoff::WorkerHandoffJobRole::Source,
@@ -3230,6 +3252,55 @@ async fn handoff_preflight(
     }))
 }
 
+/// Operation type of the retained record that lets the target read this
+/// node's preflight inputs while the preflight is in flight.
+const PREFLIGHT_READ_GRANT_OPERATION: &str = "worker_session_handoff_preflight_read_grant";
+
+/// The target reads the source chain head (and any follow reservation) back
+/// from this node while it answers the preflight, before the source preflight
+/// job exists. Retain, before contacting the target, exactly what the target
+/// may read and who it is, so the read is authorized by this node's own record
+/// of the placement rather than by the target's say-so.
+fn retain_preflight_read_grant(
+    state: &AppState,
+    remote: &str,
+    request: &ryeos_app::worker_handoff::WorkerPlacementPreflightRequest,
+) -> Result<()> {
+    let job_id = format!("worker-handoff-preflight-grant:{}", request.preflight_id);
+    if state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&job_id))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let mut roots = vec![request.source_chain_head_hash.clone()];
+    roots.extend(
+        request
+            .follow_delivery_reservation_attestation_hash
+            .iter()
+            .cloned(),
+    );
+    state.state_store.with_state_db(|db| {
+        db.create_sync_job(&ryeos_state::NewSyncJob {
+            job_id: job_id.clone(),
+            operation_type: PREFLIGHT_READ_GRANT_OPERATION.to_owned(),
+            operation: json!({
+                "operation_type": PREFLIGHT_READ_GRANT_OPERATION,
+                "preflight_id": request.preflight_id,
+                "source_chain_head_hash": request.source_chain_head_hash,
+                "follow_delivery_reservation_attestation_hash":
+                    request.follow_delivery_reservation_attestation_hash,
+            }),
+            peer: Some(remote.to_owned()),
+            roots,
+            heads: vec![request.source_chain_head_hash.clone()],
+            max_attempts: 1,
+        })
+        .map(|_| ())
+    })
+}
+
 fn source_preflight_job_id(preflight_id: &str) -> String {
     format!("worker-handoff-preflight-source:{preflight_id}")
 }
@@ -3286,7 +3357,7 @@ async fn handoff(
             &source_thread_id,
         )
         .await
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let _profile_operation = ryeos_app::hosted_operation::acquire_credential_profile_operation(
         &source.credential_profile_id,
     )
@@ -3329,7 +3400,7 @@ async fn handoff(
     #[cfg(any(test, feature = "handoff-test-support"))]
     let checkpoint_started = lillux::time::MonotonicTimer::start();
     let checkpoint = load_worker_checkpoint(&state, &source.chain_root_id, &req.manifest_ref)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     #[cfg(any(test, feature = "handoff-test-support"))]
     let checkpoint_load_ms = checkpoint_started.elapsed_millis();
     if checkpoint.restore.project_candidate_snapshot_hash != source.candidate_snapshot_hash {
@@ -3368,12 +3439,10 @@ async fn handoff(
         .get_launch_metadata(&source_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("handoff source has no launch metadata"))?;
+    // The source's recorded stop policy is node-local and never transferred:
+    // every launch resolves its own from the signed execution config, so the
+    // target records the policy its own config grants when it attaches.
     source_metadata.validate().map_err(internal)?;
-    if source_metadata.cancellation_mode.is_some() {
-        return Err(HandlerError::BadRequest(
-            "portable worker handoff v1 has no rooted cancellation-policy transfer".into(),
-        ));
-    }
     let source_capsule = source_metadata
         .admitted_launch_capsule()
         .map_err(internal)?
@@ -3388,14 +3457,14 @@ async fn handoff(
         .map_err(internal)?;
     source_capsule
         .validate_durable_handoff_eligibility()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let source_credential_profile_id = sealed
         .validate_worker_handoff_source(
             &source.owner_principal,
             state.threads.site_id(),
             &source_snapshot.origin_site_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if source_credential_profile_id != source.credential_profile_id {
         return Err(HandlerError::BadRequest(
             "source launch capsule contradicts its hosted session authority".into(),
@@ -3408,16 +3477,13 @@ async fn handoff(
         .ok_or_else(|| {
             HandlerError::BadRequest("handoff source has no stable project endpoint".into())
         })?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(&source_project_path),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let binding =
         crate::remote::config::resolve_loaded_project_binding(&loaded_remote, &source_project_path)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if binding.sync_scope != crate::remote::config::ProjectSyncScope::FullProject {
         return Err(HandlerError::BadRequest(
             "worker handoff requires a configured full_project route".into(),
@@ -3468,7 +3534,7 @@ async fn handoff(
     preflight_response
         .preflight_attestation
         .verify_with_key(&target_key)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let preflight_evidence =
         ryeos_app::worker_handoff::WorkerPlacementPreflightEvidence::from_attestation(
             &preflight_response.preflight_attestation,
@@ -3519,7 +3585,7 @@ async fn handoff(
         &source_head.target_hash,
         &preflight_evidence.source_chain_head_hash,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     drop(guard);
     #[cfg(any(test, feature = "handoff-test-support"))]
     let closure_verification_ms = closure_verification_started.elapsed_millis();
@@ -3560,7 +3626,7 @@ async fn handoff(
                     &source.chain_root_id,
                     scope,
                 )
-                .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
         ),
         (None, Some(_)) => {
             return Err(internal(
@@ -3742,7 +3808,7 @@ async fn handoff(
         source_accounting_frontier: source_accounting_frontier.clone(),
     };
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let prepare_attempt =
         begin_worker_handoff_attempt(&state, &job_id, "target_prepare", "source-handoff")?;
     #[cfg(any(test, feature = "handoff-test-support"))]
@@ -3776,16 +3842,19 @@ async fn handoff(
             .map_err(|error| internal(format!("decode target placement response: {error}")))?;
         prepared
             .validate_against(&prepare_request)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
         let target_node_client =
-            crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+            crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
         let target_roots = vec![
             prepared.placement_attestation_hash.clone(),
             prepared.target_runtime_seed_hash.clone(),
         ];
         let target_closure = target_node_client
             .objects_closure_get_with_total_timeout(
+                &crate::objects_read_scope::ReadRoot::Placement {
+                    placement_id: prepare_request.operation_id.clone(),
+                },
                 &target_roots,
                 crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
                     &state,
@@ -3809,7 +3878,7 @@ async fn handoff(
             &state,
             &target_closure.closure.large_object_hashes,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         let target_payload = crate::remote::import::closure_response_to_export_payload(
             &format!("worker-placement:{operation_id}"),
             &prepared.placement_attestation_hash,
@@ -3857,7 +3926,7 @@ async fn handoff(
         )
         .map_err(internal)?;
         verify_target_placement_attestation(&state, &loaded_remote.config, &prepared)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         Ok((prepared, target_qualification_measurements))
     }
     .await;
@@ -3923,7 +3992,7 @@ async fn handoff(
                         })?,
                         target_scope,
                     )
-                    .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+                    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
             )
         }
         (_, None) => None,
@@ -3972,7 +4041,7 @@ async fn handoff(
                     .map_err(internal)?,
             },
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     root_terminalization.commit();
     if source_metadata.accounting_scope.is_some() {
         state
@@ -4430,21 +4499,18 @@ async fn resume_committed_handoff_locked(
             "committed remote continuation contradicts source handoff progress",
         ));
     }
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if loaded_remote.config.site_id != operation.target_site_id {
         return Err(HandlerError::BadRequest(
             "configured target site changed after source commit".into(),
         ));
     }
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
     let adopt_request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
         operation_id: operation.operation_id.clone(),
         chain_root_id: operation.chain_root_id.clone(),
@@ -4593,6 +4659,9 @@ async fn fetch_target_handoff_terminal_attestation(
     .map_err(internal)?;
     let response = target_client
         .objects_get_with_response_limit_and_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: operation.operation_id.clone(),
+            },
             &[terminal_attestation_hash.to_owned()],
             &[],
             MAX_HANDOFF_TERMINAL_ATTESTATION_BYTES,
@@ -4673,6 +4742,9 @@ async fn fetch_target_handoff_terminal_chain_closure(
     ];
     let response = target_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: operation.operation_id.clone(),
+            },
             &roots,
             crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
                 state,
@@ -4696,7 +4768,7 @@ async fn fetch_target_handoff_terminal_chain_closure(
         state,
         &response.closure.large_object_hashes,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let entry = response
         .entries
         .iter()
@@ -4750,7 +4822,6 @@ enum ValidatedTargetAdoptionOutcome {
     FailedBeforeAttachment(ryeos_app::worker_handoff::WorkerPlacementFailureResponse),
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn validate_and_retain_target_adoption_result(
     state: &AppState,
     target_client: &crate::remote::client::RemoteClient,
@@ -4986,7 +5057,6 @@ async fn validate_and_retain_target_adoption_result(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn validate_and_retain_target_abort_result(
     state: &AppState,
     target_client: &crate::remote::client::RemoteClient,
@@ -5133,7 +5203,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                     }
                     Ok(_) => continue,
                     Err(error) => {
-                        tracing::error!(job_id = %job.job_id, error = %error, "invalid source worker handoff job retained for operator inspection");
+                        tracing::error!(job_id = %job.job_id, error = %format!("{error:#}"), "invalid source worker handoff job retained for operator inspection");
                         continue;
                     }
                 };
@@ -5304,10 +5374,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 tracing::error!(job_id = %job.job_id, "source handoff durable progress contradicts signed chain authority");
                 continue;
             }
-            let report = crate::remote::config::load_remotes_layered_report(
-                &state.config.app_root,
-                Some(std::path::Path::new(&operation.source_project_path)),
-            )?;
+            let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
             let loaded_remote = crate::remote::config::get_loaded_remote(
                 &report.remotes,
                 &operation.peer_remote_name,
@@ -5317,7 +5384,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 continue;
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+                crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
             let request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
                 operation_id: operation.operation_id.clone(),
                 chain_root_id: operation.chain_root_id.clone(),
@@ -5345,7 +5412,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                         WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
                     )
                     .await
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
                 let (terminal_result, _qualification_measurements): (
                     ryeos_app::worker_handoff::WorkerPlacementAdoptResult,
                     Option<Value>,
@@ -5431,7 +5498,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                         ryeos_state::SyncJobAttemptState::Failed,
                         ryeos_state::SyncJobState::Retryable,
                         &latest.phase,
-                        Some(bounded_handoff_recovery_error(&error.to_string())),
+                        Some(bounded_handoff_recovery_error(&format!("{error:#}"))),
                         latest.result,
                     )
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -5460,10 +5527,7 @@ async fn recover_exported_source_writer_cut(
         .placement_attestation_hash
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("exported source handoff has no target placement"))?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if loaded_remote.config.site_id != operation.target_site_id {
@@ -5709,16 +5773,14 @@ async fn recover_pre_cut_source_handoff_abort(
         operation,
     )?;
 
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if loaded_remote.config.site_id != operation.target_site_id {
         anyhow::bail!("source handoff configured target site changed before abort");
     }
-    let client = crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+    let client =
+        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
     let request = ryeos_app::worker_handoff::WorkerPlacementAbortRequest {
         operation: operation.clone(),
         abort_chain_head_hash: abort_head_hash.clone(),
@@ -5743,7 +5805,7 @@ async fn recover_pre_cut_source_handoff_abort(
                 WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
             )
             .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow::anyhow!(format!("{error:#}")))?;
         let terminal_result: ryeos_app::worker_handoff::WorkerPlacementAbortResult =
             serde_json::from_value(value)?;
         validate_and_retain_target_abort_result(
@@ -5790,7 +5852,7 @@ async fn recover_pre_cut_source_handoff_abort(
                 ryeos_state::SyncJobAttemptState::Failed,
                 ryeos_state::SyncJobState::Retryable,
                 abort_progress.phase.as_str(),
-                Some(bounded_handoff_recovery_error(&error.to_string())),
+                Some(bounded_handoff_recovery_error(&format!("{error:#}"))),
                 Some(abort_progress.to_value()?),
             )
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -5884,7 +5946,6 @@ fn settle_worker_handoff_attempt(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_worker_handoff_attempt_with_heads(
     state: &AppState,
     job_id: &str,
@@ -5980,7 +6041,7 @@ async fn command_observation(
         &session.placement_thread_id,
         req.command_sequence,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))
 }
 
 async fn command(
@@ -6016,7 +6077,7 @@ async fn command(
                 &request_digest,
                 &payload,
             )
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
             .is_none()
         {
             return Err(HandlerError::BadRequest(
@@ -6032,7 +6093,7 @@ async fn command(
         json!({"route_id":req.route_id,"payload":req.payload}),
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let object = result
         .as_object_mut()
         .ok_or_else(|| internal("worker command result is not an object"))?;
@@ -6197,8 +6258,8 @@ fn repair_approval_outbox_for_session(
         }))
         .map_err(internal)?;
         append_root_fact_once(
-            &state,
-            &session,
+            state,
+            session,
             "hosted_approval.decision_reserved",
             &decision_operation_id,
             json!({
@@ -6234,8 +6295,8 @@ fn repair_approval_outbox_for_session(
             }))
             .map_err(internal)?;
             append_root_fact_once(
-                &state,
-                &session,
+                state,
+                session,
                 "hosted_approval.delivery_contacting",
                 &contacting_operation_id,
                 json!({
@@ -6271,8 +6332,8 @@ fn repair_approval_outbox_for_session(
         }))
         .map_err(internal)?;
         append_root_fact_once(
-            &state,
-            &session,
+            state,
+            session,
             "hosted_approval.delivery_unknown",
             &unknown_operation_id,
             json!({
@@ -6351,6 +6412,66 @@ fn classify_candidate_publication_recovery(
 /// admitted base proves that this operation did not publish. The candidate
 /// proves success; a missing or different HEAD is irreducibly ambiguous and is
 /// terminalized as unknown rather than reopening an unsafe retry.
+/// Mirror every `publish_ready` session whose admitted base HEAD has moved
+/// into the report `ryeos node doctor` reads offline. It settles nothing:
+/// each such session settles to `base_superseded` on its owner's next
+/// publish. Best effort; the session rows and the signed HEAD stay the
+/// authority, and a failed mirror only leaves the doctor's view stale.
+pub fn mirror_stale_publication_report(state: &AppState) {
+    if let Err(error) = write_stale_publication_report(state) {
+        tracing::warn!(
+            error = %format!("{error:#}"),
+            "failed to mirror the stale publication report for node doctor"
+        );
+    }
+}
+
+fn write_stale_publication_report(state: &AppState) -> anyhow::Result<()> {
+    let mut stale = Vec::new();
+    for session in state
+        .state_store
+        .dedicated_sessions_in_state("publish_ready")?
+    {
+        let authority = match candidate_publication_authority(state, &session) {
+            Ok(authority) => authority,
+            Err(error) => {
+                tracing::warn!(
+                    chain_root_id = %session.chain_root_id,
+                    error = %error,
+                    "publish_ready session has no readable publication authority"
+                );
+                continue;
+            }
+        };
+        let current = state.state_store.with_state_db(|db| {
+            db.read_project_head(&authority.principal_key, &authority.project_hash)
+        })?;
+        if ryeos_app::stale_publication_report::base_has_moved(
+            current.as_deref(),
+            &authority.base_snapshot_hash,
+            &authority.candidate_snapshot_hash,
+        ) {
+            tracing::warn!(
+                chain_root_id = %session.chain_root_id,
+                candidate = %authority.candidate_snapshot_hash,
+                base = %authority.base_snapshot_hash,
+                current_head = ?current,
+                "publish_ready candidate's base HEAD has moved; it settles to base_superseded on the owner's next publish"
+            );
+            stale.push(
+                ryeos_app::stale_publication_report::StalePublishReadySession {
+                    chain_root_id: session.chain_root_id.clone(),
+                    placement_thread_id: session.placement_thread_id.clone(),
+                    candidate_snapshot_hash: authority.candidate_snapshot_hash.clone(),
+                    base_snapshot_hash: authority.base_snapshot_hash.clone(),
+                    current_head: current,
+                },
+            );
+        }
+    }
+    ryeos_app::stale_publication_report::write_report(&state.config.runtime_root().state(), stale)
+}
+
 pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::Result<()> {
     // Qualification journals the exact evaluator adoption before contacting
     // its separate recorded-service root. Startup either observes that exact
@@ -6429,7 +6550,19 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             "unknown",
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        if usize::from(published_fact) + usize::from(not_applied_fact) + usize::from(unknown_fact)
+        let superseded_fact = verify_candidate_publication_superseded(
+            &state,
+            &session,
+            &authority,
+            publication_root_id,
+            publication_operation_id,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        .is_some();
+        if usize::from(published_fact)
+            + usize::from(not_applied_fact)
+            + usize::from(unknown_fact)
+            + usize::from(superseded_fact)
             > 1
         {
             anyhow::bail!("candidate publication root contains contradictory terminal facts");
@@ -6471,6 +6604,14 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                 publication_operation_id,
                 &format!("publication_unknown:{candidate}"),
             )?;
+        } else if superseded_fact {
+            state.state_store.settle_dedicated_candidate_publication(
+                &session.placement_thread_id,
+                source_candidate,
+                publication_root_id,
+                publication_operation_id,
+                &format!("base_superseded:{candidate}"),
+            )?;
         } else {
             // The reservation proves that HEAD may already have been
             // contacted. Keep the exact publication root appendable while we
@@ -6491,7 +6632,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                 })?;
             let current = state
                 .state_store
-                .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))?;
+                .with_state_db(|db| db.read_project_head(principal_key, project_hash))?;
             let recovery = classify_candidate_publication_recovery(
                 current.as_deref(),
                 base_snapshot_hash,
@@ -6582,6 +6723,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             &session.placement_thread_id,
         );
     }
+    mirror_stale_publication_report(&state);
     Ok(())
 }
 
@@ -6609,7 +6751,7 @@ async fn resolve_approval(
         &placement_thread_id,
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let _credential_guard = ryeos_app::hosted_operation::acquire_credential_profile_causal_contact(
         &initial_session.credential_profile_id,
         &placement_thread_id,
@@ -6815,32 +6957,94 @@ async fn resolve_approval(
             )));
         }
     };
-    let exact_expiry = delivery.as_object().is_some_and(|object| {
-        object.len() == 4
-            && object.get("resolved").and_then(Value::as_bool) == Some(false)
-            && object.get("outcome").and_then(Value::as_str) == Some("expired")
-            && object.get("request_id") == Some(&request_id)
-            && object.get("request_digest").and_then(Value::as_str)
-                == Some(req.request_digest.as_str())
-    });
-    if exact_expiry {
-        let projected = ryeos_app::dedicated_session_service::wait_for_exact_approval_state(
-            &state,
-            &placement_thread_id,
-            &req.approval_id,
-            approval.worker_boot_epoch,
-            &req.request_digest,
-            &reservation_token,
-            &decision_digest,
-            "expired",
-            lillux::time::Duration::from_secs(30),
-        )
-        .await
-        .map_err(internal)?;
-        if projected {
+    let unresolved_testimony = |outcome: &str| {
+        delivery.as_object().is_some_and(|object| {
+            object.len() == 4
+                && object.get("resolved").and_then(Value::as_bool) == Some(false)
+                && object.get("outcome").and_then(Value::as_str) == Some(outcome)
+                && object.get("request_id") == Some(&request_id)
+                && object.get("request_digest").and_then(Value::as_str)
+                    == Some(req.request_digest.as_str())
+        })
+    };
+    let exact_expiry = unresolved_testimony("expired");
+    let exact_absent = unresolved_testimony("absent");
+    if exact_absent {
+        // The worker forgets an expired approval once RyeOS acknowledges its
+        // expiry, so a decision reserved before that expiry was projected can
+        // arrive after it. Only this worker's own acknowledged expiry of this
+        // exact request explains the absence; it settles like a typed expiry.
+        if let Some(observed) =
+            ryeos_app::dedicated_session_service::observed_expiry_explaining_absent_delivery(
+                &state,
+                &session,
+                &req.approval_id,
+                approval.worker_boot_epoch,
+                &req.request_digest,
+                &reservation_token,
+                &decision_digest,
+                &request_id,
+            )
+            .map_err(internal)?
+        {
+            let expired_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+                "schema":"ryeos.hosted_approval_delivery_fact.v1",
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":placement_thread_id,
+                "approval_id":req.approval_id,
+                "reservation_token":reservation_token,
+                "stage":"delivery_expired",
+            }))
+            .map_err(internal)?;
+            append_root_fact_once(
+                &state,
+                &session,
+                "hosted_approval.delivery_expired",
+                &expired_operation_id,
+                json!({
+                    "schema":1,
+                    "origin":"daemon_observed_io",
+                    "chain_root_id":session.chain_root_id,
+                    "placement_thread_id":placement_thread_id,
+                    "approval_id":req.approval_id,
+                    "worker_boot_epoch":approval.worker_boot_epoch,
+                    "request_digest":req.request_digest,
+                    "reservation_token":reservation_token,
+                    "decision_digest":decision_digest,
+                    "worker_answer":"absent",
+                    "expiry_observation":{
+                        "batch_digest":observed.batch_digest,
+                        "first_sequence":observed.first_sequence,
+                        "through_sequence":observed.through_sequence,
+                        "event_sequence":observed.event_sequence,
+                    },
+                }),
+            )?;
             return Err(HandlerError::BadRequest(
                 "approval expired before the owner decision reached the worker".into(),
             ));
+        }
+    }
+    if exact_expiry || exact_absent {
+        if exact_expiry {
+            let projected = ryeos_app::dedicated_session_service::wait_for_exact_approval_state(
+                &state,
+                &placement_thread_id,
+                &req.approval_id,
+                approval.worker_boot_epoch,
+                &req.request_digest,
+                &reservation_token,
+                &decision_digest,
+                "expired",
+                lillux::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(internal)?;
+            if projected {
+                return Err(HandlerError::BadRequest(
+                    "approval expired before the owner decision reached the worker".into(),
+                ));
+            }
         }
         let cleanup_state = match state
             .persistent_sessions
@@ -6905,7 +7109,12 @@ async fn resolve_approval(
             }),
         )?;
         return Err(HandlerError::BadRequest(
-            "worker reported approval expiry without durable expiry testimony; the worker was retired and delivery remains unknown".into(),
+            if exact_expiry {
+                "worker reported approval expiry without durable expiry testimony; the worker was retired and delivery remains unknown"
+            } else {
+                "worker reported the approval absent without its own acknowledged expiry of this exact request; the worker was retired and delivery remains unknown"
+            }
+            .into(),
         ));
     }
     let settled_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
@@ -6996,7 +7205,7 @@ async fn terminate(
         req.completion.as_ref(),
     )
     .await
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -7419,7 +7628,7 @@ async fn start_candidate_operation(
                         reserved_thread_id,
                         &session.owner_principal,
                     )
-                    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+                    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
                 reserved_thread_id.clone()
             }
             "planning" => reserved_thread_id.clone(),
@@ -7561,6 +7770,7 @@ async fn start_candidate_operation(
             scopes: effective_caps.clone(),
         });
     let base_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: base_provenance.logical_project_root(&current_site_id),
         requested_by: requested_by.clone(),
         project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
             path: base.effective_path.clone(),
@@ -7675,6 +7885,7 @@ async fn start_candidate_operation(
             usage_subject_asserted_by: None,
             launch_timings: None,
             pinned_project_snapshot: None,
+            remote_consumer: None,
         },
     )
     .await
@@ -7791,7 +8002,7 @@ fn frozen_candidate_closure_evidence(
         [candidate_snapshot_hash.to_owned()],
         ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport(),
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if !closure.is_complete() || !closure.large_object_hashes.is_empty() {
         return Err(HandlerError::BadRequest(
             "candidate snapshot closure is incomplete or unsupported".into(),
@@ -7812,12 +8023,12 @@ fn frozen_candidate_closure_evidence(
         cas,
         candidate_snapshot_hash,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let base = ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
         cas,
         &base_snapshot_hash,
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let mut paths = BTreeSet::new();
     paths.extend(candidate.tree().tree().files.keys().cloned());
     paths.extend(base.tree().tree().files.keys().cloned());
@@ -7853,7 +8064,7 @@ fn frozen_candidate_closure_evidence(
 
 fn candidate_validation_identity(candidate_snapshot_hash: &str) -> Result<String, HandlerError> {
     ryeos_app::thread_lifecycle::candidate_validation_identity(candidate_snapshot_hash)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))
 }
 
 struct VerifiedCandidateSource {
@@ -8187,30 +8398,18 @@ fn verify_candidate_evaluation_testimony(
         .result
         .as_ref()
         .ok_or_else(|| internal("retained successful evaluator has no result"))?;
-    let evaluator_result = validate_candidate_evaluation_result(
-        evaluator_result_value.clone(),
+    let evaluator_result = extract_candidate_evaluation_result(
+        &sealed,
+        &evaluator_capsule,
+        &evaluator,
         candidate_snapshot_hash,
         base_snapshot_hash,
     )?;
-    let evaluator_result_digest =
-        ryeos_state::objects::canonical_value_digest(evaluator_result_value).map_err(internal)?;
-    let evaluator_claim_evidence_digest =
-        ryeos_state::objects::canonical_value_digest(&evaluator_result.evidence)
-            .map_err(internal)?;
-    if !evaluator_result.accepted
-        || evaluation
-            .pointer("/result/result_digest")
-            .and_then(Value::as_str)
-            != Some(evaluator_result_digest.as_str())
-        || evaluation
-            .pointer("/result/claim_evidence_digest")
-            .and_then(Value::as_str)
-            != Some(evaluator_claim_evidence_digest.as_str())
-    {
-        return Err(internal(
-            "retained evaluator result differs from accepted testimony",
-        ));
-    }
+    validate_retained_candidate_evaluator_result(
+        evaluator_result_value,
+        &evaluator_result,
+        evaluation,
+    )?;
 
     // The append-only adoption fact is the durable commit boundary. Do not
     // require this recorded-service root to have reached its later handler
@@ -8221,8 +8420,17 @@ fn verify_candidate_evaluation_testimony(
         .get_thread(qualification_root_id)
         .map_err(internal)?
         .ok_or_else(|| internal("candidate qualification root disappeared"))?;
+    let qualification_placement = state
+        .state_store
+        .recorded_thread_placement(qualification_root_id)
+        .map_err(internal)?;
     if qualification.thread_id != qualification_root_id
-        || qualification.chain_root_id != qualification_root_id
+        || !qualification_placement_admitted(
+            qualification_root_id,
+            &qualification.chain_root_id,
+            &session.chain_root_id,
+            &qualification_placement,
+        )
         || qualification.item_ref != "service:worker-executions/qualify-candidate"
         || qualification.requested_by.as_deref() != Some(session.owner_principal.as_str())
         || qualification.current_site_id != source.current_site_id
@@ -9007,6 +9215,151 @@ fn immutable_base_program_evidence(
     }))
 }
 
+/// Select the result contract from the admitted root, never from output shape.
+/// Both fresh qualification and retained-integrity verification use this join.
+/// The callers continue to digest the complete Thread.result, including the
+/// Graph wrapper; only its authored return is interpreted as evaluator output.
+fn extract_candidate_evaluation_result(
+    sealed: &ryeos_app::thread_lifecycle::SealedRootExecutionRequest,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    evaluator: &ryeos_state::objects::ThreadSnapshot,
+    candidate_snapshot_hash: &str,
+    base_snapshot_hash: &str,
+) -> Result<CandidateEvaluationResult, HandlerError> {
+    let subject = sealed.admitted_program_subject().map_err(internal)?;
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&subject.canonical_ref)
+        .map_err(internal)?;
+    if canonical.kind != subject.kind
+        || subject.canonical_ref != sealed.item_ref()
+        || evaluator.item_ref != sealed.item_ref()
+        || evaluator.kind_name != sealed.thread_profile()
+        || evaluator.executor_ref != sealed.executor_ref()
+    {
+        return Err(internal(
+            "evaluator result contract differs from its admitted root",
+        ));
+    }
+    sealed.admitted_effective_resolution().map_err(internal)?;
+    let contract = match canonical.kind.as_str() {
+        "graph" => {
+            use ryeos_state::objects::{
+                AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, ExecutionLaunchDriver,
+            };
+            if capsule.launch_driver != ExecutionLaunchDriver::ManagedRuntime
+                || !matches!(&capsule.artifact_identity,
+                    AdmittedLaunchArtifactIdentity::ManagedRuntime { runtime_ref, executor_ref, .. }
+                    if runtime_ref == sealed.runtime_ref() && executor_ref == sealed.executor_ref())
+                || !matches!(
+                    &capsule.execution_closure,
+                    AdmittedExecutionClosure::ManagedRuntime { .. }
+                )
+                || !evaluator
+                    .managed_runtime_terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.outputs.is_null())
+            {
+                return Err(internal(
+                    "Graph evaluator lacks its admitted managed runtime terminal",
+                ));
+            }
+            CandidateEvaluatorResultContract::Graph {
+                definition_ref: sealed.item_ref(),
+                effective_definition_digest: sealed.effective_definition_digest().as_str(),
+            }
+        }
+        // Every other admitted root retains its existing flat result contract.
+        // Candidate launch admission, not this result reader, selects kinds.
+        _ => CandidateEvaluatorResultContract::Flat,
+    };
+    let value = evaluator
+        .result
+        .as_ref()
+        .ok_or_else(|| HandlerError::BadRequest("successful evaluator has no result".into()))?;
+    validate_candidate_evaluation_payload(
+        contract,
+        value.clone(),
+        candidate_snapshot_hash,
+        base_snapshot_hash,
+    )
+}
+
+enum CandidateEvaluatorResultContract<'a> {
+    Flat,
+    Graph {
+        definition_ref: &'a str,
+        effective_definition_digest: &'a str,
+    },
+}
+
+/// Recheck the same full-result and authored-evidence identities retained at
+/// initial qualification. Projection never changes the meaning of result_digest.
+fn validate_retained_candidate_evaluator_result(
+    evaluator_result_value: &Value,
+    evaluator_result: &CandidateEvaluationResult,
+    evaluation: &Value,
+) -> Result<(), HandlerError> {
+    let evaluator_result_digest =
+        ryeos_state::objects::canonical_value_digest(evaluator_result_value).map_err(internal)?;
+    let evaluator_claim_evidence_digest =
+        ryeos_state::objects::canonical_value_digest(&evaluator_result.evidence)
+            .map_err(internal)?;
+    if !evaluator_result.accepted
+        || evaluation
+            .pointer("/result/result_digest")
+            .and_then(Value::as_str)
+            != Some(evaluator_result_digest.as_str())
+        || evaluation
+            .pointer("/result/claim_evidence_digest")
+            .and_then(Value::as_str)
+            != Some(evaluator_claim_evidence_digest.as_str())
+    {
+        return Err(internal(
+            "retained evaluator result differs from accepted testimony",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_candidate_evaluation_payload(
+    contract: CandidateEvaluatorResultContract<'_>,
+    value: Value,
+    candidate_snapshot_hash: &str,
+    base_snapshot_hash: &str,
+) -> Result<CandidateEvaluationResult, HandlerError> {
+    let payload = match contract {
+        CandidateEvaluatorResultContract::Flat => value,
+        CandidateEvaluatorResultContract::Graph {
+            definition_ref,
+            effective_definition_digest,
+        } => {
+            let graph: ryeos_runtime::graph_result::GraphResult = serde_json::from_value(value)
+                .map_err(|error| {
+                    HandlerError::BadRequest(format!("invalid Graph evaluator result: {error}"))
+                })?;
+            if graph.definition_ref != definition_ref
+                || graph.effective_definition_digest != effective_definition_digest
+                || !graph.success
+                || graph.status != ryeos_runtime::graph_result::GraphRunStatus::Completed
+                || graph.errors_suppressed.unwrap_or(0) != 0
+                || graph
+                    .errors
+                    .as_ref()
+                    .is_some_and(|errors| !errors.is_empty())
+                || graph.error.is_some()
+            {
+                return Err(HandlerError::BadRequest(
+                    "Graph evaluator did not complete its exact admitted definition without errors"
+                        .into(),
+                ));
+            }
+            graph.result.ok_or_else(|| {
+                HandlerError::BadRequest("Graph evaluator has no authored return payload".into())
+            })?
+        }
+    };
+    validate_candidate_evaluation_result(payload, candidate_snapshot_hash, base_snapshot_hash)
+}
+
 fn validate_candidate_evaluation_result(
     value: Value,
     candidate_snapshot_hash: &str,
@@ -9303,6 +9656,14 @@ async fn qualify_candidate(
             "hosted execution placement changed while candidate qualification was reserved".into(),
         ));
     }
+    // Judge the invocation's placement before any reservation, reconcile or
+    // fact append, so a refused caller leaves the session exactly as it was.
+    require_disposition_placement(
+        &state,
+        &qualification_root_id,
+        &session.chain_root_id,
+        DispositionOperation::Qualification,
+    )?;
     if req.evaluator_chain_root_id == session.chain_root_id {
         return Err(HandlerError::BadRequest(
             "candidate qualification requires an independent evaluator execution chain".into(),
@@ -9591,8 +9952,10 @@ async fn qualify_candidate(
         .result
         .clone()
         .ok_or_else(|| HandlerError::BadRequest("successful evaluator has no result".into()))?;
-    let evaluator_result = validate_candidate_evaluation_result(
-        evaluator_result_value.clone(),
+    let evaluator_result = extract_candidate_evaluation_result(
+        &sealed,
+        &evaluator_capsule,
+        &evaluator,
         &req.candidate_snapshot_hash,
         &base_snapshot_hash,
     )?;
@@ -9692,7 +10055,7 @@ async fn qualify_candidate(
             &qualification_operation_id,
             reserved_integration_launch,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::authoritative_root_fact::append_once(
         &state,
         &qualification_root_id,
@@ -9723,7 +10086,7 @@ async fn qualify_candidate(
             &qualification_root_id,
             &qualification_operation_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
     Ok(json!({
         "chain_root_id":session.chain_root_id,
@@ -9805,9 +10168,17 @@ fn expected_candidate_discard_fact(
         )
         .map_err(internal)?
         .ok_or_else(|| internal("candidate source root disappeared"))?;
+    let disposition_placement = state
+        .state_store
+        .recorded_thread_placement(disposition_root_id)
+        .map_err(internal)?;
     if disposition.thread_id != disposition_root_id
-        || disposition.chain_root_id != disposition_root_id
-        || disposition_root_id == session.chain_root_id
+        || !discard_placement_admitted(
+            disposition_root_id,
+            &disposition.chain_root_id,
+            &session.chain_root_id,
+            &disposition_placement,
+        )
         || disposition.item_ref != "service:worker-executions/discard"
         || disposition.requested_by.as_deref() != Some(session.owner_principal.as_str())
         || disposition.current_site_id != source.current_site_id
@@ -9946,6 +10317,14 @@ async fn discard(
             "hosted execution placement changed while candidate discard was reserved".into(),
         ));
     }
+    // Judge the invocation's placement before any reservation, reconcile or
+    // fact append, so a refused caller leaves the session exactly as it was.
+    require_disposition_placement(
+        &state,
+        &disposition_root_id,
+        &session.chain_root_id,
+        DispositionOperation::Discard,
+    )?;
     if session.state == "discarding"
         && session
             .publication_result
@@ -10024,7 +10403,7 @@ async fn discard(
             &disposition_root_id,
             &operation_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::authoritative_root_fact::append_once(
         &state,
         &disposition_root_id,
@@ -10048,13 +10427,138 @@ async fn discard(
             &disposition_root_id,
             &operation_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
     Ok(json!({
         "chain_root_id":session.chain_root_id,
         "placement_thread_id":session.placement_thread_id,
         "discarded":true,
     }))
+}
+
+/// Typed refusal for a candidate whose admitted base HEAD was superseded.
+/// It names the expected and observed HEAD and what the owner can do next.
+fn base_superseded_refusal(
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    observed_head: Option<&str>,
+) -> HandlerError {
+    HandlerError::Structured {
+        code: "base_superseded".to_string(),
+        status: 409,
+        body: json!({
+            "code": "base_superseded",
+            "message": format!(
+                "the project HEAD moved from the candidate's admitted base {} to {}; this \
+                 candidate can never publish against its base and the session is terminal \
+                 `base_superseded`",
+                authority.base_snapshot_hash,
+                observed_head.unwrap_or("no HEAD"),
+            ),
+            "chain_root_id": session.chain_root_id,
+            "placement_thread_id": session.placement_thread_id,
+            "candidate_snapshot_hash": authority.candidate_snapshot_hash,
+            "expected_previous_hash": authority.base_snapshot_hash,
+            "observed_head": observed_head,
+            "publication_result": format!("base_superseded:{}", authority.candidate_snapshot_hash),
+            "next_steps": [
+                format!(
+                    "inspect the retained candidate snapshot {} (kept as evidence)",
+                    authority.candidate_snapshot_hash
+                ),
+                "start a new session from the current project HEAD and redo the work there",
+            ],
+        }),
+    }
+}
+
+/// Record a publication whose admitted base HEAD was superseded and settle
+/// the session terminal `base_superseded:<candidate>`, keeping the candidate
+/// as evidence. The rooted fact precedes the settlement, so startup recovery
+/// settles an interrupted supersede from it.
+fn supersede_candidate_publication(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    publication_operation_id: &str,
+    observed_head: Option<&str>,
+) -> Result<HandlerError, HandlerError> {
+    ryeos_app::authoritative_root_fact::append_once(
+        state,
+        publication_root_id,
+        CANDIDATE_PUBLICATION_SUPERSEDED_EVENT,
+        publication_operation_id,
+        candidate_publication_superseded_payload(
+            session,
+            authority,
+            publication_root_id,
+            publication_operation_id,
+            observed_head,
+        ),
+    )
+    .map_err(internal)?;
+    state
+        .state_store
+        .settle_dedicated_candidate_publication(
+            &session.placement_thread_id,
+            &authority.source_candidate_snapshot_hash,
+            publication_root_id,
+            publication_operation_id,
+            &format!("base_superseded:{}", authority.candidate_snapshot_hash),
+        )
+        .map_err(internal)?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
+    Ok(base_superseded_refusal(session, authority, observed_head))
+}
+
+/// Record a publication refused before any HEAD write for a reason that does
+/// not supersede the base (a handoff fence, an untrusted signer, an invalid
+/// or unreadable ref) and return the session to `publish_ready`, so the
+/// owner can retry once the cause is gone.
+fn publication_not_applied(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    publication_operation_id: &str,
+    refusal: &ProjectHeadAdvanceRefusal,
+) -> Result<HandlerError, HandlerError> {
+    ryeos_app::authoritative_root_fact::append_once(
+        state,
+        publication_root_id,
+        "hosted_candidate.publication_not_applied",
+        publication_operation_id,
+        candidate_publication_result_payload(
+            session,
+            authority,
+            publication_root_id,
+            publication_operation_id,
+            "not_applied",
+            false,
+        ),
+    )
+    .map_err(internal)?;
+    state
+        .state_store
+        .fail_dedicated_candidate_disposition(&session.placement_thread_id, "publishing")
+        .map_err(internal)?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
+    Ok(HandlerError::Structured {
+        code: "publication_not_applied".to_string(),
+        status: 409,
+        body: json!({
+            "code": "publication_not_applied",
+            "reason": refusal.reason(),
+            "message": format!(
+                "candidate publication was refused before any HEAD write: {refusal}; the \
+                 candidate is still publish_ready, retry once the cause is resolved"
+            ),
+            "chain_root_id": session.chain_root_id,
+            "candidate_snapshot_hash": authority.candidate_snapshot_hash,
+            "expected_previous_hash": authority.base_snapshot_hash,
+        }),
+    })
 }
 
 async fn publish(
@@ -10127,6 +10631,19 @@ async fn publish(
             "retained_for_review"
         }
     };
+    if session.publication_result.as_deref()
+        == Some(format!("base_superseded:{candidate}").as_str())
+    {
+        let current = state
+            .state_store
+            .with_state_db(|db| db.read_project_head(principal_key, project_hash))
+            .map_err(internal)?;
+        return Err(base_superseded_refusal(
+            &session,
+            &publication_authority,
+            current.as_deref(),
+        ));
+    }
     if session.publication_result.as_deref() != Some(retained) && !already_published {
         return Err(HandlerError::BadRequest(
             "session has no publishable retained candidate".into(),
@@ -10185,7 +10702,7 @@ async fn publish(
             "idempotent":true,
         }));
     }
-    let project_lock = super::project_apply_snapshot::project_apply_lock(&project_hash);
+    let project_lock = super::project_apply_snapshot::project_apply_lock(project_hash);
     let _project_guard = project_lock.lock_owned().await;
     let pinned = state
         .state_store
@@ -10237,46 +10754,28 @@ async fn publish(
             &invocation_root_id,
             &publication_operation_id,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let current = state
         .state_store
-        .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+        .with_state_db(|db| db.read_project_head(principal_key, project_hash))
         .map_err(internal)?;
     if current.as_deref() != Some(candidate) && current.as_deref() != Some(base_snapshot_hash) {
-        ryeos_app::authoritative_root_fact::append_once(
+        return Err(supersede_candidate_publication(
             &state,
+            &session,
+            &publication_authority,
             &invocation_root_id,
-            "hosted_candidate.publication_not_applied",
             &publication_operation_id,
-            candidate_publication_result_payload(
-                &session,
-                &publication_authority,
-                &invocation_root_id,
-                &publication_operation_id,
-                "not_applied",
-                false,
-            ),
-        )
-        .map_err(internal)?;
-        state
-            .state_store
-            .fail_dedicated_candidate_disposition(&session.placement_thread_id, "publishing")
-            .map_err(internal)?;
-        ryeos_app::dedicated_session_service::notify_projection_change(
-            &session.placement_thread_id,
-        );
-        return Err(HandlerError::BadRequest(format!(
-            "publication conflict: expected HEAD {}, current HEAD is {:?}",
-            base_snapshot_hash, current
-        )));
+            current.as_deref(),
+        )?);
     }
     let publication = if current.as_deref() == Some(candidate) {
         Ok(())
     } else {
         state.state_store.advance_project_head_ref(
-            &principal_key,
-            &project_hash,
+            principal_key,
+            project_hash,
             candidate,
             base_snapshot_hash,
             &signer,
@@ -10284,6 +10783,32 @@ async fn publish(
         )
     };
     if let Err(error) = publication {
+        // A refusal proven to precede any HEAD write is never an unknown
+        // outcome. A moved HEAD supersedes the admitted base for good; every
+        // other pre-write refusal leaves the candidate publishable.
+        match error.downcast_ref::<ProjectHeadAdvanceRefusal>() {
+            Some(ProjectHeadAdvanceRefusal::Conflict { observed, .. }) => {
+                return Err(supersede_candidate_publication(
+                    &state,
+                    &session,
+                    &publication_authority,
+                    &invocation_root_id,
+                    &publication_operation_id,
+                    observed.as_deref(),
+                )?);
+            }
+            Some(refusal) => {
+                return Err(publication_not_applied(
+                    &state,
+                    &session,
+                    &publication_authority,
+                    &invocation_root_id,
+                    &publication_operation_id,
+                    refusal,
+                )?);
+            }
+            None => {}
+        }
         ryeos_app::authoritative_root_fact::append_once(
             &state,
             &invocation_root_id,
@@ -10351,6 +10876,152 @@ async fn publish(
         "candidate_evaluation_hash":candidate_evaluation_hash,
         "published":true,
     }))
+}
+
+/// Whether a disposition operation (qualification or discard) runs inside
+/// the session it disposes of: the session root itself or any member of the
+/// session's chain, inline callback children included. Work inside a
+/// session never qualifies or discards that session's candidate.
+fn disposition_inside_session(
+    thread_id: &str,
+    chain_root_id: &str,
+    session_chain_root_id: &str,
+) -> bool {
+    chain_root_id == session_chain_root_id || thread_id == session_chain_root_id
+}
+
+/// A candidate qualification is a direct invocation: its own chain root,
+/// outside the session's chain and never the session itself. An inline
+/// callback child of a thread in the session's own chain is refused exactly
+/// as discard refuses it, and a member of any other chain is refused.
+fn qualification_placement_admitted(
+    thread_id: &str,
+    chain_root_id: &str,
+    session_chain_root_id: &str,
+    placement: &ryeos_app::state_store::RecordedThreadPlacement,
+) -> bool {
+    use ryeos_app::state_store::RecordedThreadPlacement;
+    if disposition_inside_session(thread_id, chain_root_id, session_chain_root_id) {
+        return false;
+    }
+    match placement {
+        RecordedThreadPlacement::Root => chain_root_id == thread_id,
+        RecordedThreadPlacement::InProcessMember {
+            chain_root_id: _,
+            upstream_thread_id: _,
+        } => false,
+        RecordedThreadPlacement::OtherMember { chain_root_id: _ } => false,
+    }
+}
+
+/// A candidate discard is a direct invocation (its own chain root, never the
+/// session itself) or an inline callback child, with proven in-process
+/// lineage, of a thread outside the session's chain. Work inside the session
+/// cannot discard its own session, and a member without in-process lineage
+/// is refused.
+fn discard_placement_admitted(
+    thread_id: &str,
+    chain_root_id: &str,
+    session_chain_root_id: &str,
+    placement: &ryeos_app::state_store::RecordedThreadPlacement,
+) -> bool {
+    use ryeos_app::state_store::RecordedThreadPlacement;
+    if disposition_inside_session(thread_id, chain_root_id, session_chain_root_id) {
+        return false;
+    }
+    match placement {
+        RecordedThreadPlacement::Root => chain_root_id == thread_id,
+        RecordedThreadPlacement::InProcessMember {
+            chain_root_id: born_in,
+            upstream_thread_id: _,
+        } => born_in == chain_root_id,
+        RecordedThreadPlacement::OtherMember { chain_root_id: _ } => false,
+    }
+}
+
+/// The candidate disposition operation whose invocation placement is judged.
+#[derive(Debug, Clone, Copy)]
+enum DispositionOperation {
+    Qualification,
+    Discard,
+}
+
+impl DispositionOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Qualification => "candidate qualification",
+            Self::Discard => "candidate discard",
+        }
+    }
+
+    fn admitted(
+        self,
+        thread_id: &str,
+        chain_root_id: &str,
+        session_chain_root_id: &str,
+        placement: &ryeos_app::state_store::RecordedThreadPlacement,
+    ) -> bool {
+        match self {
+            Self::Qualification => qualification_placement_admitted(
+                thread_id,
+                chain_root_id,
+                session_chain_root_id,
+                placement,
+            ),
+            Self::Discard => discard_placement_admitted(
+                thread_id,
+                chain_root_id,
+                session_chain_root_id,
+                placement,
+            ),
+        }
+    }
+}
+
+/// Refuse a disposition whose recorded invocation root sits in a placement
+/// the operation does not admit. Reads only; callers run it before any
+/// durable write so a refusal never leaves a reservation or a fact behind.
+fn require_disposition_placement(
+    state: &AppState,
+    root_id: &str,
+    session_chain_root_id: &str,
+    operation: DispositionOperation,
+) -> Result<(), HandlerError> {
+    let label = operation.label();
+    let invocation = state
+        .state_store
+        .get_thread(root_id)
+        .map_err(internal)?
+        .ok_or_else(|| internal(format!("{label} invocation root is not recorded")))?;
+    let placement = state
+        .state_store
+        .recorded_thread_placement(root_id)
+        .map_err(internal)?;
+    if invocation.thread_id != root_id {
+        return Err(internal(format!(
+            "{label} invocation root has a contradictory identity"
+        )));
+    }
+    if disposition_inside_session(root_id, &invocation.chain_root_id, session_chain_root_id) {
+        return Err(HandlerError::BadRequest(format!(
+            "{label} refused: invocation `{root_id}` runs inside the session's own chain \
+             `{session_chain_root_id}`; a session's candidate is disposed of only from outside \
+             that session"
+        )));
+    }
+    if !operation.admitted(
+        root_id,
+        &invocation.chain_root_id,
+        session_chain_root_id,
+        &placement,
+    ) {
+        return Err(HandlerError::BadRequest(format!(
+            "{label} refused: invocation `{root_id}` in chain `{}` is not a placement admitted \
+             for {label}",
+            invocation.chain_root_id
+        )));
+    }
+    Ok(())
 }
 
 fn internal(error: impl std::fmt::Display) -> HandlerError {
@@ -10592,7 +11263,285 @@ pub const DISCARD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 };
 
 #[cfg(test)]
+#[path = "dedicated_sessions/evaluator_contract_tests.rs"]
+mod evaluator_contract_tests;
+
+#[cfg(test)]
 mod tests {
+
+    #[test]
+    fn candidate_publication_pairing_accepts_each_admitted_pairing_and_only_exact_fences() {
+        use ryeos_app::runtime_db::DedicatedCandidateDisposition::{
+            OwnerDecision, RetainedForReview,
+        };
+        use ryeos_state::objects::PinnedTerminalPublication::{
+            Discard, RetainCurrentHead, RetainResult,
+        };
+        let owner = format!("fp:{}", "a".repeat(64));
+        let owner = owner.as_str();
+        let path = "/projects/demo";
+        let base = "b".repeat(64);
+        let pin = |principal_key: &str, project_path: &str, expected: &str| RetainCurrentHead {
+            principal_key: principal_key.to_owned(),
+            project_hash: lillux::sha256_hex(project_path.as_bytes()),
+            expected_hash: expected.to_owned(),
+        };
+        let owner_key = ryeos_state::refs::principal_storage_key(owner).unwrap();
+        let good = pin(owner_key, path, &base);
+        let check = |disposition, publication: &_| {
+            super::candidate_publication_pairing_matches(
+                disposition,
+                publication,
+                owner,
+                path,
+                &base,
+            )
+            .unwrap()
+        };
+        // Interactive: the destination is required, exactly.
+        assert!(check(&OwnerDecision, &good));
+        assert!(!check(&OwnerDecision, &RetainResult));
+        // Bounded review: a bare retained result, or a destination that is exact.
+        assert!(check(&RetainedForReview, &RetainResult));
+        assert!(check(&RetainedForReview, &good));
+        // A carried destination that names another owner, project or base is
+        // refused under either disposition.
+        for disposition in [&OwnerDecision, &RetainedForReview] {
+            let other_owner = "d".repeat(64);
+            assert!(!check(disposition, &pin(&other_owner, path, &base)));
+            assert!(!check(
+                disposition,
+                &pin(owner_key, "/projects/other", &base)
+            ));
+            assert!(!check(disposition, &pin(owner_key, path, &"c".repeat(64))));
+            assert!(!check(disposition, &Discard));
+        }
+    }
+    use super::{discard_placement_admitted, qualification_placement_admitted};
+
+    #[test]
+    fn qualification_admits_only_direct_roots_outside_the_session_chain() {
+        use ryeos_app::state_store::RecordedThreadPlacement;
+        let member = |chain: &str| RecordedThreadPlacement::InProcessMember {
+            chain_root_id: chain.to_owned(),
+            upstream_thread_id: "T-placement".to_owned(),
+        };
+        let check = |thread: &str, chain: &str, placement: &RecordedThreadPlacement| {
+            qualification_placement_admitted(thread, chain, "T-session", placement)
+        };
+        assert!(check(
+            "T-qualify",
+            "T-qualify",
+            &RecordedThreadPlacement::Root
+        ));
+        // The session itself and an inline child of the session's own chain
+        // are refused, as discard refuses them.
+        assert!(!check(
+            "T-session",
+            "T-session",
+            &RecordedThreadPlacement::Root
+        ));
+        assert!(!check("T-qualify", "T-session", &member("T-session")));
+        assert!(!discard_placement_admitted(
+            "T-qualify",
+            "T-session",
+            "T-session",
+            &member("T-session")
+        ));
+        // Stricter than discard: an inline child of another chain, which
+        // discard admits, is refused for qualification.
+        assert!(discard_placement_admitted(
+            "T-qualify",
+            "T-operator",
+            "T-session",
+            &member("T-operator")
+        ));
+        assert!(!check("T-qualify", "T-operator", &member("T-operator")));
+        // Members of other chains, and members without proven lineage.
+        assert!(!check("T-qualify", "T-unrelated", &member("T-unrelated")));
+        assert!(!check("T-qualify", "T-session", &member("T-unrelated")));
+        assert!(!check(
+            "T-qualify",
+            "T-session",
+            &RecordedThreadPlacement::OtherMember {
+                chain_root_id: "T-session".to_owned()
+            }
+        ));
+    }
+
+    fn placement_thread(
+        thread_id: &str,
+        chain_root_id: &str,
+    ) -> ryeos_app::state_store::NewThreadRecord {
+        let captured_history_policy = (thread_id == chain_root_id).then(|| {
+            let hash = "a".repeat(64);
+            ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: "directive:test".to_owned(),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
+                },
+            }
+        });
+        ryeos_app::state_store::NewThreadRecord {
+            thread_id: thread_id.to_owned(),
+            chain_root_id: chain_root_id.to_owned(),
+            kind: "directive".to_owned(),
+            item_ref: "directive:test".to_owned(),
+            executor_ref: "native:test".to_owned(),
+            launch_mode: "wait".to_owned(),
+            current_site_id: "site:test".to_owned(),
+            origin_site_id: "site:test".to_owned(),
+            upstream_thread_id: (thread_id != chain_root_id).then(|| chain_root_id.to_owned()),
+            requested_by: Some("fp:test".to_owned()),
+            project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy,
+        }
+    }
+
+    /// Birth `child_id` as an inline in-process child of the root
+    /// `parent_id`, with the lineage the placement judgement proves.
+    fn birth_inline_child(
+        store: &ryeos_app::state_store::StateStore,
+        parent_id: &str,
+        child_id: &str,
+    ) -> ryeos_app::state_store::InProcessHandlerControl {
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+        let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+            .with_in_process_lifecycle_authority(
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
+            );
+        let _birth = store
+            .create_in_process_child_with_events_and_launch_metadata(
+                &placement_thread(child_id, parent_id),
+                vec![ryeos_app::state_store::NewEventRecord {
+                    event_type: ryeos_state::event_types::THREAD_STARTED.to_owned(),
+                    storage_class: "indexed".to_owned(),
+                    payload: serde_json::json!({}),
+                }],
+                &metadata,
+                &owner,
+            )
+            .expect("publish in-process child");
+        owner
+    }
+
+    #[test]
+    fn disposition_placement_is_refused_before_any_durable_write() {
+        use super::{DispositionOperation, require_disposition_placement};
+        use ryeos_app::state_store::RecordedThreadPlacement;
+        let root = tempfile::tempdir().expect("tempdir");
+        let (store_owner, state) =
+            ryeos_app::state::test_support::build(root.path()).expect("test application");
+        let store = &state.state_store;
+        for root_id in ["T-session", "T-operator", "T-qualify"] {
+            store
+                .create_thread_for_test(&placement_thread(root_id, root_id))
+                .expect("root thread");
+        }
+        let _session_child = birth_inline_child(store, "T-session", "T-session-child");
+        let _operator_child = birth_inline_child(store, "T-operator", "T-operator-child");
+        assert!(matches!(
+            store
+                .recorded_thread_placement("T-session-child")
+                .expect("placement"),
+            RecordedThreadPlacement::InProcessMember {
+                chain_root_id: _,
+                upstream_thread_id: _
+            }
+        ));
+        let judge = |root_id: &str, operation: DispositionOperation| {
+            require_disposition_placement(&state, root_id, "T-session", operation)
+        };
+        let refusal = |result: Result<(), crate::handler_error::HandlerError>| match result {
+            Err(crate::handler_error::HandlerError::BadRequest(message)) => message,
+            other => panic!("expected a BadRequest refusal, got {other:?}"),
+        };
+        // A direct root outside the session is admitted for both.
+        judge("T-qualify", DispositionOperation::Qualification).expect("direct qualification");
+        judge("T-qualify", DispositionOperation::Discard).expect("direct discard");
+
+        // An inline child of the session's own chain is refused by both,
+        // naming the reason. The judgement only reads, and both handlers run
+        // it before their reservation, reconcile and fact append.
+        for operation in [
+            DispositionOperation::Qualification,
+            DispositionOperation::Discard,
+        ] {
+            let message = refusal(judge("T-session-child", operation));
+            assert!(
+                message.contains("runs inside the session's own chain `T-session`"),
+                "{message}"
+            );
+            let message = refusal(judge("T-session", operation));
+            assert!(
+                message.contains("inside the session's own chain"),
+                "{message}"
+            );
+        }
+
+        // An inline child of another chain: discard admits it, qualification
+        // refuses it.
+        judge("T-operator-child", DispositionOperation::Discard).expect("inline discard");
+        let message = refusal(judge(
+            "T-operator-child",
+            DispositionOperation::Qualification,
+        ));
+        assert!(
+            message.contains("is not a placement admitted for candidate qualification"),
+            "{message}"
+        );
+        drop(state);
+        drop(store_owner);
+    }
+
+    #[test]
+    fn discard_admits_roots_and_inline_children_outside_the_session_chain() {
+        use ryeos_app::state_store::RecordedThreadPlacement;
+        let member = |chain: &str| RecordedThreadPlacement::InProcessMember {
+            chain_root_id: chain.to_owned(),
+            upstream_thread_id: "T-operator-graph".to_owned(),
+        };
+        let check = |thread: &str, chain: &str, placement: &RecordedThreadPlacement| {
+            discard_placement_admitted(thread, chain, "T-session", placement)
+        };
+        assert!(check(
+            "T-discard",
+            "T-discard",
+            &RecordedThreadPlacement::Root
+        ));
+        assert!(check("T-discard", "T-operator", &member("T-operator")));
+        // The session itself and work inside the session's chain.
+        assert!(!check(
+            "T-session",
+            "T-session",
+            &RecordedThreadPlacement::Root
+        ));
+        assert!(!check("T-discard", "T-session", &member("T-session")));
+        // A chain other than the one its lineage proves.
+        assert!(!check("T-discard", "T-unrelated", &member("T-operator")));
+        assert!(!check(
+            "T-discard",
+            "T-operator",
+            &RecordedThreadPlacement::OtherMember {
+                chain_root_id: "T-operator".to_owned()
+            }
+        ));
+    }
+    use serde_json::{Value, json};
+
     use super::{
         CandidatePublicationRecovery, CheckpointRequest, CommandObservationRequest, CommandRequest,
         HandoffPreflightRequest, HandoffRequest, QualifyCandidateRequest, ResumeRequest,
@@ -10604,7 +11553,7 @@ mod tests {
     use ryeos_app::worker_handoff::{
         WORKER_SESSION_HANDOFF_OPERATION, WorkerHandoffJobRole, WorkerSessionHandoffJobOperation,
     };
-    use ryeos_state::{NewSyncJob, StateDb, TrustStore};
+    use ryeos_state::{NewSyncJob, TrustStore};
 
     #[test]
     fn candidate_return_preserves_interactive_and_completed_bounded_root_lifecycles() {
@@ -10776,6 +11725,172 @@ mod tests {
         }
     }
 
+    fn graph_evaluator_result(accepted: bool) -> Value {
+        json!({
+            "success": true,
+            "graph_id": "candidate-evaluator",
+            "definition_ref": "graph:test/candidate-evaluator",
+            "effective_definition_digest": "d".repeat(64),
+            "graph_run_id": "run-evaluator",
+            "status": "completed",
+            "steps": 2,
+            "state": {"private_intermediate": 7},
+            "result": {
+                "schema_version": 1,
+                "candidate_snapshot_hash": "c".repeat(64),
+                "base_snapshot_hash": "b".repeat(64),
+                "accepted": accepted,
+                "evidence": {"fixture_count": 20},
+            },
+        })
+    }
+
+    #[test]
+    fn candidate_evaluator_contract_selects_flat_or_exact_graph_return() {
+        use super::{CandidateEvaluatorResultContract, validate_candidate_evaluation_payload};
+        let candidate = "c".repeat(64);
+        let base = "b".repeat(64);
+        let definition = "d".repeat(64);
+        for accepted in [true, false] {
+            let graph = graph_evaluator_result(accepted);
+            let payload = graph["result"].clone();
+            let flat = validate_candidate_evaluation_payload(
+                CandidateEvaluatorResultContract::Flat,
+                payload.clone(),
+                &candidate,
+                &base,
+            )
+            .unwrap();
+            let projected = validate_candidate_evaluation_payload(
+                CandidateEvaluatorResultContract::Graph {
+                    definition_ref: "graph:test/candidate-evaluator",
+                    effective_definition_digest: &definition,
+                },
+                graph.clone(),
+                &candidate,
+                &base,
+            )
+            .unwrap();
+            assert_eq!(flat.accepted, accepted);
+            assert_eq!(projected.accepted, accepted);
+            assert_eq!(flat.evidence, projected.evidence);
+            assert_ne!(
+                ryeos_state::objects::canonical_value_digest(&graph).unwrap(),
+                ryeos_state::objects::canonical_value_digest(&payload).unwrap(),
+            );
+            // Neither lane guesses a different contract from the value shape.
+            assert!(
+                validate_candidate_evaluation_payload(
+                    CandidateEvaluatorResultContract::Flat,
+                    graph,
+                    &candidate,
+                    &base,
+                )
+                .is_err()
+            );
+            assert!(
+                validate_candidate_evaluation_payload(
+                    CandidateEvaluatorResultContract::Graph {
+                        definition_ref: "graph:test/candidate-evaluator",
+                        effective_definition_digest: &definition,
+                    },
+                    payload,
+                    &candidate,
+                    &base,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_graph_evaluator_refuses_nonterminal_errors_and_identity_substitution() {
+        use super::{CandidateEvaluatorResultContract, validate_candidate_evaluation_payload};
+        let candidate = "c".repeat(64);
+        let base = "b".repeat(64);
+        let definition = "d".repeat(64);
+        let validate = |value| {
+            validate_candidate_evaluation_payload(
+                CandidateEvaluatorResultContract::Graph {
+                    definition_ref: "graph:test/candidate-evaluator",
+                    effective_definition_digest: &definition,
+                },
+                value,
+                &candidate,
+                &base,
+            )
+        };
+        for status in [
+            "valid",
+            "invalid",
+            "completed_with_errors",
+            "continued",
+            "error",
+            "max_steps_exceeded",
+            "cancelled",
+            "killed",
+        ] {
+            let mut value = graph_evaluator_result(true);
+            value["status"] = json!(status);
+            assert!(validate(value).is_err(), "{status}");
+        }
+        for (field, replacement) in [
+            ("success", json!(false)),
+            ("definition_ref", json!("graph:test/other")),
+            ("effective_definition_digest", json!("e".repeat(64))),
+            ("errors_suppressed", json!(1)),
+            (
+                "errors",
+                json!([{"step":1,"node":"probe","error":"failed"}]),
+            ),
+            ("error", json!("")),
+            ("result", Value::Null),
+            ("unknown_field", json!(true)),
+        ] {
+            let mut value = graph_evaluator_result(true);
+            value[field] = replacement;
+            assert!(validate(value).is_err(), "{field}");
+        }
+        let mut missing = graph_evaluator_result(true);
+        missing.as_object_mut().unwrap().remove("result");
+        assert!(validate(missing).is_err());
+        for field in ["candidate_snapshot_hash", "base_snapshot_hash"] {
+            let mut changed = graph_evaluator_result(true);
+            changed["result"][field] = json!("f".repeat(64));
+            assert!(validate(changed).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn graph_evaluator_full_result_identity_includes_unprojected_runtime_state() {
+        use super::{CandidateEvaluatorResultContract, validate_candidate_evaluation_payload};
+        let candidate = "c".repeat(64);
+        let base = "b".repeat(64);
+        let definition = "d".repeat(64);
+        let original = graph_evaluator_result(true);
+        let original_digest = ryeos_state::objects::canonical_value_digest(&original).unwrap();
+        let mut changed = original.clone();
+        changed["state"]["private_intermediate"] = json!(8);
+        assert_eq!(original["result"], changed["result"]);
+        let payload = validate_candidate_evaluation_payload(
+            CandidateEvaluatorResultContract::Graph {
+                definition_ref: "graph:test/candidate-evaluator",
+                effective_definition_digest: &definition,
+            },
+            changed.clone(),
+            &candidate,
+            &base,
+        )
+        .unwrap();
+        assert!(payload.accepted);
+        // Fresh and retained testimony digest the complete Thread.result.
+        // Authored-payload equivalence cannot substitute for that identity.
+        assert_ne!(
+            original_digest,
+            ryeos_state::objects::canonical_value_digest(&changed).unwrap(),
+        );
+    }
+
     #[test]
     fn bounded_candidate_return_waits_for_exact_root_finalization() {
         use ryeos_state::objects::{ThreadSnapshotBuilder, ThreadStatus};
@@ -10881,7 +11996,11 @@ mod tests {
     #[test]
     fn status_finds_a_handoff_older_than_the_former_global_job_cap() {
         let tempdir = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tempdir.path(), std::sync::Arc::new(TrustStore::new())).unwrap();
+        let db = ryeos_app::test_support::TestState::open(
+            tempdir.path(),
+            std::sync::Arc::new(TrustStore::new()),
+        )
+        .unwrap();
         for index in 0..520 {
             let chain_root_id = if index == 0 {
                 "T-sought".to_owned()

@@ -1,3 +1,4 @@
+# ryeos:signed:2026-10-26T23:21:33Z:edfecf7dba26898aea4657f5ee789f5d3dd90d8e282739d1d59fd50995d7c1cd:1bLwY4dDftouAN2aYzrCcQrzNlTNaJNjfHZXo53Mol4O1V98g4mekCrKNC30MFBwZZsDufrRTDizcQE/Ob9vCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/repository-validation
 #   version: "1.1.0"

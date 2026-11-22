@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-13T09:59:46Z:4c0dd43cda917e646db4af29663bcbf8d2bf192b283cce11944ed61cf48adb73:StIEfLx4PxTyTnVtwamXBRybrIZcqo8ZhH2bOgK8OJ7dJrluBqIri+JR5VgoqySjyEB4YPbwEcp+bE1D4ytXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, bootstrap-runtime-source]
+description: Create one bounded source sandbox for a current captured product or admitted runtime materialization
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content bootstrap-runtime-source '{\"binding_id\":\"<signed-producer>\",\"source\":{\"kind\":\"captured_product\",\"witness_hash\":\"<exact-witness>\",\"witness_source\":{\"kind\":\"local_capture\"}},\"maximum_lifetime_seconds\":600}'"
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/bootstrap-runtime-source

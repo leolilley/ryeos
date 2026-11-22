@@ -154,7 +154,7 @@ pub(super) fn with_staged_bundle_generation<T>(
         tracing::warn!(
             old_generation = %staging.display(),
             live_generation = %bundle_root.display(),
-            error = %error,
+            error = %format!("{error:#}"),
             "publisher generation committed but local excluded content remains in the recoverable old generation"
         );
         cleanup.disarm();
@@ -168,7 +168,7 @@ pub(super) fn with_staged_bundle_generation<T>(
     if let Err(error) = remove_recovery_marker_exact(&recovery_marker) {
         tracing::warn!(
             path = %recovery_marker.display(),
-            error = %error,
+            error = %format!("{error:#}"),
             "publisher generation committed but recovery-marker cleanup failed"
         );
     }
@@ -182,6 +182,7 @@ pub(super) fn with_staged_bundle_generation<T>(
                             staging.file_name().expect("staging name checked"),
                             &old_generation,
                         )
+                        .map(|receipt| receipt.is_some())
                         .and_then(|removed| {
                             if removed {
                                 Ok(())
@@ -261,7 +262,10 @@ fn create_staging_directory(
                 .ok_or_else(|| anyhow!("stale publisher staging disappeared"))?;
             stale.ensure_path_binding()?;
             stale.remove_contents_recursive_bounded(PUBLISHER_TRAVERSAL)?;
-            if !parent.remove_empty_child_if_same(&staging_name, &stale)? {
+            if !parent
+                .remove_empty_child_if_same(&staging_name, &stale)
+                .map(|receipt| receipt.is_some())?
+            {
                 bail!("stale publisher staging remained non-empty");
             }
         }
@@ -372,18 +376,13 @@ fn publisher_tree_identity(path: &Path) -> Result<lillux::PinnedDirectoryIdentit
 fn is_bundle_publisher_floor_excluded(relative: &str) -> bool {
     use ryeos_state::project_sync::{
         NODE_BUNDLES_ROOT, NODE_ROUTES_ROOT, NODE_SCHEDULES_ROOT, ProjectAiPathClass,
-        classify_project_ai_path, is_durable_content_capture_floor_excluded,
+        classify_floor_path, is_durable_content_capture_floor_excluded,
     };
 
-    match classify_project_ai_path(relative, None) {
-        ProjectAiPathClass::NodeOwned { prefix }
-            if matches!(
-                prefix,
-                NODE_ROUTES_ROOT | NODE_SCHEDULES_ROOT | NODE_BUNDLES_ROOT
-            ) =>
-        {
-            false
-        }
+    match classify_floor_path(relative) {
+        Some(ProjectAiPathClass::NodeOwned {
+            prefix: NODE_ROUTES_ROOT | NODE_SCHEDULES_ROOT | NODE_BUNDLES_ROOT,
+        }) => false,
         _ => is_durable_content_capture_floor_excluded(relative),
     }
 }
@@ -523,7 +522,9 @@ fn restore_floor_excluded_content_open(
                 // A restored descendant keeps the scaffold non-empty.  An
                 // empty scaffold represented only obsolete generated content
                 // and must not alter the committed generation.
-                let _ = live.remove_empty_child_if_same(&entry.name, &live_child)?;
+                let _ = live
+                    .remove_empty_child_if_same(&entry.name, &live_child)
+                    .map(|receipt| receipt.is_some())?;
             }
             old.ensure_entry_observation(&entry)?;
         }
@@ -597,7 +598,8 @@ impl Drop for StagingCleanup {
                 .remove_contents_recursive_bounded(PUBLISHER_TRAVERSAL);
             let _ = self
                 .parent
-                .remove_empty_child_if_same(&self.name, &self.directory);
+                .remove_empty_child_if_same(&self.name, &self.directory)
+                .map(|receipt| receipt.is_some());
         }
     }
 }
@@ -706,7 +708,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let bundle = temp.path().join("bundle");
-        fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/state/local/bin")).unwrap();
         fs::create_dir_all(bundle.join(".ai/node/routes")).unwrap();
         fs::create_dir_all(bundle.join(".ai/node/schedules")).unwrap();
         fs::create_dir_all(bundle.join(".ai/node/bundles")).unwrap();
@@ -715,10 +717,10 @@ mod tests {
         fs::write(bundle.join(".ai/node/routes/execute.yaml"), b"route").unwrap();
         fs::write(bundle.join(".ai/node/schedules/nightly.yaml"), b"schedule").unwrap();
         fs::write(bundle.join(".ai/node/bundles/runtime.yaml"), b"runtime").unwrap();
-        symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
+        symlink("/usr/bin/python", bundle.join(".ai/state/local/bin/python")).unwrap();
 
         with_staged_bundle_generation(&bundle, |staging| {
-            assert!(!staging.join(".venv").exists());
+            assert!(!staging.join(".ai/state/local").exists());
             assert_eq!(
                 fs::read(staging.join(".ai/node/routes/execute.yaml"))?,
                 b"route"
@@ -736,7 +738,7 @@ mod tests {
         })
         .expect("bundle declarations must enter publisher staging without local content");
 
-        assert!(bundle.join(".venv/bin/python").is_symlink());
+        assert!(bundle.join(".ai/state/local/bin/python").is_symlink());
         assert_eq!(
             fs::read(bundle.join(".ai/node/routes/execute.yaml")).unwrap(),
             b"route"
@@ -783,9 +785,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let bundle = temp.path().join("bundle");
         let staging = temp.path().join(".bundle.publish-staging");
-        fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/state/local/bin")).unwrap();
         fs::write(bundle.join("generation"), b"old").unwrap();
-        symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
+        symlink("/usr/bin/python", bundle.join(".ai/state/local/bin/python")).unwrap();
         fs::create_dir(&staging).unwrap();
         fs::write(staging.join("generation"), b"committed").unwrap();
 
@@ -795,14 +797,14 @@ mod tests {
 
         with_staged_bundle_generation(&bundle, |next| {
             assert_eq!(fs::read(next.join("generation"))?, b"committed");
-            assert!(!next.join(".venv").exists());
+            assert!(!next.join(".ai/state/local").exists());
             fs::write(next.join("generation"), b"next")?;
             Ok(())
         })
         .expect("next publish should recover the committed exchange first");
 
         assert_eq!(fs::read(bundle.join("generation")).unwrap(), b"next");
-        assert!(bundle.join(".venv/bin/python").is_symlink());
+        assert!(bundle.join(".ai/state/local/bin/python").is_symlink());
         assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
     }
 
@@ -815,12 +817,11 @@ mod tests {
         let staging = temp.path().join(".bundle.publish-staging");
         fs::create_dir_all(bundle.join(".ai/objects/old/fanout")).unwrap();
         fs::write(bundle.join(".ai/objects/old/fanout/object"), b"old").unwrap();
-        fs::create_dir_all(bundle.join("tools/.venv/bin")).unwrap();
-        symlink("/usr/bin/python", bundle.join("tools/.venv/bin/python")).unwrap();
+        fs::create_dir_all(bundle.join(".ai/state/local/bin")).unwrap();
+        symlink("/usr/bin/python", bundle.join(".ai/state/local/bin/python")).unwrap();
 
         fs::create_dir_all(staging.join(".ai/objects/new/fanout")).unwrap();
         fs::write(staging.join(".ai/objects/new/fanout/object"), b"new").unwrap();
-        fs::create_dir(staging.join("tools")).unwrap();
 
         let recovery = PublisherExchangeRecovery::capture(&bundle, &staging).unwrap();
         write_recovery_marker(temp.path(), "bundle", recovery);
@@ -830,7 +831,7 @@ mod tests {
             assert!(next.join(".ai/objects/new/fanout/object").exists());
             assert!(!next.join(".ai/objects/old").exists());
             assert!(
-                !next.join("tools/.venv").exists(),
+                !next.join(".ai/state/local").exists(),
                 "excluded local content must stay outside publisher authoring"
             );
             Ok(())
@@ -839,7 +840,7 @@ mod tests {
 
         assert!(bundle.join(".ai/objects/new/fanout/object").exists());
         assert!(!bundle.join(".ai/objects/old").exists());
-        assert!(bundle.join("tools/.venv/bin/python").is_symlink());
+        assert!(bundle.join(".ai/state/local/bin/python").is_symlink());
         assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
     }
 
@@ -852,23 +853,27 @@ mod tests {
         let staging = temp.path().join(".bundle.publish-staging");
         fs::create_dir(&bundle).unwrap();
         fs::write(bundle.join("generation"), b"live").unwrap();
-        fs::create_dir_all(staging.join(".venv/bin")).unwrap();
+        fs::create_dir_all(staging.join(".ai/state/local/bin")).unwrap();
         fs::write(staging.join("generation"), b"never-committed").unwrap();
-        symlink("/usr/bin/python", staging.join(".venv/bin/python")).unwrap();
+        symlink(
+            "/usr/bin/python",
+            staging.join(".ai/state/local/bin/python"),
+        )
+        .unwrap();
 
         let recovery = PublisherExchangeRecovery::capture(&bundle, &staging).unwrap();
         write_recovery_marker(temp.path(), "bundle", recovery);
 
         with_staged_bundle_generation(&bundle, |next| {
             assert_eq!(fs::read(next.join("generation"))?, b"live");
-            assert!(!next.join(".venv").exists());
+            assert!(!next.join(".ai/state/local").exists());
             fs::write(next.join("generation"), b"next")?;
             Ok(())
         })
         .expect("uncommitted staging should be discarded before the next publish");
 
         assert_eq!(fs::read(bundle.join("generation")).unwrap(), b"next");
-        assert!(!bundle.join(".venv").exists());
+        assert!(!bundle.join(".ai/state/local").exists());
         assert!(!publisher_recovery_marker(temp.path(), "bundle").exists());
     }
 }

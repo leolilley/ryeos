@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::effect::{RyeOsEffectResult, RyeOsUiError};
-use super::model::{BrowserSession, BrowserViewport, RyeOsDockEdge};
-use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
+use super::model::{BrowserSession, BrowserViewport};
 use crate::ids::RyeOsViewInstanceKey;
 use crate::view_set::{FieldCursorState, FocusDirection, ViewSpec};
 
@@ -14,10 +13,62 @@ pub enum RyeOsFilterField {
     ServicesQuery,
 }
 
+/// What a rename names. The client that edits text starts from this and ends
+/// with the matching rename intent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RyeOsRenameTarget {
+    Surface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    ViewSet {
+        view_set_id: crate::ids::ViewSetId,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsUiIntent {
     Refresh,
+    /// Bring the open view set that holds this chain's work forward.
+    OpenAttentionItem {
+        chain_root_id: String,
+    },
+    /// Acknowledge one attention item through the mounted affordance that does it.
+    AcknowledgeAttentionItem {
+        item_id: String,
+    },
+    /// Ask the presentation host to open a fresh document under the same
+    /// authenticated session. Preparation precedes an explicit link; the child
+    /// independently claims its seat. No bearer authority enters the link.
+    OpenNewPresentationDocument,
+    OpenSurfaceInNewPresentation {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+        dialog_id: String,
+        dialog_binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    /// Rust selects and freezes the exact source inventory before asking the
+    /// existing authenticated seat observer for a destination frontier.
+    /// The renderer supplies neither a phase hash nor an export commitment.
+    BeginTransfer {
+        mode: super::transfer_export::UiTransferExportMode,
+        source: UiTransferSourceSelection,
+        destination_presentation_id: String,
+    },
+    /// A local contact request only. Canonical evidence is selected from a
+    /// completed authenticated paired replay, never supplied by this intent.
+    ContactTransfer {
+        transfer: ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        action: UiTransferContactIntent,
+    },
+    /// Closed source inventory and immutable two-seat identity. The actor
+    /// captures live values and refuses a changed commitment, never rebases it.
+    PrepareTransfer {
+        transfer: ryeos_ui_presentation_contract::transfer::TransferIdentity,
+        export: super::transfer_export::UiTransferExport,
+    },
     /// Run a content-declared affordance against a projected row: the
     /// ONE generic row interaction. The engine resolves the binding's
     /// affordance, substitutes row fields, and applies its plane (ui
@@ -28,19 +79,61 @@ pub enum RyeOsUiIntent {
         affordance_id: String,
         record: serde_json::Value,
     },
+    /// A Rust-projected local row, not a browser-supplied executable intent.
+    ActivateLocalProjection {
+        instance_key: RyeOsViewInstanceKey,
+        record_id: String,
+        projection_guard: String,
+    },
     OpenView {
         view: ViewSpec,
     },
-    OpenNewView {
-        view: ViewSpec,
+    /// Choose one launcher view and reveal where it can land. The choice is
+    /// local to the open launcher; nothing is opened.
+    StageLauncherView {
+        instance_key: RyeOsViewInstanceKey,
+        view_ref: String,
     },
-    OpenOverlay {
-        overlay_id: String,
+    /// Ask the client to start renaming a Surface or view set. The client
+    /// edits the name and answers with a resolve event.
+    BeginRename {
+        target: RyeOsRenameTarget,
     },
-    /// Fold or unfold one launcher group. The overlay stays open — this
-    /// mutates presentation state, never launches anything.
-    ToggleOverlayGroup {
-        group: String,
+    /// Open one admitted View as a fresh tab at the captured insertion owner.
+    /// Subject-dependent Views stay unresolved; this never copies ambient work.
+    OpenViewInNewTab {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+        view_ref: String,
+    },
+    OpenCompositionInNewSurface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+        view_ref: Option<String>,
+        dialog_id: String,
+        dialog_binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    OpenLauncher,
+    SelectSurface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    CloseSurface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+    },
+    RenameSurface {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        binding: super::binding::UiBindingAttachmentCoordinate,
+        title: String,
+    },
+    OpenDialog {
+        dialog_id: String,
+    },
+    CloseDialog {
+        instance_key: RyeOsViewInstanceKey,
     },
     CloseFocused,
     CloseTile {
@@ -101,6 +194,12 @@ pub enum RyeOsUiIntent {
         tile_id: String,
         view_set_id: crate::ids::ViewSetId,
     },
+    MoveTileToSurfaceViewSet {
+        layout_guard: String,
+        tile_id: String,
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+    },
     PinViewSelection {
         instance_key: RyeOsViewInstanceKey,
     },
@@ -127,14 +226,6 @@ pub enum RyeOsUiIntent {
     },
     ToggleTopStatusBar,
     ToggleBottomStatusBar,
-    ToggleBackdropBreak,
-    ToggleDock {
-        edge: RyeOsDockEdge,
-    },
-    ResizeFocused {
-        direction: FocusDirection,
-    },
-    SelectDimension,
     InspectItem {
         canonical_ref: String,
     },
@@ -149,28 +240,16 @@ pub enum RyeOsUiIntent {
         root: String,
         path: String,
     },
-    CopyText {
-        text: String,
-    },
-    OpenExternal {
-        url: String,
-    },
     /// Steer the route's head thread via `service:commands/submit`
     /// (`cancel` / `interrupt` / `continue` / `kill`). The reducer reads the
     /// head thread at dispatch time. This is the same authority the CLI's
-    /// `ryeos commands submit` uses — no new bypass; see the daemon authz
-    /// note at `command_service.submit` / `.tmp/thread-authorization-review.md`.
+    /// `ryeos commands submit` uses; the daemon authorizes it at
+    /// `command_service.submit`, so no new bypass is introduced here.
     SubmitThreadCommand {
         command: super::dto::ThreadControlCommand,
     },
-    /// Aim the input route at a thread — the feed re-projects to its braid.
-    /// Activating a forked-subthread feed entry "enters" that subthread.
-    AimThread {
-        thread_id: String,
-    },
     /// Step INTO a child execution from a feed entry — the debugger step-in
-    /// across the dispatch edge. Unlike `AimThread` (a bare route retarget),
-    /// this pushes a return frame so Backspace walks back to the parent braid,
+    /// across the dispatch edge. This pushes a return frame so Backspace walks back to the parent braid,
     /// and sets BOTH route coordinates: a spawned child is a fresh root, so its
     /// `chain_root_id` equals its own thread id. The lens stays the braid
     /// timeline and re-projects onto the child via the route facet — no view
@@ -199,6 +278,38 @@ pub enum RyeOsUiIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UiTransferSourceSelection {
+    MountedView {
+        instance_key: RyeOsViewInstanceKey,
+    },
+    ViewSet {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+    },
+    SurfaceViewSets {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum UiTransferContactIntent {
+    AcceptView {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+        view_set_id: crate::ids::ViewSetId,
+        placement: super::composition_operation::CompositionPlacement,
+    },
+    AcceptTabs {
+        surface_instance_id: crate::ids::SurfaceInstanceId,
+    },
+    Commit,
+    Abort,
+    Activate,
+    CancelFreeze,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsUiEvent {
     /// Pointer-originated input names its exact mounted input; it must never
@@ -214,39 +325,6 @@ pub enum RyeOsUiEvent {
         tile_id: String,
         field: RyeOsFilterField,
         value: String,
-    },
-    SetFilesRoot {
-        tile_id: String,
-        root: String,
-    },
-    SetFilesPath {
-        tile_id: String,
-        path: String,
-    },
-    SetAtlasLayerVisible {
-        /// Target tile; `None` (default) targets the ambient backdrop atlas.
-        #[serde(default)]
-        tile_id: Option<String>,
-        kind: AtlasItemKind,
-        visible: bool,
-    },
-    SetAtlasLens {
-        #[serde(default)]
-        tile_id: Option<String>,
-        lens: AtlasLensVm,
-    },
-    SetAtlasProjection {
-        #[serde(default)]
-        tile_id: Option<String>,
-        projection: AtlasProjectionVm,
-        #[serde(default)]
-        root: Option<String>,
-    },
-    SetAtlasFileSpacePath {
-        #[serde(default)]
-        tile_id: Option<String>,
-        root: String,
-        path: String,
     },
     SetFieldSelection {
         instance_key: RyeOsViewInstanceKey,
@@ -308,18 +386,32 @@ pub enum RyeOsUiEvent {
     FocusChanged {
         target: Option<String>,
     },
-    FocusDock {
-        edge: RyeOsDockEdge,
-    },
     FocusDirection {
         direction: FocusDirection,
     },
-    OpenOverlay {
-        overlay_id: String,
+    OpenLauncher,
+    /// Open the attention overlay, or close it when open.
+    ToggleOverlay,
+    /// Move the overlay selection by `delta` rows while it is open.
+    MoveOverlay {
+        delta: i32,
     },
-    CloseOverlay,
-    SetOverlayQuery {
-        query: String,
+    /// Dispatch the selected overlay row's first action.
+    ActivateOverlay,
+    /// Dispatch the selected overlay row's action whose keys are `ch`.
+    ActivateOverlayKey {
+        ch: char,
+    },
+    OpenDialog {
+        dialog_id: String,
+    },
+    CloseDialog {
+        instance_key: RyeOsViewInstanceKey,
+    },
+    /// Dismiss a dialog by one step: the launcher's second stage first, then
+    /// the dialog itself.
+    DismissDialog {
+        instance_key: RyeOsViewInstanceKey,
     },
     FocusInput,
     BlurInput,
@@ -360,36 +452,13 @@ pub enum RyeOsUiEvent {
     /// cuts the in-flight cognition and redirects. Falls back to steer semantics
     /// on non-running targets. Bound to Alt+Enter.
     SubmitInputInterrupt,
-    MoveOverlaySelection {
-        delta: i32,
-    },
-    /// Pointer selection names the exact projected overlay row; it must not
-    /// derive a delta or trust a mutable index from a stale renderer frame.
-    SetOverlaySelection {
-        item_id: String,
-    },
-    ChooseOverlay {
-        secondary: bool,
-    },
-    /// Atomically select and choose one exact projected overlay row.
-    ChooseOverlayAt {
-        item_id: String,
-        secondary: bool,
-    },
-    /// Fold (`expand: false`) or unfold the launcher group under the
-    /// overlay selection. Folding from a leaf lands the selection on the
-    /// group's header. Inert while a search query is live — matches
-    /// present under force-expanded headers.
-    FoldOverlayGroup {
-        expand: bool,
-    },
     SetTileCursor {
         tile_id: String,
         index: usize,
     },
     /// Select a projected list point by its exact mounted view identity. This
     /// is the pointer-facing form: unlike `SetTileCursor`, it also addresses
-    /// views mounted in a dock slot without inventing a tile id.
+    /// views mounted outside a tile (dialogs) without inventing a tile id.
     SetViewCursor {
         instance_key: RyeOsViewInstanceKey,
         index: usize,
@@ -411,6 +480,13 @@ pub enum RyeOsUiEvent {
         item_id: String,
         expand: bool,
     },
+    /// Fold descendants of the exact visible hierarchy item. Unlike the
+    /// keyboard-focused form, this also addresses shared dialogs.
+    SetViewTreeItemCollapsed {
+        instance_key: RyeOsViewInstanceKey,
+        item_id: String,
+        collapsed: bool,
+    },
     /// Dismiss one exact transient notice. Unknown/already-dismissed ids are
     /// idempotent no-ops so stale renderer frames cannot remove another one.
     DismissNotice {
@@ -423,13 +499,7 @@ pub enum RyeOsUiEvent {
         instance_key: RyeOsViewInstanceKey,
         section_id: String,
     },
-    /// Fold (`collapsed: true`) or unfold a turn-section of a feed lens.
-    SetFold {
-        tile_id: String,
-        section: usize,
-        collapsed: bool,
-    },
-    /// Fold a section in an exactly addressed tile or dock view instance.
+    /// Fold a section in an exactly addressed mounted view instance.
     SetViewFold {
         instance_key: RyeOsViewInstanceKey,
         section: usize,
@@ -447,6 +517,39 @@ pub enum RyeOsUiEvent {
         collapsed: bool,
     },
     ActivateFocused,
+    /// Choose where the staged launcher view lands by the key its choice shows.
+    ChooseLauncherPlace {
+        key: char,
+    },
+    /// Start renaming the active view set, or with `surface` the active
+    /// Surface.
+    RenameActive {
+        surface: bool,
+    },
+    /// End a requested rename: `Some` commits that name, `None` abandons it.
+    ResolveRename {
+        title: Option<String>,
+    },
+    /// Type one character into a requested rename that the core is editing.
+    RenameInsert {
+        ch: char,
+    },
+    /// Delete the last character of a requested rename the core is editing.
+    RenameBackspace,
+    /// Commit a requested rename with the name as edited so far.
+    CommitRename,
+    /// Act on the timeline entry under the point in the focused feed: copy it
+    /// or look at the raw events behind it.
+    TimelineEntry {
+        action: super::timeline::RyeOsTimelineEntryAction,
+    },
+    /// Fold or unfold the cluster under the point in the focused feed.
+    ToggleTimelineFold,
+    /// Answer the focused feed's first pending ask with the action whose
+    /// key cap is `ch`.
+    AnswerDockAsk {
+        ch: char,
+    },
     /// Step back up the execution-drill stack: restore the view a step-in left
     /// and the facet context it read. The "return" half of the debugger drill;
     /// no-op at the top of the tree.
@@ -457,9 +560,20 @@ pub enum RyeOsUiEvent {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RyeOsInputAction {
     Focus,
-    SetText { text: String, cursor: usize },
+    SetText {
+        text: String,
+        cursor: usize,
+    },
     Complete,
-    Submit { interrupt: bool },
+    Submit {
+        interrupt: bool,
+    },
+    /// List navigation belongs to this exact live-filter mount, never to
+    /// whichever tile happened to gain focus after the renderer frame.
+    NavigateSelection {
+        delta: i32,
+    },
+    ActivateSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +620,7 @@ pub enum RyeOsTransportFreshness {
 pub enum RyeOsEvent {
     Start {
         session: BrowserSession,
+        presentation_id: String,
         viewport: BrowserViewport,
         now_ms: u64,
     },
@@ -514,6 +629,14 @@ pub enum RyeOsEvent {
     },
     EffectResult {
         result: RyeOsEffectResult,
+    },
+    /// Adapter observation after exact authenticated claim and replay; this
+    /// event cannot claim a daemon producer or manufacture its authority.
+    PresentationProducerReady {
+        producer: super::binding::UiPresentationProducer,
+        /// Authenticated next producer-event position, not a local prefix or
+        /// retained chain sequence. No default permits predecessor adapters.
+        next_engine_seq: u64,
     },
     DaemonEvent {
         payload: serde_json::Value,
@@ -541,9 +664,9 @@ pub enum RyeOsEvent {
     },
     /// One frame from the head thread's live SSE tail. The reducer applies
     /// ryeos event semantics so both clients reach them through `dispatch`:
-    /// cognition deltas accumulate into the live buffer; durable milestones
-    /// supersede it and refetch the braid snapshot. Clients only open the
-    /// stream and forward each frame's `(event_type, payload)`.
+    /// streamed text accumulates into the live buffer; any other frame
+    /// supersedes it and refetches the timeline source. Clients only open the
+    /// stream and forward each frame.
     ThreadTail {
         thread_id: String,
         event_type: String,
@@ -558,4 +681,18 @@ pub enum RyeOsEvent {
     RouteChanged {
         route: String,
     },
+}
+
+#[cfg(test)]
+mod acknowledgement_ingress_tests {
+    #[test]
+    fn semantic_only_ack_cannot_enter_the_serialized_event_router() {
+        let error = serde_json::from_value::<super::RyeOsEvent>(serde_json::json!({
+            "type": "seat_append_acknowledged",
+            "producer": {},
+            "events": [],
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
+    }
 }

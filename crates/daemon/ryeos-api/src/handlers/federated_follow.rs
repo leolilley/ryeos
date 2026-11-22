@@ -31,7 +31,7 @@ fn authenticated_target_node(
 ) -> Result<String, HandlerError> {
     if !ctx.verified
         || ctx.authorized_key_class
-            != Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode)
+            != Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode)
         || ctx.authenticated_origin_site_id.as_deref() != Some(target_site_id)
     {
         return Err(HandlerError::Forbidden(
@@ -63,7 +63,7 @@ pub async fn deliver(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     req.validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let authenticated_target_principal = authenticated_target_node(&ctx, &req.target_site_id)?;
     if req.parent_site_id != state.threads.site_id() {
         return Err(HandlerError::Forbidden(
@@ -79,7 +79,7 @@ async fn deliver_locked(
     authenticated_target_principal: String,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let target_remote = config::resolve_remote_by_site_id(&remotes, &req.target_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if target_remote.remote.principal_id != authenticated_target_principal {
@@ -96,7 +96,7 @@ async fn deliver_locked(
         .principal_id
         .strip_prefix("fp:")
         .ok_or_else(|| internal("configured target principal is not a fingerprint"))?;
-    let target_client = RemoteClient::from_remote_cfg(&state, &target_remote.remote);
+    let target_client = RemoteClient::from_remote_cfg(&state, &target_remote.remote)?;
     let reservation_value =
         load_local_object(&state, &req.reservation_attestation_hash).map_err(internal)?;
     let reservation_data = lillux::canonical_json(&reservation_value)
@@ -121,6 +121,9 @@ async fn deliver_locked(
         .map_err(internal)?;
     let closure = target_client
         .objects_closure_get(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: req.operation_id.clone(),
+            },
             &[
                 req.target_chain_head_hash.clone(),
                 req.terminal_attestation_hash.clone(),
@@ -148,12 +151,12 @@ async fn deliver_locked(
         ));
     }
     let terminal_attestation = ryeos_state::objects::Attestation::from_value(&terminal_value)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     terminal_attestation
         .verify_with_key(&target_key)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let terminal = RemoteFollowTerminalEvidence::from_attestation(&terminal_attestation)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if terminal.operation_id != req.operation_id
         || terminal.reservation_attestation_hash != req.reservation_attestation_hash
         || terminal.child_chain_root_id != req.child_chain_root_id
@@ -167,12 +170,12 @@ async fn deliver_locked(
     }
 
     let reservation_attestation = ryeos_state::objects::Attestation::from_value(&reservation_value)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     reservation_attestation
         .verify_with_key(state.identity.verifying_key())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let reservation = RemoteFollowReservationEvidence::from_attestation(&reservation_attestation)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if reservation.parent_site_id != req.parent_site_id
         || reservation.parent_node_signer_fingerprint != state.identity.fingerprint()
         || reservation.child_chain_root_id != req.child_chain_root_id
@@ -206,7 +209,7 @@ async fn deliver_locked(
         reservation_entry,
         closure_options.limits(),
     )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let operation = RemoteFollowDeliveryJobOperation::new(
         RemoteFollowDeliveryJobRole::Parent,
         req.operation_id.clone(),
@@ -250,7 +253,7 @@ async fn deliver_locked(
         .map_err(internal)?;
         response
             .validate_against(&req)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         return serde_json::to_value(response).map_err(internal);
     }
     let attempt_id = format!("remote-follow-parent-attempt:{}", uuid::Uuid::new_v4());
@@ -279,7 +282,7 @@ async fn deliver_locked(
             &req.target_chain_head_hash,
             &source_head.target_hash,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
         drop(guard);
 
         let fact_payload = serde_json::json!({
@@ -579,10 +582,10 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
                 terminalize_invalid_delivery_job(state, &job, &error)?;
                 continue;
             }
-            let remotes = config::load_remotes_layered(&state.config.app_root, None)?;
+            let remotes = config::load_remotes(&state.config.app_root)?;
             let parent_remote =
                 config::resolve_remote_by_site_id(&remotes, &operation.parent_site_id)?;
-            let client = RemoteClient::from_remote_cfg(state, &parent_remote.remote);
+            let client = RemoteClient::from_remote_cfg(state, &parent_remote.remote)?;
             let attempt_id = format!("remote-follow-attempt:{}", uuid::Uuid::new_v4());
             state.state_store.with_state_db(|db| {
                 db.create_sync_job_attempt(&ryeos_state::NewSyncJobAttempt {
@@ -629,7 +632,7 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
                         ryeos_state::SyncJobAttemptState::Failed,
                         ryeos_state::SyncJobState::Retryable,
                         "delivery_retryable",
-                        Some(bounded_error(&error.to_string())),
+                        Some(bounded_error(&format!("{error:#}"))),
                         Some(serde_json::to_value(request)?),
                     )?;
                 }
@@ -640,7 +643,6 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
     Ok(recovered)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn settle_attempt(
     state: &AppState,
     job: &ryeos_state::SyncJobRecord,
@@ -787,7 +789,7 @@ mod authority_tests {
             "fp:target-node".into(),
             Vec::new(),
             true,
-            Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode),
             Some("site:target".into()),
         );
         assert_eq!(
@@ -796,8 +798,8 @@ mod authority_tests {
         );
 
         for class in [
-            ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient,
-            ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
         ] {
             let rejected = HandlerContext::new_with_authority(
                 "fp:operator".into(),

@@ -1,0 +1,213 @@
+{
+  "items": [
+    {
+      "item": "entry",
+      "id": "mrk:4",
+      "type": "marker",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": null,
+      "counts_as": null,
+      "slots": {
+        "headline": "launched with deepseek-v4-flash · via deepseek"
+      },
+      "seq": [
+        4,
+        4
+      ],
+      "ts": [
+        "2026-11-16T07:20:30Z",
+        "2026-11-16T07:20:30Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "msg:6/0",
+      "type": "message",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:6/0",
+      "counts_as": null,
+      "text_streamed": true,
+      "slots": {
+        "body": "<scrubbed content 2444 chars>"
+      },
+      "seq": [
+        6,
+        6
+      ],
+      "ts": [
+        "2026-11-16T07:20:31Z",
+        "2026-11-16T07:20:31Z"
+      ]
+    },
+    {
+      "item": "recap",
+      "id": "rc:tho:11/0",
+      "exchange": "msg:6/0",
+      "work": 1,
+      "duration_s": 1,
+      "members": [
+        {
+          "item": "entry",
+          "id": "tho:11/0",
+          "type": "thought",
+          "state": null,
+          "tone": null,
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:6/0",
+          "counts_as": null,
+          "slots": {
+            "body": "<scrubbed reasoning_content 641 chars>"
+          },
+          "seq": [
+            11,
+            11
+          ],
+          "ts": [
+            "2026-11-16T07:20:33Z",
+            "2026-11-16T07:20:33Z"
+          ]
+        },
+        {
+          "item": "entry",
+          "id": "act:0000000000000000000000000000000000000000000000000000000000000014",
+          "type": "activity",
+          "state": "done",
+          "tone": "good",
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:6/0",
+          "counts_as": "other",
+          "slots": {
+            "badge": "291 B",
+            "detail": "{}",
+            "headline": "test_anchor_demo_anchor_demo"
+          },
+          "seq": [
+            14,
+            15
+          ],
+          "ts": [
+            "2026-11-16T07:20:33Z",
+            "2026-11-16T07:20:34Z"
+          ]
+        }
+      ],
+      "seq": 29
+    },
+    {
+      "item": "cluster",
+      "id": "cl:mrk:19",
+      "headline": "2 system events",
+      "members": [
+        {
+          "id": "mrk:19",
+          "type": "marker",
+          "state": null,
+          "tone": null,
+          "thread": "T-0002",
+          "parent": null,
+          "exchange": "msg:6/0",
+          "counts_as": null,
+          "slots": {
+            "headline": "launched with deepseek-v4-flash · via deepseek"
+          },
+          "seq": [
+            19,
+            19
+          ],
+          "ts": [
+            "2026-11-16T07:20:35Z",
+            "2026-11-16T07:20:35Z"
+          ]
+        },
+        {
+          "id": "mrk:20",
+          "type": "marker",
+          "state": null,
+          "tone": null,
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:6/0",
+          "counts_as": null,
+          "slots": {
+            "headline": "continued: context_window",
+            "target": "T-0002"
+          },
+          "seq": [
+            20,
+            20
+          ],
+          "ts": [
+            "2026-11-16T07:20:35Z",
+            "2026-11-16T07:20:35Z"
+          ]
+        }
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "pro:25/0",
+      "type": "prose",
+      "state": null,
+      "tone": null,
+      "thread": "T-0002",
+      "parent": null,
+      "exchange": "msg:6/0",
+      "counts_as": null,
+      "text_streamed": true,
+      "slots": {
+        "body": "<scrubbed content 24 chars>"
+      },
+      "seq": [
+        25,
+        25
+      ],
+      "ts": [
+        "2026-11-16T07:20:36Z",
+        "2026-11-16T07:20:36Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "out:T-0002",
+      "type": "outcome",
+      "state": "completed",
+      "tone": "good",
+      "thread": "T-0002",
+      "parent": null,
+      "exchange": "msg:6/0",
+      "counts_as": null,
+      "slots": {
+        "headline": "success"
+      },
+      "seq": [
+        29,
+        29
+      ],
+      "ts": [
+        "2026-11-16T07:20:36Z",
+        "2026-11-16T07:20:36Z"
+      ]
+    }
+  ],
+  "undeclared": {},
+  "notice_noun": {
+    "key": "system_event",
+    "one": "system event",
+    "many": "system events"
+  },
+  "lane_matches": [
+    {
+      "label": "Working",
+      "entry": null,
+      "status": "running"
+    }
+  ]
+}

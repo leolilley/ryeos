@@ -1,0 +1,14 @@
+# ryeos:signed:2026-11-12T23:59:42Z:e35af2fa387b50ce2caf7546517eecadf23c0018ca03ef1ae5814c7ea143e11a:dZI4LljXZIIpqMX7ZL6FMANwyxFq/kdH67ztSPpGsR4KjuXIKWmis1UKJIZ6y8a1ahYe0h7TUdAFiSuseL7RDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+{
+  "category": "development/ryeos",
+  "name": "render-provider-shape",
+  "version": "1.0.0",
+  "schema": "ryeos.development.render-provider-shape.v1",
+  "description": "Where the render-provider-shape-check host tool reads Render from. The owner id is site data: set it in a site copy passed with --config-file, or pass --owner-id. The API key is read from api_key_env, else from env_file (the worktree's gitignored .env); it is never printed.",
+  "api_base": "https://api.render.com/v1",
+  "owner_id": null,
+  "api_key_env": "RENDER_API_KEY",
+  "env_file": "${WORKTREE}/.env",
+  "adapter_source": "crates/host-adapters/render-sandbox-adapter/src/main.rs",
+  "root_type": "RenderSandbox"
+}

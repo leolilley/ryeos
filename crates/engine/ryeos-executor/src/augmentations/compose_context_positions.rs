@@ -44,7 +44,6 @@ struct ComposeResolvedAuthority {
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     decl: &LaunchAugmentationDecl,
     resolution: &mut ResolutionOutput,
@@ -58,6 +57,7 @@ pub async fn run(
     state: &ryeos_app::state::AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
     admitted_request_snapshot: Option<&Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
+    request_trust: Option<&ryeos_engine::trust::TrustStore>,
 ) -> Result<Vec<super::LaunchAugmentationAudit>, LaunchAugmentationError> {
     let (
         target_kind,
@@ -123,7 +123,9 @@ pub async fn run(
         ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
     ))
     .then_some(project_path);
-    let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let engine_roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(provenance.logical_project_root(&plan_ctx.current_site_id));
     let node_config_root = engine.node_config_root();
     let resolution_materialization =
         ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
@@ -207,6 +209,7 @@ pub async fn run(
                 &engine_roots,
                 engine,
                 &request_snapshot,
+                request_trust.unwrap_or(&request_snapshot.trust_store),
                 &subject_authority,
                 &resolution_materialization,
                 state,
@@ -254,6 +257,7 @@ pub async fn run(
                                 &engine_roots,
                                 node_config_root.as_deref(),
                                 &resolution_materialization,
+                                request_trust.unwrap_or(&request_snapshot.trust_store),
                                 state,
                             )
                             .await?
@@ -285,7 +289,7 @@ pub async fn run(
                         }
                         // A trust rejection is an authored authority failure, not
                         // a cache miss. It must remain fail-closed.
-                        enforce_current_trust(&per_root, target_kind)?;
+                        enforce_current_trust(engine, state, &per_root, target_kind)?;
                         apply_projection(
                             resolution,
                             output_derived,
@@ -334,6 +338,7 @@ pub async fn run(
                                     &engine_roots,
                                     node_config_root.as_deref(),
                                     &resolution_materialization,
+                                    request_trust.unwrap_or(&request_snapshot.trust_store),
                                     state,
                                 )
                                 .await?
@@ -361,7 +366,7 @@ pub async fn run(
                                 }
                                 continue 'authority;
                             }
-                            enforce_current_trust(&per_root, target_kind)?;
+                            enforce_current_trust(engine, state, &per_root, target_kind)?;
                             apply_projection(
                                 resolution,
                                 output_derived,
@@ -409,6 +414,7 @@ pub async fn run(
                                 &engine_roots,
                                 node_config_root.as_deref(),
                                 &resolution_materialization,
+                                request_trust.unwrap_or(&request_snapshot.trust_store),
                                 state,
                             )
                             .await?
@@ -658,6 +664,7 @@ pub async fn run(
         //        token revocation and failure-finalization below then run
         //        regardless, so a pre-spawn failure can no longer leak tokens
         //        or leave the child thread non-terminal.
+        let unsettled_cleanup = std::sync::atomic::AtomicBool::new(false);
         let spawn_outcome: Result<
         ryeos_engine::method_wire::MethodCallResult,
         LaunchAugmentationError,
@@ -668,7 +675,7 @@ pub async fn run(
             method: target_method.clone(),
             thread_id: child_thread_id.clone(),
             callback: ryeos_runtime::envelope::EnvelopeCallback {
-                socket_path: state.config.uds_path.clone(),
+                socket_path: state.config.runtime_uds_path(),
                 token: cap.token.clone(),
             },
             project_root: project_path.to_path_buf(),
@@ -730,6 +737,12 @@ pub async fn run(
             item_ref: runtime_item_ref.clone(),
             thread_id: child_thread_id.clone(),
             project_path: project_path.to_path_buf(),
+            bundle_state_home: None,
+            runtime_state_root: cap
+                .provenance
+                .state_root_override()
+                .unwrap_or(project_path)
+                .to_path_buf(),
             acting_principal: principal_fingerprint.to_string(),
             cas_root: state
                 .state_store
@@ -740,7 +753,7 @@ pub async fn run(
                 Some(
                     state
                         .config
-                        .uds_path
+                        .runtime_uds_path()
                         .to_str()
                         .ok_or_else(|| {
                             LaunchAugmentationError::RuntimeRegistry(
@@ -766,7 +779,7 @@ pub async fn run(
             .env_injections
             .iter()
             .map(|injection| {
-                let value = ryeos_engine::protocol_vocabulary::produce_env_value(
+                let value = ryeos_engine::protocol_vocabulary::produce_optional_env_value(
                     injection.source,
                     &env_request,
                 )
@@ -778,15 +791,18 @@ pub async fn run(
                         runtime_item_ref,
                     ))
                 })?;
-                Ok(ryeos_app::env_contract::EnvBinding::new(
+                Ok(value.map(|value| ryeos_app::env_contract::EnvBinding::new(
                     injection.name.clone(),
                     value,
                     ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection {
                         source: injection.source,
                     },
-                ))
+                )))
             })
-            .collect::<Result<Vec<_>, LaunchAugmentationError>>()?;
+            .collect::<Result<Vec<_>, LaunchAugmentationError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let envs = ryeos_app::env_contract::EnvContractBuilder::new()
             .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
                 (
@@ -813,6 +829,7 @@ pub async fn run(
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         };
+        let runtime_socket = state.config.runtime_uds_path();
         let applied = state
             .isolation
             .apply_awaiting_attachment_with_provenance(
@@ -831,20 +848,23 @@ pub async fn run(
                 network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: provenance.state_root_override(),
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
+                    captured_callback_socket: false,
                     daemon_socket_path: callback_ipc_requested
-                        .then_some(state.config.uds_path.as_path()),
+                        .then_some(runtime_socket.as_path()),
                     bundle_roots: &bundle_roots,
-                    node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
+                    verbatim_env_names: &[],
                 },
             )
             .map_err(|error| LaunchAugmentationError::Threads(format!("isolation: {error}")))?;
@@ -872,7 +892,13 @@ pub async fn run(
         })
         .await
         .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?
-        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn/attach: {e:#}")))?;
+        .map_err(|e| {
+            // Classify before the typed failure is rendered to text.
+            if crate::execution::process_attachment::is_unsettled_launch_cleanup(&e) {
+                unsettled_cleanup.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            LaunchAugmentationError::Threads(format!("spawn/attach: {e:#}"))
+        })?;
 
         if !result.success {
             return Err(LaunchAugmentationError::ChildBootstrap {
@@ -923,6 +949,11 @@ pub async fn run(
 
         let batch_result = match spawn_outcome {
             Ok(br) => br,
+            // Unproved cleanup: keep the row non-terminal and the lifecycle
+            // owner armed so its drop stop or reconcile settles the child.
+            Err(e) if unsettled_cleanup.load(std::sync::atomic::Ordering::SeqCst) => {
+                return Err(e);
+            }
             Err(e) => {
                 match crate::dispatch::finalize_method_thread_if_needed(
                     state,
@@ -966,6 +997,7 @@ pub async fn run(
                 &engine_roots,
                 node_config_root.as_deref(),
                 &resolution_materialization,
+                request_trust.unwrap_or(&request_snapshot.trust_store),
                 state,
             )
             .await?
@@ -1056,6 +1088,7 @@ pub async fn run(
                 &engine_roots,
                 node_config_root.as_deref(),
                 &resolution_materialization,
+                request_trust.unwrap_or(&request_snapshot.trust_store),
                 state,
             )
             .await?
@@ -1171,7 +1204,6 @@ pub async fn run(
 
 // This blocking boundary keeps every authority input explicit so none can be
 // silently recovered from ambient state inside the worker.
-#[allow(clippy::too_many_arguments)]
 async fn resolve_compose_authority_off_thread(
     engine: &ryeos_engine::engine::Engine,
     resolution_project_root: Option<&Path>,
@@ -1220,7 +1252,6 @@ async fn resolve_compose_authority_off_thread(
     })?
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_compose_authority(
     engine: &ryeos_engine::engine::Engine,
     resolution_project_root: Option<&Path>,
@@ -1431,11 +1462,13 @@ fn resolve_compose_authority(
         };
         let resolution_output = closure.output();
         crate::execution::launch::enforce_effective_trust(
-            resolution_output.effective_trust_class,
+            &engine.kinds,
+            &state.node_policy,
+            resolution_output,
             requested_ref,
             target_kind,
         )
-        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(error.to_string()))?;
+        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(Box::new(error)))?;
         per_root.insert((*requested_ref).to_string(), resolution_output.clone());
         referenced_closures.push((cache_key, closure));
     }
@@ -1501,13 +1534,13 @@ fn runtime_config_snapshot_cache() -> &'static crate::resolved_config_cache::Sna
 
 // The cache key is deliberately parameterized by the complete admitted
 // authority tuple.
-#[allow(clippy::too_many_arguments)]
 async fn load_runtime_config_snapshot_cached(
     kind: &str,
     requirements: &BTreeMap<String, ryeos_engine::kind_registry::MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     engine: &ryeos_engine::engine::Engine,
     request_snapshot: &ryeos_engine::engine::EffectiveRequestAuthoritySnapshot,
+    request_trust: &ryeos_engine::trust::TrustStore,
     subject_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
     materialization: &ryeos_app::resolution_cache::ResolutionMaterializationBinding,
     state: &ryeos_app::state::AppState,
@@ -1518,7 +1551,10 @@ async fn load_runtime_config_snapshot_cached(
     let engine_roots = engine_roots.clone();
     let node_config_root = engine.node_config_root();
     let key_has_node_config_layer = node_config_root.is_some();
-    let trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    let trusted_signers = state
+        .engine
+        .node_trust_store
+        .launch_signer_entries(request_trust, engine_roots.signer_project_root());
     let generation = engine.registered_bundle_generation_fingerprint();
     let generation_epoch = engine.registered_bundle_generation_epoch();
     let key_subject_authority = subject_authority.clone();
@@ -1526,9 +1562,7 @@ async fn load_runtime_config_snapshot_cached(
         request_snapshot.request_engine_generation_identity.clone();
     let registry_fingerprint = request_snapshot.registry_fingerprint.clone();
     let effective_trust_identity = request_snapshot.effective_trust_identity.clone();
-    let node_trust_identity =
-        ryeos_runtime::verified_loader::VerifiedLoader::node_trust_identity_from(&trusted_keys_dir)
-            .map_err(crate::dispatch_error::DispatchError::Internal)?;
+    let signers_digest = ryeos_engine::trust::trusted_signers_digest(&trusted_signers);
     let key_kind = kind.clone();
     let key_requirements = requirements.clone();
     let key_roots = engine_roots.clone();
@@ -1546,14 +1580,14 @@ async fn load_runtime_config_snapshot_cached(
             })
             .collect::<Vec<_>>();
         let value = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": &key_kind,
             "requirements": &key_requirements,
             "subject_authority": &key_subject_authority,
             "request_engine_generation_identity": &request_engine_generation_identity,
             "registry_fingerprint": &registry_fingerprint,
             "effective_trust_identity": &effective_trust_identity,
-            "node_trust_identity": &node_trust_identity,
+            "trusted_signers_digest": &signers_digest,
             "node_config_layer": key_has_node_config_layer,
             "roots": roots,
         });
@@ -1582,7 +1616,7 @@ async fn load_runtime_config_snapshot_cached(
                     &value,
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     Some(&materialization),
                 )
                 .await?
@@ -1633,7 +1667,7 @@ async fn load_runtime_config_snapshot_cached(
                     &value,
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     Some(&materialization),
                 )
                 .await?
@@ -1662,7 +1696,7 @@ async fn load_runtime_config_snapshot_cached(
                 let load_requirements = requirements.clone();
                 let load_roots = engine_roots.clone();
                 let load_node_config_root = node_config_root.clone();
-                let load_trusted_keys_dir = trusted_keys_dir.clone();
+                let load_trusted_signers = trusted_signers.clone();
                 let load_materialization = materialization.clone();
                 let loaded = tokio::task::spawn_blocking(move || {
                     let snapshot = method_runtime_config_snapshot_under_current_authority(
@@ -1670,7 +1704,7 @@ async fn load_runtime_config_snapshot_cached(
                         &load_requirements,
                         &load_roots,
                         load_node_config_root.as_deref(),
-                        &load_trusted_keys_dir,
+                        &load_trusted_signers,
                         &load_materialization,
                     )?;
                     let estimated_bytes = snapshot.estimated_bytes();
@@ -1701,7 +1735,7 @@ async fn load_runtime_config_snapshot_cached(
                     &Arc::new(snapshot.clone()),
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     Some(&materialization),
                 )
                 .await
@@ -1745,7 +1779,7 @@ async fn load_runtime_config_snapshot_cached(
                 let load_requirements = requirements.clone();
                 let load_roots = engine_roots.clone();
                 let load_node_config_root = node_config_root.clone();
-                let load_trusted_keys_dir = trusted_keys_dir.clone();
+                let load_trusted_signers = trusted_signers.clone();
                 let load_materialization = materialization.clone();
                 let snapshot = tokio::task::spawn_blocking(move || {
                     method_runtime_config_snapshot_under_current_authority(
@@ -1753,7 +1787,7 @@ async fn load_runtime_config_snapshot_cached(
                         &load_requirements,
                         &load_roots,
                         load_node_config_root.as_deref(),
-                        &load_trusted_keys_dir,
+                        &load_trusted_signers,
                         &load_materialization,
                     )
                 })
@@ -1768,7 +1802,7 @@ async fn load_runtime_config_snapshot_cached(
                     &snapshot,
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     Some(&materialization),
                 )
                 .await?
@@ -1797,7 +1831,7 @@ fn method_runtime_config_snapshot_under_current_authority(
     requirements: &BTreeMap<String, ryeos_engine::kind_registry::MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     materialization: &ryeos_app::resolution_cache::ResolutionMaterializationBinding,
 ) -> Result<crate::dispatch::MethodRuntimeConfigSnapshot, crate::dispatch_error::DispatchError> {
     match materialization
@@ -1813,7 +1847,7 @@ fn method_runtime_config_snapshot_under_current_authority(
                 requirements,
                 engine_roots,
                 node_config_root,
-                node_trusted_keys_dir,
+                trusted_signers,
                 None,
                 project_root,
                 content,
@@ -1824,7 +1858,7 @@ fn method_runtime_config_snapshot_under_current_authority(
             requirements,
             engine_roots,
             node_config_root,
-            node_trusted_keys_dir,
+            trusted_signers,
             None,
         ),
     }
@@ -1834,19 +1868,19 @@ async fn cached_method_config_is_valid(
     snapshot: &Arc<crate::dispatch::MethodRuntimeConfigSnapshot>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
 ) -> Result<bool, crate::dispatch_error::DispatchError> {
     let snapshot = snapshot.clone();
     let roots = engine_roots.clone();
     let node_config_root = node_config_root.map(Path::to_path_buf);
-    let trusted_keys_dir = trusted_keys_dir.to_path_buf();
+    let trusted_signers = trusted_signers.to_vec();
     let materialization = materialization.cloned();
     tokio::task::spawn_blocking(move || {
         snapshot.revalidate_against_status(
             &roots,
             node_config_root.as_deref(),
-            &trusted_keys_dir,
+            &trusted_signers,
             materialization.as_ref(),
         )
     })
@@ -1877,13 +1911,17 @@ async fn runtime_config_snapshot_is_valid(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
     materialization: &ryeos_app::resolution_cache::ResolutionMaterializationBinding,
+    request_trust: &ryeos_engine::trust::TrustStore,
     state: &ryeos_app::state::AppState,
 ) -> Result<bool, LaunchAugmentationError> {
     cached_method_config_is_valid(
         snapshot,
         engine_roots,
         node_config_root,
-        &state.config.runtime_root().trusted_keys_dir(),
+        &state
+            .engine
+            .node_trust_store
+            .launch_signer_entries(request_trust, engine_roots.signer_project_root()),
         Some(materialization),
     )
     .await
@@ -1947,7 +1985,6 @@ async fn verify_augmentation_executor_attestation(
     .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_cache_key(
     decl: &LaunchAugmentationDecl,
     positions: &BTreeMap<String, Vec<String>>,
@@ -2081,16 +2118,20 @@ fn digest_json(value: &Value) -> Result<String, LaunchAugmentationError> {
 }
 
 fn enforce_current_trust(
+    engine: &ryeos_engine::engine::Engine,
+    state: &ryeos_app::state::AppState,
     per_root: &BTreeMap<String, ResolutionOutput>,
     target_kind: &str,
 ) -> Result<(), LaunchAugmentationError> {
     for (root_ref, output) in per_root {
         crate::execution::launch::enforce_effective_trust(
-            output.effective_trust_class,
+            &engine.kinds,
+            &state.node_policy,
+            output,
             root_ref,
             target_kind,
         )
-        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(error.to_string()))?;
+        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(Box::new(error)))?;
     }
     Ok(())
 }
@@ -2389,22 +2430,29 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn lifecycle_test_state() -> (tempfile::TempDir, ryeos_app::state::AppState) {
+    /// The Store owner sits between the directory and the application so
+    /// destructuring drops the application before the Store closes. It stays
+    /// on the building thread.
+    pub(crate) fn lifecycle_test_state() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         let temp = tempfile::tempdir().expect("test tempdir");
-        let runtime_state_dir = temp.path().join(".ai/state");
-        let runtime_db_path = temp.path().join("runtime.sqlite3");
+        let runtime_db_path =
+            ryeos_app::test_support::TestStateStore::runtime_state_dir(temp.path())
+                .join("runtime.sqlite3");
         let key_path = temp.path().join("identity/node-key.pem");
-        let config = ryeos_app::config::Config {
+        let config = ryeos_node_runtime::config::Config {
             bind: "127.0.0.1:0".parse().expect("test bind"),
             db_path: runtime_db_path.clone(),
             uds_path: temp.path().join("test.sock"),
             app_root: temp.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
-            operator_signing_key_path: temp.path().join("user-key.pem"),
             authorized_keys_dir: temp.path().join("auth"),
         };
-        let identity =
-            ryeos_app::identity::NodeIdentity::create(&key_path).expect("test node identity");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)
+            .expect("test node identity");
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
@@ -2414,17 +2462,14 @@ pub(crate) mod tests {
             *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
-        let state_store = Arc::new(
-            ryeos_app::state_store::StateStore::new_with_head_trust(
-                temp.path().to_path_buf(),
-                runtime_state_dir,
-                runtime_db_path,
-                signer,
-                write_barrier.clone(),
-                Arc::new(head_trust),
-            )
-            .expect("test state store"),
-        );
+        let store_owner = ryeos_app::test_support::TestStateStore::open_with_barrier(
+            temp.path(),
+            signer,
+            write_barrier.clone(),
+            Arc::new(head_trust),
+        )
+        .expect("test state store");
+        let state_store = std::sync::Arc::clone(store_owner.store());
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -2455,14 +2500,16 @@ pub(crate) mod tests {
             events.clone(),
         ));
         let node_config = ryeos_app::node_config::NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
             bundles: Vec::new(),
             routes: Vec::new(),
             commands: Vec::new(),
         };
-        let controller_lifetime =
-            ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
+        let controller_lifetime = store_owner.controller_lifetime();
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
             daemon_build: ryeos_app::build_info::get(),
@@ -2500,27 +2547,32 @@ pub(crate) mod tests {
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
-                ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
-                )]),
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                    ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                    ryeos_node_runtime::node_policy::shipped_event_storage_record(),
+                    Arc::new(
+                        ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
+                        ),
+                    ),
+                ]),
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
+            provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+            vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             command_registry: Arc::new(
                 ryeos_runtime::CommandRegistry::from_records(&[], &Default::default())
                     .expect("test command registry"),
             ),
             authorizer: Arc::new(ryeos_runtime::authorizer::Authorizer::new()),
-            scheduler_db: Arc::new(
-                ryeos_scheduler::db::SchedulerDb::new_in_memory().expect("test scheduler db"),
-            ),
-            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-            scheduler_reload_tx: None,
             ignore_matcher: Arc::new(
                 ryeos_app::ignore::IgnoreMatcher::from_config(&ryeos_app::ignore::IgnoreConfig {
                     patterns: Vec::new(),
                 })
                 .unwrap(),
             ),
+            sync_include: std::sync::Arc::new(ryeos_state::project_sync::SyncInclude::for_tests()),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: Arc::new(
@@ -2531,8 +2583,9 @@ pub(crate) mod tests {
             ),
             scoped_producer_authorities: Arc::new(Default::default()),
             scoped_producer_processes: Arc::new(Default::default()),
+            qualification_workspace_custody: Arc::new(Default::default()),
         };
-        (temp, state)
+        (temp, store_owner, state)
     }
 
     #[cfg(target_os = "linux")]
@@ -2571,10 +2624,13 @@ pub(crate) mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn bound_runtime_children_fixture() -> (tempfile::TempDir, ryeos_app::state::AppState)
-    {
+    pub(crate) fn bound_runtime_children_fixture() -> (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        ryeos_app::state::AppState,
+    ) {
         use ryeos_app::runtime_db::{RuntimeWorkspaceBinding, WorkspaceBinding, WorkspaceState};
-        let (temp, state) = lifecycle_test_state();
+        let (temp, store_owner, state) = lifecycle_test_state();
         let store = &state.state_store;
         let parent = "T-runtime-parent";
         store
@@ -2653,7 +2709,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
         }
-        (temp, state)
+        (temp, store_owner, state)
     }
 
     #[test]
@@ -2703,7 +2759,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn cancellation_settles_attached_augmentation_child_while_blocking_wait_is_in_flight() {
-        let (temp, state) = lifecycle_test_state();
+        let (temp, _store_owner, state) = lifecycle_test_state();
         let thread_id = "T-augmentation-cancel-inflight";
         let descendant_pid_path = temp.path().join("augmentation-descendant.pid");
         let (worker_done_tx, worker_done_rx) = mpsc::channel();

@@ -53,68 +53,12 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
     Ok(())
 }
 
-/// Version tag for the JSON payload persisted into
-/// `runtime_db.thread_runtime.launch_metadata`. Bump when a
-/// breaking shape change ships; readers MUST decode loudly so a
-/// schema mismatch surfaces in logs rather than silently disabling
-/// downstream behaviors (see `runtime_db::get_runtime_info`).
-// Exact durable launch metadata contract. Changes to any embedded authority
-// shape require a new epoch so startup rejects the old store before nested
-// deserialization can reinterpret (or partially decode) that authority.
-// v15 carries the pinned COW base/current project-authority pair.
-// v18 carries the retained-current-HEAD principal/project/base destination.
-// v19 carries the path-free outer exact-program projection and its exact
-// resolved ref-binding identities through the embedded sealed invocation.
-// v20 carries the exact runtime-state bootstrap selected for a machine
-// continuation, so live launch and crash recovery cannot disagree about
-// whether the managed runtime consumes a predecessor checkpoint or cold-starts
-// after an authority above the runtime has restored its state.
-// v21 embeds the exact optional ingress-authenticated handler authority. Its
-// absence is durable and may never be normalized into verified callback
-// authority during recovery.
-// v22 carries the flat captured node-policy provenance contract. v23 binds
-// remote adoption to the exact target-node operator grant generation. v24
-// carries admitted-launch capsule v20, which distinguishes standalone command
-// bytes from an executable member overlaid into its complete realization.
-// v25 carries admitted-launch capsule v21 and its required kind-projected
-// per-execution network ceiling.
-// v26 carries required filesystem/network ceilings in direct and managed
-// plans, intersected before admission, and explicit realization mount roots
-// in admitted capsule v22. Predecessor authority is never reinterpreted.
-// Predecessor authority remains opaque history rather than being interpreted
-// as current launch authority.
-// v27 combines that source-local authority with sealed scheduled fires and
-// independent candidate evaluation/integration in capsule 23/request 16.
-// v28 carries explicit fixed-parent live confinement and namespace-scoped
-// symlink semantics in capsule v24. Older live authority stays opaque history.
-// v29 combines the current adapter protocol's explicit node-owned proc
-// surface with capsule 25/request 18 and retained content-target ceilings.
-// Classify prior launch evidence before decoding its nested authority.
-// v30 carries the strict isolation-adapter v7 provenance enum. Classify old
-// envelopes before decoding nested protocol authority; never alias v6 to v7.
-// v31 binds sealed node-network input digests in isolation provenance. Retain
-// predecessor launch records as opaque history, never decode with empty inputs.
-// v32 combines qualified process-scope guarantees and strict adapter v8
-// nested-sandbox provenance in the same unlanded containment cut.
-// Earlier launch classes are opaque history, never assumed scope-capable.
-// v33 retains explicit workload invocation bindings and v2 grant/wire authority.
-// An old mandatory-client declaration is not an implicit CLI binding.
-// The parallel environment-product branch allocated its own v31-v34 shapes:
-// v31 requires the exact invocation product selector map in ResumeContext.
-// Classify old envelopes before decoding nested protocol authority; never
-// synthesize an empty selector map for predecessor persisted launches.
-// v32 retains the daemon-selected durable-effect authority for an awaited
-// managed root so terminal recovery never reconstructs a grant from caller
-// input or the current wrapper definition.
-// v33 requires typed root/dependency selection lists and complete selected
-// verifier testimony. Earlier selector objects are not launch authority.
-// v34 retains source-bearing product selections; receipts are not semantic identity.
-// v35 combines source-bearing product selections and exact invocation/scope
-// authority. Both separately checkpointed branch shapes remain opaque history.
-// v36 requires site-qualified stable identity for pinned project generations.
-// Predecessor `local:<path>` pins remain opaque history and cannot authorize
-// candidate return or cross-site continuation under the current contract.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 36;
+/// Exact durable launch metadata contract persisted into
+/// `runtime_db.thread_runtime.launch_metadata`. Any change to an embedded
+/// authority shape bumps it; a stored record of any other version is refused
+/// before its nested authority is decoded, and the execution-history reset
+/// discards it.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 38;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -193,9 +137,13 @@ pub struct RuntimeLaunchMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub in_process_lifecycle_authority: Option<ryeos_state::objects::ExecutionLifecycleAuthority>,
 
-    /// Cancellation policy resolved at decorate-spec time and snapshotted
-    /// here so the daemon can route cancellation without re-loading the spec.
-    /// `None` = use the default 3s graceful shutdown.
+    /// Stop policy resolved for this launch and snapshotted here so the
+    /// daemon can route cancellation without re-loading the spec: the
+    /// `native_async` declaration, else the signed execution config's
+    /// `cancellation_mode` / `cancellation_grace_secs`. Every managed launch
+    /// records one. `None` remains only where no subprocess policy applies
+    /// (in-process handlers, metadata-free attaches); a stop then uses the
+    /// node's named fallback, `process::UNRECORDED_STOP_POLICY_GRACE_SECS`.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cancellation_mode: Option<CancellationMode>,
 
@@ -298,6 +246,35 @@ pub struct RuntimeLaunchMetadata {
     /// authority, never a producer parameter or producer stdout field.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub effect_authority: Option<ryeos_effect_contract::PreparedEffectDispatchAuthority>,
+
+    /// The principal whose scopes covered this thread's declared capabilities
+    /// at admission, and the authorized-key grant it authenticated under.
+    /// Recorded so live work can be found when a grant is revoked or replaced.
+    /// An operator follow-up records its own sender; machine continuations
+    /// keep the admitting principal. `None` for launches that no
+    /// grant-bearing caller admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covering_authority: Option<CoveringAuthority>,
+
+    /// How much of the execution tree's run deadline this thread leaves to
+    /// its ancestors, in milliseconds. Sealed at the thread's first launch and
+    /// copied unchanged to every continuation, resume and follow successor, so
+    /// a continued child keeps the window its parent reserved. `None` until
+    /// the first launch seals it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_hold_back_ms: Option<u64>,
+}
+
+/// The caller that lent a thread its declared capabilities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoveringAuthority {
+    /// Fingerprint of the covering principal.
+    pub principal: String,
+    /// Digest (`source_file_hash`) of the authorized-key grant the principal
+    /// authenticated under; `None` when the caller was not grant-backed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +319,8 @@ impl Default for RuntimeLaunchMetadata {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: None,
+            deadline_hold_back_ms: None,
         }
     }
 }
@@ -608,9 +587,35 @@ impl ResumeContext {
             expected.original_snapshot_hash = Some(generation.snapshot_hash.clone());
             expected.original_pushed_head_ref = None;
         }
-        if transition_kind == ContinuationAuthorityTransitionKind::OperatorFollowUp {
-            expected.parameters = self.parameters.clone();
-            expected.requested_by = self.requested_by.clone();
+        match &transition_kind {
+            ContinuationAuthorityTransitionKind::Inherit => {}
+            ContinuationAuthorityTransitionKind::OperatorFollowUp => {
+                expected.parameters = self.parameters.clone();
+                expected.requested_by = self.requested_by.clone();
+            }
+            ContinuationAuthorityTransitionKind::OperatorRebind { names } => {
+                expected.parameters = self.parameters.clone();
+                expected.requested_by = self.requested_by.clone();
+                if names.is_empty() {
+                    anyhow::bail!("an operator rebind continuation names no ref binding");
+                }
+                for name in names {
+                    // A rebind names a different item at a binding the
+                    // operator states; an unchanged or dropped entry is not
+                    // one, so the named set is exactly what changed.
+                    let rebound = self.ref_bindings.get(name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "operator rebind continuation states no ref binding `{name}`"
+                        )
+                    })?;
+                    if source.ref_bindings.get(name) == Some(rebound) {
+                        anyhow::bail!(
+                            "operator rebind continuation leaves ref binding `{name}` unchanged"
+                        );
+                    }
+                    expected.ref_bindings.insert(name.clone(), rebound.clone());
+                }
+            }
         }
         if self != &expected {
             anyhow::bail!(
@@ -684,7 +689,13 @@ impl ResumeContext {
             }
             ryeos_state::objects::EnvironmentAuthority::None
             | ryeos_state::objects::EnvironmentAuthority::Vault { .. }
-            | ryeos_state::objects::EnvironmentAuthority::Delegated { .. } => {
+            | ryeos_state::objects::EnvironmentAuthority::Delegated { .. }
+            | ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
+                declared_names: _,
+                recipient_principal: _,
+                recipient_scopes: _,
+                name_authority: _,
+            } => {
                 if self.local_overlay_root.is_some() {
                     anyhow::bail!(
                         "launch authority without a project overlay carries a local overlay root"
@@ -762,15 +773,21 @@ impl ResumeContext {
     }
 }
 
-/// The two continuation authority changes admitted by the lifecycle.
+/// The continuation authority changes admitted by the lifecycle.
 ///
 /// This tag is supplied by the already-separated machine/follow and
-/// operator-follow-up state boundaries; it is never inferred from changed
-/// fields in an untrusted successor envelope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContinuationAuthorityTransitionKind {
+/// operator state boundaries; it is never inferred from changed fields in an
+/// untrusted successor envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationAuthorityTransitionKind {
     Inherit,
     OperatorFollowUp,
+    /// An operator follow-up that also binds a different item at each named
+    /// ref binding. The successor keeps the admitted program and re-admits
+    /// only what launch preparation derives from those bindings.
+    OperatorRebind {
+        names: std::collections::BTreeSet<String>,
+    },
 }
 
 impl RuntimeLaunchMetadata {
@@ -918,6 +935,16 @@ impl RuntimeLaunchMetadata {
                 &self.effect_authority,
                 &attempt.effect_authority,
             )?,
+            covering_authority: exact(
+                "covering authority",
+                &self.covering_authority,
+                &attempt.covering_authority,
+            )?,
+            deadline_hold_back_ms: exact(
+                "deadline hold-back",
+                &self.deadline_hold_back_ms,
+                &attempt.deadline_hold_back_ms,
+            )?,
         };
         merged.validate()?;
         Ok(merged)
@@ -960,6 +987,7 @@ impl RuntimeLaunchMetadata {
                 || self.follow_launch_window.is_some()
                 || self.isolation.is_some()
                 || self.effect_authority.is_some()
+                || self.deadline_hold_back_ms.is_some()
             {
                 anyhow::bail!(
                     "in-process handler launch metadata contains subprocess-only authority"
@@ -1069,8 +1097,9 @@ impl RuntimeLaunchMetadata {
 
     /// Build metadata from a finalized engine `SubprocessSpec`.
     ///
-    /// Captures the `native_async` cancellation policy and the
-    /// `native_resume` policy, both of which are spec-level
+    /// Captures the compiled stop policy (`native_async`, else the
+    /// execution-config policy) and the `native_resume` policy, both of
+    /// which are spec-level
     /// `DecorateSpec`-phase outputs the daemon needs to route
     /// shutdown / resume without re-loading the spec.
     ///
@@ -1086,11 +1115,7 @@ impl RuntimeLaunchMetadata {
             // DirectItemExecutor before thread birth.
             launch_driver: None,
             in_process_lifecycle_authority: None,
-            cancellation_mode: spec
-                .execution
-                .native_async
-                .as_ref()
-                .map(|na| na.cancellation_mode),
+            cancellation_mode: spec.execution.stop_policy(),
             native_resume: spec.execution.native_resume.clone(),
             checkpoint_dir: None,
             resume_context: None,
@@ -1107,6 +1132,8 @@ impl RuntimeLaunchMetadata {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: None,
+            deadline_hold_back_ms: None,
         }
     }
 
@@ -1134,6 +1161,7 @@ impl RuntimeLaunchMetadata {
             && self.isolation.is_none()
             && self.accounting_scope.is_none()
             && self.effect_authority.is_none()
+            && self.deadline_hold_back_ms.is_none()
     }
 
     /// Build the immutable CAS launch closure at admission. The runtime ledger
@@ -1158,7 +1186,7 @@ impl RuntimeLaunchMetadata {
             } else {
                 "launch source"
             };
-            anyhow::bail!("{role} admitted capsule invocation/resume validation: {error}");
+            anyhow::bail!("{role} admitted capsule invocation/resume validation: {error:#}");
         }
         let admitted_project_authority = self
             .admitted_project_authority
@@ -1368,6 +1396,8 @@ impl RuntimeLaunchMetadata {
             // (no allowance reset).
             accounting_scope: self.accounting_scope.clone(),
             effect_authority: self.effect_authority.clone(),
+            covering_authority: self.covering_authority.clone(),
+            deadline_hold_back_ms: self.deadline_hold_back_ms,
         }
     }
 
@@ -1404,8 +1434,85 @@ impl RuntimeLaunchMetadata {
             // ledger exists to prevent (plan constraint 6, §10.3).
             accounting_scope: self.accounting_scope.clone(),
             effect_authority: self.effect_authority.clone(),
+            covering_authority: self.covering_authority.clone(),
+            deadline_hold_back_ms: self.deadline_hold_back_ms,
             ..Self::default()
         }
+    }
+
+    /// Require that this operational launch metadata still describes the
+    /// launch `admitted` rooted in the state store.
+    ///
+    /// Launch metadata is the runtime database's working copy; the capsule is
+    /// the authority. A continuation seed derived from metadata that drifted
+    /// from its capsule would feed unadmitted bindings, closure or
+    /// capabilities to whatever reads the seed next.
+    pub fn require_admitted_by(
+        &self,
+        admitted: &ryeos_state::objects::AdmittedLaunchCapsule,
+    ) -> anyhow::Result<()> {
+        let operational = self.admitted_launch_capsule()?.ok_or_else(|| {
+            anyhow::anyhow!("operational launch metadata has no admitted launch capsule")
+        })?;
+        if !admitted.same_continuation_admission(&operational)? {
+            anyhow::bail!(
+                "operational launch metadata differs from its authoritative CAS admission"
+            );
+        }
+        Ok(())
+    }
+
+    /// Derive the launch seed of an operator rebind successor.
+    ///
+    /// `source_capsule` is the source's capsule as rooted in the state store.
+    /// This metadata must still describe that capsule, or no seed is derived:
+    /// the ordinary continuation makes the same comparison before it reads
+    /// descriptors or credentials, and a rebind, which prepares the launch
+    /// again from this seed, must not start from anything the capsule did
+    /// not admit.
+    ///
+    /// The seed is otherwise the ordinary continuation seed: everything a
+    /// continuation copies from its source (runtime policy, admitted closure,
+    /// accounting scope, deadline hold-back, effect authority) is copied the
+    /// same way. The one difference is the sealed invocation, rebased onto
+    /// the ref bindings the operator named. The seed's closure and
+    /// realization are still the source's; launch preparation replaces the
+    /// binding-derived part and the state boundary compares the result with
+    /// the source.
+    pub fn operator_rebind_successor_seed(
+        &self,
+        source_thread_id: &str,
+        source_capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+        resume_context: ResumeContext,
+        handler_context: &crate::handler_context::HandlerContext,
+        names: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<Self> {
+        self.require_admitted_by(source_capsule)
+            .with_context(|| format!("operator rebind source {source_thread_id}"))?;
+        let sealed = self
+            .sealed_root_request
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("source {source_thread_id} has no admitted launch capsule")
+            })?
+            .for_operator_rebind_invocation(&resume_context, handler_context, names)?;
+        Ok(self
+            .continuation_successor_seed(resume_context)
+            .with_continuation_source(source_thread_id)
+            .with_sealed_root_request(sealed))
+    }
+
+    /// Record the principal (and grant digest, when grant-backed) that covered
+    /// this thread's declared capabilities.
+    /// Seal the share of the run deadline this thread leaves to its ancestors.
+    pub fn with_deadline_hold_back_ms(mut self, hold_back_ms: u64) -> Self {
+        self.deadline_hold_back_ms = Some(hold_back_ms);
+        self
+    }
+
+    pub fn with_covering_authority(mut self, authority: CoveringAuthority) -> Self {
+        self.covering_authority = Some(authority);
+        self
     }
 
     pub fn with_sealed_root_request(mut self, request: SealedRootExecutionRequest) -> Self {
@@ -1646,7 +1753,8 @@ mod tests {
                 "declaration_id": "runtime",
                 "witness_hash": "c".repeat(64),
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": null
+                "qualification_hash": null,
+                "remote_testimony": null
             }
         }]))
         .unwrap();
@@ -1903,11 +2011,111 @@ mod tests {
     }
 
     #[test]
+    fn operator_rebind_changes_only_the_named_ref_bindings_beside_an_operator_follow_up() {
+        let project = tempfile::tempdir().unwrap();
+        let mut source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        source.ref_bindings = BTreeMap::from([
+            (
+                "model".to_string(),
+                "directive:test/models/first".to_string(),
+            ),
+            ("guard".to_string(), "directive:test/guard".to_string()),
+        ]);
+        let rebind = |names: &[&str]| ContinuationAuthorityTransitionKind::OperatorRebind {
+            names: names.iter().map(|name| (*name).to_string()).collect(),
+        };
+        let mut rebound = source.clone();
+        rebound.parameters = serde_json::json!({"input": "continue"});
+        rebound.ref_bindings.insert(
+            "model".to_string(),
+            "directive:test/models/second".to_string(),
+        );
+        rebound
+            .validate_continuation_transition_from(&source, None, rebind(&["model"]))
+            .unwrap();
+
+        // The change is admitted only under the typed rebind transition.
+        for kind in [
+            ContinuationAuthorityTransitionKind::Inherit,
+            ContinuationAuthorityTransitionKind::OperatorFollowUp,
+        ] {
+            assert!(
+                rebound
+                    .validate_continuation_transition_from(&source, None, kind)
+                    .is_err()
+            );
+        }
+        // Naming nothing, an unchanged binding, or an absent one is refused.
+        for names in [
+            &[][..],
+            &["guard"][..],
+            &["guard", "model"][..],
+            &["absent"][..],
+        ] {
+            assert!(
+                rebound
+                    .validate_continuation_transition_from(&source, None, rebind(names))
+                    .is_err(),
+                "{names:?}"
+            );
+        }
+        // A binding outside the named set cannot change with it.
+        let mut widened = rebound.clone();
+        widened.ref_bindings.insert(
+            "guard".to_string(),
+            "directive:test/other-guard".to_string(),
+        );
+        assert!(
+            widened
+                .validate_continuation_transition_from(&source, None, rebind(&["model"]))
+                .is_err()
+        );
+        // Nor can any other launch field.
+        let mut other = rebound.clone();
+        other.item_ref = "tool:test/other".to_string();
+        assert!(
+            other
+                .validate_continuation_transition_from(&source, None, rebind(&["model"]))
+                .is_err()
+        );
+        let mut caps = rebound.clone();
+        caps.effective_caps.push("ryeos.execute.*".to_string());
+        assert!(
+            caps.validate_continuation_transition_from(&source, None, rebind(&["model"]))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn from_spec_no_native_async_yields_none() {
         let m = RuntimeLaunchMetadata::from_spec(&empty_spec());
         assert!(m.cancellation_mode.is_none());
         assert!(m.checkpoint_dir.is_none());
         assert_eq!(m.schema_version, LAUNCH_METADATA_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn from_spec_without_native_async_records_execution_config_policy() {
+        let mut spec = empty_spec();
+        spec.execution.cancellation_mode = Some(CancellationMode::Graceful { grace_secs: 2 });
+        let m = RuntimeLaunchMetadata::from_spec(&spec);
+        assert_eq!(
+            m.cancellation_mode,
+            Some(CancellationMode::Graceful { grace_secs: 2 })
+        );
+    }
+
+    #[test]
+    fn from_spec_native_async_declaration_owns_the_stop_policy() {
+        let mut spec = empty_spec();
+        spec.execution.native_async = Some(NativeAsyncSpec {
+            cancellation_mode: CancellationMode::Hard,
+        });
+        spec.execution.cancellation_mode = Some(CancellationMode::Graceful { grace_secs: 2 });
+        let m = RuntimeLaunchMetadata::from_spec(&spec);
+        assert_eq!(m.cancellation_mode, Some(CancellationMode::Hard));
     }
 
     #[test]
@@ -1956,6 +2164,11 @@ mod tests {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: Some(CoveringAuthority {
+                principal: "fp:caller".to_string(),
+                grant_digest: Some("a".repeat(64)),
+            }),
+            deadline_hold_back_ms: Some(30_000),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
@@ -2035,6 +2248,7 @@ mod tests {
                 directive_budget_id: Some("D-source".to_string()),
             }),
             admitted_execution_closure: Some(execution_closure.clone()),
+            deadline_hold_back_ms: Some(40_000),
             ..RuntimeLaunchMetadata::default()
         };
         let successor_resume = resume_context(ProjectContext::SnapshotHash {
@@ -2068,6 +2282,11 @@ mod tests {
             "continuation must carry the accounting scope forward"
         );
         assert!(successor.accounting_scope.is_some());
+        assert_eq!(
+            successor.deadline_hold_back_ms,
+            Some(40_000),
+            "a continued child keeps the window its parent reserved"
+        );
     }
 
     #[test]
@@ -2123,7 +2342,11 @@ mod tests {
         let live_dir = tempfile::tempdir().unwrap();
         let live_authority = crate::execution_policy::resolve_standard_local_live_authority(
             live_dir.path(),
-            vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+            vec![
+                crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+                crate::execution_policy::OPERATOR_VAULT_CAPABILITY.to_string(),
+            ],
+            "fp:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap()

@@ -329,6 +329,10 @@ fn build_top_level_help(
             "Provision one administrator-owned local hosted-worker service",
         ),
         crate::tty::Row::key_value(
+            "node host retire",
+            "Retire a stopped node's host service, or every orphaned one",
+        ),
+        crate::tty::Row::key_value(
             "node doctor",
             "Offline checklist answering \"why won't it start\"",
         ),
@@ -339,6 +343,10 @@ fn build_top_level_help(
         crate::tty::Row::key_value(
             "node reset authorization",
             "Reset authorized keys for a schema cutover",
+        ),
+        crate::tty::Row::key_value(
+            "node authorization revoke",
+            "Revoke a grant on a stopped node, leaving a tombstone",
         ),
         crate::tty::Row::key_value(
             "node reset policy-generation",
@@ -914,8 +922,9 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "init" => (
             "ryeos init",
             "Run interactive first-contact onboarding, or bootstrap non-interactively",
-            "ryeos init [--non-interactive | --json] [--bind <ADDR>] [--uds-path <PATH>] [--node-profile <NAME>] [--trust-file <FILE>]... [OPTIONS]",
+            "ryeos init [--non-interactive | --json] [--bind <ADDR>] [--uds-path <PATH>] [--node-profile <NAME> --host-class <NAME>] [--trust-file <FILE>]... [OPTIONS]",
         ),
+        #[cfg(feature = "model-provider-setup")]
         "setup" => (
             "ryeos setup",
             "Configure a verified model provider and default model",
@@ -931,6 +940,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Provision one administrator-owned local hosted-worker service",
             "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
         ),
+        "node host retire" => (
+            "ryeos node host retire",
+            "Retire a stopped node's host service, or every orphaned one",
+            "ryeos node host retire --confirm [--app-root <DIR> | --orphaned]",
+        ),
         "node doctor" => (
             "ryeos node doctor",
             "Diagnose the local node environment",
@@ -941,10 +955,20 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Retire the local execution-history epoch",
             "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--schema-cut-from <EPOCH> --schema-cut-to <EPOCH>] [--json] [--app-root <DIR>]",
         ),
+        "node reset execution-history-scratch" => (
+            "ryeos node reset execution-history-scratch",
+            "Clear execution-history reset scratch the next reset cannot settle",
+            "ryeos node reset execution-history-scratch [--dry-run | --confirm] [--json] [--app-root <DIR>]",
+        ),
         "node reset authorization" => (
             "ryeos node reset authorization",
             "Retire all grants and restore only the local operator",
             "ryeos node reset authorization --confirm [--json] [--app-root <DIR>]",
+        ),
+        "node authorization revoke" => (
+            "ryeos node authorization revoke",
+            "Revoke a grant on a stopped node, leaving a tombstone",
+            "ryeos node authorization revoke --fingerprint <FINGERPRINT> --reason <TEXT> [--keep-delegates] [--json] [--app-root <DIR>]",
         ),
         "node reset replay-indexes" => (
             "ryeos node reset replay-indexes",
@@ -956,10 +980,30 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Retire predecessor external-content bindings",
             "ryeos node reset external-content-bindings [--dry-run | --confirm] [--json] [--app-root <DIR>]",
         ),
+        "node large-objects purge-quarantine" => (
+            "ryeos node large-objects purge-quarantine",
+            "Discard the damaged large objects scrub quarantined",
+            "ryeos node large-objects purge-quarantine [--dry-run | --confirm] [--json] [--app-root <DIR>]",
+        ),
         "node reset policy-generation" => (
             "ryeos node reset policy-generation",
             "Replace an obsolete node-policy generation",
-            "ryeos node reset policy-generation --node-profile <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--json] [--app-root <DIR>]",
+            "ryeos node reset policy-generation --node-profile <NAME> --host-class <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--json] [--app-root <DIR>]",
+        ),
+        "node host-access grant" => (
+            "ryeos node host-access grant",
+            "Grant one exact host-authority tool host-direct execution: it runs on the host with the operator's authority",
+            "ryeos node host-access grant <item_ref> --project <DIR> [--id <ID>] [--origin direct|graph_child|schedule]... [--env <NAME>]... [--containment scope_required|group_allowed] [--json] [--app-root <DIR>]",
+        ),
+        "node host-access revoke" => (
+            "ryeos node host-access revoke",
+            "Remove one host_access grant",
+            "ryeos node host-access revoke <id> [--json] [--app-root <DIR>]",
+        ),
+        "node host-access list" => (
+            "ryeos node host-access list",
+            "List host_access grants; with --project, report each as current or stale",
+            "ryeos node host-access list [--project <DIR>] [--json] [--app-root <DIR>]",
         ),
         "start" => (
             "ryeos start",
@@ -981,12 +1025,54 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Sign RyeOS items by canonical ref, glob, or .ai path",
             "ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]",
         ),
+        "external-content product publish" => (
+            "ryeos external-content product publish",
+            "Produce a named product and ship it: activate, execute the producer, wait, capture, admit the witness, and push it when asked",
+            "ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>] [--json]",
+        ),
+        "codex login device" => (
+            "ryeos codex login device",
+            "Log a Codex credential profile in with a device code: open the login session, show the code, wait for the account, end the session, and confirm",
+            "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
+        ),
+        "node policy-apply" => (
+            "ryeos node policy-apply",
+            "Validate and atomically install an operator-authored node policy on a stopped node",
+            "ryeos node policy-apply <section> <source.yaml> [--json] [--app-root <DIR>]",
+        ),
         "identity" => (
             "ryeos identity",
             "Print the local node public identity",
             "ryeos identity [--json] [--app-root <DIR>]",
         ),
         _ => {
+            if let Some(descriptor) = crate::lifecycle_commands::local_command_descriptors()
+                .iter()
+                .find(|descriptor| {
+                    descriptor.tokens.len() == command_tokens.len()
+                        && descriptor
+                            .tokens
+                            .iter()
+                            .zip(command_tokens)
+                            .all(|(expected, actual)| *expected == actual)
+                })
+            {
+                // A registered lifecycle command without a hand-written entry
+                // still gets its registered summary and a generic usage line.
+                let title = format!("ryeos {command}");
+                let mut document = crate::tty::Document::titled(title.clone());
+                let mut overview = crate::tty::Section::named("overview");
+                overview
+                    .rows
+                    .push(crate::tty::Row::text(descriptor.summary));
+                document.sections.push(overview);
+                let mut usage_section = crate::tty::Section::named("usage");
+                usage_section
+                    .rows
+                    .push(crate::tty::Row::text(format!("{title} [OPTIONS]")));
+                document.sections.push(usage_section);
+                return document;
+            }
             let mut document =
                 crate::tty::Document::titled(format!("no local help available for '{command}'"));
             document.hints.push(crate::tty::Hint::new(
@@ -1022,15 +1108,76 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
                 "--node-profile <NAME>",
                 "Publisher-signed source-root init profile (required on fresh nodes)",
             ),
+            (
+                "--host-class <NAME>",
+                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile. `local` enforces the sandbox and init refuses if the host cannot prove it; `local_unconfined` is the explicit opt-out that runs jobs as the daemon user",
+            ),
             ("--app-root <DIR>", "Application root"),
         ],
+        #[cfg(feature = "model-provider-setup")]
         "setup" => &[("--app-root <DIR>", "Application root")],
+        "external-content product publish" => &[
+            (
+                "--activation <config-ref>",
+                "Activate this external-content recipe online first and wait for it",
+            ),
+            (
+                "--from-thread <thread-id>",
+                "Resume from a completed producer thread instead of executing again",
+            ),
+            (
+                "--push-to <remote>",
+                "Push the admitted product to this remote under the declared byte bound",
+            ),
+            (
+                "--project-snapshot <hash>",
+                "Execute the producer from this published project snapshot",
+            ),
+            (
+                "--current-head",
+                "Execute the producer from the current principal project HEAD",
+            ),
+            (
+                "--timeout-secs <n>",
+                "Give up waiting after this many seconds",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
+        "codex login device" => &[
+            (
+                "--create",
+                "Create the profile first; an existing owned profile is kept",
+            ),
+            (
+                "--trusted",
+                "Open the login on an explicitly trusted process-group node",
+            ),
+            (
+                "--yes",
+                "Confirm the observed account without asking (needed without a terminal)",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
         "node host setup" => &[
             (
                 "--confirm",
                 "Confirm provisioning the administrator-owned host association",
             ),
             ("--app-root <DIR>", "Existing initialized application root"),
+        ],
+        "node host retire" => &[
+            (
+                "--confirm",
+                "Confirm removing the administrator-owned host association",
+            ),
+            (
+                "--app-root <DIR>",
+                "Application root whose stopped node's service to retire",
+            ),
+            (
+                "--orphaned",
+                "Retire every node service whose app root no longer exists",
+            ),
         ],
         "execute" => &[
             (
@@ -1076,14 +1223,47 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_setup_help_matches_selection_and_core_help_survives() {
+        let setup = build_lifecycle_command_help(&["setup".to_owned()]);
+        let expected = if cfg!(feature = "model-provider-setup") {
+            "ryeos setup"
+        } else {
+            "no local help available for 'setup'"
+        };
+        assert_eq!(setup.title.as_deref(), Some(expected));
+        let init = build_lifecycle_command_help(&["init".to_owned()]);
+        assert_eq!(init.title.as_deref(), Some("ryeos init"));
+    }
+
+    #[test]
+    fn every_lifecycle_command_has_local_help() {
+        for descriptor in crate::lifecycle_commands::local_command_descriptors() {
+            let tokens: Vec<String> = descriptor.tokens.iter().map(|t| (*t).to_owned()).collect();
+            let document = build_lifecycle_command_help(&tokens);
+            let title = document.title.as_deref().unwrap_or_default();
+            assert!(
+                !title.starts_with("no local help"),
+                "no help for {:?}",
+                descriptor.tokens
+            );
+        }
+        let apply = build_lifecycle_command_help(&["node".to_owned(), "policy-apply".to_owned()]);
+        assert_eq!(apply.title.as_deref(), Some("ryeos node policy-apply"));
+    }
+
     use ryeos_app::node_config::NodeConfigSnapshot;
     use std::path::PathBuf;
 
     #[test]
     fn installed_help_reads_command_and_effective_item_metadata() {
         let snapshot = NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {
@@ -1236,7 +1416,7 @@ mod tests {
         let mut defaults = std::collections::BTreeMap::new();
         defaults.insert(
             "surface".to_string(),
-            serde_json::Value::String("surface:ryeos/ui/atlas".to_string()),
+            serde_json::Value::String("surface:ryeos/ui/base".to_string()),
         );
         let command = LoadedCommandDescriptor {
             command: ryeos_runtime::CommandDef {

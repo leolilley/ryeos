@@ -1,0 +1,2751 @@
+//! Composition of one node-signed external placement binding.
+//!
+//! `compose_binding_document` is the only constructor of a binding document
+//! outside the loader. Test fixtures and the offline operator command both
+//! call it, with the same runtime qualification inputs, so a fixture can never
+//! drift from what an operator composes. The operator path adds the facts only an installed node can supply (artifact
+//! identities from the verified bundles), a fresh credential generation, the
+//! node-identity signature and an exact round trip through the section parse
+//! before anything is published.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use ryeos_state::external_execution::admission::{
+    AdmittedExternalCandidateProgram, ExternalCandidateRuntimeSource,
+};
+use ryeos_state::external_execution::transport::{
+    EXTERNAL_CHANNEL_RELAY_CONTRACT, EXTERNAL_CHANNEL_ROUTE_CONTRACT,
+    ExternalControllerFileRelayContract, ExternalControllerTransportContract,
+    ExternalControllerTransportSelection, ExternalNetworkInputPolicy,
+    ExternalNetworkInputSelection, MAX_TLS_ROOT_CERTIFICATES, external_tls_root_bundle_digest,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::{
+    BindingDocument, ExternalExecutionSection, ExternalRuntimeContentQualificationBinding,
+    ExternalRuntimeQualificationBinding, ExternalStructuredSessionBinding, ExternalWorkloadBinding,
+    InstalledExternalExecutionBinding, SECTION_NAME, adapter_settings_digest, binding_digest,
+    capacity_owner,
+};
+use crate::node_config::NodeConfigSection as _;
+
+/// Installed-backend id the tests register.
+#[cfg(test)]
+pub(super) const TEST_BACKEND_ID: &str = "test-lease-backend";
+/// Capacity group an operator binding joins unless told otherwise.
+pub const DEFAULT_CAPACITY_GROUP: &str = "candidate-workers";
+
+const HTTP_NETWORK_POLICY: &str = "supervisor_pinned_owner_only_candidate_denied_v1";
+pub(super) const RELAY_NETWORK_POLICY: &str = "controller_file_relay_guest_deny_all_v1";
+pub(super) const STORAGE_POLICY: &str = "ephemeral_private_candidate_v1";
+pub(super) const CLEANUP_PROOF: &str = "provider_terminal_occurrence_v1";
+const MAX_ROOTS_PEM_BYTES: usize = 256 * 1024;
+
+/// Bounds a binding grants one placement. Every omitted field keeps the
+/// operator default; the document validation still owns the hard limits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ComposeLimits {
+    pub max_active: u16,
+    pub timeout_seconds: u32,
+    pub contact_timeout_seconds: u32,
+    pub observation_timeout_seconds: u32,
+    pub cleanup_timeout_seconds: u32,
+    /// Prepaid native work (SQL VM steps) a placement may spend on the node
+    /// across its life; a fresh placement needs at least this much left in
+    /// the daemon incarnation. Measure a workload before lowering it.
+    pub native_work_steps: u64,
+    pub max_workspace_bytes: u64,
+    pub max_export_bytes: u64,
+    pub max_transfer_bytes: u64,
+    pub max_guest_package_regular_bytes: u64,
+    pub max_guest_package_framed_bytes: u64,
+}
+
+impl Default for ComposeLimits {
+    fn default() -> Self {
+        Self {
+            max_active: 1,
+            timeout_seconds: 600,
+            contact_timeout_seconds: 30,
+            observation_timeout_seconds: 120,
+            cleanup_timeout_seconds: 300,
+            native_work_steps: super::DEFAULT_NATIVE_WORK_STEPS,
+            max_workspace_bytes: 1024 * 1024 * 1024,
+            max_export_bytes: 512 * 1024 * 1024,
+            max_transfer_bytes: 1024 * 1024 * 1024,
+            max_guest_package_regular_bytes: 1024 * 1024 * 1024,
+            max_guest_package_framed_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// Refuse a binding whose largest admitted package the snapshot's guest owner
+/// cannot stage. The owner's profile is read from the node's content store by
+/// the guest runtime manifest hash; a node that does not hold that manifest
+/// cannot be checked here, and the activation check covers it. The binding
+/// bounds no entry count, so only the byte ceilings are checked at this point.
+pub(crate) fn require_guest_owner_stages_largest_package(
+    app_root: &Path,
+    guest_runtime_manifest_hash: &str,
+    limits: &ComposeLimits,
+    owner_runtime_required: bool,
+) -> Result<()> {
+    let cas = lillux::CasStore::new(
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+            .state()
+            .join("objects"),
+    );
+    let Some(profile) =
+        ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile::from_cas(
+            &cas,
+            guest_runtime_manifest_hash,
+        )?
+    else {
+        ensure!(
+            !owner_runtime_required,
+            "the binding's guest owner runtime {guest_runtime_manifest_hash} is not in this \
+             node's content store, so its staging capacity cannot be checked"
+        );
+        return Ok(());
+    };
+    profile
+        .require_stages_package(
+            limits.max_guest_package_framed_bytes,
+            limits.max_guest_package_regular_bytes,
+            0,
+        )
+        .with_context(|| {
+            format!(
+                "the snapshot's guest owner cannot stage the largest package this binding admits \
+                 (framed {} bytes, regular {} bytes; owner private source {} bytes)",
+                limits.max_guest_package_framed_bytes,
+                limits.max_guest_package_regular_bytes,
+                profile.private_source_max_bytes
+            )
+        })
+}
+
+/// Artifact identities taken from the installed, verified bundles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BundleArtifactFacts {
+    pub(crate) backend_artifact_hash: String,
+    pub(crate) backend_artifact_bytes: u64,
+    pub(crate) settings_schema_digest: String,
+    pub(crate) supervisor_artifact_hash: String,
+    pub(crate) supervisor_artifact_bytes: u64,
+    pub(crate) launcher_artifact_hash: String,
+    pub(crate) launcher_artifact_bytes: u64,
+    pub(crate) configuration_adapter_artifact_hash: String,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_artifact_hash: String,
+    pub(crate) connector_artifact_bytes: u64,
+    pub(crate) relay_scope_setting: Option<String>,
+}
+
+/// Everything one binding document is made from.
+pub(crate) struct ComposeInputs<'a> {
+    pub(crate) program: &'a AdmittedExternalCandidateProgram,
+    pub(crate) controller_transport: ExternalControllerTransportSelection,
+    pub(crate) provider_network_inputs: ExternalNetworkInputPolicy,
+    pub(crate) tls_roots_der_base64: Vec<String>,
+    pub(crate) backend: String,
+    pub(crate) account: String,
+    pub(crate) capacity_group: String,
+    pub(crate) credential_generation: String,
+    pub(crate) settings: Value,
+    pub(crate) guest_runtime_manifest_hash: String,
+    pub(crate) runtime_qualification: Option<ExternalRuntimeQualificationBinding>,
+    pub(crate) runtime_content_qualification: Option<ExternalRuntimeContentQualificationBinding>,
+    pub(crate) artifacts: BundleArtifactFacts,
+    pub(crate) limits: ComposeLimits,
+}
+
+/// A runtime content qualification is acquired-content testimony for an
+/// activation-sourced runtime; launch loads it by activation, coordinate and
+/// attestation and checks it against the session's runtime manifest. A program
+/// derived from activated content was itself derived from that testimony, so
+/// it must be present and must name the exact coordinate and attestation the
+/// program carries. A product-sourced program carries none: its runtime
+/// authority is its admitted product selection, and launch refuses the slot
+/// there. Either mismatch is refused here so that a binding launch would reject
+/// is never signed.
+fn require_content_qualification_pairing(
+    program: &AdmittedExternalCandidateProgram,
+    qualification: Option<&ExternalRuntimeContentQualificationBinding>,
+) -> Result<()> {
+    let ExternalCandidateRuntimeSource::ActivatedContent {
+        qualification_coordinate_id,
+        ..
+    } = &program.runtime_source
+    else {
+        ensure!(
+            qualification.is_none(),
+            "a product-sourced program carries no runtime content qualification"
+        );
+        return Ok(());
+    };
+    let qualification = qualification
+        .context("an activated-content program requires a runtime content qualification")?;
+    ensure!(
+        qualification.coordinate_id == *qualification_coordinate_id,
+        "runtime content qualification names a coordinate the program was not derived from"
+    );
+    ensure!(
+        qualification.attestation_hash == program.qualification_attestation_hash,
+        "runtime content qualification names an attestation the program was not derived from"
+    );
+    Ok(())
+}
+
+/// The single non-test constructor of a placement binding document. The
+/// schema, network policy, storage policy and cleanup proof follow from the
+/// transport; the digest of the settings is derived, never supplied.
+pub(super) fn compose_binding_document(inputs: ComposeInputs<'_>) -> Result<BindingDocument> {
+    let ComposeInputs {
+        program,
+        controller_transport,
+        provider_network_inputs,
+        tls_roots_der_base64,
+        backend,
+        account,
+        capacity_group,
+        credential_generation,
+        settings,
+        guest_runtime_manifest_hash,
+        runtime_qualification,
+        runtime_content_qualification,
+        artifacts,
+        limits,
+    } = inputs;
+    super::require_relay_scope(
+        &controller_transport,
+        artifacts.relay_scope_setting.as_deref(),
+        &settings,
+    )?;
+    program.validate()?;
+    require_content_qualification_pairing(program, runtime_content_qualification.as_ref())?;
+    controller_transport.validate()?;
+    provider_network_inputs.validate()?;
+    let (schema, network_policy) = match &controller_transport {
+        ExternalControllerTransportSelection::HttpJson(http) => {
+            ensure!(
+                external_tls_root_bundle_digest(&tls_roots_der_base64)?
+                    == http.tls_root_bundle_digest,
+                "composed TLS roots changed their transport identity"
+            );
+            (20, HTTP_NETWORK_POLICY)
+        }
+        ExternalControllerTransportSelection::ControllerFileRelay(_) => {
+            ensure!(
+                tls_roots_der_base64.is_empty(),
+                "a file-relay transport carries no TLS roots"
+            );
+            (22, RELAY_NETWORK_POLICY)
+        }
+    };
+    let document = BindingDocument {
+        kind: "node".into(),
+        schema,
+        protocol: program.requirement.protocol.clone(),
+        workload: ExternalWorkloadBinding::StructuredSession(ExternalStructuredSessionBinding {
+            provider_declaration_id: program.requirement.provider_declaration_id.clone(),
+            provider_configuration_destination: program
+                .requirement
+                .provider_configuration_destination
+                .clone(),
+            runtime_manifest_hash: program.runtime_manifest_hash.clone(),
+            runtime_selection_identity: program.selection_identity_digest.clone(),
+            configuration_adapter_artifact_hash: artifacts.configuration_adapter_artifact_hash,
+            configuration_adapter_artifact_bytes: artifacts.configuration_adapter_artifact_bytes,
+            connector_protocol: program.requirement.connector_protocol.clone(),
+            connector_artifact_hash: artifacts.connector_artifact_hash,
+            connector_artifact_bytes: artifacts.connector_artifact_bytes,
+        }),
+        backend,
+        account,
+        capacity_group,
+        credential_generation,
+        settings_digest: adapter_settings_digest(&settings)?,
+        settings_schema_digest: artifacts.settings_schema_digest,
+        settings,
+        backend_artifact_hash: artifacts.backend_artifact_hash,
+        backend_artifact_bytes: artifacts.backend_artifact_bytes,
+        supervisor_artifact_hash: artifacts.supervisor_artifact_hash,
+        supervisor_artifact_bytes: artifacts.supervisor_artifact_bytes,
+        guest_runtime_manifest_hash,
+        runtime_qualification,
+        runtime_content_qualification,
+        launcher_artifact_hash: artifacts.launcher_artifact_hash,
+        launcher_artifact_bytes: artifacts.launcher_artifact_bytes,
+        network_policy: network_policy.into(),
+        storage_policy: STORAGE_POLICY.into(),
+        cleanup_proof: CLEANUP_PROOF.into(),
+        provider_network_inputs,
+        controller_transport,
+        controller_tls_root_certificates_der_base64: tls_roots_der_base64,
+        max_active: limits.max_active,
+        timeout_seconds: limits.timeout_seconds,
+        contact_timeout_seconds: limits.contact_timeout_seconds,
+        observation_timeout_seconds: limits.observation_timeout_seconds,
+        cleanup_timeout_seconds: limits.cleanup_timeout_seconds,
+        native_work_steps: Some(limits.native_work_steps),
+        max_workspace_bytes: limits.max_workspace_bytes,
+        max_export_bytes: limits.max_export_bytes,
+        max_transfer_bytes: limits.max_transfer_bytes,
+        max_guest_package_regular_bytes: limits.max_guest_package_regular_bytes,
+        max_guest_package_framed_bytes: limits.max_guest_package_framed_bytes,
+    };
+    document.validate()?;
+    Ok(document)
+}
+
+/// Fresh 256-bit credential generation from the Lillux CSPRNG. Composing
+/// again always names a new generation, so an earlier vault entry is never
+/// reused or overwritten.
+pub fn fresh_credential_generation() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    lillux::crypto::fill_random_bytes(&mut bytes)?;
+    Ok(hex::encode(bytes))
+}
+
+/// Canonical HTTPS origin: scheme, host and optional non-default port only.
+pub fn canonical_https_origin(origin: &str) -> Result<String> {
+    const REFUSAL: &str =
+        "controller origin must be https://host[:port] without path, query, fragment or userinfo";
+    let url = url::Url::parse(origin).map_err(|_| anyhow::anyhow!(REFUSAL))?;
+    ensure!(
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.port() != Some(0)
+            && url.origin().ascii_serialization() == origin,
+        REFUSAL
+    );
+    Ok(origin.to_owned())
+}
+
+/// Parse a PEM bundle of trust roots into the sorted, unique canonical
+/// base64 DER form the signed binding carries. Only CERTIFICATE blocks are
+/// accepted; a key block or any stray text is refused.
+pub fn parse_tls_root_pem(pem: &str) -> Result<Vec<String>> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    const ONLY_CERTIFICATES: &str = "TLS roots PEM may contain only CERTIFICATE blocks";
+    ensure!(
+        pem.len() <= MAX_ROOTS_PEM_BYTES,
+        "TLS roots PEM exceeds its byte bound"
+    );
+    let mut certificates = Vec::new();
+    let mut open: Option<String> = None;
+    for line in pem.lines() {
+        let line = line.trim_end_matches('\r');
+        match open.as_mut() {
+            None => {
+                if line == BEGIN {
+                    open = Some(String::new());
+                } else if !line.trim().is_empty() {
+                    bail!(ONLY_CERTIFICATES);
+                }
+            }
+            Some(body) => {
+                if line == END {
+                    let der = STANDARD
+                        .decode(body.as_bytes())
+                        .map_err(|_| anyhow::anyhow!("TLS root certificate is not valid base64"))?;
+                    // The consumer builds its trust store from exactly these
+                    // bytes, so the same parse gates them here: DER that is
+                    // not an X.509 certificate (a key, for one) is refused.
+                    rustls::RootCertStore::empty()
+                        .add(rustls::pki_types::CertificateDer::from(der.as_slice()))
+                        .map_err(|_| {
+                            anyhow::anyhow!("TLS root certificate is not an X.509 certificate")
+                        })?;
+                    certificates.push(STANDARD.encode(der));
+                    open = None;
+                } else {
+                    ensure!(
+                        line.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=')),
+                        ONLY_CERTIFICATES
+                    );
+                    body.push_str(line);
+                }
+            }
+        }
+    }
+    ensure!(open.is_none(), "TLS roots PEM has an unterminated block");
+    ensure!(
+        !certificates.is_empty(),
+        "TLS roots PEM carries no CERTIFICATE block"
+    );
+    certificates.sort();
+    certificates.dedup();
+    ensure!(
+        certificates.len() <= MAX_TLS_ROOT_CERTIFICATES,
+        "TLS roots PEM carries too many certificates"
+    );
+    // Digest validation owns the per-certificate and aggregate byte bounds.
+    external_tls_root_bundle_digest(&certificates)?;
+    Ok(certificates)
+}
+
+/// Controller transport an operator selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposeTransportRequest {
+    Https {
+        origin: String,
+        roots_pem: String,
+    },
+    FileRelay {
+        owner_workspace_id: String,
+        private_mailbox_parent: String,
+    },
+}
+
+impl ComposeTransportRequest {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Https { .. } => "https",
+            Self::FileRelay { .. } => "file-relay",
+        }
+    }
+}
+
+/// Host adapter contact inputs and the pinned bounds an operator binding uses.
+pub(crate) fn operator_network_inputs() -> ExternalNetworkInputPolicy {
+    let sources = ryeos_external_execution_contract::operator_network_inputs();
+    ExternalNetworkInputPolicy {
+        resolver: ExternalNetworkInputSelection {
+            source: sources.resolver_source.into(),
+            max_bytes: sources.resolver_max_bytes,
+            required: sources.resolver_required,
+        },
+        hosts: ExternalNetworkInputSelection {
+            source: sources.hosts_source.into(),
+            max_bytes: sources.hosts_max_bytes,
+            required: sources.hosts_required,
+        },
+    }
+}
+
+pub(super) struct SelectedTransport {
+    pub(super) selection: ExternalControllerTransportSelection,
+    pub(super) network_inputs: ExternalNetworkInputPolicy,
+    pub(super) tls_roots: Vec<String>,
+}
+
+pub(super) fn select_transport(request: &ComposeTransportRequest) -> Result<SelectedTransport> {
+    let network_inputs = operator_network_inputs();
+    match request {
+        ComposeTransportRequest::Https { origin, roots_pem } => {
+            let https_origin = canonical_https_origin(origin)?;
+            let tls_roots = parse_tls_root_pem(roots_pem)?;
+            let contract = ExternalControllerTransportContract {
+                schema: 3,
+                network_inputs: network_inputs.clone(),
+                https_origin,
+                route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
+                tls_root_bundle_digest: external_tls_root_bundle_digest(&tls_roots)?,
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 10_000,
+                maximum_response_bytes: 1024 * 1024,
+                max_clock_skew_ms: None,
+            };
+            Ok(SelectedTransport {
+                selection: contract.into(),
+                network_inputs,
+                tls_roots,
+            })
+        }
+        ComposeTransportRequest::FileRelay {
+            owner_workspace_id,
+            private_mailbox_parent,
+        } => {
+            ensure!(
+                private_mailbox_parent == ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT,
+                "a file-relay mailbox parent must be the guest owner's occurrence root `{}`, \
+                 where each relay mailbox lives; got `{private_mailbox_parent}`",
+                ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+            );
+            Ok(SelectedTransport {
+                selection: ExternalControllerTransportSelection::ControllerFileRelay(
+                    ExternalControllerFileRelayContract {
+                        schema: 3,
+                        route_contract: EXTERNAL_CHANNEL_RELAY_CONTRACT.into(),
+                        owner_workspace_id: owner_workspace_id.clone(),
+                        private_mailbox_parent: private_mailbox_parent.clone(),
+                        maximum_file_bytes: 1024 * 1024,
+                        maximum_frames: 1024,
+                        poll_interval_ms: 1000,
+                        poll_deadline_ms: 30_000,
+                        max_clock_skew_ms: None,
+                    },
+                ),
+                network_inputs,
+                tls_roots: Vec::new(),
+            })
+        }
+    }
+}
+
+/// Read the artifact identities for one provider and backend out of the
+/// verified installed bundles.
+pub(crate) fn bundle_artifact_facts(
+    artifacts: &crate::external_artifacts::ResolvedExternalExecutionArtifacts,
+    provider_declaration_id: &str,
+    backend: &str,
+) -> Result<BundleArtifactFacts> {
+    let generation = artifacts.placement_backends.installed_generation(backend)?;
+    let (configuration_adapter_artifact_hash, configuration_adapter_artifact_bytes) = artifacts
+        .provider_configurations
+        .coordinate_for_provider(provider_declaration_id)?;
+    let connector_hash = artifacts
+        .provider_connector_hashes
+        .get(provider_declaration_id)
+        .context("external provider declaration names no installed connector")?;
+    let (connector_artifact_hash, connector_artifact_bytes) =
+        artifacts.connectors.coordinate_for_hash(connector_hash)?;
+    Ok(BundleArtifactFacts {
+        backend_artifact_hash: generation.backend_artifact_hash,
+        backend_artifact_bytes: generation.backend_artifact_bytes,
+        settings_schema_digest: generation.settings_schema_digest,
+        supervisor_artifact_hash: generation.supervisor_artifact_hash,
+        supervisor_artifact_bytes: generation.supervisor_artifact_bytes,
+        launcher_artifact_hash: generation.launcher_artifact_hash,
+        launcher_artifact_bytes: generation.launcher_artifact_bytes,
+        configuration_adapter_artifact_hash,
+        configuration_adapter_artifact_bytes,
+        connector_artifact_hash,
+        connector_artifact_bytes,
+        relay_scope_setting: generation.relay_scope_setting,
+    })
+}
+
+/// Run `read` over a stopped node's installed bundle roots under the
+/// bundle-generation lock, so the installed set cannot change during the
+/// read. The generation is verified before and after `read` runs.
+pub(crate) fn with_installed_bundles<T>(
+    app_root: &Path,
+    read: impl FnOnce(&[PathBuf], &ryeos_engine::trust::TrustStore, &Path) -> Result<T>,
+) -> Result<T> {
+    let roots = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(roots.as_path())
+        .context("load node trust store")?;
+    let _bundle_generation_lock =
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire_for_startup(app_root)
+            .context("acquire bundle-generation lock")?;
+    let records = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+        app_root,
+        trust_store: &trust,
+    }
+    .load_bundle_section()
+    .context("load installed bundle registrations")?;
+    let generation =
+        ryeos_node_runtime::engine_init::VerifiedBundleGeneration::capture(records, &trust)
+            .context("capture verified bundle generation")?;
+    generation.checked(&trust, || {
+        read(
+            &generation.roots(),
+            &trust,
+            &crate::private_artifact_home::root(&roots.state()),
+        )
+    })
+}
+
+/// Resolve the signed artifacts of a stopped node's installed bundles
+/// without starting it. Holding the bundle-generation lock keeps the
+/// installed set fixed for the whole read.
+pub(crate) fn resolve_installed_artifacts(
+    app_root: &Path,
+) -> Result<crate::external_artifacts::ResolvedExternalExecutionArtifacts> {
+    with_installed_bundles(app_root, |bundle_roots, trust, credential_home| {
+        crate::external_artifacts::resolve_external_execution_artifacts(
+            bundle_roots,
+            trust,
+            credential_home,
+        )
+    })
+}
+
+/// One operator request to compose and install a binding.
+pub struct ComposeRequest<'a> {
+    pub app_root: &'a Path,
+    /// Proof that the node is stopped; no daemon may read the section while
+    /// it is rewritten.
+    pub state_lock: &'a ryeos_node_runtime::state_lock::StateLock,
+    pub id: String,
+    pub backend: String,
+    pub program: AdmittedExternalCandidateProgram,
+    pub transport: ComposeTransportRequest,
+    pub account: String,
+    pub capacity_group: String,
+    /// The generation the binding names for its provider credential. The
+    /// caller chooses it: an interactive operator takes a fresh one, and a
+    /// signed offline request derives it from the request digest, so a
+    /// re-run of the same request names the generation it already installed.
+    pub credential_generation: String,
+    pub settings: Value,
+    pub guest_runtime_manifest_hash: String,
+    pub runtime_qualification: Option<Value>,
+    pub runtime_content_qualification: Option<Value>,
+    pub limits: ComposeLimits,
+    /// The node's verified signed policy: what compose judges the placement
+    /// against, with the same function launch runs.
+    pub node_policy: &'a ryeos_node_runtime::node_policy::NodePolicySnapshot,
+}
+
+/// What was installed. It carries no credential and no vault key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeReport {
+    pub id: String,
+    pub path: PathBuf,
+    pub backend: String,
+    pub account: String,
+    pub capacity_group: String,
+    pub transport: String,
+    pub credential_generation: String,
+    pub settings_digest: String,
+    pub binding_digest: String,
+    pub capacity_owner: String,
+}
+
+/// Compose, sign with the node identity, verify the exact bytes the loader
+/// will read, and publish atomically.
+pub fn compose_external_execution_binding(request: ComposeRequest<'_>) -> Result<ComposeReport> {
+    compose_with_resolver(request, resolve_installed_artifacts)
+}
+
+/// The composition itself, parameterised on how the installed artifacts are
+/// resolved so a test can supply registries without a bundle on disk. The
+/// resolver runs at the same point of the sequence as the bundle read.
+pub(crate) fn compose_with_resolver(
+    request: ComposeRequest<'_>,
+    resolve: impl FnOnce(&Path) -> Result<crate::external_artifacts::ResolvedExternalExecutionArtifacts>,
+) -> Result<ComposeReport> {
+    request
+        .state_lock
+        .ensure_protects_app_root(request.app_root)?;
+    validate_document_id(&request.id, "external-execution binding")?;
+    let identity = load_node_identity(request.app_root)?;
+    let backend = request.backend.clone();
+    let transport = select_transport(&request.transport)?;
+    let runtime_qualification = request
+        .runtime_qualification
+        .map(|value| {
+            serde_json::from_value::<ExternalRuntimeQualificationBinding>(value)
+                .context("invalid runtime qualification")
+        })
+        .transpose()?;
+    let runtime_content_qualification = request
+        .runtime_content_qualification
+        .map(|value| {
+            serde_json::from_value::<ExternalRuntimeContentQualificationBinding>(value)
+                .context("invalid runtime content qualification")
+        })
+        .transpose()?;
+    require_guest_owner_stages_largest_package(
+        request.app_root,
+        &request.guest_runtime_manifest_hash,
+        &request.limits,
+        false,
+    )?;
+    let resolved = resolve(request.app_root)?;
+    let artifacts = bundle_artifact_facts(
+        &resolved,
+        &request.program.requirement.provider_declaration_id,
+        &backend,
+    )?;
+    let document = compose_binding_document(ComposeInputs {
+        program: &request.program,
+        controller_transport: transport.selection,
+        provider_network_inputs: transport.network_inputs,
+        tls_roots_der_base64: transport.tls_roots,
+        backend,
+        account: request.account,
+        capacity_group: request.capacity_group,
+        credential_generation: request.credential_generation,
+        settings: request.settings,
+        guest_runtime_manifest_hash: request.guest_runtime_manifest_hash,
+        runtime_qualification,
+        runtime_content_qualification,
+        artifacts,
+        limits: request.limits,
+    })?;
+    let signed = sign_node_document(&serde_yaml::to_string(&document)?, &identity)?;
+    let installed = admit_signed_binding(request.app_root, &request.id, &signed, &identity)?;
+    // Judge the placement exactly as launch will, before anything is
+    // published: a binding the adapter, the node policy or the program's
+    // lease cannot meet is refused here, with no provider contact.
+    let contract = installed.backend_contract();
+    let backend = resolved
+        .placement_backends
+        .installed(&contract)
+        .context("the composed binding names no installed lifecycle adapter generation")?;
+    crate::external_placement::judge_placement(
+        &request.program,
+        &contract,
+        backend.as_ref(),
+        request.node_policy,
+        None::<fn() -> Result<Option<i64>>>,
+    )
+    .context("the placement is refused at compose")?;
+    let path = publish_signed_document(
+        request.app_root,
+        SECTION_NAME,
+        &request.id,
+        signed.as_bytes(),
+    )?;
+    Ok(ComposeReport {
+        id: installed.id.clone(),
+        path,
+        backend: installed.document.backend.clone(),
+        account: installed.document.account.clone(),
+        capacity_group: installed.document.capacity_group.clone(),
+        transport: request.transport.label().to_owned(),
+        credential_generation: installed.document.credential_generation.clone(),
+        settings_digest: installed.document.settings_digest.clone(),
+        binding_digest: installed.digest.clone(),
+        capacity_owner: installed.capacity_owner.clone(),
+    })
+}
+
+/// The credential generation of the binding installed under `id`, or `None`
+/// when no such binding is installed. A binding whose document is unreadable
+/// is an error, not an absence.
+pub fn installed_binding_credential_generation(
+    app_root: &Path,
+    id: &str,
+) -> Result<Option<String>> {
+    validate_document_id(id, "external-execution binding")?;
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join(SECTION_NAME)
+        .join(format!("{id}.yaml"));
+    if lillux::read_optional_regular_file_bounded_no_follow(
+        &path,
+        ryeos_node_runtime::node_document::MAX_ITEM_BYTES,
+    )
+    .with_context(|| format!("inspect {SECTION_NAME} document {}", path.display()))?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    let identity = load_node_identity(app_root)?;
+    Ok(Some(
+        read_installed_binding(app_root, id, &identity)?
+            .document
+            .credential_generation,
+    ))
+}
+
+/// Verify signed bytes exactly as the loader would: a trusted signature
+/// whose signer is the current node, then the section's own parse.
+pub(crate) fn admit_signed_binding(
+    app_root: &Path,
+    id: &str,
+    signed: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<InstalledExternalExecutionBinding> {
+    let body = verify_node_signed(signed, identity, "external-execution binding")?;
+    let context = item_context(app_root, SECTION_NAME, id, identity.fingerprint());
+    // The section parse is the loader's own gate for this document.
+    ExternalExecutionSection.parse(&context, &body)?;
+    let document: BindingDocument =
+        serde_json::from_value(body).context("invalid external placement binding")?;
+    document.validate()?;
+    let signer = identity.fingerprint().to_owned();
+    Ok(InstalledExternalExecutionBinding {
+        id: id.to_owned(),
+        digest: binding_digest(id, &signer, signed)?,
+        capacity_owner: capacity_owner(&signer, &document)?,
+        document,
+        signed_source: signed.into(),
+        signer,
+        signer_verifying_key: identity.verifying_key().to_bytes(),
+    })
+}
+
+/// Read an installed binding back the way the loader admits it: bounded
+/// no-follow read, trusted current-node signature, then the section parse.
+pub(crate) fn read_installed_binding(
+    app_root: &Path,
+    id: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<InstalledExternalExecutionBinding> {
+    validate_document_id(id, "external-execution binding")?;
+    let signed = read_installed_document(app_root, SECTION_NAME, id)?;
+    admit_signed_binding(app_root, id, &signed, identity)
+}
+
+/// Installed provider executables a structured-session placement pins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderArtifactFacts {
+    pub(crate) configuration_adapter_artifact_hash: String,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_artifact_hash: String,
+    pub(crate) connector_artifact_bytes: u64,
+}
+
+/// Re-pin the installed placement binding to the installed lifecycle
+/// generation (`generation`) and, for a session workload, the installed
+/// provider executables (`provider`). Every operator-stated fact is carried,
+/// the credential generation among them. A generation whose settings schema
+/// differs cannot take the carried settings: that is refused with
+/// `recompose_settings_schema_changed`, because only the operator can state
+/// new settings. Signs and verifies, publishes nothing.
+pub(crate) fn repin_placement(
+    app_root: &Path,
+    installed: &InstalledExternalExecutionBinding,
+    generation: &crate::external_placement::InstalledLifecycleGeneration,
+    provider: Option<&ProviderArtifactFacts>,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<crate::node_config::recompose::RepinOutcome<InstalledExternalExecutionBinding>> {
+    use crate::node_config::recompose::{RECOMPOSE_SETTINGS_SCHEMA_CHANGED, RecomposeRefusal};
+    let binding = crate::node_config::recompose::BindingRef {
+        section: SECTION_NAME.to_owned(),
+        id: installed.id.clone(),
+    };
+    let mut document = installed.document.clone();
+    if document.settings_schema_digest != generation.settings_schema_digest {
+        return Err(RecomposeRefusal {
+            code: RECOMPOSE_SETTINGS_SCHEMA_CHANGED,
+            binding,
+            detail: format!(
+                "the installed `{}` adapter declares settings schema {}, the binding's settings \
+                 were stated under {}",
+                document.backend,
+                generation.settings_schema_digest,
+                document.settings_schema_digest
+            ),
+            fix: format!(
+                "state the settings again: ryeos node external-execution compose --id {} ...",
+                installed.id
+            ),
+        }
+        .into());
+    }
+    super::require_relay_scope(
+        &document.controller_transport,
+        generation.relay_scope_setting.as_deref(),
+        &document.settings,
+    )?;
+    document.backend_artifact_hash = generation.backend_artifact_hash.clone();
+    document.backend_artifact_bytes = generation.backend_artifact_bytes;
+    document.supervisor_artifact_hash = generation.supervisor_artifact_hash.clone();
+    document.supervisor_artifact_bytes = generation.supervisor_artifact_bytes;
+    document.launcher_artifact_hash = generation.launcher_artifact_hash.clone();
+    document.launcher_artifact_bytes = generation.launcher_artifact_bytes;
+    let session = match &mut document.workload {
+        ExternalWorkloadBinding::StructuredSession(session) => Some((
+            &mut session.configuration_adapter_artifact_hash,
+            &mut session.configuration_adapter_artifact_bytes,
+            &mut session.connector_artifact_hash,
+            &mut session.connector_artifact_bytes,
+        )),
+        ExternalWorkloadBinding::QualificationStructuredSession(session) => Some((
+            &mut session.configuration_adapter_artifact_hash,
+            &mut session.configuration_adapter_artifact_bytes,
+            &mut session.connector_artifact_hash,
+            &mut session.connector_artifact_bytes,
+        )),
+        ExternalWorkloadBinding::DirectCommand {} => None,
+    };
+    if let Some((config_hash, config_bytes, connector_hash, connector_bytes)) = session {
+        let provider = provider.context("a session placement re-pins its provider executables")?;
+        *config_hash = provider.configuration_adapter_artifact_hash.clone();
+        *config_bytes = provider.configuration_adapter_artifact_bytes;
+        *connector_hash = provider.connector_artifact_hash.clone();
+        *connector_bytes = provider.connector_artifact_bytes;
+    }
+    let fields_changed = crate::node_config::recompose::changed_fields(
+        &serde_json::to_value(&installed.document)?,
+        &serde_json::to_value(&document)?,
+    );
+    if fields_changed.is_empty() {
+        return Ok(crate::node_config::recompose::RepinOutcome::unchanged(
+            installed.clone(),
+        ));
+    }
+    document.validate()?;
+    let signed = sign_node_document(&serde_yaml::to_string(&document)?, identity)?;
+    let new = admit_signed_binding(app_root, &installed.id, &signed, identity)?;
+    Ok(crate::node_config::recompose::RepinOutcome {
+        old: installed.clone(),
+        new,
+        signed: Some(signed),
+        fields_changed,
+    })
+}
+
+/// The provider declaration a session placement pins, if any.
+impl InstalledExternalExecutionBinding {
+    pub(crate) fn provider_declaration_id(&self) -> Option<&str> {
+        match &self.document.workload {
+            ExternalWorkloadBinding::StructuredSession(session) => {
+                Some(&session.provider_declaration_id)
+            }
+            ExternalWorkloadBinding::QualificationStructuredSession(session) => {
+                Some(&session.provider_declaration_id)
+            }
+            ExternalWorkloadBinding::DirectCommand {} => None,
+        }
+    }
+
+    pub(crate) fn backend(&self) -> &str {
+        &self.document.backend
+    }
+}
+
+/// What a snapshot producer takes from the placement binding it feeds.
+#[derive(Debug, Clone)]
+pub(crate) struct ProducerSourceFacts {
+    pub(crate) backend: String,
+    pub(crate) account: String,
+    pub(crate) adapter_artifact_hash: String,
+    pub(crate) settings: Value,
+    pub(crate) network_inputs: ExternalNetworkInputPolicy,
+}
+
+impl InstalledExternalExecutionBinding {
+    /// Owner, generation, backend and account of the placement credential.
+    pub(crate) fn credential_coordinates(&self) -> (String, String, String, String) {
+        (
+            self.capacity_owner.clone(),
+            self.document.credential_generation.clone(),
+            self.document.backend.clone(),
+            self.document.account.clone(),
+        )
+    }
+
+    pub(crate) fn producer_source_facts(&self) -> ProducerSourceFacts {
+        ProducerSourceFacts {
+            backend: self.document.backend.clone(),
+            account: self.document.account.clone(),
+            adapter_artifact_hash: self.document.backend_artifact_hash.clone(),
+            settings: self.document.settings.clone(),
+            network_inputs: self.document.provider_network_inputs.clone(),
+        }
+    }
+}
+
+/// Bounded identifier naming one installed node document.
+pub(crate) fn validate_document_id(id: &str, what: &str) -> Result<()> {
+    ensure!(
+        !id.is_empty()
+            && id.len() <= 128
+            && !id.starts_with('.')
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')),
+        "{what} id is invalid"
+    );
+    Ok(())
+}
+
+pub(crate) fn load_node_identity(
+    app_root: &Path,
+) -> Result<ryeos_node_runtime::identity::NodeIdentity> {
+    ryeos_node_runtime::identity::NodeIdentity::load(
+        &app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("node/identity/private_key.pem"),
+    )
+    .context("load node identity")
+}
+
+/// Sign `yaml` with the node identity and bound the result.
+pub(crate) fn sign_node_document(
+    yaml: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<String> {
+    let signed = lillux::signature::sign_content_at(
+        yaml,
+        identity.signing_key(),
+        "#",
+        None,
+        &lillux::time::iso8601_now(),
+    );
+    ensure!(
+        signed.len() as u64 <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES,
+        "signed node document exceeds its byte bound"
+    );
+    Ok(signed)
+}
+
+/// Check a trusted signature by the current node and return the body.
+pub(crate) fn verify_node_signed(
+    signed: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+    what: &str,
+) -> Result<Value> {
+    let envelope = ryeos_engine::contracts::SignatureEnvelope {
+        prefix: "#".into(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let header = ryeos_engine::item_resolution::parse_signature_header(signed, &envelope)
+        .with_context(|| format!("{what} has no valid signature line"))?;
+    ensure!(
+        header.signer_fingerprint == identity.fingerprint(),
+        "{what} must be signed by the current node {}; got {}",
+        identity.fingerprint(),
+        header.signer_fingerprint
+    );
+    ryeos_engine::trust::verify_node_signed_document(
+        signed,
+        &header,
+        &envelope,
+        identity.verifying_key(),
+    )
+    .with_context(|| format!("verify {what} signature"))?;
+    serde_yaml::from_str(&ryeos_node_runtime::node_config_source::strip_signature(
+        signed,
+    ))
+    .with_context(|| format!("parse {what} body"))
+}
+
+pub(crate) fn item_context(
+    app_root: &Path,
+    section: &str,
+    id: &str,
+    signer_fingerprint: &str,
+) -> crate::node_config::NodeItemContext {
+    let rel_path = PathBuf::from(format!("{id}.yaml"));
+    crate::node_config::NodeItemContext {
+        section: section.into(),
+        id: id.to_owned(),
+        stem: id.to_owned(),
+        source_file: app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join(section)
+            .join(&rel_path),
+        rel_path,
+        signer_fingerprint: signer_fingerprint.to_owned(),
+    }
+}
+
+/// Bounded no-follow read of one installed section document.
+pub(crate) fn read_installed_document(app_root: &Path, section: &str, id: &str) -> Result<String> {
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join(section)
+        .join(format!("{id}.yaml"));
+    let Some(bytes) = lillux::read_optional_regular_file_bounded_no_follow(
+        &path,
+        ryeos_node_runtime::node_document::MAX_ITEM_BYTES,
+    )
+    .with_context(|| format!("read {section} document {}", path.display()))?
+    else {
+        bail!("{section} document `{id}` is not installed");
+    };
+    String::from_utf8(bytes).with_context(|| format!("{section} document `{id}` is not UTF-8"))
+}
+
+/// Atomically publish signed bytes as `<section>/<id>.yaml`.
+pub(crate) fn publish_signed_document(
+    app_root: &Path,
+    section_name: &str,
+    id: &str,
+    bytes: &[u8],
+) -> Result<PathBuf> {
+    let base =
+        lillux::PinnedDirectory::open_or_create(&app_root.join(ryeos_engine::AI_DIR).join("node"))
+            .context("establish no-follow node document root")?;
+    let section = base
+        .open_or_create_child(std::ffi::OsStr::new(section_name), 0o755)
+        .with_context(|| format!("establish {section_name} section"))?;
+    let _directory_lock = section.lock_exclusive()?;
+    let filename = format!("{id}.yaml");
+    let filename = std::ffi::OsStr::new(&filename);
+    let expected = section.open_pinned_regular(filename, false)?;
+    section
+        .atomic_write_pinned_if_same(
+            filename,
+            expected.as_ref(),
+            bytes,
+            0o600,
+            crate::APP_TEMP_PURPOSE,
+        )
+        .with_context(|| {
+            format!(
+                "write {section_name} document {}",
+                section.path().join(filename).display()
+            )
+        })?;
+    Ok(section.path().join(filename))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    const TEST_SIGNER_KEY: [u8; 32] = [91; 32];
+
+    fn identity_in(root: &Path) -> ryeos_node_runtime::identity::NodeIdentity {
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
+            &root.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        ryeos_engine::test_support::write_node_public_identity(root, identity.verifying_key());
+        identity
+    }
+
+    fn program() -> AdmittedExternalCandidateProgram {
+        use ryeos_state::external_execution::admission::{
+            CONNECTOR_PROTOCOL, ExternalCandidateExecutionRoute, ExternalCandidateProcFilesystem,
+            ExternalCandidateRequirement, ExternalCandidateRuntimeAuthority,
+            ExternalCandidateRuntimeRecipe, ExternalCandidateRuntimeSource, PROTOCOL,
+        };
+        let runtime_recipe = ExternalCandidateRuntimeRecipe {
+            schema: 2,
+            runtime_mount_destination: "/runtime".into(),
+            executable_relative_path: "bin/codex".into(),
+            argv0: "codex".into(),
+            arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+            cwd: "/workspace".into(),
+            environment: std::collections::BTreeMap::new(),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+            contain_process_group: false,
+            nested_sandbox: true,
+        };
+        let runtime_recipe_digest = runtime_recipe.digest().unwrap();
+        let requirement = ExternalCandidateRequirement {
+            schema: 7,
+            required_lifecycle_capabilities: Default::default(),
+            protocol: PROTOCOL.into(),
+            connector_protocol: CONNECTOR_PROTOCOL.into(),
+            execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
+            provider_declaration_id: "codex-hosted".into(),
+            provider_configuration_destination: "environments.toml".into(),
+            runtime_product_declaration_id: "runtime".into(),
+            runtime_authority: ExternalCandidateRuntimeAuthority::CapturedProduct,
+            runtime_recipe,
+        };
+        let qualification_use =
+            ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+                &requirement,
+            )
+            .unwrap();
+        AdmittedExternalCandidateProgram {
+            requirement,
+            qualification_use,
+            runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            runtime_manifest_hash: "b".repeat(64),
+            runtime_source: ExternalCandidateRuntimeSource::CapturedProduct {
+                witness_hash: "1".repeat(64),
+            },
+            qualification_attestation_hash: "2".repeat(64),
+            selection_identity_digest: "c".repeat(64),
+            runtime_recipe_digest,
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
+        }
+    }
+
+    // Two self-signed P-256 certificates and the PKCS#8 key of the first.
+    const CERT_A_BODY: &str = concat!(
+        "MIIBjjCCATWgAwIBAgIUBulWxSHNplQwE/kkocyS/QefZWQwCgYIKoZIzj0EAwIw\n",
+        "HDEaMBgGA1UEAwwRcnllb3MtdGVzdC1yb290LWEwIBcNMjYxMDE1MDg0MzAyWhgP\n",
+        "MjEyNjA5MjEwODQzMDJaMBwxGjAYBgNVBAMMEXJ5ZW9zLXRlc3Qtcm9vdC1hMFkw\n",
+        "EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElMH3O+U96At/8bguQghoMw0/EC/HQ+Ir\n",
+        "Z2l3l9Be37KcGidJqnoRIY7SqjfvPJt4T8LHPvyJeyE14bvECdkOEKNTMFEwHQYD\n",
+        "VR0OBBYEFBTsj4QaaL8THWJUbp06QN3xIZ2YMB8GA1UdIwQYMBaAFBTsj4QaaL8T\n",
+        "HWJUbp06QN3xIZ2YMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIg\n",
+        "DMnc0WbVJELUTAdUGldjCKhtJ0xoevzW603Ao0kNROQCIA9LiD3E9qEIGZfsCsmN\n",
+        "2xiBg4gDBSA5Bv8Ip5yehlwq\n"
+    );
+    const CERT_B_BODY: &str = concat!(
+        "MIIBjzCCATWgAwIBAgIUPGWI7SyokTvmsPzPAYWeWVtk8lcwCgYIKoZIzj0EAwIw\n",
+        "HDEaMBgGA1UEAwwRcnllb3MtdGVzdC1yb290LWIwIBcNMjYxMDE1MDg0MzAyWhgP\n",
+        "MjEyNjA5MjEwODQzMDJaMBwxGjAYBgNVBAMMEXJ5ZW9zLXRlc3Qtcm9vdC1iMFkw\n",
+        "EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAESAz+X5Z8c3JC1QvRbpNyIfrhBWKoDw3P\n",
+        "ER08ufXq049SS2VIH/6CIDx4jbzYm3CaC86Taswh7i6pg4eNpfom8KNTMFEwHQYD\n",
+        "VR0OBBYEFK5pDkvczzbse0aZ68kFyksPyRK+MB8GA1UdIwQYMBaAFK5pDkvczzbs\n",
+        "e0aZ68kFyksPyRK+MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIg\n",
+        "S/T6rAvLS9MLxRqZF5XfKTKr/aPijP8qTV2eyc8D1VoCIQC4giVV5cTAPhqD2hqy\n",
+        "H6io4TaaRBC8yhOtuJHnmQ0DQg==\n"
+    );
+    const KEY_A_BODY: &str = concat!(
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgi3tYG8836U5RN6KU\n",
+        "nr7KYVz4JtMrB4QDcF48KCCV8IGhRANCAASUwfc75T3oC3/xuC5CCGgzDT8QL8dD\n",
+        "4itnaXeX0F7fspwaJ0mqehEhjtKqN+88m3hPwsc+/Il7ITXhu8QJ2Q4Q\n"
+    );
+
+    fn pem_block(label: &str, body: &str) -> String {
+        format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n")
+    }
+
+    pub(crate) fn cert_a() -> String {
+        pem_block("CERTIFICATE", CERT_A_BODY)
+    }
+
+    fn cert_b() -> String {
+        pem_block("CERTIFICATE", CERT_B_BODY)
+    }
+
+    fn der_of(body: &str) -> Vec<u8> {
+        STANDARD.decode(body.replace('\n', "")).unwrap()
+    }
+
+    pub(crate) fn root_pem() -> String {
+        format!("{}{}", cert_a(), cert_b())
+    }
+
+    fn facts() -> BundleArtifactFacts {
+        BundleArtifactFacts {
+            backend_artifact_hash: "d".repeat(64),
+            backend_artifact_bytes: 4096,
+            settings_schema_digest: "3".repeat(64),
+            supervisor_artifact_hash: "1".repeat(64),
+            supervisor_artifact_bytes: 4096,
+            launcher_artifact_hash: "e".repeat(64),
+            launcher_artifact_bytes: 4096,
+            configuration_adapter_artifact_hash: "2".repeat(64),
+            configuration_adapter_artifact_bytes: 4096,
+            connector_artifact_hash: "f".repeat(64),
+            connector_artifact_bytes: 4096,
+            relay_scope_setting: Some("owner_id".into()),
+        }
+    }
+
+    fn https() -> ComposeTransportRequest {
+        ComposeTransportRequest::Https {
+            origin: "https://controller.example:7443".into(),
+            roots_pem: root_pem(),
+        }
+    }
+
+    fn relay() -> ComposeTransportRequest {
+        ComposeTransportRequest::FileRelay {
+            owner_workspace_id: "test-owner".into(),
+            private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+                .into(),
+        }
+    }
+
+    fn compose(
+        program: &AdmittedExternalCandidateProgram,
+        transport: &ComposeTransportRequest,
+        settings: Value,
+    ) -> Result<BindingDocument> {
+        let selected = select_transport(transport)?;
+        compose_binding_document(ComposeInputs {
+            program,
+            controller_transport: selected.selection,
+            provider_network_inputs: selected.network_inputs,
+            tls_roots_der_base64: selected.tls_roots,
+            backend: TEST_BACKEND_ID.into(),
+            account: "operator-account".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: fresh_credential_generation()?,
+            settings,
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: None,
+            artifacts: facts(),
+            limits: ComposeLimits::default(),
+        })
+    }
+
+    fn refusal<T>(result: Result<T>) -> anyhow::Error {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected a refusal"),
+        }
+    }
+
+    fn relay_settings() -> Value {
+        serde_json::json!({"owner_id": "test-owner"})
+    }
+
+    fn content_program() -> AdmittedExternalCandidateProgram {
+        ryeos_state::external_execution::admission::test_support::content_candidate_capsule(
+            &"b".repeat(64),
+        )
+        .unwrap()
+        .external_candidate
+        .unwrap()
+    }
+
+    fn content_qualification_value() -> Value {
+        let program = content_program();
+        let ExternalCandidateRuntimeSource::ActivatedContent {
+            qualification_coordinate_id,
+            ..
+        } = &program.runtime_source
+        else {
+            panic!("content fixture program is activated content");
+        };
+        serde_json::json!({
+            "activation_ref": "config:fixtures/runtime-activation",
+            "coordinate_id": qualification_coordinate_id,
+            "attestation_hash": program.qualification_attestation_hash,
+            "owner_principal": format!("fp:{}", "7".repeat(64)),
+            "required_claims": ["compatible"],
+            "remote_testimony": Value::Null,
+        })
+    }
+
+    fn content_qualification() -> ExternalRuntimeContentQualificationBinding {
+        serde_json::from_value(content_qualification_value()).unwrap()
+    }
+
+    fn compose_with_content(
+        program: &AdmittedExternalCandidateProgram,
+        content: Option<ExternalRuntimeContentQualificationBinding>,
+    ) -> Result<BindingDocument> {
+        let selected = select_transport(&relay())?;
+        compose_binding_document(ComposeInputs {
+            program,
+            controller_transport: selected.selection,
+            provider_network_inputs: selected.network_inputs,
+            tls_roots_der_base64: selected.tls_roots,
+            backend: TEST_BACKEND_ID.into(),
+            account: "operator-account".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: "a".repeat(64),
+            settings: relay_settings(),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: content,
+            artifacts: facts(),
+            limits: ComposeLimits::default(),
+        })
+    }
+
+    #[test]
+    fn content_qualification_lands_in_the_document_and_changes_its_digest() {
+        let program = content_program();
+        let with = compose_with_content(&program, Some(content_qualification())).unwrap();
+        let mut narrower = content_qualification();
+        narrower.required_claims = vec!["compatible".into(), "licensed".into()];
+        let other = compose_with_content(&program, Some(narrower.clone())).unwrap();
+        assert_eq!(
+            with.runtime_content_qualification,
+            Some(content_qualification())
+        );
+        assert_eq!(other.runtime_content_qualification, Some(narrower));
+        let digest = |document: &BindingDocument| {
+            binding_digest(
+                "operator",
+                "signer",
+                &serde_yaml::to_string(document).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_ne!(digest(&with), digest(&other));
+    }
+
+    #[test]
+    fn a_content_qualification_for_another_coordinate_is_refused() {
+        let program = content_program();
+        let mut other = content_qualification();
+        other.coordinate_id = "5".repeat(64);
+        let error = refusal(compose_with_content(&program, Some(other)));
+        assert!(
+            format!("{error:#}").contains("coordinate the program was not derived from"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_content_qualification_for_another_attestation_is_refused() {
+        let program = content_program();
+        let mut other = content_qualification();
+        other.attestation_hash = "6".repeat(64);
+        let error = refusal(compose_with_content(&program, Some(other)));
+        assert!(
+            format!("{error:#}").contains("attestation the program was not derived from"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_captured_product_program_refuses_a_content_qualification() {
+        let program = program();
+        let error = refusal(compose_with_content(
+            &program,
+            Some(content_qualification()),
+        ));
+        assert!(
+            format!("{error:#}")
+                .contains("product-sourced program carries no runtime content qualification"),
+            "{error:#}"
+        );
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.runtime_content_qualification = Some(content_qualification_value());
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let error = refusal(compose_with_resolver(request, |_| Ok(resolved)));
+        assert!(
+            format!("{error:#}")
+                .contains("product-sourced program carries no runtime content qualification"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+        compose_with_content(&program, None).unwrap();
+    }
+
+    #[test]
+    fn an_activated_content_program_still_refuses_an_absent_content_qualification() {
+        let error = refusal(compose_with_content(&content_program(), None));
+        assert!(
+            format!("{error:#}").contains("requires a runtime content qualification"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_content_qualification_selection_states_its_remote_testimony_explicitly() {
+        let local = content_qualification_value();
+        assert!(content_qualification().remote_testimony.is_none());
+
+        let mut remote = local.clone();
+        remote["remote_testimony"] = serde_json::json!({
+            "acceptance_hash": "8".repeat(64),
+            "acceptance_policy_ref": "config:fixtures/content-acceptance",
+        });
+        let parsed: ExternalRuntimeContentQualificationBinding =
+            serde_json::from_value(remote).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(
+            parsed.remote_testimony.unwrap().acceptance_policy_ref,
+            "config:fixtures/content-acceptance"
+        );
+
+        let mut missing = local;
+        missing.as_object_mut().unwrap().remove("remote_testimony");
+        assert!(
+            serde_json::from_value::<ExternalRuntimeContentQualificationBinding>(missing).is_err()
+        );
+    }
+
+    #[test]
+    fn a_remote_content_testimony_selection_is_signed_through_composition() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = content_program();
+        let mut selected = content_qualification_value();
+        selected["remote_testimony"] = serde_json::json!({
+            "acceptance_hash": "8".repeat(64),
+            "acceptance_policy_ref": "config:fixtures/content-acceptance",
+        });
+        request.runtime_content_qualification = Some(selected);
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let report = compose_with_resolver(request, |_| Ok(resolved)).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let loaded =
+            admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
+        let selected = loaded.document.runtime_content_qualification.unwrap();
+        assert_eq!(
+            selected.remote_testimony.unwrap().acceptance_hash,
+            "8".repeat(64)
+        );
+    }
+
+    fn guest_qualification_value(remote: Value) -> Value {
+        serde_json::json!({
+            "attestation_hash": "6".repeat(64),
+            "owner_principal": format!("fp:{}", "7".repeat(64)),
+            "qualification": {
+                "policy_ref": "config:fixtures/guest-qualification",
+                "required_claims": ["snapshot_v1"],
+            },
+            "remote_testimony": remote,
+        })
+    }
+
+    #[test]
+    fn a_guest_qualification_selection_states_its_remote_testimony_explicitly() {
+        let local = guest_qualification_value(Value::Null);
+        let parsed: ExternalRuntimeQualificationBinding =
+            serde_json::from_value(local.clone()).unwrap();
+        assert!(parsed.remote_testimony.is_none());
+
+        let remote = guest_qualification_value(serde_json::json!({
+            "acceptance_hash": "8".repeat(64),
+            "acceptance_policy_ref": "config:fixtures/guest-acceptance",
+        }));
+        let parsed: ExternalRuntimeQualificationBinding = serde_json::from_value(remote).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(
+            parsed.remote_testimony.unwrap().acceptance_policy_ref,
+            "config:fixtures/guest-acceptance"
+        );
+
+        let mut missing = local;
+        missing.as_object_mut().unwrap().remove("remote_testimony");
+        assert!(serde_json::from_value::<ExternalRuntimeQualificationBinding>(missing).is_err());
+    }
+
+    #[test]
+    fn a_remote_testimony_selection_is_signed_through_composition() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.runtime_qualification = Some(guest_qualification_value(serde_json::json!({
+            "acceptance_hash": "8".repeat(64),
+            "acceptance_policy_ref": "config:fixtures/guest-acceptance",
+        })));
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let report = compose_with_resolver(request, |_| Ok(resolved)).unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let loaded =
+            admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
+        let selected = loaded.document.runtime_qualification.unwrap();
+        assert_eq!(
+            selected.remote_testimony.unwrap().acceptance_hash,
+            "8".repeat(64)
+        );
+    }
+
+    #[test]
+    fn an_activated_content_program_is_refused_without_a_content_qualification() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = content_program();
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let error = refusal(compose_with_resolver(request, |_| Ok(resolved)));
+        assert!(
+            format!("{error:#}").contains("requires a runtime content qualification"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+    }
+
+    #[test]
+    fn a_content_qualification_with_a_bad_activation_ref_is_refused() {
+        let program = content_program();
+        let mut bad = content_qualification();
+        bad.activation_ref = "tool:fixtures/runtime-activation".into();
+        let error = refusal(compose_with_content(&program, Some(bad)));
+        assert!(
+            format!("{error:#}").contains("exact activation config ref"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn both_transports_validate_and_pick_their_schema_and_network_policy() {
+        let program = program();
+        let http = compose(&program, &https(), serde_json::json!({"region": "r"})).unwrap();
+        assert_eq!(
+            (http.schema, http.network_policy.as_str()),
+            (20, HTTP_NETWORK_POLICY)
+        );
+        assert_eq!(http.controller_tls_root_certificates_der_base64.len(), 2);
+        let file = compose(&program, &relay(), relay_settings()).unwrap();
+        assert_eq!(
+            (file.schema, file.network_policy.as_str()),
+            (22, RELAY_NETWORK_POLICY)
+        );
+        assert!(file.controller_tls_root_certificates_der_base64.is_empty());
+    }
+
+    #[test]
+    fn two_composes_differ_in_credential_generation_only() {
+        let program = program();
+        let first = compose(&program, &https(), serde_json::json!({})).unwrap();
+        let second = compose(&program, &https(), serde_json::json!({})).unwrap();
+        assert_ne!(first.credential_generation, second.credential_generation);
+        assert_eq!(first.credential_generation.len(), 64);
+        let mut aligned = second.clone();
+        aligned.credential_generation = first.credential_generation.clone();
+        assert!(first == aligned);
+    }
+
+    #[test]
+    fn artifact_hashes_and_workload_come_from_the_inputs_not_defaults() {
+        let program = program();
+        let document = compose(&program, &https(), serde_json::json!({})).unwrap();
+        let facts = facts();
+        assert_eq!(document.backend_artifact_hash, facts.backend_artifact_hash);
+        assert_eq!(
+            document.settings_schema_digest,
+            facts.settings_schema_digest
+        );
+        assert_eq!(
+            document.supervisor_artifact_hash,
+            facts.supervisor_artifact_hash
+        );
+        assert_eq!(
+            document.launcher_artifact_hash,
+            facts.launcher_artifact_hash
+        );
+        let session = document.workload.structured_session().unwrap();
+        assert_eq!(
+            session.configuration_adapter_artifact_hash,
+            facts.configuration_adapter_artifact_hash
+        );
+        assert_eq!(
+            session.connector_artifact_hash,
+            facts.connector_artifact_hash
+        );
+        assert_eq!(session.runtime_manifest_hash, program.runtime_manifest_hash);
+        assert_eq!(
+            session.runtime_selection_identity,
+            program.selection_identity_digest
+        );
+    }
+
+    #[test]
+    fn origin_must_be_a_bare_https_origin() {
+        assert_eq!(
+            canonical_https_origin("https://controller.example:7443").unwrap(),
+            "https://controller.example:7443"
+        );
+        for bad in [
+            "http://controller.example",
+            "https://controller.example/",
+            "https://controller.example/path",
+            "https://controller.example?x=1",
+            "https://controller.example#f",
+            "https://user@controller.example",
+            "https://user:pw@controller.example",
+            "controller.example",
+            "",
+            "https://controller.example:443",
+            "https://Controller.Example:7443",
+            "https://controller.example:7443/",
+            " https://controller.example:7443",
+            "https://controller.example:7443 ",
+            "\thttps://controller.example:7443\n",
+            "https://b\u{fc}cher.example:7443",
+            "https://controller.example:0",
+            "https://controller.example:65536",
+        ] {
+            let error = canonical_https_origin(bad).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("without path, query, fragment or userinfo"),
+                "{bad}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn ip_literal_origins_are_accepted_in_canonical_form() {
+        for good in ["https://192.0.2.1:7443", "https://[::1]:7443"] {
+            assert_eq!(canonical_https_origin(good).unwrap(), good);
+        }
+        for bad in [
+            "https://[::1]:443",
+            "https://[0:0:0:0:0:0:0:1]:7443",
+            "https://192.0.2.1:0",
+        ] {
+            assert!(canonical_https_origin(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn compose_against_a_node_without_installed_bundles_publishes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let _identity = identity_in(root.path());
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(root.path()),
+        )
+        .unwrap();
+        let error = refusal(compose_external_execution_binding(ComposeRequest {
+            app_root: root.path(),
+            state_lock: &lock,
+            id: "operator".into(),
+            backend: TEST_BACKEND_ID.into(),
+            program: program(),
+            transport: https(),
+            account: "operator-account".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: fresh_credential_generation().unwrap(),
+            settings: serde_json::json!({}),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: None,
+            limits: ComposeLimits::default(),
+            node_policy: &node_policy(10_000_000, None),
+        }));
+        assert!(
+            format!("{error:#}").contains("load installed bundle registrations"),
+            "{error:#}"
+        );
+        assert!(
+            !root
+                .path()
+                .join(".ai/node/external_execution/operator.yaml")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn roots_must_be_certificates_only_and_nonempty() {
+        for bad in [
+            "".to_owned(),
+            "\n\n".to_owned(),
+            // Key-shaped DER under a CERTIFICATE label.
+            pem_block("CERTIFICATE", KEY_A_BODY),
+            // A well-formed DER sequence that is not a certificate.
+            pem_block("CERTIFICATE", "MAMCAQE=\n"),
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n".to_owned(),
+            format!(
+                "{}-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+                root_pem()
+            ),
+            format!("stray\n{}", root_pem()),
+            "-----BEGIN CERTIFICATE-----\nMAMCAQE=\n".to_owned(),
+            "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n".to_owned(),
+        ] {
+            assert!(parse_tls_root_pem(&bad).is_err(), "{bad:?}");
+        }
+        let program = program();
+        let empty = ComposeTransportRequest::Https {
+            origin: "https://controller.example".into(),
+            roots_pem: String::new(),
+        };
+        assert!(compose(&program, &empty, serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn a_real_certificate_is_accepted_and_keeps_its_der() {
+        let roots = parse_tls_root_pem(&cert_a()).unwrap();
+        assert_eq!(roots, vec![STANDARD.encode(der_of(CERT_A_BODY))]);
+        let error = parse_tls_root_pem(&pem_block("CERTIFICATE", KEY_A_BODY)).unwrap_err();
+        assert!(
+            error.to_string().contains("not an X.509 certificate"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn roots_digest_matches_the_signed_transport_and_ordering_is_canonical() {
+        let forward = parse_tls_root_pem(&format!("{}{}", cert_b(), cert_a())).unwrap();
+        let reverse = parse_tls_root_pem(&root_pem()).unwrap();
+        assert_eq!(forward, reverse);
+        let document = compose(&program(), &https(), serde_json::json!({})).unwrap();
+        let http = document.controller_transport.http().unwrap();
+        assert_eq!(
+            http.tls_root_bundle_digest,
+            external_tls_root_bundle_digest(&forward).unwrap()
+        );
+    }
+
+    #[test]
+    fn relay_scope_must_equal_the_setting_the_adapter_declares() {
+        let program = program();
+        // `relay()` names workspace `test-owner`; the declared key is `owner_id`.
+        compose(&program, &relay(), relay_settings()).unwrap();
+        for settings in [
+            serde_json::json!({"owner_id": "other"}),
+            serde_json::json!({}),
+            serde_json::json!({"workspace": "test-owner"}),
+        ] {
+            let error = refusal(compose(&program, &relay(), settings));
+            assert!(
+                error.to_string().contains("relay scope setting differs"),
+                "{error}"
+            );
+        }
+        // An adapter that declares no scope key cannot be composed over a relay.
+        let selected = select_transport(&relay()).unwrap();
+        let error = refusal(compose_binding_document(ComposeInputs {
+            program: &program,
+            controller_transport: selected.selection,
+            provider_network_inputs: selected.network_inputs,
+            tls_roots_der_base64: Vec::new(),
+            backend: TEST_BACKEND_ID.into(),
+            account: "a".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: "a".repeat(64),
+            settings: relay_settings(),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: None,
+            artifacts: BundleArtifactFacts {
+                relay_scope_setting: None,
+                ..facts()
+            },
+            limits: ComposeLimits::default(),
+        }));
+        assert!(
+            error.to_string().contains("no relay scope setting"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn relay_carries_no_roots() {
+        let program = program();
+        compose(&program, &relay(), relay_settings()).unwrap();
+        // The constructor itself refuses roots beside a relay transport.
+        let selected = select_transport(&relay()).unwrap();
+        let error = refusal(compose_binding_document(ComposeInputs {
+            program: &program,
+            controller_transport: selected.selection,
+            provider_network_inputs: selected.network_inputs,
+            tls_roots_der_base64: vec![STANDARD.encode(der_of(CERT_A_BODY))],
+            backend: TEST_BACKEND_ID.into(),
+            account: "a".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: "a".repeat(64),
+            settings: relay_settings(),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: None,
+            artifacts: facts(),
+            limits: ComposeLimits::default(),
+        }));
+        assert!(
+            error.to_string().contains("carries no TLS roots"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn signed_binding_round_trips_and_a_foreign_signer_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = identity_in(root.path());
+        let document = compose(&program(), &https(), serde_json::json!({"region": "r"})).unwrap();
+        let sign = |key: &lillux::crypto::SigningKey| {
+            lillux::signature::sign_content_at(
+                &serde_yaml::to_string(&document).unwrap(),
+                key,
+                "#",
+                None,
+                "2026-10-15T00:00:00Z",
+            )
+        };
+        let signed = sign(identity.signing_key());
+        let installed = admit_signed_binding(root.path(), "operator", &signed, &identity).unwrap();
+        assert_eq!(installed.id(), "operator");
+        assert!(installed.document == document);
+        assert_eq!(installed.signer, identity.fingerprint());
+        installed.retained_generation().unwrap();
+
+        let foreign = lillux::crypto::SigningKey::from_bytes(&TEST_SIGNER_KEY);
+        let error =
+            admit_signed_binding(root.path(), "operator", &sign(&foreign), &identity).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must be signed by the current node"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn published_file_is_replaced_atomically_and_carries_the_signed_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let first =
+            publish_signed_document(root.path(), SECTION_NAME, "operator", b"first").unwrap();
+        assert_eq!(
+            first,
+            root.path()
+                .join(".ai/node/external_execution/operator.yaml")
+        );
+        let second =
+            publish_signed_document(root.path(), SECTION_NAME, "operator", b"second").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+    }
+
+    #[test]
+    fn binding_id_is_a_bounded_identifier() {
+        assert!(validate_document_id("doc-1.a_b", "binding").is_ok());
+        for bad in ["", ".hidden", "a/b", "a b", &"a".repeat(129)] {
+            assert!(validate_document_id(bad, "binding").is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn limits_file_overrides_named_fields_and_refuses_unknown_ones() {
+        let limits: ComposeLimits =
+            serde_json::from_value(serde_json::json!({"max_active": 3})).unwrap();
+        assert_eq!(limits.max_active, 3);
+        assert_eq!(
+            limits.timeout_seconds,
+            ComposeLimits::default().timeout_seconds
+        );
+        assert_eq!(limits.native_work_steps, 2_000_000);
+        let limits: ComposeLimits =
+            serde_json::from_value(serde_json::json!({"native_work_steps": 12_000_000})).unwrap();
+        assert_eq!(limits.native_work_steps, 12_000_000);
+        assert!(
+            serde_json::from_value::<ComposeLimits>(serde_json::json!({"max_actve": 3})).is_err()
+        );
+    }
+
+    use crate::external_placement::compose_test_support as installed;
+
+    const PROVIDER_ID: &str = "codex-hosted";
+    const BINDING_ID: &str = "operator";
+    const SETTINGS_SCHEMA: &str =
+        "3333333333333333333333333333333333333333333333333333333333333333";
+
+    /// A stopped node with an identity, a vault key pair, the state lock and
+    /// real connector and configuration-adapter executables.
+    /// A node policy whose supervisor journal window is `operation_millis`
+    /// and whose execution policy carries `lease_budget`.
+    fn node_policy(
+        operation_millis: u64,
+        lease_budget: Option<
+            ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget,
+        >,
+    ) -> ryeos_node_runtime::node_policy::NodePolicySnapshot {
+        let envelope = crate::external_supervisor_native::test_supervisor_journal_envelope();
+        let maintenance = ryeos_scheduler_contract::NodeMaintenancePolicy {
+            schema: 1,
+            schedules: Vec::new(),
+            offline_reset: None,
+            offline_native: [(
+                crate::external_supervisor_native::EXTERNAL_SUPERVISOR_JOURNAL_CLASS.to_owned(),
+                ryeos_scheduler_contract::OfflineNativeQuota {
+                    max_native_storage_bytes: envelope.storage_bytes,
+                    max_native_allocator_steps: envelope.allocator_steps,
+                    max_native_connections: envelope.connections,
+                    max_operation_millis: operation_millis,
+                    max_cleanup_millis: envelope.cleanup_millis,
+                    max_cleanup_steps: envelope.cleanup_steps,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            remote_offline_operations: Vec::new(),
+        };
+        let execution =
+            ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy {
+                schema: 4,
+                max_live_fanout: 1,
+                max_private_materialization_copy_bytes: 1024 * 1024,
+                host_env_passthrough: vec![],
+                workload_client: None,
+                resource_authority: None,
+                producer_resource_ceiling: None,
+                external_lease_budget: lease_budget,
+                external_wall_clock_requirement: None,
+            };
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+            std::sync::Arc::new(maintenance),
+            std::sync::Arc::new(execution),
+        ])
+    }
+
+    fn lease_budget() -> ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+        ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+            max_concurrent_leases: 2,
+            max_lease_lifetime_seconds: 4 * 60 * 60,
+            daily_lease_seconds: 8 * 60 * 60,
+            turn_end_margin_seconds: 30,
+        }
+    }
+
+    /// A program that needs one remote lease.
+    fn leased_program() -> AdmittedExternalCandidateProgram {
+        let mut program = program();
+        program.placement.lease = vec![lillux::process_control::CapabilityRequirement::Name(
+            "lease.create_bound".into(),
+        )];
+        program
+    }
+
+    struct StoppedNode {
+        policy: ryeos_node_runtime::node_policy::NodePolicySnapshot,
+        root: tempfile::TempDir,
+        lock: ryeos_node_runtime::state_lock::StateLock,
+        connector: PathBuf,
+        adapter: PathBuf,
+    }
+
+    fn stopped_node() -> StoppedNode {
+        let root = tempfile::tempdir().unwrap();
+        let _identity = identity_in(root.path());
+        let key = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(
+            &ryeos_vault::paths::default_vault_secret_key_path(root.path()),
+            &key,
+        )
+        .unwrap();
+        lillux::vault::write_public_key(
+            &ryeos_vault::paths::default_vault_public_key_path(root.path()),
+            &key.public_key(),
+        )
+        .unwrap();
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(root.path()),
+        )
+        .unwrap();
+        let connector = root.path().join("connector");
+        installed::write_executable(&connector, b"connector executable bytes");
+        let adapter = root.path().join("configuration-adapter");
+        installed::write_executable(&adapter, b"configuration adapter executable bytes");
+        StoppedNode {
+            policy: node_policy(10_000_000, Some(lease_budget())),
+            root,
+            lock,
+            connector,
+            adapter,
+        }
+    }
+
+    fn provider_declaration(
+        id: &str,
+    ) -> ryeos_external_execution_contract::ExternalProviderDeclaration {
+        ryeos_external_execution_contract::ExternalProviderDeclaration {
+            id: id.to_owned(),
+            protocol: ryeos_external_execution_contract::PROVIDER_DECLARATION_PROTOCOL.to_owned(),
+            targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
+            connector: "provider-connector".to_owned(),
+            connector_descendants:
+                ryeos_external_execution_contract::ExternalProviderConnectorDescendants::InProcessGroup,
+            configuration_adapter: "provider-configuration".to_owned(),
+            configuration_destination: "environments.toml".to_owned(),
+            qualification_request_binding_protocol: None,
+        }
+    }
+
+    fn lifecycle(
+        artifact: &str,
+    ) -> std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend> {
+        installed::CoordinateOnlyBackend::shared(
+            TEST_BACKEND_ID,
+            artifact,
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+        )
+    }
+
+    /// Registries holding `provider` over the node's executables, and the
+    /// given lifecycle generations.
+    fn installed_artifacts(
+        node: &StoppedNode,
+        provider: Option<&str>,
+        backends: Vec<std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend>>,
+    ) -> crate::external_artifacts::ResolvedExternalExecutionArtifacts {
+        let mut provider_connector_hashes = std::collections::BTreeMap::new();
+        let mut configurations = Vec::new();
+        if let Some(provider) = provider {
+            let (connector_hash, _) = installed::connector_coordinate(&node.connector);
+            provider_connector_hashes.insert(provider.to_owned(), connector_hash);
+            configurations.push(
+                installed::provider_configuration(provider_declaration(provider), &node.adapter)
+                    .unwrap(),
+            );
+        }
+        crate::external_artifacts::ResolvedExternalExecutionArtifacts {
+            provider_connector_hashes,
+            connectors: installed::connector_registry(provider.map(|_| node.connector.clone()))
+                .unwrap(),
+            provider_configurations:
+                crate::external_placement::ExternalProviderConfigurationRegistry::from_artifacts(
+                    configurations,
+                )
+                .unwrap(),
+            placement_backends:
+                crate::external_placement::ExternalPlacementBackendRegistry::from_backends(backends)
+                    .unwrap(),
+        }
+    }
+
+    fn compose_request<'a>(node: &'a StoppedNode, backend: &str) -> ComposeRequest<'a> {
+        ComposeRequest {
+            app_root: node.root.path(),
+            state_lock: &node.lock,
+            id: BINDING_ID.into(),
+            backend: backend.into(),
+            program: program(),
+            transport: https(),
+            account: "operator-account".into(),
+            capacity_group: DEFAULT_CAPACITY_GROUP.into(),
+            credential_generation: fresh_credential_generation().unwrap(),
+            settings: serde_json::json!({}),
+            guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification: None,
+            runtime_content_qualification: None,
+            limits: ComposeLimits::default(),
+            node_policy: &node.policy,
+        }
+    }
+
+    fn binding_path(node: &StoppedNode) -> PathBuf {
+        node.root
+            .path()
+            .join(".ai/node/external_execution/operator.yaml")
+    }
+
+    /// Compose a request and report whether it was refused and whether a
+    /// binding was published.
+    fn compose_over(
+        node: &StoppedNode,
+        request: ComposeRequest<'_>,
+        backend: std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend>,
+    ) -> (Result<ComposeReport>, bool) {
+        let resolved = installed_artifacts(node, Some(PROVIDER_ID), vec![backend]);
+        let result = compose_with_resolver(request, |_| Ok(resolved));
+        (result, binding_path(node).exists())
+    }
+
+    fn backend_with(
+        capabilities: std::collections::BTreeSet<
+            ryeos_external_execution_contract::LifecycleCapability,
+        >,
+        admits_leases: bool,
+    ) -> std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend> {
+        installed::CoordinateOnlyBackend::shared_with(
+            TEST_BACKEND_ID,
+            &"d".repeat(64),
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+            capabilities,
+            admits_leases,
+        )
+    }
+
+    fn full_capabilities()
+    -> std::collections::BTreeSet<ryeos_external_execution_contract::LifecycleCapability> {
+        use ryeos_external_execution_contract::LifecycleCapability::*;
+        [SupervisorActivation, ExactTerminalObservation].into()
+    }
+
+    #[test]
+    fn compose_refuses_an_adapter_without_the_capabilities_the_placement_needs() {
+        let node = stopped_node();
+        let (result, published) = compose_over(
+            &node,
+            compose_request(&node, TEST_BACKEND_ID),
+            backend_with(Default::default(), false),
+        );
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("the placement is refused at compose")
+                && error.contains("external lifecycle adapter lacks required capabilities"),
+            "{error}"
+        );
+        assert!(!published, "a refused composition published a binding");
+    }
+
+    #[test]
+    fn compose_refuses_a_lease_its_adapter_refuses() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), false));
+        let error = format!("{:#}", refusal(result));
+        assert!(error.contains("admits no leases"), "{error}");
+        assert!(!published);
+
+        // The same program composes once the adapter admits the lease.
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), true));
+        result.unwrap();
+        assert!(published);
+    }
+
+    #[test]
+    fn compose_refuses_a_lease_program_without_a_node_lease_budget() {
+        let mut node = stopped_node();
+        node.policy = node_policy(10_000_000, None);
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), true));
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("declares no external lease budget"),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    #[test]
+    fn compose_refuses_a_lease_program_over_a_relay_transport() {
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        request.transport = relay();
+        request.settings = relay_settings();
+        let mut capabilities = full_capabilities();
+        capabilities
+            .insert(ryeos_external_execution_contract::LifecycleCapability::ControllerFileRelay);
+        let (result, published) = compose_over(&node, request, backend_with(capabilities, true));
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("names no HTTPS controller origin"),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    #[test]
+    fn compose_names_the_largest_observation_timeout_the_journal_window_funds() {
+        // The default binding lives contact 30 + 2 x observation 120 +
+        // execution 600 + cleanup 300 = 1170 s; a 1000 s window leaves
+        // 1000 - 930 = 70 s for the two observations, 35 s each.
+        let mut node = stopped_node();
+        node.policy = node_policy(1_000_000, None);
+        let (result, published) = compose_over(
+            &node,
+            compose_request(&node, TEST_BACKEND_ID),
+            backend_with(full_capabilities(), false),
+        );
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("the largest observation timeout this window funds is 35 s")
+                && error.contains("the binding names 120 s"),
+            "{error}"
+        );
+        assert!(!published);
+
+        // A window that the other three timeouts already exceed funds none.
+        node.policy = node_policy(900_000, None);
+        let (result, _) = compose_over(
+            &node,
+            compose_request(&node, TEST_BACKEND_ID),
+            backend_with(full_capabilities(), false),
+        );
+        let error = format!("{:#}", refusal(result));
+        assert!(error.contains("no observation timeout fits"), "{error}");
+    }
+
+    /// The recorded P17 refusal: a node window of 4860 s against a binding
+    /// whose lifetime is contact 60 + 2 x observation 480 + execution 3600 +
+    /// cleanup 300 = 4920 s. Compose refuses it, naming both numbers and the
+    /// 450 s observation timeout the window funds.
+    #[test]
+    fn compose_refuses_the_recorded_journal_window_of_4860000_against_4920000() {
+        let mut node = stopped_node();
+        node.policy = node_policy(4_860_000, Some(lease_budget()));
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        request.limits = ComposeLimits {
+            timeout_seconds: 3_600,
+            contact_timeout_seconds: 60,
+            observation_timeout_seconds: 480,
+            cleanup_timeout_seconds: 300,
+            ..ComposeLimits::default()
+        };
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), true));
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("operation window of 4860000 ms is shorter than the occurrence lifetime of 4920000 ms")
+                && error.contains(
+                    "the largest observation timeout this window funds is 450 s, the binding names 480 s"
+                ),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    /// The recorded lease refusal for the `codex.authoring.remote` workload
+    /// class: a guarantee its adapter's spec does not derive refuses compose,
+    /// naming the workload class and the missing guarantee. The class is a
+    /// fixture value here, so the name is asserted as the program carries it.
+    #[test]
+    fn compose_refusal_of_an_unmet_lease_requirement_names_the_workload_and_the_guarantee() {
+        const UNDERIVED: &str = "lease.fenced_exclusive";
+        let spec = installed::DerivedLeaseSpec::new(vec![
+            installed::SpecOperation::CreateOnceBoundToReservation,
+            installed::SpecOperation::ObserveExactOccurrence,
+        ]);
+        let backend = installed::CoordinateOnlyBackend::shared_with_lease_spec(
+            TEST_BACKEND_ID,
+            &"d".repeat(64),
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+            full_capabilities(),
+            spec,
+        );
+        let mut program = leased_program();
+        program.placement.workload_class = "codex.authoring.remote".into();
+        program.placement.lease = vec![
+            serde_json::from_value(serde_json::json!({
+                "name": UNDERIVED, "accept": ["provider_attested"]
+            }))
+            .unwrap(),
+        ];
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = program;
+        let (result, published) = compose_over(&node, request, backend);
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains(UNDERIVED) && error.contains("codex.authoring.remote"),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    /// A binding's network inputs are the contract crate's one definition, and
+    /// the transport compose selects carries exactly those values.
+    #[test]
+    fn binding_network_inputs_are_the_contract_definition() {
+        let sources = ryeos_external_execution_contract::operator_network_inputs();
+        let policy = operator_network_inputs();
+        assert_eq!(policy.resolver.source, sources.resolver_source);
+        assert_eq!(policy.resolver.max_bytes, sources.resolver_max_bytes);
+        assert_eq!(policy.hosts.source, sources.hosts_source);
+        assert_eq!(policy.hosts.max_bytes, sources.hosts_max_bytes);
+        assert_eq!(policy.resolver.required, sources.resolver_required);
+        assert_eq!(policy.hosts.required, sources.hosts_required);
+        assert!(policy.resolver.required && !policy.hosts.required);
+        policy.validate().unwrap();
+        let selected = select_transport(&ComposeTransportRequest::FileRelay {
+            owner_workspace_id: "w".into(),
+            private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+                .into(),
+        })
+        .unwrap();
+        assert_eq!(selected.network_inputs, policy);
+    }
+
+    /// Compose and launch judge a placement with one function over one input
+    /// shape: the verdict `judge_placement` gives for a program, binding,
+    /// adapter and policy is the refusal compose carries for the same ones.
+    #[test]
+    fn compose_and_launch_share_one_placement_judgment() {
+        let node = stopped_node();
+        let backend = backend_with(full_capabilities(), false);
+        let program = leased_program();
+        let (result, _) = compose_over(
+            &node,
+            {
+                let mut request = compose_request(&node, TEST_BACKEND_ID);
+                request.program = program.clone();
+                request
+            },
+            backend.clone(),
+        );
+        let compose_error = format!("{:#}", refusal(result));
+
+        // The contract launch would judge: the binding as compose composed
+        // it, read back through the loader's own admission.
+        let (compose_ok, published) = compose_over(
+            &node,
+            compose_request(&node, TEST_BACKEND_ID),
+            backend_with(full_capabilities(), false),
+        );
+        compose_ok.unwrap();
+        assert!(published);
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(binding_path(&node)).unwrap();
+        let contract = admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity)
+            .unwrap()
+            .backend_contract();
+        let launch_error = format!(
+            "{:#}",
+            crate::external_placement::judge_placement(
+                &program,
+                &contract,
+                backend.as_ref(),
+                &node.policy,
+                // Launch's only addition: the session's own deadline, one the
+                // lease covers.
+                Some(|| Ok(Some(lillux::time::timestamp_millis() + 10_000))),
+            )
+            .unwrap_err()
+        );
+        assert!(
+            compose_error.ends_with(&launch_error),
+            "compose `{compose_error}` is not launch's `{launch_error}`"
+        );
+    }
+
+    /// A lease guarantee the provider's spec does not derive from its
+    /// operation kinds is refused at compose, and launch's judgment of the
+    /// same inputs is the same refusal.
+    #[test]
+    fn compose_and_launch_refuse_a_lease_guarantee_the_spec_does_not_derive() {
+        use installed::{DerivedLeaseSpec, SpecOperation};
+        const UNDERIVED: &str = "lease.fenced_exclusive";
+
+        let spec = DerivedLeaseSpec::new(vec![
+            SpecOperation::CreateOnceBoundToReservation,
+            SpecOperation::ObserveExactOccurrence,
+        ]);
+        assert!(
+            !spec.derived_guarantees().contains(UNDERIVED),
+            "the spec must not derive {UNDERIVED}"
+        );
+        let backend = installed::CoordinateOnlyBackend::shared_with_lease_spec(
+            TEST_BACKEND_ID,
+            &"d".repeat(64),
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+            full_capabilities(),
+            spec,
+        );
+        let attested = |name: &str| -> lillux::process_control::CapabilityRequirement {
+            serde_json::from_value(
+                serde_json::json!({"name": name, "accept": ["provider_attested"]}),
+            )
+            .unwrap()
+        };
+        let mut program = program();
+        program.placement.lease = vec![attested("lease.create_bound"), attested(UNDERIVED)];
+        let mut derived_program = program.clone();
+        derived_program.placement.lease = vec![attested("lease.create_bound")];
+
+        // The same program composes when the guarantee is one the spec derives.
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = derived_program.clone();
+        let (result, published) = compose_over(&node, request, backend.clone());
+        result.unwrap();
+        assert!(published);
+
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = program.clone();
+        let (result, published) = compose_over(&node, request, backend.clone());
+        let compose_error = format!("{:#}", refusal(result));
+        assert!(compose_error.contains(UNDERIVED), "{compose_error}");
+        assert!(!published);
+
+        // Launch's judgment: the binding as an unrefused compose publishes it,
+        // read back through the loader's own admission.
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = derived_program;
+        let (compose_ok, _) = compose_over(&node, request, backend.clone());
+        compose_ok.unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(binding_path(&node)).unwrap();
+        let contract = admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity)
+            .unwrap()
+            .backend_contract();
+        let launch_error = format!(
+            "{:#}",
+            crate::external_placement::judge_placement(
+                &program,
+                &contract,
+                backend.as_ref(),
+                &node.policy,
+                Some(|| Ok(Some(lillux::time::timestamp_millis() + 10_000))),
+            )
+            .unwrap_err()
+        );
+        assert!(launch_error.contains(UNDERIVED), "{launch_error}");
+        assert!(
+            compose_error.ends_with(&launch_error),
+            "compose `{compose_error}` is not launch's `{launch_error}`"
+        );
+    }
+
+    #[test]
+    fn composed_binding_takes_its_artifact_facts_from_the_installed_registries() {
+        let node = stopped_node();
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let report =
+            compose_with_resolver(compose_request(&node, TEST_BACKEND_ID), |_| Ok(resolved))
+                .unwrap();
+
+        assert_eq!(report.id, BINDING_ID);
+        assert_eq!(report.backend, TEST_BACKEND_ID);
+        assert_eq!(report.path, binding_path(&node));
+        let published =
+            lillux::secure_fs::open_pinned_regular_file_no_follow(&report.path).unwrap();
+        assert_eq!(
+            published.observation().unwrap().permission_mode().unwrap(),
+            0o600
+        );
+
+        // The published bytes load back through the loader's own admission
+        // under the node identity.
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let loaded =
+            admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
+        loaded.retained_generation().unwrap();
+        assert_eq!(loaded.digest, report.binding_digest);
+        assert_eq!(loaded.capacity_owner, report.capacity_owner);
+        assert_eq!(
+            loaded.document.credential_generation,
+            report.credential_generation
+        );
+        assert_eq!(loaded.document.settings_digest, report.settings_digest);
+
+        let document = &loaded.document;
+        assert_eq!(document.settings_schema_digest, SETTINGS_SCHEMA);
+        assert_eq!(document.backend_artifact_hash, "d".repeat(64));
+        assert_eq!(document.backend_artifact_bytes, 4096);
+        assert_eq!(document.supervisor_artifact_hash, "1".repeat(64));
+        assert_eq!(document.supervisor_artifact_bytes, 8192);
+        assert_eq!(document.launcher_artifact_hash, "e".repeat(64));
+        assert_eq!(document.launcher_artifact_bytes, 12288);
+        let (connector_hash, connector_bytes) = installed::connector_coordinate(&node.connector);
+        let (adapter_hash, adapter_bytes) =
+            installed::provider_configuration_coordinate(&node.adapter);
+        let session = document.workload.structured_session().unwrap();
+        assert_eq!(session.connector_artifact_hash, connector_hash);
+        assert_eq!(session.connector_artifact_bytes, connector_bytes);
+        assert_eq!(session.configuration_adapter_artifact_hash, adapter_hash);
+        assert_eq!(session.configuration_adapter_artifact_bytes, adapter_bytes);
+    }
+
+    #[test]
+    fn recompose_carries_every_placement_fact_and_repins_only_artifacts() {
+        use crate::node_config::recompose::PlacementArtifactSource as _;
+        let node = stopped_node();
+        let composed = compose_with_resolver(compose_request(&node, TEST_BACKEND_ID), |_| {
+            Ok(installed_artifacts(
+                &node,
+                Some(PROVIDER_ID),
+                vec![lifecycle(&"d".repeat(64))],
+            ))
+        })
+        .unwrap();
+        let identity = load_node_identity(node.root.path()).unwrap();
+        let before = read_installed_binding(node.root.path(), BINDING_ID, &identity).unwrap();
+
+        // A new adapter generation is installed; the provider is unchanged.
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"f".repeat(64))]);
+        let generation = resolved.generation(TEST_BACKEND_ID).unwrap();
+        let provider = resolved.provider(PROVIDER_ID).unwrap();
+        let outcome = repin_placement(
+            node.root.path(),
+            &before,
+            &generation,
+            Some(&provider),
+            &identity,
+        )
+        .unwrap();
+        assert_eq!(outcome.fields_changed, ["backend_artifact_hash"]);
+        assert!(outcome.signed.is_some());
+        assert_ne!(outcome.new.digest, before.digest);
+        assert_eq!(
+            outcome.new.document.credential_generation,
+            composed.credential_generation
+        );
+        assert_eq!(outcome.new.capacity_owner, before.capacity_owner);
+        let mut expected = before.document.clone();
+        expected.backend_artifact_hash = "f".repeat(64);
+        assert!(outcome.new.document == expected);
+
+        // Nothing moved: nothing to publish.
+        let unchanged = repin_placement(
+            node.root.path(),
+            &outcome.new,
+            &generation,
+            Some(&provider),
+            &identity,
+        )
+        .unwrap();
+        assert!(unchanged.signed.is_none());
+
+        // A generation under another settings schema cannot take the carried
+        // settings.
+        let mut moved = generation.clone();
+        moved.settings_schema_digest = "4".repeat(64);
+        let error = repin_placement(
+            node.root.path(),
+            &before,
+            &moved,
+            Some(&provider),
+            &identity,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::node_config::recompose::RecomposeRefusal>()
+                .unwrap()
+                .code,
+            crate::node_config::recompose::RECOMPOSE_SETTINGS_SCHEMA_CHANGED
+        );
+    }
+
+    #[test]
+    fn composing_for_an_uninstalled_provider_publishes_nothing() {
+        let node = stopped_node();
+        let resolved = installed_artifacts(
+            &node,
+            Some("another-provider"),
+            vec![lifecycle(&"d".repeat(64))],
+        );
+        let error = refusal(compose_with_resolver(
+            compose_request(&node, TEST_BACKEND_ID),
+            |_| Ok(resolved),
+        ));
+        assert!(
+            format!("{error:#}").contains("external provider declaration is not installed"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+    }
+
+    #[test]
+    fn composing_for_an_uninstalled_backend_publishes_nothing() {
+        let node = stopped_node();
+        let resolved = installed_artifacts(&node, Some(PROVIDER_ID), Vec::new());
+        let error = refusal(compose_with_resolver(
+            compose_request(&node, TEST_BACKEND_ID),
+            |_| Ok(resolved),
+        ));
+        assert!(
+            format!("{error:#}")
+                .contains("external lifecycle backend `test-lease-backend` is not installed"),
+            "{error:#}"
+        );
+        assert!(!binding_path(&node).exists());
+    }
+
+    #[test]
+    fn artifact_lookups_refuse_the_absent_and_ambiguous_cases() {
+        let node = stopped_node();
+        let facts_error =
+            |resolved: &crate::external_artifacts::ResolvedExternalExecutionArtifacts| {
+                format!(
+                    "{:#}",
+                    refusal(bundle_artifact_facts(
+                        resolved,
+                        PROVIDER_ID,
+                        TEST_BACKEND_ID
+                    ))
+                )
+            };
+
+        // Two installed generations under one backend id are ambiguous.
+        let two_generations = installed_artifacts(
+            &node,
+            Some(PROVIDER_ID),
+            vec![lifecycle(&"d".repeat(64)), lifecycle(&"a".repeat(64))],
+        );
+        assert!(
+            facts_error(&two_generations).contains("has more than one installed generation"),
+            "ambiguous lifecycle generation"
+        );
+
+        // A provider with no installed adapter, or with no connector
+        // declared for it, or whose connector is not installed.
+        let mut resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        resolved.provider_connector_hashes.clear();
+        assert!(
+            facts_error(&resolved).contains("names no installed connector"),
+            "provider without a declared connector"
+        );
+        resolved
+            .provider_connector_hashes
+            .insert(PROVIDER_ID.to_owned(), "9".repeat(64));
+        assert!(
+            facts_error(&resolved).contains("installed external candidate connector is absent"),
+            "connector absent"
+        );
+        let no_provider = installed_artifacts(&node, None, vec![lifecycle(&"d".repeat(64))]);
+        assert!(
+            facts_error(&no_provider).contains("external provider declaration is not installed"),
+            "provider absent"
+        );
+        let no_backend = installed_artifacts(&node, Some(PROVIDER_ID), Vec::new());
+        assert!(
+            facts_error(&no_backend).contains("is not installed"),
+            "backend absent"
+        );
+    }
+
+    #[test]
+    fn duplicate_provider_and_connector_identities_cannot_be_installed() {
+        // The registries refuse a duplicate at construction, so the
+        // ambiguous provider and connector lookups are unreachable from any
+        // installed set; this pins the refusals that guarantee it.
+        let node = stopped_node();
+        let twin = node.root.path().join("connector-twin");
+        installed::write_executable(&twin, b"connector executable bytes");
+        let error = installed::connector_registry([node.connector.clone(), twin]).unwrap_err();
+        assert!(error.to_string().contains("is duplicated"), "{error:#}");
+
+        let duplicate =
+            crate::external_placement::ExternalProviderConfigurationRegistry::from_artifacts(vec![
+                installed::provider_configuration(provider_declaration(PROVIDER_ID), &node.adapter)
+                    .unwrap(),
+                installed::provider_configuration(provider_declaration(PROVIDER_ID), &node.adapter)
+                    .unwrap(),
+            ])
+            .unwrap_err();
+        assert!(
+            duplicate.to_string().contains("is duplicated"),
+            "{duplicate:#}"
+        );
+    }
+
+    #[test]
+    fn a_composed_binding_provisions_a_credential_the_vault_returns() {
+        use crate::vault::{NodeVault as _, SealedEnvelopeVault};
+
+        let node = stopped_node();
+        let resolved =
+            installed_artifacts(&node, Some(PROVIDER_ID), vec![lifecycle(&"d".repeat(64))]);
+        let report =
+            compose_with_resolver(compose_request(&node, TEST_BACKEND_ID), |_| Ok(resolved))
+                .unwrap();
+
+        let provisioned = super::super::provision::provision_installed_placement_credential(
+            node.root.path(),
+            BINDING_ID,
+            &zeroize::Zeroizing::new("provider-secret".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            provisioned.outcome,
+            super::super::provision::ProvisionOutcome::Inserted
+        );
+        assert_eq!(provisioned.owner, report.capacity_owner);
+        assert_eq!(provisioned.generation, report.credential_generation);
+        assert_eq!(provisioned.backend, report.backend);
+        assert_eq!(provisioned.account, report.account);
+
+        let access = crate::vault::placement::PlacementCredentialAccess::new(
+            &report.capacity_owner,
+            &report.credential_generation,
+            &report.backend,
+            &report.account,
+        )
+        .unwrap();
+        let vault = SealedEnvelopeVault::load(node.root.path()).unwrap();
+        let decoded = access
+            .decode(vault.placement_credential(&access).unwrap())
+            .unwrap();
+        assert_eq!(decoded.secret(), "provider-secret");
+    }
+}

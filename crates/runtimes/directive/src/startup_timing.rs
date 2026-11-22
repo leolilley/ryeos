@@ -751,7 +751,6 @@ pub fn record_context_composition(context_item_contributions: &serde_json::Value
 }
 
 #[cfg(feature = "latency-profiling")]
-#[allow(clippy::too_many_arguments)]
 pub fn record_prompt_source_composition(
     provider_id: &str,
     model_id: &str,

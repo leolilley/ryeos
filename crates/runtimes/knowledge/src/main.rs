@@ -89,7 +89,7 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
         return MethodCallResult::failure(
             envelope,
             MethodCallError::MethodFailed {
-                reason: format!("attach_process failed: {e}"),
+                reason: format!("attach_process failed: {e:#}"),
             },
         );
     }
@@ -98,7 +98,7 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
         return MethodCallResult::failure(
             envelope,
             MethodCallError::MethodFailed {
-                reason: format!("mark_running failed: {e}"),
+                reason: format!("mark_running failed: {e:#}"),
             },
         );
     }

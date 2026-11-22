@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T05:41:43Z:d05ae3a109743cd8b7606f95f2366f59e88c96320ead6786b3bb7772155f422c:Hs6JQMcB8U5iY1r9LSBFcfY5gQj5NscOC+rVKNd0QeDtbkTV295vwGYpFiKEmdyEHoaLhdvUBdHd0rQtFVP5Cw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-10-26T23:17:07Z:d05ae3a109743cd8b7606f95f2366f59e88c96320ead6786b3bb7772155f422c:9kCMtGua7ZQYoG59JVmMUVKd6AgXg5eEIjFU5ZkUo//+5oI0IhUxiRT37Km864NhQ6CLwK9usO6ckHxh1WAZCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/authoring-environment-production
 #   version: "1.0.0"

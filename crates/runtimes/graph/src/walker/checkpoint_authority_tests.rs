@@ -1,3 +1,4 @@
+use ryeos_runtime::graph_result::GraphRunStatus;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -146,7 +147,6 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
         _: &str,
         event_type: &str,
         _: Value,
-        _: &str,
     ) -> Result<Value, CallbackError> {
         self.event_types
             .lock()
@@ -167,7 +167,12 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
         Ok(json!({}))
     }
 
-    async fn append_events(&self, _: &str, events: Vec<Value>) -> Result<Value, CallbackError> {
+    async fn append_events(
+        &self,
+        _: &str,
+        events: Vec<Value>,
+        _: ryeos_runtime::callback::EventAppendOptions,
+    ) -> Result<Value, CallbackError> {
         let event_types = events
             .iter()
             .map(|event| {

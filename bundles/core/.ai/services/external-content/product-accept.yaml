@@ -1,0 +1,10 @@
+# ryeos:signed:2026-10-22T05:18:13Z:5097235dc839aa5d6d065d60ddb0940e56822f60612e6788499ded170b405308:VxF/737W2Y17GBC7OCghGAxEADe2tw9C+1G0U1pFi8ZrxkHvdtlqeFNL3NZl0qr953eeM0y88haW6FZJLx8uCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.product-accept
+required_caps: ["ryeos.execute.service.external-content/product-accept"]
+schema:
+  staging_id: string
+  witness_hash: string
+  origin_admission_hash: string
+  maximum_bytes: integer
+description: "Publish the acceptance of a staged product under the node identity once its closure and large objects are resident, and return {witness_hash, origin_admission_hash, acceptance_hash, reused_existing, manifest_hash}"

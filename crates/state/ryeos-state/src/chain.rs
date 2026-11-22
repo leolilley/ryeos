@@ -4,7 +4,6 @@
 //! All writes are protected by file locks and validated against the signed head ref.
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, anyhow};
@@ -89,6 +88,15 @@ pub(crate) struct AuthoritativeThreadEventChainReadback {
     pub(crate) events: Vec<(String, ThreadEvent)>,
 }
 
+/// One thread's event frontier read from a single trust-verified signed head.
+#[derive(Clone)]
+pub(crate) struct AuthoritativeThreadEventReadAnchorReadback {
+    pub(crate) chain_head_hash: String,
+    pub(crate) snapshot_hash: String,
+    pub(crate) thread_last_event_hash: Option<String>,
+    pub(crate) thread_last_seq: u64,
+}
+
 /// Validate through an already-pinned CAS root so every object in the closure
 /// is read from the same authority inode.
 pub(crate) fn validate_authoritative_history_with_cas(
@@ -118,6 +126,24 @@ pub(crate) fn validate_authoritative_history_with_cas_and_check(
         target_hash,
         expected_ancestor,
         check,
+    )
+}
+
+pub(crate) fn validate_authoritative_history_with_cas_budget_and_check(
+    cas: &lillux::CasStore,
+    chain_root_id: &str,
+    target_hash: &str,
+    expected_ancestor: Option<&str>,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+    budget: &mut crate::object_closure::BoundedCasObjectReadBudget,
+) -> anyhow::Result<()> {
+    validation::validate_authoritative_history_with_cas_limits_and_check(
+        cas,
+        chain_root_id,
+        target_hash,
+        expected_ancestor,
+        check,
+        budget,
     )
 }
 
@@ -206,10 +232,56 @@ pub struct AppendEventsInput<'a> {
     pub signer: &'a dyn Signer,
 }
 
+/// The exact thread frontier a conditional append requires under the chain
+/// lock: the signed head it was read from plus the thread's last event and
+/// sequence.
+pub(crate) struct ExpectedThreadAppendAnchor<'a> {
+    pub(crate) chain_root_id: &'a str,
+    pub(crate) thread_id: &'a str,
+    pub(crate) chain_head_hash: &'a str,
+    pub(crate) thread_last_event_hash: Option<&'a str>,
+    pub(crate) thread_last_seq: u64,
+}
+
+pub(crate) enum ConditionalAppendResult {
+    Appended(AppendResult),
+    Conflict,
+}
+
+/// Whether the signed head and the thread frontier still equal `expected`,
+/// read under the caller's chain lock. A missing head or thread never matches.
+pub(crate) fn thread_append_anchor_matches_under_lock(
+    cas_root: &Path,
+    refs_root: &Path,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    lock: &ChainLock,
+    expected: ExpectedThreadAppendAnchor<'_>,
+) -> anyhow::Result<bool> {
+    let Some((head_hash, state)) = read_chain_state_with_verified_head(
+        cas_root,
+        refs_root,
+        lock,
+        expected.chain_root_id,
+        trust_store,
+        head_cache,
+    )?
+    else {
+        return Ok(false);
+    };
+    let Some(entry) = state.threads.get(expected.thread_id) else {
+        return Ok(false);
+    };
+    Ok(head_hash == expected.chain_head_hash
+        && entry.last_event_hash.as_deref() == expected.thread_last_event_hash
+        && entry.last_thread_seq == expected.thread_last_seq)
+}
+
 /// File lock for a chain.
 pub struct ChainLock {
-    /// Held only for RAII; Drop releases the file lock via closed fd.
-    _lock_file: File,
+    /// Held only for RAII; the registered lock releases on drop and is
+    /// closed in every fork child before its pre-exec hold.
+    _lock_file: lillux::locks::ForkClosedLockFile,
     /// Pins the exact chain directory in which the lock was acquired.
     lock_directory: lillux::PinnedDirectory,
     /// Retains the exact refs-root ancestor when the owner already has one.
@@ -346,6 +418,7 @@ impl ChainLock {
         create_if_missing: bool,
     ) -> anyhow::Result<Self> {
         let lock_name = std::ffi::OsStr::new("lock");
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let lock_file = if create_if_missing {
             let file = lock_directory
                 .open_regular_create(lock_name, true, false, 0o600)
@@ -358,15 +431,12 @@ impl ChainLock {
                 .ok_or_else(|| anyhow!("chain lock anchor is absent"))?
         };
 
-        // Acquire exclusive flock on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                anyhow::bail!("flock failed: {}", std::io::Error::last_os_error());
-            }
-        }
+        let lock_file =
+            lillux::locks::ForkClosedLockFile::register(lock_file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
+        lock_file
+            .lock_exclusive()
+            .map_err(|error| anyhow!("flock failed: {error}"))?;
 
         Ok(ChainLock {
             _lock_file: lock_file,
@@ -1202,6 +1272,41 @@ pub(crate) fn read_authoritative_thread_append_anchor_with_trust(
     }))
 }
 
+/// Capture one immutable thread-event frontier from a trust-verified signed
+/// head. Callers may release the chain lock after this returns: later pages
+/// authenticate the fixed CAS predecessor path rather than re-reading a moving
+/// head.
+pub(crate) fn capture_authoritative_thread_event_read_anchor_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    thread_id: &str,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<AuthoritativeThreadEventReadAnchorReadback>> {
+    let Some((chain_head_hash, chain_state)) = read_chain_state_with_verified_head(
+        cas_root,
+        refs_root,
+        chain_lock,
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(entry) = chain_state.threads.get(thread_id) else {
+        return Ok(None);
+    };
+    Ok(Some(AuthoritativeThreadEventReadAnchorReadback {
+        chain_head_hash,
+        snapshot_hash: entry.snapshot_hash.clone(),
+        thread_last_event_hash: entry.last_event_hash.clone(),
+        thread_last_seq: entry.last_thread_seq,
+    }))
+}
+
 /// Read one thread's complete event chain and current append position from the
 /// same trust-verified signed head. This is the commit-qualified readback used
 /// only after an append returned an error that may have followed head
@@ -1465,7 +1570,6 @@ pub(crate) fn read_authoritative_root_birth_with_trust(
 /// returns. The pending Set is durable before the signed head becomes visible.
 // The authority-bearing lock, expected head, signer, and trust store stay
 // explicit so publication provenance cannot be hidden in an opaque argument bag.
-#[allow(clippy::too_many_arguments)]
 fn publish_chain_head(
     cas_root: &Path,
     refs_root: &Path,
@@ -1587,7 +1691,6 @@ pub(crate) fn create_chain_with_trust(
 
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_chain_with_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -1709,7 +1812,6 @@ pub(crate) fn create_chain_with_trust_under_lock(
 /// authoritative chain write.
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_chain_with_events_and_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -1980,6 +2082,34 @@ pub(crate) fn append_events_with_trust_under_lock(
     head_cache: &mut HeadCache,
     lock: &ChainLock,
 ) -> anyhow::Result<AppendResult> {
+    match append_events_with_trust_under_lock_inner(input, trust_store, head_cache, lock, None)? {
+        ConditionalAppendResult::Appended(result) => Ok(result),
+        ConditionalAppendResult::Conflict => {
+            anyhow::bail!("unconditional append reported an anchor conflict")
+        }
+    }
+}
+
+/// Append only when the signed head and the thread frontier still equal
+/// `expected`, checked under the same chain lock that publishes the append. A
+/// moved frontier returns `Conflict` before any object is written.
+pub(crate) fn append_events_with_trust_under_lock_if_anchor(
+    input: AppendEventsInput<'_>,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    lock: &ChainLock,
+    expected: ExpectedThreadAppendAnchor<'_>,
+) -> anyhow::Result<ConditionalAppendResult> {
+    append_events_with_trust_under_lock_inner(input, trust_store, head_cache, lock, Some(expected))
+}
+
+fn append_events_with_trust_under_lock_inner(
+    input: AppendEventsInput<'_>,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    lock: &ChainLock,
+    expected: Option<ExpectedThreadAppendAnchor<'_>>,
+) -> anyhow::Result<ConditionalAppendResult> {
     let AppendEventsInput {
         cas_root,
         refs_root,
@@ -1997,15 +2127,16 @@ pub(crate) fn append_events_with_trust_under_lock(
     crate::signer::ensure_signer_trusted(signer, trust_store)?;
 
     // Read current chain head
-    let current_chain_state = read_chain_head_for_mutation(
+    let (current_chain_head_hash, current_chain_state) = read_chain_state_with_verified_head(
         cas_root,
         refs_root,
-        Some(lock),
+        lock,
         chain_root_id,
         trust_store,
         head_cache,
     )
-    .context("failed to read current chain head")?;
+    .context("failed to read current chain head")?
+    .ok_or_else(|| anyhow::anyhow!("signed ref not found for chain {chain_root_id}"))?;
 
     // Verify thread exists in chain
     if !current_chain_state.threads.contains_key(thread_id) {
@@ -2013,6 +2144,18 @@ pub(crate) fn append_events_with_trust_under_lock(
     }
 
     let current_thread_entry = &current_chain_state.threads[thread_id];
+    if let Some(expected) = &expected
+        && (expected.chain_root_id != chain_root_id || expected.thread_id != thread_id)
+    {
+        anyhow::bail!("conditional append anchor belongs to another thread");
+    }
+    if let Some(expected) = &expected
+        && (current_chain_head_hash != expected.chain_head_hash
+            || current_thread_entry.last_event_hash.as_deref() != expected.thread_last_event_hash
+            || current_thread_entry.last_thread_seq != expected.thread_last_seq)
+    {
+        return Ok(ConditionalAppendResult::Conflict);
+    }
 
     // Validate every snapshot update and load its authoritative predecessor
     // before serializing or writing any prospective event object.
@@ -2238,13 +2381,13 @@ pub(crate) fn append_events_with_trust_under_lock(
         crate::CachedHead::new(chain_state_hash.clone(), new_chain_state),
     );
 
-    Ok(AppendResult {
+    Ok(ConditionalAppendResult::Appended(AppendResult {
         chain_state_hash,
         first_chain_seq: first_chain_seq_result,
         event_count,
         events: stored_events,
         snapshot_updates,
-    })
+    }))
 }
 
 /// Add a new thread to an existing chain.
@@ -2298,7 +2441,6 @@ pub(crate) fn add_thread_to_chain_with_trust(
 
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -2447,7 +2589,6 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
 #[cfg(test)]
 // The test adapter mirrors the authority-bearing production boundary, keeping
 // CAS, refs, signer, trust, and cache inputs independently visible.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events(
     cas_root: &Path,
     refs_root: &Path,
@@ -2473,7 +2614,6 @@ pub(crate) fn add_thread_to_chain_with_events(
 #[cfg(test)]
 // Preserve the explicit authority/trust seam in tests rather than hiding
 // security-relevant inputs inside a convenience fixture.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_trust(
     cas_root: &Path,
     refs_root: &Path,
@@ -2491,6 +2631,7 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust(
         refs_root,
         chain_root_id,
         new_snapshot,
+        None,
         events,
         signer,
         trust_store,
@@ -2499,14 +2640,22 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust(
     )
 }
 
+/// Add a member thread and its initial durable events under one signed head.
+///
+/// `event_successor_snapshot`, when supplied, is the member's snapshot after
+/// its initial events: the Created snapshot and the successor are written in
+/// one CAS batch and only the successor is published in the chain entry. An
+/// in-process handler child (born running in its parent's chain) uses this so
+/// its created→running transition commits atomically with its birth, the
+/// same way a root birth publishes its event successor.
 // Mutation authority and trust inputs deliberately remain explicit at this
 // boundary; callers must prove each prerequisite independently.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
     chain_root_id: &str,
     mut new_snapshot: ThreadSnapshot,
+    mut event_successor_snapshot: Option<ThreadSnapshot>,
     mut events: Vec<ThreadEvent>,
     signer: &dyn Signer,
     trust_store: &TrustStore,
@@ -2566,6 +2715,34 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
             new_snapshot.thread_id,
             chain_root_id
         );
+    }
+    // A member born live with an event successor is a child of a live
+    // upstream member of this chain. Checked against the head read under this
+    // chain lock, before any object is written, so an upstream that turned
+    // terminal can never acquire a new live child.
+    if event_successor_snapshot.is_some() {
+        let upstream_thread_id = new_snapshot.upstream_thread_id.as_deref().ok_or_else(|| {
+            anyhow!(
+                "live member {} of chain {chain_root_id} names no upstream thread",
+                new_snapshot.thread_id
+            )
+        })?;
+        let upstream = current_chain_state
+            .threads
+            .get(upstream_thread_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "live member {} names upstream {upstream_thread_id}, which is not a member of chain {chain_root_id}",
+                    new_snapshot.thread_id
+                )
+            })?;
+        if upstream.status.is_terminal() {
+            anyhow::bail!(
+                "refusing to birth live member {} under terminal upstream {upstream_thread_id} ({}) in chain {chain_root_id}",
+                new_snapshot.thread_id,
+                upstream.status.as_str()
+            );
+        }
     }
 
     let append_timestamp =
@@ -2638,10 +2815,45 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     let snapshot_value = new_snapshot.to_value();
     let snapshot_json = lillux::canonical_json(&snapshot_value)
         .context("failed to canonicalize branch snapshot")?;
-    let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
-    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
+    let created_snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
+    let snapshot_path = lillux::shard_path(cas_root, "objects", &created_snapshot_hash, ".json");
     pending_writes.push((snapshot_path, snapshot_json.into_bytes()));
-    new_entry.snapshot_hash.clone_from(&snapshot_hash);
+    new_entry.snapshot_hash.clone_from(&created_snapshot_hash);
+
+    let (new_entry, published_snapshot, snapshot_hash) =
+        if let Some(mut successor) = event_successor_snapshot.take() {
+            validation::validate_snapshot_transition_identity(&new_snapshot, &successor)?;
+            validation::stamp_snapshot_position(&mut successor, &new_entry, final_chain_seq);
+            validation::normalize_and_validate_snapshot_transition(
+                &new_snapshot,
+                &mut successor,
+                &append_timestamp,
+            )?;
+            validation::validate_snapshot_last_event(
+                &successor,
+                successor.last_event_hash.as_deref().ok_or_else(|| {
+                    anyhow!("member successor snapshot is missing its final event hash")
+                })?,
+                stored_events
+                    .last()
+                    .expect("add_thread_with_events rejects an empty event list"),
+            )?;
+            let successor_json = lillux::canonical_json(&successor.to_value())
+                .context("failed to canonicalize branch successor snapshot")?;
+            let successor_hash = lillux::sha256_hex(successor_json.as_bytes());
+            let successor_path = lillux::shard_path(cas_root, "objects", &successor_hash, ".json");
+            pending_writes.push((successor_path, successor_json.into_bytes()));
+            let entry = ChainThreadEntry {
+                snapshot_hash: successor_hash.clone(),
+                last_event_hash: new_entry.last_event_hash.clone(),
+                last_thread_seq: new_entry.last_thread_seq,
+                status: successor.status,
+            };
+            (entry, successor, successor_hash)
+        } else {
+            (new_entry, new_snapshot.clone(), created_snapshot_hash)
+        };
+    let new_snapshot = published_snapshot;
 
     let mut new_threads = current_chain_state.threads.clone();
     new_threads.insert(new_snapshot.thread_id.clone(), new_entry);
@@ -2706,7 +2918,6 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
 /// Add one thread and append events to an existing thread in one signed head
 /// transition. This is the generic cross-thread primitive for continuation
 /// creation: neither thread's relation event can become authoritative alone.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_append_with_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,

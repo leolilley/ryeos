@@ -3,8 +3,11 @@
 //! This module is meaning-blind about tools, workers, Python, and projects.
 //! It consumes an already-authorized logical file view, builds the exact
 //! content-only manifest, and produces a proof that the binding can be
-//! redeemed from retained storage. Filesystem/root acquisition and CAS
-//! publication remain daemon responsibilities.
+//! redeemed from retained storage. Callers select filesystem/root authority;
+//! read-only view helpers can pin those selected directories. CAS publication
+//! remains a daemon responsibility.
+
+pub mod source_view;
 
 use std::path::{Path, PathBuf};
 
@@ -309,7 +312,7 @@ pub fn capture_source_candidate(
             .collect(),
         entries,
     )
-    .map_err(|error| EngineError::Internal(error.to_string()))?;
+    .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
     let (after, after_identity) = census(content, roots, ceiling)?;
     if observed != after || authority_identity != after_identity {
         return Err(EngineError::MutableEffectiveProgramAuthorityChanged);
@@ -402,7 +405,7 @@ fn census(
 
 fn validate_relative_path(label: &str, value: &str) -> anyhow::Result<()> {
     ryeos_state::objects::validate_canonical_project_relative_path(value)
-        .map_err(|error| anyhow::anyhow!("{label}: {error}"))
+        .map_err(|error| anyhow::anyhow!("{label}: {error:#}"))
 }
 
 fn validate_root_id(value: &str) -> Result<(), EngineError> {
@@ -445,7 +448,7 @@ impl SourceClosureProof {
         let value = self
             .projection
             .to_value()
-            .map_err(|error| EngineError::Internal(error.to_string()))?;
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
         let canonical = lillux::canonical_json(&value)
             .map_err(|error| EngineError::Internal(error.to_string()))?;
         Ok(lillux::sha256_hex(canonical.as_bytes()))
@@ -476,7 +479,7 @@ pub fn prove_source_closure(
 ) -> Result<SourceClosureProof, EngineError> {
     projection
         .validate()
-        .map_err(|error| EngineError::Internal(error.to_string()))?;
+        .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
     let proof = SourceClosureProof { projection };
     if proof.revalidate(store) != SourceClosureProofStatus::Current {
         return Err(EngineError::Internal(

@@ -20,11 +20,13 @@ use ryeos_isolation_protocol::{
     IsolationEnvironment, IsolationFixedParentView, IsolationLoopbackIngress, IsolationMount,
     IsolationMountAccess, IsolationNetwork, IsolationPath, IsolationPidNamespace, IsolationPlan,
     IsolationProjectWorkspace, IsolationTarget, IsolationTargetChannel,
-    IsolationWorkspaceDescendantMount, MAX_AUTHORITIES, WorkspaceLifecycleOperation,
+    IsolationTargetSealedPayload, IsolationWorkspaceDescendantMount, MAX_AUTHORITIES,
+    WorkspaceLifecycleOperation,
 };
 
 mod authority;
 mod backend;
+mod generation_scope;
 mod inspection;
 mod network_inputs;
 mod policy;
@@ -33,33 +35,41 @@ mod provenance;
 use authority::IsolationReadOnlyMountScope;
 
 pub use authority::{
-    IsolationAdmittedCommand, IsolationCommandAuthority, IsolationCommandAuthorityRef,
-    IsolationDescriptorBoundCommand, IsolationDescriptorFileIdentity,
-    IsolationFilesystemAuthorityCeiling, IsolationLaunchContext, IsolationLiveAccessAuthority,
-    IsolationNetworkAuthorityCeiling, IsolationProducerPreparedDirectoryAuthority,
-    IsolationProducerPreparedImmutableFileAuthority, IsolationProjectAuthority,
-    IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
-    IsolationTargetChannelAuthority, IsolationVerifiedCode,
-    IsolationWritableRuntimeViewMountAuthority,
+    BUNDLE_STATE_ISOLATION_DESTINATION, IsolationAdmittedCommand, IsolationBundleStateHome,
+    IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
+    IsolationDescriptorFileIdentity, IsolationFilesystemAuthorityCeiling, IsolationLaunchContext,
+    IsolationLiveAccessAuthority, IsolationNetworkAuthorityCeiling,
+    IsolationProducerPreparedDirectoryAuthority, IsolationProducerPreparedImmutableFileAuthority,
+    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
+    IsolationTargetChannelAuthority, IsolationTargetSealedPayloadAuthority, IsolationVerifiedCode,
+    IsolationWritableRuntimeViewMountAuthority, OriginalProductManifestRole,
 };
-pub use backend::ResolvedIsolationBackend;
+pub use backend::{ResolvedIsolationBackend, VerifiedIsolationBackendCapture};
+pub use generation_scope::VerifiedGeneration;
 pub use inspection::{
-    IsolationBackendInspection, IsolationBackendStatus, IsolationInspection,
-    ProcessControlReadinessReason, ProcessScopeAuthorityStatus, ProcessScopeReadiness,
-    ProtocolProcessControlReadiness,
+    CALLBACK_CAPTURED_COMPATIBLE, DescendantContainmentGuarantee, DescendantContainmentReadiness,
+    FILESYSTEM_CAPTURED_EXECUTION, GuaranteeHost, ISOLATION_ENFORCED, ISOLATION_PROVIDER,
+    IsolationBackendInspection, IsolationBackendStatus, IsolationInspection, NODE_POLICY_PROVIDER,
+    PidNamespaceContainmentQualification, ProcessControlReadinessReason,
+    ProcessScopeAuthorityStatus, ProcessScopeReadiness, ProtocolProcessControlReadiness,
+    SESSIONS_TRUSTED_PROCESS_GROUP, add_pid_namespace_containment, provide_scope_guarantee,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::TEST_ISOLATION_POLICY_RELATIVE_PATH;
 pub use policy::{
-    ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy, IsolationFilesystemPolicy,
+    AUTHORING_HOST_CLASS, ISOLATION_NAMESPACES, ISOLATION_POLICY_VERSION,
+    IsolationEnvironmentPolicy, IsolationFilesystemPolicy, IsolationHostClass, IsolationHostDirect,
     IsolationLimitsPolicy, IsolationLiveProjectPolicy, IsolationMode, IsolationNetworkMode,
-    IsolationNetworkPolicy, IsolationNetworkRuntimeFile, IsolationPolicy,
-    IsolationProcessScopePolicy,
+    IsolationNetworkPolicy, IsolationNetworkRuntimeFile, IsolationPolicy, IsolationPolicyDocument,
+    IsolationProcessScopePolicy, IsolationSharedFilesystemPolicy, MAX_HOST_CLASSES,
+    MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS, floor_requires_outright, nested_sandbox_from,
+    valid_host_class_name,
 };
 use provenance::redacted_plan_digest;
 pub use provenance::{
     AppliedIsolationLaunch, AppliedIsolationLaunchAwaitingAttachment,
-    IsolationAdapterProtocolIdentity, IsolationLaunchProvenance,
+    IsolationAdapterProtocolIdentity, IsolationCommandDelivery, IsolationExecutionPosture,
+    IsolationHostDirectContainment, IsolationHostDirectGrant, IsolationLaunchProvenance,
     IsolationRequestAwaitingAttachment,
 };
 
@@ -78,6 +88,35 @@ enum IsolationRuntimeState {
     Enforced,
 }
 
+/// The retained whole-execution containment one launch compiles against. A
+/// closed enum is right here: each variant is a mechanism with its own
+/// plan contract, not a policy choice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedContainment<'a> {
+    /// Strict process group: the sandbox denies `setsid`/`setpgid`, and the
+    /// launcher's group is the only containment.
+    Group,
+    /// A cgroup scope, with its own nested-sandbox and quiescence authority.
+    Cgroup(&'a lillux::ProcessScopeRecovery),
+    /// The target's own PID-namespace init, retained by the launcher: every
+    /// descendant is contained even after leaving the group. No quiescence.
+    PidNamespaceInit,
+}
+
+impl<'a> RetainedContainment<'a> {
+    fn of(scope: Option<&'a lillux::ProcessScope>) -> Self {
+        match scope {
+            None => Self::Group,
+            Some(scope) if scope.is_pid_namespace_init() => Self::PidNamespaceInit,
+            Some(scope) => Self::Cgroup(scope.recovery()),
+        }
+    }
+
+    fn is_cgroup(self) -> bool {
+        matches!(self, Self::Cgroup(_))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestedLaunchLifecycle {
     Run,
@@ -90,6 +129,129 @@ struct CompiledIsolationLaunch {
     expected_applied_launch: Option<lillux::LinuxSandboxAppliedLaunchCommitments>,
     expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
     loopback_transfer: Option<CompiledLoopbackTransfer>,
+    original_command_binding: Option<CompiledOriginalCommandBinding>,
+}
+
+/// Custody produced only by the actual original held target compiler.
+/// No selected GPU role, funding, applied observation or release authority.
+pub(crate) struct CompiledOriginalCommandBinding {
+    command: IsolationAdmittedCommand,
+    realization_tree: Option<lillux::InheritedDescriptorAuthority>,
+    target: lillux::LinuxSandboxAppliedLaunchCommitments,
+    mounts: lillux::LinuxSandboxMountPreparationCommitments,
+    backend: Arc<VerifiedIsolationBackendCapture>,
+    original_deadline: lillux::time::MonotonicDeadline,
+}
+
+impl CompiledOriginalCommandBinding {
+    pub(crate) fn require_same_compilation(
+        &self,
+        target: &lillux::LinuxSandboxAppliedLaunchCommitments,
+        mounts: &lillux::LinuxSandboxMountPreparationCommitments,
+        backend: &Arc<VerifiedIsolationBackendCapture>,
+    ) -> Result<(), EngineError> {
+        if self.target != *target || self.mounts != *mounts || !Arc::ptr_eq(&self.backend, backend)
+        {
+            return Err(refused(
+                "original command custody differs from its compiler return".into(),
+            ));
+        }
+        if self.original_deadline.has_elapsed() {
+            return Err(refused(
+                "original command custody expired before process contact".into(),
+            ));
+        }
+        let command = match &self.command {
+            IsolationAdmittedCommand::DescriptorBound(command) => {
+                if self.realization_tree.is_some() {
+                    return Err(refused(
+                        "standalone command custody carries a foreign tree".into(),
+                    ));
+                }
+                command
+            }
+            IsolationAdmittedCommand::RealizationMember(command) => {
+                let tree = self.realization_tree.as_ref().ok_or_else(|| {
+                    refused("original member command custody lost its actual tree".into())
+                })?;
+                if tree.directory_identity().map_err(|error| {
+                    refused(format!("identify retained original command tree: {error}"))
+                })? != command.realization_root()
+                {
+                    return Err(refused(
+                        "original member command custody changed tree".into(),
+                    ));
+                }
+                command.command()
+            }
+        };
+        validate_descriptor_bound_command(command)
+    }
+}
+
+// Called downstream of target preparation with the exact selected mount
+// handle. A source identity or public descriptor-bound DTO alone is insufficient.
+fn retain_original_prepared_command(
+    authority: Option<IsolationCommandAuthorityRef<'_>>,
+    prepared_target: &lillux::InheritedDescriptorAuthority,
+) -> Result<IsolationAdmittedCommand, EngineError> {
+    let (retained, command) = match authority {
+        Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => (
+            IsolationAdmittedCommand::DescriptorBound(command.clone()),
+            command,
+        ),
+        Some(IsolationCommandAuthorityRef::RealizationMember(member)) => (
+            IsolationAdmittedCommand::RealizationMember(member.clone()),
+            member.command(),
+        ),
+        _ => {
+            return Err(refused(
+                "original held compiler requires an admitted descriptor-backed command".into(),
+            ));
+        }
+    };
+    validate_descriptor_bound_command(command)?;
+    if !command
+        .executable()
+        .same_file_identity(prepared_target)
+        .map_err(|error| refused(format!("compare original prepared executable: {error}")))?
+        || descriptor_file_identity(prepared_target)? != command.file_identity()
+    {
+        return Err(refused(
+            "original command descriptor differs from prepared target".into(),
+        ));
+    }
+    Ok(retained)
+}
+
+fn retain_original_prepared_tree(
+    command: &IsolationAdmittedCommand,
+    mounts: &[IsolationReadOnlyMountAuthority],
+) -> Result<Option<lillux::InheritedDescriptorAuthority>, EngineError> {
+    let IsolationAdmittedCommand::RealizationMember(member) = command else {
+        return Ok(None);
+    };
+    let mount = mounts
+        .iter()
+        .find(|mount| {
+            matches!(
+                mount.scope(),
+                IsolationReadOnlyMountScope::ProjectRealization
+                    | IsolationReadOnlyMountScope::ExecutionRuntimeRealization
+            ) && mount.destination() == member.realization_destination()
+        })
+        .ok_or_else(|| refused("original command custody lost its prepared tree mount".into()))?;
+    if mount
+        .source()
+        .directory_identity()
+        .map_err(|error| refused(format!("identify original prepared command tree: {error}")))?
+        != member.realization_root()
+    {
+        return Err(refused(
+            "original prepared command tree binding changed".into(),
+        ));
+    }
+    Ok(Some(mount.source().clone()))
 }
 
 struct CompiledLoopbackTransfer {
@@ -231,6 +393,7 @@ pub struct IsolationRuntime {
     /// Exact daemon-lifetime backend capture used by enforced execution.
     /// Disabled snapshots always carry `None`.
     backend_capture: Option<Arc<ResolvedIsolationBackend>>,
+    verified_backend_capture: Option<Arc<VerifiedIsolationBackendCapture>>,
     network_runtime_files: Vec<network_inputs::CapturedNetworkFile>,
     process_scope_provider: Option<Arc<lillux::ProcessScopeProvider>>,
     /// Optional higher-level generation guard retained by standalone
@@ -243,6 +406,11 @@ pub struct IsolationRuntime {
     generation_node_trust: Option<TrustStore>,
     generation_bundle_roots: Option<Vec<PathBuf>>,
     generation_registered_bundle_roots: Option<Vec<crate::item_resolution::RegisteredBundleRoot>>,
+    /// Present only on a per-launch view made by
+    /// [`IsolationRuntime::host_direct_launch`]: the operator grant under
+    /// which this one launch runs on the host. The node's shared runtime
+    /// never carries it.
+    host_direct: Option<Arc<IsolationHostDirectGrant>>,
 }
 
 /// Kind-neutral evidence for one daemon-owned workspace lifecycle transition.
@@ -342,6 +510,10 @@ struct PinnedDaemonSocket {
     parent: Arc<lillux::PinnedDirectory>,
     name: std::ffi::OsString,
     entry: lillux::InheritedDescriptorAuthority,
+    /// Daemon endpoints a sandboxed launch must never be given: the control
+    /// socket, as its configured spelling and its canonical location. No
+    /// readable mount may equal or contain any of them.
+    withheld: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -557,7 +729,7 @@ impl VerifiedArtifactStore {
             }
             None => match self
                 .root
-                .atomic_create_regular(name.as_ref(), content, 0o500)
+                .atomic_create_regular(name.as_ref(), content, 0o500, crate::ENGINE_TEMP_PURPOSE)
                 .map_err(|error| {
                     refused(format!(
                         "verified artifact {} cannot be written: {error}",
@@ -715,6 +887,7 @@ enum WritableMountAuthority {
     Policy,
     DaemonCheckpoint,
     DaemonStateRoot,
+    BundleStateHome,
 }
 
 #[derive(Debug, Clone)]
@@ -767,6 +940,10 @@ struct CodeNamespace<'a> {
     project_destination: &'a Path,
     canonical_project: &'a Path,
     bundle_roots: &'a [PathBuf],
+    /// False when the live project is served through a fixed-parent view:
+    /// mirroring the whole project root as readable code authority would
+    /// reintroduce the paths the view withholds.
+    project_mirror: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -794,7 +971,6 @@ struct ReadableMountResolution<'a> {
     daemon_socket: Option<&'a PinnedDaemonSocket>,
     requested_daemon_socket: Option<&'a Path>,
     bundle_roots: &'a [PathBuf],
-    node_trusted_keys_dir: Option<&'a Path>,
     verified_code_mounts: &'a [ReadableMount],
 }
 
@@ -806,6 +982,7 @@ struct WritableMountValidation<'a> {
     runtime_workspace_authorized: bool,
     canonical_checkpoint_dir: Option<&'a Path>,
     canonical_state_root: Option<&'a Path>,
+    canonical_bundle_state_home: Option<&'a Path>,
 }
 
 struct PreparedProjectWorkspace {
@@ -1078,10 +1255,11 @@ impl IsolationRuntime {
                 self.verify_runtime_workspace_layout(workspace_id, &project_root, None)?;
                 let root_identity =
                     |label: &str, root: &lillux::PinnedDirectory| -> Result<String, EngineError> {
-                        let (device, inode) = root.device_inode().map_err(|error| {
-                            refused(format!("inspect workspace {label} identity: {error}"))
-                        })?;
-                        Ok(format!("dev{device}-ino{inode}"))
+                        root.identity()
+                            .and_then(|identity| identity.canonical_text())
+                            .map_err(|error| {
+                                refused(format!("inspect workspace {label} identity: {error}"))
+                            })
                     };
                 let pinned_root_identities = BTreeMap::from([(
                     "project".to_string(),
@@ -1318,10 +1496,11 @@ impl IsolationRuntime {
                 }
                 let root_identity =
                     |label: &str, root: &lillux::PinnedDirectory| -> Result<String, EngineError> {
-                        let (device, inode) = root.device_inode().map_err(|error| {
-                            refused(format!("inspect workspace {label} identity: {error}"))
-                        })?;
-                        Ok(format!("dev{device}-ino{inode}"))
+                        root.identity()
+                            .and_then(|identity| identity.canonical_text())
+                            .map_err(|error| {
+                                refused(format!("inspect workspace {label} identity: {error}"))
+                            })
                     };
                 let observed_roots = BTreeMap::from([
                     (
@@ -1470,44 +1649,97 @@ impl IsolationRuntime {
                 policy.version, ISOLATION_POLICY_VERSION
             )));
         }
+        if !valid_host_class_name(&policy.host_class) {
+            return Err(refused(format!(
+                "isolation host class {:?} is not a canonical name",
+                policy.host_class
+            )));
+        }
         validate_policy_semantics(policy)?;
-        if policy.filesystem.proc_filesystem
-            == ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested
-            && !matches!(
+        // The nested sandbox is one permission with two signed halves: the
+        // floor requires `isolation:namespaces` outright, and the proc
+        // ceiling is `pid_namespace_nested`. Either half alone is refused so
+        // the permission can be read from either.
+        let nested_proc = policy.filesystem.proc_filesystem
+            == ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
+        let namespaces_required =
+            floor_requires_outright(&policy.requires_capabilities, ISOLATION_NAMESPACES);
+        if nested_proc && !namespaces_required {
+            return Err(refused(format!(
+                "pid_namespace_nested proc requires {ISOLATION_NAMESPACES} in isolation \
+                 requires_capabilities"
+            )));
+        }
+        if namespaces_required && !nested_proc {
+            return Err(refused(format!(
+                "{ISOLATION_NAMESPACES} in isolation requires_capabilities requires \
+                 pid_namespace_nested proc"
+            )));
+        }
+        if policy.nested_sandbox() {
+            if !matches!(
                 policy.process_scopes,
-                IsolationProcessScopePolicy::Required {
-                    nested_sandbox: true,
-                    ..
-                }
-            )
+                IsolationProcessScopePolicy::Required { .. }
+            ) {
+                return Err(refused(
+                    "nested sandbox policy requires required process scopes".to_owned(),
+                ));
+            }
+            if policy.mode != IsolationMode::Enforce {
+                return Err(refused(
+                    "nested sandbox policy requires enforced isolation".to_owned(),
+                ));
+            }
+        }
+        if let IsolationProcessScopePolicy::Required { control_timeout_ms } = &policy.process_scopes
+            && *control_timeout_ms == 0
         {
             return Err(refused(
-                "nested proc requires explicit scoped nested-sandbox policy".to_owned(),
+                "required process scopes require a positive control deadline".to_owned(),
             ));
         }
-        if let IsolationProcessScopePolicy::Required {
-            control_timeout_ms,
-            nested_sandbox,
-        } = &policy.process_scopes
+        if let IsolationProcessScopePolicy::Required { control_timeout_ms } = &policy.process_scopes
+            && *control_timeout_ms > MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS
         {
-            if *control_timeout_ms == 0 {
-                return Err(refused(
-                    "required process scopes require a positive control deadline".to_owned(),
-                ));
-            }
-            if *nested_sandbox
-                && (policy.mode != IsolationMode::Enforce
-                    || policy.filesystem.proc_filesystem
-                        != ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested)
-            {
-                return Err(refused(
-                    "nested sandbox policy requires enforced isolation and pid_namespace_nested proc"
-                        .to_owned(),
-                ));
-            }
+            return Err(EngineError::IsolationPolicyValueAboveMaximum {
+                field: "process_scopes.control_timeout_ms",
+                value_ms: *control_timeout_ms,
+                maximum_ms: MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS,
+            });
         }
         if policy.mode == IsolationMode::Enforce {
             validate_enforced_limits(&policy.limits)?;
+        }
+        Ok(())
+    }
+
+    /// Validate a signed policy document: every host class it declares
+    /// must be canonically named and, combined with the shared policy, be
+    /// a valid runtime policy on its own. Whether the document may declare
+    /// more than one class is its holder's rule, not checked here.
+    pub fn validate_policy_document(document: &IsolationPolicyDocument) -> Result<(), EngineError> {
+        if document.version != ISOLATION_POLICY_VERSION {
+            return Err(refused(format!(
+                "unsupported node isolation policy version {} (expected {})",
+                document.version, ISOLATION_POLICY_VERSION
+            )));
+        }
+        if document.host_classes.is_empty() || document.host_classes.len() > MAX_HOST_CLASSES {
+            return Err(refused(format!(
+                "isolation policy must declare between 1 and {MAX_HOST_CLASSES} host classes"
+            )));
+        }
+        for name in document.host_classes.keys() {
+            let selected = document
+                .narrowed(name)
+                .and_then(IsolationPolicyDocument::into_selected_policy)
+                .map_err(refused)?;
+            Self::validate_policy(&selected).map_err(|error| match error {
+                EngineError::IsolationPolicyRefused { reason } => {
+                    refused(format!("isolation host class `{name}`: {reason}"))
+                }
+                other => other,
+            })?;
         }
         Ok(())
     }
@@ -1567,6 +1799,7 @@ impl IsolationRuntime {
             parent: Arc::new(parent),
             name: socket_name.to_os_string(),
             entry,
+            withheld: Vec::new(),
         };
         Self::load_inner(app_root, Some(socket), backend)
     }
@@ -1625,6 +1858,7 @@ impl IsolationRuntime {
     pub fn resolve_compiled_policy_for_daemon(
         app_root: &Path,
         daemon_socket: &Path,
+        withheld_control_socket: Option<&Path>,
         policy: IsolationPolicy,
         source: PathBuf,
         digest: String,
@@ -1671,6 +1905,10 @@ impl IsolationRuntime {
             parent: Arc::new(parent),
             name: socket_name.to_os_string(),
             entry,
+            withheld: withheld_control_socket
+                .map(withheld_endpoint_spellings)
+                .transpose()?
+                .unwrap_or_default(),
         };
         Self::resolve_compiled_policy_inner(
             app_root,
@@ -1762,18 +2000,21 @@ impl IsolationRuntime {
     /// Node-owned control budget, distinct from a workload request deadline.
     pub fn process_scope_control_timeout(&self) -> Result<lillux::time::Duration, EngineError> {
         self.ensure_registered_generation_current()?;
-        for capability in [
-            lillux::ProcessScopeCapability::Quiescence,
-            lillux::ProcessScopeCapability::Termination,
-            lillux::ProcessScopeCapability::Recovery,
-        ] {
+        for entry in &self.inspection.requires_capabilities {
+            let [name] = entry.names() else {
+                continue;
+            };
+            let Some(capability) = lillux::ProcessScopeCapability::from_capability_name(name)
+            else {
+                continue;
+            };
             if !self
                 .inspection
                 .process_scope_capabilities
                 .contains(&capability)
             {
                 return Err(refused(format!(
-                    "node has not qualified required process-scope capability {capability:?}"
+                    "node policy requires {name}, but the process-scope provider has not qualified it"
                 )));
             }
         }
@@ -1785,6 +2026,38 @@ impl IsolationRuntime {
                 "this execution requires a configured node process-scope provider".to_owned(),
             )),
         }
+    }
+
+    /// Admit a concrete retained containment against the node's qualified
+    /// guarantees. A cgroup scope must come from this runtime's admitted
+    /// provider generation; a PID-namespace init needs the node's passed
+    /// qualification probe. Neither is inferred from configuration alone.
+    fn validate_retained_scope(&self, scope: &lillux::ProcessScope) -> Result<(), EngineError> {
+        if scope.is_pid_namespace_init() {
+            if !self
+                .inspection
+                .process_scope_readiness
+                .descendant_containment
+                .pid_namespace
+                .qualified
+            {
+                return Err(refused(
+                    "PID-namespace descendant containment is not qualified on this node".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
+        let timeout = self.process_scope_control_timeout()?;
+        let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
+            refused("retained scope has no admitted provider generation".to_owned())
+        })?;
+        provider.validate_scope(scope).map_err(refused)?;
+        if scope.recovery().control_timeout() != timeout {
+            return Err(refused(
+                "retained process scope differs from the admitted control budget".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Prepare the allocation intent without creating a kernel resource.
@@ -1840,6 +2113,31 @@ impl IsolationRuntime {
         Ok(provenance)
     }
 
+    /// Retain same-backend actual executable capture facts exactly once.
+    /// This is not node admission, a generation witness or native evidence.
+    pub fn retain_verified_backend_capture(
+        mut self,
+        capture: Arc<VerifiedIsolationBackendCapture>,
+    ) -> Result<Self, EngineError> {
+        if self.verified_backend_capture.is_some() {
+            return Err(refused(
+                "verified backend captures cannot be replaced".into(),
+            ));
+        }
+        let backend = self.backend_capture.as_ref().ok_or_else(|| {
+            refused("verified backend capture requires this runtime's retained backend".into())
+        })?;
+        capture.require_same_backend(backend)?;
+        self.verified_backend_capture = Some(capture);
+        Ok(self)
+    }
+
+    /// Borrow retained capture facts only. Protected consumers must separately
+    /// bind actual node trust/generation and their original selected launch.
+    pub fn verified_backend_capture(&self) -> Option<&Arc<VerifiedIsolationBackendCapture>> {
+        self.verified_backend_capture.as_ref()
+    }
+
     pub fn retain_registered_generation(
         mut self,
         lifeline: Arc<dyn IsolationGenerationLifeline>,
@@ -1884,16 +2182,88 @@ impl IsolationRuntime {
         self.generation_registered_bundle_roots.as_deref()
     }
 
+    /// Verify every installed bundle of the retained generation now. This
+    /// always verifies, also inside a guarded operation: every caller that is
+    /// about to launch a workload, allocate a resource or commit a write keeps
+    /// its own real check immediately before that effect.
     pub fn ensure_registered_generation_current(&self) -> Result<(), EngineError> {
         match &self._generation_lifeline {
             Some(lifeline) => {
-                lifeline
-                    .ensure_current()
-                    .map_err(|reason| EngineError::IsolationPolicyRefused {
-                        reason: format!("registered bundle generation changed: {reason}"),
-                    })
+                let started = std::time::Instant::now();
+                let outcome = lifeline.ensure_current();
+                crate::work_tally::GENERATION_VERIFICATIONS.record(started.elapsed());
+                outcome.map_err(|reason| EngineError::IsolationPolicyRefused {
+                    reason: format!("registered bundle generation changed: {reason}"),
+                })
             }
             None => Ok(()),
+        }
+    }
+
+    /// Verification point of work that commits nothing: it only produces a
+    /// value which the enclosing guarded operation refuses if its
+    /// after-verification fails.
+    ///
+    /// Inside a [`Self::with_verified_generation`] operation for this same
+    /// generation on the calling thread, the operation's own before and after
+    /// verification covers this point and nothing is re-verified. Everywhere
+    /// else this verifies every installed bundle now.
+    ///
+    /// The only callers are the launch of a handler subprocess
+    /// ([`Self::apply_handler_launch`]) and, through
+    /// [`Self::with_verified_generation`], a nested guarded operation.
+    pub(crate) fn ensure_registered_generation_current_unless_covered(
+        &self,
+    ) -> Result<(), EngineError> {
+        if self
+            .registered_generation_identity
+            .is_some_and(generation_scope::is_covered)
+        {
+            return Ok(());
+        }
+        self.ensure_registered_generation_current()
+    }
+
+    /// Run `operation` against the retained bundle generation, verified once
+    /// before and once after. A failed after-verification refuses the
+    /// operation's result.
+    ///
+    /// The token passed to `operation` names the verified generation. While
+    /// `operation` runs, a nested guarded operation and a handler subprocess
+    /// launch for that generation on the calling thread are covered by this
+    /// operation's two verifications. Every other verification point still
+    /// verifies for itself.
+    /// Nested inside an operation for the same generation, this adds no
+    /// verification of its own; the outermost operation's after-verification
+    /// still runs and still refuses its result.
+    pub fn with_verified_generation<T, E>(
+        &self,
+        operation: impl FnOnce(&VerifiedGeneration) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<EngineError>,
+    {
+        match (
+            &self._generation_lifeline,
+            self.registered_generation_identity,
+        ) {
+            (Some(_), Some(identity)) => generation_scope::run_verified(
+                identity,
+                || self.ensure_registered_generation_current().map_err(E::from),
+                operation,
+            ),
+            // A lifeline is always retained together with its identity; an
+            // unidentified one could not be matched by any enclosed
+            // verification point, so nothing is ever covered for it.
+            (Some(_), None) => {
+                self.ensure_registered_generation_current()
+                    .map_err(E::from)?;
+                let value = generation_scope::run_unregistered(operation)?;
+                self.ensure_registered_generation_current()
+                    .map_err(E::from)?;
+                Ok(value)
+            }
+            (None, _) => generation_scope::run_unregistered(operation),
         }
     }
 
@@ -1914,6 +2284,66 @@ impl IsolationRuntime {
 
     pub fn is_enforced(&self) -> bool {
         self.state == IsolationRuntimeState::Enforced
+    }
+
+    /// The per-launch view under which one operator-granted host-authority
+    /// launch runs on the host.
+    ///
+    /// The view keeps this generation's identity, limits, verified-artifact
+    /// store and process-scope provider, and compiles every launch with the
+    /// disabled-isolation semantics: no adapter, exact-digest command and
+    /// source delivery through retained descriptors, the node's output caps,
+    /// and cgroup containment when the grant requires a scope. Ordinary
+    /// launches keep the node's shared runtime; only the launch holding this
+    /// view is affected. The lane must offer host-direct execution: an
+    /// `unavailable` lane refuses whatever the grant says.
+    pub fn host_direct_launch(&self, grant: IsolationHostDirectGrant) -> Result<Self, EngineError> {
+        if self.inspection.host_direct != IsolationHostDirect::OperatorGranted {
+            return Err(refused(format!(
+                "host_access_lane_unavailable: host class `{}` says host_direct: {}",
+                self.inspection.host_class,
+                self.inspection.host_direct.as_str()
+            )));
+        }
+        if self.host_direct.is_some() {
+            return Err(refused(
+                "a host-direct launch view cannot be derived from another".to_owned(),
+            ));
+        }
+        if grant.containment == IsolationHostDirectContainment::Scope
+            && self.process_scope_provider.is_none()
+        {
+            return Err(refused(format!(
+                "host_access_containment_unavailable: grant `{}` requires a process scope, but host class `{}` has no qualified scope provider (process_scopes: {:?})",
+                grant.grant_id, self.inspection.host_class, self.inspection.process_scopes
+            )));
+        }
+        let mut runtime = self.clone();
+        runtime.state = IsolationRuntimeState::Disabled;
+        runtime.backend_capture = None;
+        runtime.verified_backend_capture = None;
+        runtime.host_direct = Some(Arc::new(grant));
+        Ok(runtime)
+    }
+
+    /// The operator grant of a per-launch host-direct view; `None` on the
+    /// node's shared runtime and every confined launch.
+    pub fn host_direct_grant(&self) -> Option<&IsolationHostDirectGrant> {
+        self.host_direct.as_deref()
+    }
+
+    /// The guarantees this node reports for variant selection, graded by the
+    /// same function the signed capability report uses.
+    pub fn reported_guarantees(&self) -> lillux::process_control::HostCapabilities {
+        self.inspection
+            .reported_guarantees(self.is_enforced(), &GuaranteeHost::observe())
+    }
+
+    /// The node's signed capability floor. A mechanism proof graded below
+    /// measured is admitted for selection only where this floor names it and
+    /// accepts the grade.
+    pub fn capability_floor(&self) -> &[lillux::process_control::CapabilityRequirement] {
+        &self.inspection.requires_capabilities
     }
 
     /// Whether this runtime can enforce an isolated-network launch ceiling.
@@ -2147,7 +2577,7 @@ impl IsolationRuntime {
         }
         #[cfg(target_os = "linux")]
         let executable = {
-            let mut source = source;
+            let source = source;
             let before =
                 lillux::require_effective_user_owned_regular(&source).map_err(|error| {
                     refused(format!("admitted command source is not protected: {error}"))
@@ -2163,7 +2593,7 @@ impl IsolationRuntime {
             let observation = lillux::observe_open_regular_file(&source)
                 .map_err(|error| refused(format!("observe admitted command source: {error}")))?;
             let content =
-                lillux::read_open_regular_file_stable_bounded(&mut source, &observation, max_bytes)
+                lillux::read_open_regular_file_stable_bounded(&source, &observation, max_bytes)
                     .map_err(|error| {
                         refused(format!(
                             "read admitted command source {}: {error}",
@@ -2305,6 +2735,39 @@ impl IsolationRuntime {
         })
     }
 
+    /// Apply this immutable policy snapshot to the launch of one handler
+    /// subprocess: a parser, composer, validator or evidence projector.
+    ///
+    /// A handler is launched by its exact verified executable digest, sees
+    /// installed bundle roots read-only, is given no writable mount, and
+    /// returns only a value. Launching one commits nothing. Inside a guarded
+    /// operation for this generation its result is refused together with the
+    /// operation's when the after-verification fails, so the launch does not
+    /// verify the generation again there. Outside a guarded operation it
+    /// verifies before and after, as every other launch does.
+    pub(crate) fn apply_handler_launch(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+    ) -> Result<lillux::SubprocessRequest, EngineError> {
+        self.ensure_registered_generation_current_unless_covered()?;
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::Run,
+            RetainedContainment::Group,
+            None,
+            None,
+            None,
+        )?;
+        self.ensure_registered_generation_current_unless_covered()?;
+        tracing::debug!(
+            isolation = ?applied.provenance,
+            "compiled isolation launch provenance"
+        );
+        Ok(applied.request)
+    }
+
     pub fn apply_with_provenance(
         &self,
         request: lillux::SubprocessRequest,
@@ -2315,6 +2778,7 @@ impl IsolationRuntime {
             request,
             context,
             RequestedLaunchLifecycle::Run,
+            RetainedContainment::Group,
             None,
             None,
             None,
@@ -2358,22 +2822,14 @@ impl IsolationRuntime {
     ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
         self.ensure_registered_generation_current()?;
         if let Some(scope) = scope.as_ref() {
-            let timeout = self.process_scope_control_timeout()?;
-            let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
-                refused("retained scope has no admitted provider generation".to_owned())
-            })?;
-            provider.validate_scope(scope).map_err(refused)?;
-            if scope.recovery().control_timeout() != timeout {
-                return Err(refused(
-                    "retained process scope differs from the admitted control budget".to_owned(),
-                ));
-            }
+            self.validate_retained_scope(scope)?;
         }
         let applied = self.apply_with_provenance_current(
             request,
             context,
             RequestedLaunchLifecycle::AwaitAttachment,
-            scope.as_ref().map(|scope| scope.recovery()),
+            RetainedContainment::of(scope.as_ref()),
+            None,
             None,
             None,
         )?;
@@ -2383,6 +2839,7 @@ impl IsolationRuntime {
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: None,
         })
     }
 
@@ -2398,23 +2855,15 @@ impl IsolationRuntime {
     ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
         self.ensure_registered_generation_current()?;
         if let Some(scope) = scope.as_ref() {
-            let timeout = self.process_scope_control_timeout()?;
-            let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
-                refused("retained scope has no admitted provider generation".to_owned())
-            })?;
-            provider.validate_scope(scope).map_err(refused)?;
-            if scope.recovery().control_timeout() != timeout {
-                return Err(refused(
-                    "retained process scope differs from the admitted control budget".to_owned(),
-                ));
-            }
+            self.validate_retained_scope(scope)?;
         }
         let applied = self.apply_with_provenance_current(
             request,
             context,
             RequestedLaunchLifecycle::AwaitAttachment,
-            scope.as_ref().map(|scope| scope.recovery()),
+            RetainedContainment::of(scope.as_ref()),
             Some(devices),
+            None,
             None,
         )?;
         self.ensure_registered_generation_current()?;
@@ -2423,6 +2872,81 @@ impl IsolationRuntime {
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
             expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: None,
+        })
+    }
+
+    /// Compile the same held unscoped request with the original owner-supplied
+    /// sealed local window and existing node-selected device descriptors.
+    /// This generic compiler grants no financial/node/device/Runtime release
+    /// authority. The caller must consume its SAME retained original funded
+    /// owner; missing qualified admission remains refusal, never null fallback.
+    pub fn apply_awaiting_attachment_with_original_namespace_occupancy(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+        devices: &lillux::CharacterDeviceSet,
+        original_window: lillux::time::OriginalNamespaceOccupancyHandoff,
+    ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
+        let original_deadline = original_window.original_deadline();
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired before compilation".into(),
+            ));
+        }
+        self.ensure_registered_generation_current()?;
+        let capture = self.verified_backend_capture.as_ref().ok_or_else(|| {
+            refused("selected original compiler lacks actual retained backend captures".into())
+        })?;
+        let backend = self.backend_capture.as_ref().ok_or_else(|| {
+            refused("selected original compiler lacks its same retained backend".into())
+        })?;
+        capture.require_same_backend(backend)?;
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired before selected translation".into(),
+            ));
+        }
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::AwaitAttachment,
+            RetainedContainment::Group,
+            Some(devices),
+            None,
+            Some(original_window),
+        )?;
+        self.ensure_registered_generation_current()?;
+        capture.require_same_backend(backend)?;
+        if original_deadline.has_elapsed() {
+            return Err(refused(
+                "original backend capture deadline expired during compilation".into(),
+            ));
+        }
+        let binding = applied
+            .original_command_binding
+            .as_ref()
+            .ok_or_else(|| refused("original compiler omitted prepared command custody".into()))?;
+        binding.require_same_compilation(
+            applied
+                .expected_applied_launch
+                .as_ref()
+                .ok_or_else(|| refused("original compiler omitted target commitments".into()))?,
+            applied
+                .expected_mount_preparation
+                .as_ref()
+                .ok_or_else(|| refused("original compiler omitted mount commitments".into()))?,
+            capture,
+        )?;
+        Ok(AppliedIsolationLaunchAwaitingAttachment {
+            request: IsolationRequestAwaitingAttachment::new_with_original_backend_capture(
+                applied.request,
+                Arc::clone(capture),
+            ),
+            provenance: applied.provenance,
+            expected_applied_launch: applied.expected_applied_launch,
+            expected_mount_preparation: applied.expected_mount_preparation,
+            original_command_binding: applied.original_command_binding,
         })
     }
 
@@ -2441,23 +2965,15 @@ impl IsolationRuntime {
         ingress
             .validate()
             .map_err(|error| refused(error.to_string()))?;
-        let timeout = self.process_scope_control_timeout()?;
-        let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
-            refused("retained scope has no admitted provider generation".to_owned())
-        })?;
-        provider.validate_scope(&scope).map_err(refused)?;
-        if scope.recovery().control_timeout() != timeout {
-            return Err(refused(
-                "retained process scope differs from the admitted control budget".into(),
-            ));
-        }
+        self.validate_retained_scope(&scope)?;
         let applied = self.apply_with_provenance_current(
             request,
             context,
             RequestedLaunchLifecycle::AwaitAttachment,
-            Some(scope.recovery()),
+            RetainedContainment::of(Some(&scope)),
             None,
             Some(ingress),
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchWithLoopbackIngress {
@@ -2480,15 +2996,32 @@ impl IsolationRuntime {
         request: lillux::SubprocessRequest,
         context: IsolationLaunchContext<'_>,
         lifecycle: RequestedLaunchLifecycle,
-        process_scope: Option<&lillux::ProcessScopeRecovery>,
+        containment: RetainedContainment<'_>,
         selected_devices: Option<&lillux::CharacterDeviceSet>,
         loopback_ingress: Option<&IsolationLoopbackIngress>,
+        original_occupancy: Option<lillux::time::OriginalNamespaceOccupancyHandoff>,
     ) -> Result<CompiledIsolationLaunch, EngineError> {
         // Keep this seam backend-neutral. The engine may compile only the
         // signed generic isolation policy/protocol and retain exact descriptor
         // carriers. Namespace, mount, descriptor, process, and host-path
         // mechanics belong to Lillux; never add a backend-specific branch or
         // an ambient-path fallback here.
+        if context.filesystem_authority_ceiling
+            == IsolationFilesystemAuthorityCeiling::CapturedInputs
+        {
+            return Err(refused(
+                "captured inputs workspace view is not supported by this local isolation compiler"
+                    .into(),
+            ));
+        }
+        if original_occupancy.is_some()
+            && (self.state == IsolationRuntimeState::Disabled
+                || lifecycle != RequestedLaunchLifecycle::AwaitAttachment
+                || containment != RetainedContainment::Group
+                || loopback_ingress.is_some())
+        {
+            return Err(refused("original occupancy cannot downgrade held enforced launch, acquire local scope or use an unrelated loopback transfer".into()));
+        }
         validate_workspace_view_context(
             self.state,
             context.project_authority,
@@ -2507,6 +3040,17 @@ impl IsolationRuntime {
         let verified_command_authority = context
             .verified_command
             .map(|authority| authority.authority());
+        if original_occupancy.is_some()
+            && !matches!(
+                verified_command_authority,
+                Some(IsolationCommandAuthorityRef::DescriptorBound(_))
+                    | Some(IsolationCommandAuthorityRef::RealizationMember(_))
+            )
+        {
+            return Err(refused(
+                "original held compiler cannot use a data-only command fallback".into(),
+            ));
+        }
         if request.argv0.is_some() {
             return Err(refused(
                 "caller-supplied subprocess argv[0] is not admitted by isolation policy"
@@ -2553,6 +3097,43 @@ impl IsolationRuntime {
                 ));
             }
         }
+        if context.target_sealed_payloads.len() > MAX_AUTHORITIES {
+            return Err(refused("too many typed target sealed payloads".to_string()));
+        }
+        let mut previous_payload_fd = None;
+        for payload in context.target_sealed_payloads {
+            if previous_payload_fd.is_some_and(|previous| previous >= payload.target_fd()) {
+                return Err(refused(
+                    "typed target sealed payloads must be strictly sorted by target descriptor"
+                        .to_string(),
+                ));
+            }
+            previous_payload_fd = Some(payload.target_fd());
+            if context
+                .target_channels
+                .iter()
+                .any(|channel| channel.target_fd() == payload.target_fd())
+            {
+                return Err(refused(
+                    "a target descriptor is claimed by both a channel and a sealed payload"
+                        .to_string(),
+                ));
+            }
+            if !channel_environment.insert(payload.env_name()) {
+                return Err(refused(format!(
+                    "duplicate protected target environment variable {}",
+                    payload.env_name()
+                )));
+            }
+            let inherited_descriptor = payload.inherited_descriptor().map_err(|error| {
+                refused(format!("inspect typed target sealed payload: {error}"))
+            })?;
+            if !inherited_descriptors.insert(inherited_descriptor) {
+                return Err(refused(
+                    "typed target sealed payloads alias one inherited descriptor".to_string(),
+                ));
+            }
+        }
         if self.state == IsolationRuntimeState::Enforced
             && context.filesystem_authority_ceiling
                 == IsolationFilesystemAuthorityCeiling::CapturedExecution
@@ -2589,9 +3170,8 @@ impl IsolationRuntime {
             if context.live_access.is_some()
                 || context.checkpoint_dir.is_some()
                 || context.checkpoint_authority.is_some()
-                || context.daemon_socket_path.is_some()
+                || (context.daemon_socket_path.is_some() && !context.captured_callback_socket)
                 || !context.bundle_roots.is_empty()
-                || context.node_trusted_keys_dir.is_some()
             {
                 return Err(refused(
                     "captured execution context carries ambient filesystem authority".to_string(),
@@ -2719,6 +3299,7 @@ impl IsolationRuntime {
             // safety. Retained output remains bounded by the immutable node
             // policy, with any lower caller limit preserved.
             let mut request = request;
+            let mut command_delivery = None;
             if !context.verified_code.is_empty() || context.verified_command.is_some() {
                 let lexical_command = verified_command_authority
                     .map(|authority| {
@@ -2783,7 +3364,7 @@ impl IsolationRuntime {
                         command_authority,
                         Some(IsolationCommandAuthorityRef::DescriptorBound(_))
                     );
-                    let (canonical_source, handle) = match command_authority {
+                    let (canonical_source, handle, delivery) = match command_authority {
                         Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => {
                             self.seal_descriptor_bound_command_for_disabled(command)?
                         }
@@ -2799,6 +3380,7 @@ impl IsolationRuntime {
                         rewrite_descriptor_bound_code_references(
                             &mut request.args,
                             &mut request.envs,
+                            context.verbatim_env_names,
                             &identity.source_path,
                             &destination,
                         )?;
@@ -2806,6 +3388,7 @@ impl IsolationRuntime {
                         rewrite_verified_code_references(
                             &mut request.args,
                             &mut request.envs,
+                            context.verbatim_env_names,
                             &identity.source_path,
                             &canonical_source,
                             &destination,
@@ -2819,6 +3402,7 @@ impl IsolationRuntime {
                     )?;
                     if is_command {
                         sealed_command = Some(destination.to_string_lossy().into_owned());
+                        command_delivery = Some(delivery);
                     }
                     request.inherited_fds.push(handle);
                 }
@@ -2837,6 +3421,13 @@ impl IsolationRuntime {
                     .bind_to_subprocess_request(&mut request)
                     .map_err(|error| refused(format!("bind typed target channel: {error}")))?;
             }
+            for payload in context.target_sealed_payloads {
+                payload
+                    .bind_to_subprocess_request(&mut request)
+                    .map_err(|error| {
+                        refused(format!("bind typed target sealed payload: {error}"))
+                    })?;
+            }
             let requested = request.limits.unwrap_or_default();
             request.limits = Some(lillux::SubprocessLimits {
                 // `mode: disabled` is an OS-confinement opt-out. Preserve a
@@ -2846,6 +3437,7 @@ impl IsolationRuntime {
                 max_address_space_bytes: requested.max_address_space_bytes,
                 max_cpu_seconds: requested.max_cpu_seconds,
                 max_processes: requested.max_processes,
+                deny_process_creation: requested.deny_process_creation,
                 max_stdout_bytes: Some(
                     requested
                         .max_stdout_bytes
@@ -2861,12 +3453,15 @@ impl IsolationRuntime {
                         }),
                 ),
             });
+            let mut provenance = self.launch_provenance(None);
+            provenance.command_delivery = command_delivery;
             return Ok(CompiledIsolationLaunch {
                 request,
-                provenance: self.launch_provenance(None),
+                provenance,
                 expected_applied_launch: None,
                 expected_mount_preparation: None,
                 loopback_transfer: None,
+                original_command_binding: None,
             });
         }
         if !request.inherited_fds.is_empty() {
@@ -2936,9 +3531,6 @@ impl IsolationRuntime {
         for root in context.bundle_roots {
             validate_namespace_destination("bundle root", root)?;
         }
-        if let Some(path) = context.node_trusted_keys_dir {
-            validate_namespace_destination("node trusted-keys directory", path)?;
-        }
         if let Some(path) = self.app_root_destination.as_deref() {
             validate_namespace_destination("app root", path)?;
         }
@@ -2947,8 +3539,7 @@ impl IsolationRuntime {
         let fixed_parent_views = match context.live_access {
             Some(IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
                 root,
-                root_device_id,
-                root_inode,
+                root_identity,
                 denied_control_paths,
                 authorized_write_namespaces,
             }) => {
@@ -2973,12 +3564,12 @@ impl IsolationRuntime {
                         "live project path binding changed before launch: {error}"
                     ))
                 })?;
-                let (current_device_id, current_inode) = root.device_inode().map_err(|error| {
+                let current_identity = root.identity().map_err(|error| {
                     refused(format!(
                         "live project descriptor cannot be inspected: {error}"
                     ))
                 })?;
-                if current_device_id != *root_device_id || current_inode != *root_inode {
+                if current_identity != *root_identity {
                     return Err(refused(format!(
                         "live project descriptor identity changed before launch: {}",
                         root.path().display()
@@ -3295,6 +3886,17 @@ impl IsolationRuntime {
         } else {
             None
         };
+        let bundle_state_home = context
+            .bundle_state_home
+            .map(|home| {
+                resolve_bundle_state_home(
+                    home,
+                    self.app_root.as_deref().ok_or_else(|| {
+                        refused("bundle state home requires a pinned app root".to_string())
+                    })?,
+                )
+            })
+            .transpose()?;
         if context.checkpoint_dir.is_some() != context.checkpoint_authority.is_some() {
             return Err(refused(
                 "checkpoint path and pinned authority must be supplied together".to_string(),
@@ -3366,7 +3968,13 @@ impl IsolationRuntime {
             });
         let mut resolved_writable_mounts =
             if context.project_authority == IsolationProjectAuthority::ReadOnly {
-                Vec::new()
+                // A read-only project never becomes writable, but the daemon's
+                // own checkpoint directory for this launch does: a replay-aware
+                // runtime records its progress there, never in the project.
+                configured_writable
+                    .filter(|configured| configured.as_str() == "{checkpoint_dir}")
+                    .map(|configured| resolve_writable_mount(configured, &writable_resolution))
+                    .collect::<Result<Vec<_>, _>>()?
             } else {
                 configured_writable
                     .map(|configured| resolve_writable_mount(configured, &writable_resolution))
@@ -3410,6 +4018,20 @@ impl IsolationRuntime {
                 source_handle: source_handle.clone(),
             });
         }
+        if let Some(home) = bundle_state_home.as_ref().filter(|home| home.writable) {
+            // The namespace is an exact descriptor authority. A broader policy
+            // mount that would expose sibling namespaces or other bundles'
+            // homes merely because it contains this path is dropped.
+            writable_mounts.retain(|mount| {
+                !paths_overlap(&mount.source, &home.source) || mount.source == canonical_project
+            });
+            writable_mounts.push(WritableMount {
+                source: home.source.clone(),
+                destination: PathBuf::from(BUNDLE_STATE_ISOLATION_DESTINATION),
+                authority: WritableMountAuthority::BundleStateHome,
+                source_handle: home.handle.clone(),
+            });
+        }
         writable_mounts.sort_by(|left, right| {
             left.destination
                 .cmp(&right.destination)
@@ -3426,6 +4048,10 @@ impl IsolationRuntime {
             runtime_workspace_authorized,
             canonical_checkpoint_dir: canonical_checkpoint_dir.as_deref(),
             canonical_state_root: canonical_state_root.as_deref(),
+            canonical_bundle_state_home: bundle_state_home
+                .as_ref()
+                .filter(|home| home.writable)
+                .map(|home| home.source.as_path()),
         };
         for mount in &writable_mounts {
             validate_writable_mount(&mount.source, mount.authority, &writable_validation)?;
@@ -3434,6 +4060,7 @@ impl IsolationRuntime {
             project_destination: &project_destination,
             canonical_project: &canonical_project,
             bundle_roots: context.bundle_roots,
+            project_mirror: fixed_parent_views.is_empty(),
         };
         let mut verified_code = context.verified_code.iter().collect::<Vec<_>>();
         if let Some(command) =
@@ -3484,6 +4111,7 @@ impl IsolationRuntime {
                 rewrite_descriptor_bound_code_references(
                     &mut args,
                     &mut envs,
+                    context.verbatim_env_names,
                     &verified.source_path,
                     &prepared.artifact.destination,
                 )?;
@@ -3491,6 +4119,7 @@ impl IsolationRuntime {
                 rewrite_verified_code_references(
                     &mut args,
                     &mut envs,
+                    context.verbatim_env_names,
                     &verified.source_path,
                     &prepared.canonical_source,
                     &prepared.artifact.destination,
@@ -3680,7 +4309,6 @@ impl IsolationRuntime {
             daemon_socket: self.daemon_socket.as_ref(),
             requested_daemon_socket,
             bundle_roots: context.bundle_roots,
-            node_trusted_keys_dir: context.node_trusted_keys_dir,
             verified_code_mounts: &verified_code_mounts,
         };
         if context.project_authority == IsolationProjectAuthority::ReadOnly
@@ -3724,6 +4352,11 @@ impl IsolationRuntime {
                 context.filesystem_authority_ceiling
                     == IsolationFilesystemAuthorityCeiling::NodePolicy
                     || configured.as_str() == "{verified_code}"
+                    // A daemon-admitted captured-compatible callback keeps only
+                    // the pinned socket entry; resolution mounts that entry, never
+                    // its parent directory.
+                    || (context.captured_callback_socket
+                        && configured.as_str() == "{daemon_socket}")
                     || (context.project_authority == IsolationProjectAuthority::ReadOnly
                         && configured.as_str() == "{project}")
             });
@@ -3756,6 +4389,36 @@ impl IsolationRuntime {
                     && mount.destination.starts_with(&project_destination))
             });
         }
+        if let Some(home) = bundle_state_home.as_ref().filter(|home| !home.writable) {
+            readable_mounts.retain(|mount| !paths_overlap(&mount.source, &home.source));
+            readable_mounts.push(ReadableMount {
+                source: home.source.clone(),
+                destination: PathBuf::from(BUNDLE_STATE_ISOLATION_DESTINATION),
+                source_handle: home.handle.clone(),
+                layer: 20,
+            });
+        }
+        if bundle_state_home.is_some() {
+            let destination = Path::new(BUNDLE_STATE_ISOLATION_DESTINATION);
+            let collides = |other: &Path| paths_overlap(destination, other);
+            if collides(&project_destination)
+                || collides(&cwd_destination)
+                || context.state_root.is_some_and(collides)
+                || context.checkpoint_dir.is_some_and(collides)
+                || self.app_root.as_deref().is_some_and(collides)
+                || readable_mounts
+                    .iter()
+                    .any(|mount| mount.destination != destination && collides(&mount.destination))
+                || writable_mounts
+                    .iter()
+                    .any(|mount| mount.destination != destination && collides(&mount.destination))
+            {
+                return Err(refused(format!(
+                    "bundle state mount destination {BUNDLE_STATE_ISOLATION_DESTINATION} overlaps \
+                     another launch authority"
+                )));
+            }
+        }
         // Admitted realization mounts are added only after workspace
         // supersession: they are launch-admitted authority, not configured
         // project content, and their cache source lives under the project's
@@ -3763,11 +4426,24 @@ impl IsolationRuntime {
         // pinned-workspace mode, leaving live or absent bytes where identity
         // claims the realization.
         let mut external_destinations = Vec::with_capacity(context.external_read_only_mounts.len());
+        IsolationReadOnlyMountAuthority::require_complete_original_manifest_pair(
+            context.external_read_only_mounts,
+        )
+        .map_err(|error| refused(error.to_string()))?;
         for external in context.external_read_only_mounts {
             let destination = external.destination();
             validate_namespace_destination("external realization mount", destination)?;
             match external.scope() {
-                IsolationReadOnlyMountScope::RuntimeConfiguration => {
+                IsolationReadOnlyMountScope::RuntimeConfiguration
+                | IsolationReadOnlyMountScope::OriginalProductManifest(_) => {
+                    if let IsolationReadOnlyMountScope::OriginalProductManifest(role) =
+                        external.scope()
+                        && destination != role.destination()
+                    {
+                        return Err(refused(
+                            "original product manifest has a non-role destination".into(),
+                        ));
+                    }
                     ryeos_state::objects::validate_session_runtime_configuration_destination(
                         destination.to_str().ok_or_else(|| {
                             refused("runtime configuration destination is not UTF-8".into())
@@ -4144,7 +4820,17 @@ impl IsolationRuntime {
             )));
         }
         validate_namespace_destination("command", &command_path)?;
-        let (supervised_status, status_writer, status_fd, adapter_lifecycle) = match lifecycle {
+        // Borrow the existing original handoff before moving its exact roles.
+        let original_occupancy_deadline = original_occupancy
+            .as_ref()
+            .map(lillux::time::OriginalNamespaceOccupancyHandoff::original_deadline);
+        let (
+            supervised_status,
+            status_writer,
+            status_fd,
+            adapter_lifecycle,
+            native_terminal_writer,
+        ) = match lifecycle {
             RequestedLaunchLifecycle::Run => {
                 let status = lillux::supervised_launcher_status_pipe().map_err(|reason| {
                     refused(format!(
@@ -4159,10 +4845,11 @@ impl IsolationRuntime {
                     status.writer,
                     status_fd,
                     AdapterLaunchLifecycle::Run,
+                    None,
                 )
             }
             RequestedLaunchLifecycle::AwaitAttachment => {
-                let status = lillux::supervised_launcher_attachment_status_pipe().map_err(
+                let mut status = lillux::supervised_launcher_attachment_status_pipe().map_err(
                     |reason| {
                         refused(format!(
                             "supervised launcher attachment boundary cannot be initialized: {reason}"
@@ -4172,6 +4859,32 @@ impl IsolationRuntime {
                 let status_fd = status.writer_descriptor().map_err(|reason| {
                     refused(format!("invalid supervised status descriptor: {reason}"))
                 })?;
+                let native_terminal_writer =
+                    if let Some(original) = original_occupancy_deadline {
+                        status
+                            .reader
+                            .require_applied_launch_receipt(
+                                ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+                            )
+                            .map_err(|reason| {
+                                refused(format!("require original applied launch: {reason}"))
+                            })?;
+                        status
+                            .reader
+                            .require_mount_preparation_receipt()
+                            .map_err(|reason| {
+                                refused(format!("require original held mount: {reason}"))
+                            })?;
+                        Some(status.prepare_native_settlement_channel(original).map_err(
+                            |reason| {
+                                refused(format!(
+                                    "prepare original native terminal channel: {reason}"
+                                ))
+                            },
+                        )?)
+                    } else {
+                        None
+                    };
                 let release_reader = status.attachment_release_reader;
                 let release_fd = inherited_fd(&release_reader)?;
                 inherited_fds.push(release_reader);
@@ -4186,6 +4899,7 @@ impl IsolationRuntime {
                         release_fd,
                         release_keepalive_fd,
                     },
+                    native_terminal_writer,
                 )
             }
         };
@@ -4539,6 +5253,26 @@ impl IsolationRuntime {
             });
         }
 
+        let mut sealed_payload_plan = Vec::with_capacity(context.target_sealed_payloads.len());
+        for (index, payload) in context.target_sealed_payloads.iter().enumerate() {
+            let source = IsolationAuthorityId::new(format!("target-sealed-payload-{index}"))
+                .map_err(|error| refused(error.to_string()))?;
+            let inherited_fd = payload.inherited_descriptor().map_err(|error| {
+                refused(format!("inspect target sealed-payload descriptor: {error}"))
+            })?;
+            authorities.push(IsolationAuthority {
+                id: source.clone(),
+                inherited_fd,
+                purpose: IsolationAuthorityPurpose::TargetSealedPayload,
+            });
+            payload.retain_for_child(&mut authority_handles);
+            sealed_payload_plan.push(IsolationTargetSealedPayload {
+                source,
+                target_fd: payload.target_fd(),
+                env_name: payload.env_name().to_owned(),
+            });
+        }
+
         let mut character_device_plan = Vec::new();
         if let Some(devices) = selected_devices {
             character_device_plan.reserve(devices.authorities().len());
@@ -4592,8 +5326,44 @@ impl IsolationRuntime {
                 )));
             }
         }
+        for payload in &sealed_payload_plan {
+            if environment
+                .insert(payload.env_name.clone(), payload.target_fd.to_string())
+                .is_some()
+            {
+                return Err(refused(format!(
+                    "caller cannot provide protected target sealed-payload environment variable {}",
+                    payload.env_name
+                )));
+            }
+        }
         let argv0 = command_argv0.unwrap_or_else(|| command_path.to_string_lossy().into_owned());
+        let target_limits = limits
+            .filter(|limits| {
+                limits.max_open_files.is_some()
+                    || limits.max_address_space_bytes.is_some()
+                    || limits.max_cpu_seconds.is_some()
+                    || limits.max_processes.is_some()
+                    || limits.deny_process_creation
+            })
+            .map(|limits| ryeos_isolation_protocol::IsolationTargetLimits {
+                max_open_files: target_open_files(
+                    self.inspection.limits.open_files,
+                    limits.max_open_files,
+                ),
+                max_address_space_bytes: limits.max_address_space_bytes,
+                max_cpu_seconds: limits.max_cpu_seconds,
+                max_processes: limits.max_processes,
+                deny_process_creation: limits.deny_process_creation,
+            });
+        relocate_sources_off_target_slots(
+            &mut authorities,
+            &mut authority_handles,
+            &target_channel_plan,
+            &sealed_payload_plan,
+        )?;
         let plan = IsolationPlan {
+            target_limits,
             target: IsolationTarget {
                 executable: target_authority,
                 argv0,
@@ -4605,6 +5375,7 @@ impl IsolationRuntime {
             fixed_parent_views,
             project_workspace: project_workspace_plan,
             target_channels: target_channel_plan,
+            target_sealed_payloads: sealed_payload_plan,
             environment: IsolationEnvironment {
                 values: environment,
             },
@@ -4626,7 +5397,7 @@ impl IsolationRuntime {
             // read-only task-only proc even on a nested-capable node.
             proc_filesystem: match (
                 self.inspection.filesystem.proc_filesystem,
-                process_scope.is_some(),
+                containment.is_cgroup(),
             ) {
                 (ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested, false) => {
                     ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace
@@ -4634,31 +5405,22 @@ impl IsolationRuntime {
                 (selected, _) => selected,
             },
             pid_namespace: IsolationPidNamespace::Isolated,
-            // Only a concrete retained scope replaces the strict group
+            // Only a concrete retained containment replaces the strict group
             // contract. Node capability/configuration alone cannot do so.
-            shared_process_group: process_scope.is_none(),
-            nested_sandbox: process_scope.is_some()
-                && matches!(
-                    self.inspection.process_scopes,
-                    IsolationProcessScopePolicy::Required {
-                        nested_sandbox: true,
-                        ..
-                    }
-                ),
+            shared_process_group: containment == RetainedContainment::Group,
+            // A child sandbox needs whole-execution containment AND a nested
+            // proc ceiling; only the cgroup scope was designed for that. The
+            // PID-namespace init gets ordinary task-only proc.
+            nested_sandbox: containment.is_cgroup() && self.inspection.nested_sandbox(),
         };
         let required_capabilities = plan
             .validate(&authorities)
             .map_err(|error| refused(format!("invalid compiled isolation plan: {error}")))?;
-        if !required_capabilities.is_subset(&backend.effective_capabilities) {
-            let missing = required_capabilities
-                .difference(&backend.effective_capabilities)
-                .map(|capability| format!("{capability:?}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(refused(format!(
-                "selected isolation adapter is missing required capabilities: {missing}"
-            )));
-        }
+        require_compiled_launch_capabilities(
+            required_capabilities,
+            backend,
+            original_occupancy.is_some(),
+        )?;
         let plan_digest = redacted_plan_digest(&plan)?;
         let expected_applied_launch = expected_applied_launch_commitments(&plan)?;
         let expected_mount_preparation =
@@ -4675,6 +5437,18 @@ impl IsolationRuntime {
         } else {
             (None, None)
         };
+        let original_occupancy_handles = original_occupancy.map(|window| window.into_authorities());
+        let original_namespace_occupancy = original_occupancy_handles
+            .as_ref()
+            .map(|(window, clock)| {
+                Ok::<_, EngineError>(
+                    ryeos_isolation_protocol::OriginalNamespaceOccupancyDescriptorRoles {
+                        window_fd: inherited_fd(window)?,
+                        clock_namespace_fd: inherited_fd(clock)?,
+                    },
+                )
+            })
+            .transpose()?;
         let launch_request = AdapterLaunchRequest {
             protocol: IsolationAdapterProtocolVersion::Current,
             plan,
@@ -4687,11 +5461,60 @@ impl IsolationRuntime {
                 .map(|child| child.inherited_descriptor())
                 .transpose()
                 .map_err(|error| refused(format!("inspect loopback transfer endpoint: {error}")))?,
+            original_namespace_occupancy,
+            native_terminal_fd: native_terminal_writer
+                .as_ref()
+                .map(inherited_fd)
+                .transpose()?,
             lifecycle: adapter_lifecycle,
         };
         launch_request
             .validate()
             .map_err(|error| refused(format!("invalid isolation launch request: {error}")))?;
+        // Only now have descriptor/member preparation, target mount selection,
+        // exact commitments and the complete request validation succeeded.
+        let original_command_binding = if let Some(original_deadline) = original_occupancy_deadline
+        {
+            let target_role = launch_request
+                .authorities
+                .iter()
+                .find(|authority| authority.id == launch_request.plan.target.executable)
+                .ok_or_else(|| refused("original compiled target authority missing".into()))?;
+            if target_role.purpose != IsolationAuthorityPurpose::Executable {
+                return Err(refused(
+                    "original compiled target is not executable authority".into(),
+                ));
+            }
+            let prepared_target = authority_handles
+                .iter()
+                .find(|handle| handle.inherited_descriptor().ok() == Some(target_role.inherited_fd))
+                .ok_or_else(|| {
+                    refused("original compiled target descriptor owner missing".into())
+                })?;
+            let command =
+                retain_original_prepared_command(verified_command_authority, prepared_target)?;
+            let realization_tree =
+                retain_original_prepared_tree(&command, context.external_read_only_mounts)?;
+            let backend_capture = self.verified_backend_capture.as_ref().ok_or_else(|| {
+                refused("original compiled command lacks captured backend".into())
+            })?;
+            let binding = CompiledOriginalCommandBinding {
+                command,
+                realization_tree,
+                target: expected_applied_launch.clone(),
+                mounts: expected_mount_preparation.clone(),
+                backend: Arc::clone(backend_capture),
+                original_deadline,
+            };
+            binding.require_same_compilation(
+                &expected_applied_launch,
+                &expected_mount_preparation,
+                backend_capture,
+            )?;
+            Some(binding)
+        } else {
+            None
+        };
         let request_bytes = serde_json::to_vec(&launch_request)
             .map_err(|error| refused(format!("serialize isolation request: {error}")))?;
         if request_bytes.len() > ryeos_isolation_protocol::MAX_REQUEST_BYTES {
@@ -4706,6 +5529,10 @@ impl IsolationRuntime {
         if let Some(child) = transfer_child.as_ref() {
             child.retain_for_child(&mut inherited_fds);
         }
+        if let Some((window, clock)) = original_occupancy_handles {
+            inherited_fds.push(window);
+            inherited_fds.push(clock);
+        }
         inherited_fds.extend(authority_handles);
         inherited_fds.extend(backend.artifact_handles.values().cloned());
         // The exact signed adapter is both the initial executable and the
@@ -4714,14 +5541,52 @@ impl IsolationRuntime {
         // range, and closes this original at the launcher exec boundary.
         inherited_fds.push(backend.adapter_handle.clone());
         inherited_fds.push(request_handle);
+        if let Some(writer) = native_terminal_writer {
+            let original = original_occupancy_deadline
+                .ok_or_else(|| refused("native terminal writer lost original handoff".into()))?;
+            // ALL actual inherited handles, including the newly sealed request.
+            // Adapter checks its actual stdio independently before role closure.
+            let companions = inherited_fds.iter().collect::<Vec<_>>();
+            writer
+                .require_distinct_nonblocking_pipe_writer(&companions, original)
+                .map_err(|reason| {
+                    refused(format!("validate original terminal writer: {reason}"))
+                })?;
+            inherited_fds.push(writer);
+        }
 
-        let requested_open_files = limits.as_ref().and_then(|limits| limits.max_open_files);
-        let effective_open_files = match (self.inspection.limits.open_files, requested_open_files) {
-            (Some(policy), Some(requested)) => Some(policy.min(requested)),
-            (Some(policy), None) => Some(policy),
-            (None, Some(requested)) => Some(requested),
-            (None, None) => None,
-        };
+        // The adapter's own limit covers its sandbox setup, which holds
+        // descriptors in proportion to what it inherits and places every
+        // target slot before the target's limit applies. The target inherits
+        // it, so it also covers the target's own limit (`target_limits` in the
+        // plan), or is the policy ceiling when the target sets none. Sources
+        // relocated above the highest slot may sit at or above this limit:
+        // they are already open when it is installed, and only new
+        // descriptors (dup3 onto a slot included) are bounded by it.
+        let highest_target_slot = launch_request
+            .plan
+            .target_channels
+            .iter()
+            .map(|channel| channel.target_fd)
+            .chain(
+                launch_request
+                    .plan
+                    .target_sealed_payloads
+                    .iter()
+                    .map(|payload| payload.target_fd),
+            )
+            .max();
+        let target_open_files = launch_request
+            .plan
+            .target_limits
+            .as_ref()
+            .and_then(|limits| limits.max_open_files);
+        let effective_open_files = adapter_setup_open_files(
+            inherited_fds.len(),
+            highest_target_slot,
+            target_open_files,
+            self.inspection.limits.open_files,
+        )?;
         let effective_stdout_bytes = limits
             .as_ref()
             .and_then(|limits| limits.max_stdout_bytes)
@@ -4743,6 +5608,9 @@ impl IsolationRuntime {
                 .and_then(|limits| limits.max_address_space_bytes),
             max_cpu_seconds: limits.as_ref().and_then(|limits| limits.max_cpu_seconds),
             max_processes: limits.as_ref().and_then(|limits| limits.max_processes),
+            // The sealed target carrier has already passed capability admission.
+            // Trusted adapter setup still needs to fork the final target.
+            deny_process_creation: false,
         });
 
         Ok(CompiledIsolationLaunch {
@@ -4768,6 +5636,7 @@ impl IsolationRuntime {
                 receiver,
                 request: launch_request,
             }),
+            original_command_binding,
         })
     }
 
@@ -4787,6 +5656,12 @@ impl IsolationRuntime {
             effective_capabilities: self.inspection.backend.effective_capabilities.clone(),
             network_runtime_files: network_inputs::digests(&self.network_runtime_files),
             plan_digest,
+            command_delivery: None,
+            execution_posture: self
+                .host_direct
+                .as_deref()
+                .cloned()
+                .map(IsolationExecutionPosture::HostDirect),
         }
     }
 
@@ -4890,13 +5765,8 @@ impl IsolationRuntime {
             .as_ref()
             .map(|backend| backend.effective_capabilities.clone())
             .unwrap_or_default();
-        if matches!(
-            policy.process_scopes,
-            IsolationProcessScopePolicy::Required {
-                nested_sandbox: true,
-                ..
-            }
-        ) && !effective_capabilities.contains(&IsolationCapability::ProcessNestedSandbox)
+        if policy.nested_sandbox()
+            && !effective_capabilities.contains(&IsolationCapability::ProcessNestedSandbox)
         {
             return Err(refused(
                 "selected node backend has not qualified nested-sandbox capability".to_owned(),
@@ -4919,14 +5789,16 @@ impl IsolationRuntime {
                     ProcessScopeAdmission::Execution,
                 ) => (None, BTreeSet::new()),
                 (
-                    IsolationProcessScopePolicy::Required {
-                        control_timeout_ms, ..
-                    },
+                    IsolationProcessScopePolicy::Required { control_timeout_ms },
                     ProcessScopeAdmission::Execution,
                 ) => match process_scope_provider {
                     Some(provider) => {
                         let timeout = lillux::time::Duration::from_millis(*control_timeout_ms);
-                        let capabilities = provider.qualify(timeout).map_err(refused)?;
+                        // The provider probes only the guarantees the signed
+                        // floor asks of it; a freeze the floor does not name
+                        // is neither exercised nor reported.
+                        let wanted = policy.required_process_scope_capabilities();
+                        let capabilities = provider.qualify(timeout, &wanted).map_err(refused)?;
                         (Some(provider), capabilities)
                     }
                     None => (None, BTreeSet::new()),
@@ -4934,17 +5806,35 @@ impl IsolationRuntime {
             };
         let process_scope_readiness = ProcessScopeReadiness::classify(
             policy.process_scopes.clone(),
+            policy.required_process_scope_capabilities(),
             policy.trusted_process_group_sessions,
             process_scope_authority_digest,
             process_scope_capabilities.clone(),
+            // Qualified only for an enforced execution runtime; a definition
+            // validator or disabled runtime launches nothing to contain.
+            if state == IsolationRuntimeState::Enforced
+                && matches!(scope_admission, ProcessScopeAdmission::Execution)
+            {
+                PidNamespaceContainmentQualification::probe()
+                    .graded_by(&policy.requires_capabilities)
+            } else {
+                PidNamespaceContainmentQualification::not_probed(
+                    "not probed: this runtime is not an enforced execution runtime",
+                )
+            },
         );
         Ok(Self {
             inspection: IsolationInspection {
                 source,
                 version: policy.version,
+                host_class: policy.host_class,
                 mode: policy.mode,
                 digest,
                 process_scopes: policy.process_scopes,
+                requires_capabilities: policy.requires_capabilities,
+                enclosure_inits: policy.enclosure_inits,
+                host_lifetime_bound: policy.host_lifetime_bound,
+                host_direct: policy.host_direct,
                 process_scope_capabilities,
                 process_scope_readiness,
                 backend: IsolationBackendInspection {
@@ -4975,6 +5865,7 @@ impl IsolationRuntime {
             daemon_socket,
             verified_artifacts,
             backend_capture: captured_backend,
+            verified_backend_capture: None,
             network_runtime_files,
             process_scope_provider,
             _generation_lifeline: None,
@@ -4982,6 +5873,7 @@ impl IsolationRuntime {
             generation_node_trust: None,
             generation_bundle_roots: None,
             generation_registered_bundle_roots: None,
+            host_direct: None,
         })
     }
 
@@ -5129,6 +6021,7 @@ impl IsolationRuntime {
             IsolationReadOnlyMountScope::StateOverlay
                 | IsolationReadOnlyMountScope::RuntimeConfiguration
                 | IsolationReadOnlyMountScope::RuntimeEndpoint
+                | IsolationReadOnlyMountScope::OriginalProductManifest(_)
         ) {
             return Err(refused(format!(
                 "verified code {} is covered by an ineligible configuration mount",
@@ -5233,9 +6126,27 @@ impl IsolationRuntime {
     fn seal_descriptor_bound_command_for_disabled(
         &self,
         command: &IsolationDescriptorBoundCommand,
-    ) -> Result<(PathBuf, lillux::InheritedDescriptorAuthority), EngineError> {
+    ) -> Result<
+        (
+            PathBuf,
+            lillux::InheritedDescriptorAuthority,
+            IsolationCommandDelivery,
+        ),
+        EngineError,
+    > {
         validate_descriptor_bound_command(command)?;
         let identity = command.identity();
+        if let Some(host_origin) = command.host_origin()
+            && host_origin.file_name() == identity.source_path.file_name()
+            && let Some(handle) =
+                self.retain_verified_host_inode_for_disabled(host_origin, identity)?
+        {
+            return Ok((
+                identity.source_path.clone(),
+                handle,
+                IsolationCommandDelivery::VerifiedHostInode,
+            ));
+        }
 
         #[cfg(not(unix))]
         {
@@ -5296,20 +6207,37 @@ impl IsolationRuntime {
                             identity.source_path.display()
                         ))
                     })?;
-            Ok((identity.source_path.clone(), handle))
+            Ok((
+                identity.source_path.clone(),
+                handle,
+                IsolationCommandDelivery::SealedCopy,
+            ))
         }
     }
 
-    /// Revalidate admitted code and copy the exact bytes into a kernel-sealed
-    /// anonymous file. Disabled isolation deliberately provides no filesystem
-    /// confinement, so a regular cache inode is not an immutable boundary
-    /// against another same-UID workload. Memfd seals make the bytes immutable
-    /// even after the descriptor is inherited by that workload.
+    /// Revalidate verified code and deliver it to a disabled-isolation launch.
+    /// Disabled isolation deliberately provides no filesystem confinement, so
+    /// a regular cache inode is not an immutable boundary against another
+    /// same-UID workload; memfd seals make copied bytes immutable even after
+    /// the descriptor is inherited by that workload. An admitted
+    /// command on a system runtime surface that the daemon's effective
+    /// identity provably cannot change runs from its own inode, re-digested
+    /// through the retained descriptor, so its executable self lookup names
+    /// the real file (multi-call binaries dispatch on that name). Everything
+    /// else is copied into a kernel-sealed anonymous file. Neither carrier
+    /// reopens a path after the digest.
     fn seal_verified_code_for_disabled(
         &self,
         verified: &IsolationVerifiedCode,
         executable: bool,
-    ) -> Result<(PathBuf, lillux::InheritedDescriptorAuthority), EngineError> {
+    ) -> Result<
+        (
+            PathBuf,
+            lillux::InheritedDescriptorAuthority,
+            IsolationCommandDelivery,
+        ),
+        EngineError,
+    > {
         if !verified.source_path.is_absolute() {
             return Err(refused(format!(
                 "verified code path must be absolute: {}",
@@ -5328,6 +6256,16 @@ impl IsolationRuntime {
             )));
         }
         let canonical_source = canonicalize_context_mount("verified code", &verified.source_path)?;
+        if executable
+            && let Some(handle) =
+                self.retain_verified_host_inode_for_disabled(&canonical_source, verified)?
+        {
+            return Ok((
+                canonical_source,
+                handle,
+                IsolationCommandDelivery::VerifiedHostInode,
+            ));
+        }
         let (content, metadata) = read_regular_file_bytes_limited(
             "verified code",
             &canonical_source,
@@ -5365,7 +6303,91 @@ impl IsolationRuntime {
             lillux::sealed_memfd(c"ryeos-verified-code", &content)
         }
         .map_err(|error| refused(format!("seal verified code content: {error}")))?;
-        Ok((canonical_source, handle))
+        Ok((
+            canonical_source,
+            handle,
+            IsolationCommandDelivery::SealedCopy,
+        ))
+    }
+
+    /// Retain the original inode of an admitted host command when the
+    /// daemon's effective identity provably cannot change its bytes, which a
+    /// workload launched with the same credentials therefore cannot either.
+    /// `None` means that proof does not hold and the caller seals a copy; it
+    /// is the delivery rule, not a fallback, and the launch records which
+    /// carrier ran. A file that passes the proof but no longer carries the
+    /// admitted digest refuses, exactly as a sealed capture would.
+    fn retain_verified_host_inode_for_disabled(
+        &self,
+        canonical_source: &Path,
+        verified: &IsolationVerifiedCode,
+    ) -> Result<Option<lillux::InheritedDescriptorAuthority>, EngineError> {
+        if !is_on_system_runtime_surface(canonical_source) {
+            return Ok(None);
+        }
+        let pinned =
+            lillux::open_pinned_regular_file_no_follow(canonical_source).map_err(|error| {
+                refused(format!(
+                    "open verified host command {}: {error:#}",
+                    canonical_source.display()
+                ))
+            })?;
+        let descriptor = pinned.try_clone_descriptor().map_err(|error| {
+            refused(format!(
+                "duplicate verified host command {}: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        if let Err(error) = lillux::require_unwritable_by_effective_user(&descriptor) {
+            tracing::debug!(
+                command = %canonical_source.display(),
+                reason = %format!("{error:#}"),
+                "verified host command is not provably unwritable; sealing a copy"
+            );
+            return Ok(None);
+        }
+        drop(descriptor);
+        pinned.require_executable().map_err(|error| {
+            refused(format!(
+                "verified code {} is not executable: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        let observation = pinned.observation().map_err(|error| {
+            refused(format!(
+                "observe verified host command {}: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        let max_bytes = self.inspection.limits.verified_artifact_file_bytes;
+        if observation.size() > max_bytes {
+            return Err(refused(format!(
+                "verified host command {} is {} bytes, exceeding configured per-file limit {max_bytes}",
+                canonical_source.display(),
+                observation.size(),
+            )));
+        }
+        let actual_hash = pinned.digest_stable_exact(&observation).map_err(|error| {
+            refused(format!(
+                "digest verified host command {}: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        if actual_hash != verified.content_hash {
+            return Err(refused(format!(
+                "verified code {} changed after verification (expected {}, got {})",
+                canonical_source.display(),
+                verified.content_hash,
+                actual_hash
+            )));
+        }
+        let handle = pinned.inherited_descriptor_authority().map_err(|error| {
+            refused(format!(
+                "retain verified host command {}: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        Ok(Some(handle))
     }
 
     fn prepare_current_command(
@@ -5427,6 +6449,7 @@ impl IsolationRuntime {
             namespace.project_destination,
             namespace.canonical_project,
             namespace.bundle_roots,
+            namespace.project_mirror,
         )?;
         let artifact = ReadableMount {
             source_handle: artifact.handle,
@@ -5463,6 +6486,26 @@ impl IsolationRuntime {
             scope_admission: ProcessScopeAdmission::DefinitionValidation,
         })
         .expect("compiled disabled isolation fixture policy is valid")
+    }
+
+    /// A policy-free runtime compiled from an explicit, unenforced test
+    /// policy, for composed tests that need a lane field such as
+    /// `host_direct` without an app root or backend.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test_policy(policy: IsolationPolicy) -> Result<Self, EngineError> {
+        Self::resolve(IsolationRuntimeResolution {
+            policy,
+            source: None,
+            digest: None,
+            app_root: None,
+            app_root_authority: None,
+            app_root_destination: None,
+            daemon_socket: None,
+            backend: None,
+            process_scope_provider: None,
+            process_scope_authority_digest: None,
+            scope_admission: ProcessScopeAdmission::DefinitionValidation,
+        })
     }
 
     /// Construct the explicit disabled execution boundary with exact app-root
@@ -5506,6 +6549,29 @@ fn descriptor_file_identity(
         mode: identity.mode(),
         file_type: identity.file_type(),
     })
+}
+
+// The compiler admits the plan before forming AdapterLaunchRequest. Original
+// reporter admission must therefore happen here as well as request.validate.
+fn require_compiled_launch_capabilities(
+    mut required: BTreeSet<IsolationCapability>,
+    backend: &ResolvedIsolationBackend,
+    original_occupancy: bool,
+) -> Result<(), EngineError> {
+    if original_occupancy {
+        required.insert(IsolationCapability::ProcessOriginalNamespaceTerminalReporting);
+    }
+    if !required.is_subset(&backend.effective_capabilities) {
+        let missing = required
+            .difference(&backend.effective_capabilities)
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(refused(format!(
+            "selected isolation adapter is missing required capabilities: {missing}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_descriptor_bound_command(
@@ -5568,8 +6634,162 @@ fn validate_descriptor_bound_command(
     }
 }
 
+/// The floor is canonical data: well-formed names, each named once across
+/// the whole floor. An `any_of` set lists at least two names in sorted
+/// order, and the entries are sorted by their first name. An entry's
+/// accepted grades and provider ids are sorted, unique tokens; which grade
+/// texts exist is the entry's own refusal. A set never names
+/// a per-scope capability, whose requirement decides how scopes are
+/// configured and so must be unconditional. A weaker residency basis, which
+/// a stronger basis does not meet, is named only in a set beside
+/// `accounting`. A per-scope name needs a
+/// configured scope provider, and a configured provider's scopes cannot run
+/// without termination and recovery, so the floor must name both whenever
+/// scopes are required. Trusted enclosure inits are sorted, unique
+/// executable file names.
+fn validate_capability_floor(policy: &IsolationPolicy) -> Result<(), EngineError> {
+    use lillux::process_control::CapabilityRequirement;
+    let entries = &policy.requires_capabilities;
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in entries {
+        let names = entry.names();
+        if names.is_empty() {
+            return Err(refused(format!(
+                "isolation requires_capabilities entry {} names nothing",
+                entry.label()
+            )));
+        }
+        let is_set = match entry {
+            CapabilityRequirement::Name(_) => false,
+            CapabilityRequirement::Spec(spec) => !spec.any_of.is_empty(),
+        };
+        if is_set && (names.len() < 2 || names.windows(2).any(|pair| pair[0] >= pair[1])) {
+            return Err(refused(format!(
+                "isolation requires_capabilities entry {} must list at least two names, \
+                 sorted and unique",
+                entry.label()
+            )));
+        }
+        if let Some(reason) = lillux::process_control::floor_entry_refusal(entry) {
+            return Err(refused(format!("isolation requires_capabilities {reason}")));
+        }
+        for name in names {
+            if !well_formed_floor_token(name) {
+                return Err(refused(format!(
+                    "isolation requires_capabilities names an invalid capability {name:?}"
+                )));
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(refused(format!(
+                    "isolation requires_capabilities names {name} more than once"
+                )));
+            }
+        }
+        for (field, tokens) in [
+            ("accept", entry.accepted_grades()),
+            ("providers", entry.providers()),
+        ] {
+            if let Some(invalid) = tokens.iter().find(|token| !well_formed_floor_token(token)) {
+                return Err(refused(format!(
+                    "isolation requires_capabilities entry {} lists an invalid {field} value \
+                     {invalid:?}",
+                    entry.label()
+                )));
+            }
+            if tokens.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(refused(format!(
+                    "isolation requires_capabilities entry {} must list {field} sorted and unique",
+                    entry.label()
+                )));
+            }
+        }
+        // Which grade texts exist, and that an entry names one thing, is
+        // the entry's own rule; the shape checks above keep its message
+        // for well-formed tokens only.
+        if let Some(reason) = entry.spec_refusal() {
+            return Err(refused(format!("isolation requires_capabilities {reason}")));
+        }
+    }
+    if entries
+        .windows(2)
+        .any(|pair| pair[0].names()[0] >= pair[1].names()[0])
+    {
+        return Err(refused(
+            "isolation requires_capabilities must be sorted and unique".to_owned(),
+        ));
+    }
+    let inits = &policy.enclosure_inits;
+    if inits.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(refused(
+            "isolation enclosure_inits must be sorted and unique".to_owned(),
+        ));
+    }
+    for init in inits {
+        let file_name = !init.is_empty()
+            && init.len() <= 255
+            && init != "."
+            && init != ".."
+            && init
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() && byte != b'/');
+        if !file_name {
+            return Err(refused(format!(
+                "isolation enclosure_inits names {init:?}, which is not an executable file name"
+            )));
+        }
+    }
+    if let Some(reason) = policy
+        .host_lifetime_bound
+        .as_ref()
+        .and_then(|bound| bound.refusal())
+    {
+        return Err(refused(format!("isolation {reason}")));
+    }
+    let scoped = policy.required_process_scope_capabilities();
+    match &policy.process_scopes {
+        IsolationProcessScopePolicy::Unconfigured {} if !scoped.is_empty() => {
+            Err(refused(format!(
+                "isolation requires per-scope capabilities {} but process scopes are unconfigured",
+                scoped
+                    .iter()
+                    .map(|capability| capability.capability_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        }
+        IsolationProcessScopePolicy::Required { .. } => {
+            for capability in [
+                lillux::ProcessScopeCapability::Termination,
+                lillux::ProcessScopeCapability::Recovery,
+            ] {
+                if !scoped.contains(&capability) {
+                    return Err(refused(format!(
+                        "required process scopes need {} in isolation requires_capabilities",
+                        capability.capability_name()
+                    )));
+                }
+            }
+            Ok(())
+        }
+        IsolationProcessScopePolicy::Unconfigured {} => Ok(()),
+    }
+}
+
+/// Capability names, proof grades and provider ids share one token shape:
+/// short, lowercase, and made of the characters the node report writes.
+fn well_formed_floor_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 128
+        && token.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'_' | b'-' | b':' | b'.')
+        })
+}
+
 fn validate_policy_semantics(policy: &IsolationPolicy) -> Result<(), EngineError> {
     network_inputs::validate(&policy.network)?;
+    validate_capability_floor(policy)?;
     policy
         .filesystem
         .live_project
@@ -5594,7 +6814,6 @@ fn validate_policy_semantics(policy: &IsolationPolicy) -> Result<(), EngineError
                 | "{node_public_identity}"
                 | "{daemon_socket}"
                 | "{bundle_roots}"
-                | "{node_trusted_keys}"
                 | "{verified_code}"
         );
         if !is_placeholder {
@@ -5735,6 +6954,7 @@ fn push_verified_code_handoff(
 fn rewrite_descriptor_bound_code_references(
     args: &mut [String],
     envs: &mut [(String, String)],
+    verbatim_env_names: &[String],
     source: &Path,
     destination: &Path,
 ) -> Result<(), EngineError> {
@@ -5750,25 +6970,56 @@ fn rewrite_descriptor_bound_code_references(
             destination.display()
         ))
     })?;
-    for value in args
-        .iter_mut()
-        .chain(envs.iter_mut().map(|(_, value)| value))
-    {
+    for (site, value) in rewrite_sites(args, envs, verbatim_env_names) {
         if let Some(rewritten) = replace_delimited_path(value, source, destination) {
             *value = rewritten;
         }
         if value.contains(source) {
             return Err(refused(format!(
-                "descriptor-bound code reference cannot be rewritten safely: {value:?}"
+                "descriptor-bound code reference in {site} cannot be rewritten safely"
             )));
         }
     }
     Ok(())
 }
 
+/// One rewritable argument or environment value, labelled by position or name
+/// only. Refusals never echo the value itself.
+enum RewriteSite<'a> {
+    Argument(usize),
+    Environment(&'a str),
+}
+
+impl std::fmt::Display for RewriteSite<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Argument(index) => write!(formatter, "argument {index}"),
+            Self::Environment(name) => write!(formatter, "environment variable {name}"),
+        }
+    }
+}
+
+/// Arguments plus environment values that are subject to code-path rewriting.
+/// Verbatim names are delivered exactly as admitted and are never inspected.
+fn rewrite_sites<'a>(
+    args: &'a mut [String],
+    envs: &'a mut [(String, String)],
+    verbatim_env_names: &'a [String],
+) -> impl Iterator<Item = (RewriteSite<'a>, &'a mut String)> {
+    args.iter_mut()
+        .enumerate()
+        .map(|(index, value)| (RewriteSite::Argument(index), value))
+        .chain(
+            envs.iter_mut()
+                .filter(move |(name, _)| !verbatim_env_names.contains(name))
+                .map(|(name, value)| (RewriteSite::Environment(name.as_str()), value)),
+        )
+}
+
 fn rewrite_verified_code_references(
     args: &mut [String],
     envs: &mut [(String, String)],
+    verbatim_env_names: &[String],
     source: &Path,
     canonical_source: &Path,
     destination: &Path,
@@ -5789,10 +7040,7 @@ fn rewrite_verified_code_references(
         && canonical_source
             .to_str()
             .is_some_and(|canonical| canonical == destination);
-    for value in args
-        .iter_mut()
-        .chain(envs.iter_mut().map(|(_, value)| value))
-    {
+    for (site, value) in rewrite_sites(args, envs, verbatim_env_names) {
         if let Some(rewritten) = replace_delimited_path(value, source, destination) {
             *value = rewritten;
         } else {
@@ -5837,7 +7085,7 @@ fn rewrite_verified_code_references(
             || contains_canonical_path_reference(value, canonical_source)
         {
             return Err(refused(format!(
-                "verified code reference in argument or environment value cannot be rewritten safely: {value:?}"
+                "verified code reference in {site} cannot be rewritten safely"
             )));
         }
     }
@@ -5961,11 +7209,15 @@ fn code_namespace_layout(
     project_destination: &Path,
     canonical_project: &Path,
     bundle_roots: &[PathBuf],
+    project_mirror: bool,
 ) -> Result<(Option<ReadableMount>, PathBuf), EngineError> {
-    let mut candidates = vec![(
-        canonical_project.to_path_buf(),
-        project_destination.to_path_buf(),
-    )];
+    let mut candidates = Vec::new();
+    if project_mirror {
+        candidates.push((
+            canonical_project.to_path_buf(),
+            project_destination.to_path_buf(),
+        ));
+    }
     for bundle_root in bundle_roots {
         candidates.push((
             canonicalize_context_mount("bundle root", bundle_root)?,
@@ -6113,7 +7365,7 @@ fn read_regular_file_bytes_limited(
 fn read_regular_file_handle_limited(
     kind: &str,
     path: &Path,
-    mut file: std::fs::File,
+    file: std::fs::File,
     max_bytes: u64,
 ) -> Result<(Vec<u8>, lillux::OpenRegularFileObservation), EngineError> {
     let observation = lillux::observe_open_regular_file(&file).map_err(|error| {
@@ -6129,7 +7381,7 @@ fn read_regular_file_handle_limited(
             observation.size()
         )));
     }
-    let content = lillux::read_open_regular_file_stable_bounded(&mut file, &observation, max_bytes)
+    let content = lillux::read_open_regular_file_stable_bounded(&file, &observation, max_bytes)
         .map_err(|error| refused(format!("{kind} {} cannot be read: {error}", path.display())))?;
     Ok((content, observation))
 }
@@ -6147,6 +7399,54 @@ fn canonicalize_launch_path(kind: &str, path: &Path) -> Result<PathBuf, EngineEr
 /// descriptor for the isolation adapter. Validation and mount execution therefore refer
 /// to the same kernel object; a pathname swap after this point cannot redirect
 /// the bind to a protected node path.
+/// An admitted bundle state namespace, canonicalized and pinned.
+struct ResolvedBundleStateHome {
+    source: PathBuf,
+    handle: lillux::InheritedDescriptorAuthority,
+    writable: bool,
+}
+
+/// Prove `home` is one exact namespace directory of one bundle's home beneath
+/// `<app_root>/.ai/state/bundle-state/` and pin it. Anything else, including
+/// the root itself, a bundle's whole home, a deeper descendant, or a path
+/// that resolves outside through a link, is refused.
+fn resolve_bundle_state_home(
+    home: &IsolationBundleStateHome,
+    app_root: &Path,
+) -> Result<ResolvedBundleStateHome, EngineError> {
+    use std::path::Component;
+
+    let source = canonicalize_context_mount("bundle state home", &home.namespace_dir)?;
+    let root = app_root
+        .join(crate::AI_DIR)
+        .join("state")
+        .join("bundle-state");
+    let relative = source.strip_prefix(&root).map_err(|_| {
+        refused(format!(
+            "bundle state home {} is not beneath {}",
+            source.display(),
+            root.display()
+        ))
+    })?;
+    let exact_namespace = relative.components().count() == 2
+        && relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+    if !exact_namespace {
+        return Err(refused(format!(
+            "bundle state home {} is not one exact namespace directory of one bundle beneath {}",
+            source.display(),
+            root.display()
+        )));
+    }
+    let handle = pin_mount_source("bundle state home", &source)?;
+    Ok(ResolvedBundleStateHome {
+        source,
+        handle,
+        writable: home.writable,
+    })
+}
+
 fn pin_mount_source(
     kind: &str,
     path: &Path,
@@ -6244,7 +7544,49 @@ fn resolve_writable_mount(
     }))
 }
 
+/// The spellings under which the control socket could be mounted: as
+/// configured and as its canonical location.
+fn withheld_endpoint_spellings(endpoint: &Path) -> Result<Vec<PathBuf>, EngineError> {
+    validate_namespace_destination("withheld control socket", endpoint)?;
+    let mut spellings = vec![endpoint.to_path_buf()];
+    if let (Some(parent), Some(name)) = (endpoint.parent(), endpoint.file_name()) {
+        let canonical = canonicalize_launch_path("withheld control socket parent", parent)?;
+        spellings.push(canonical.join(name));
+    }
+    spellings.dedup();
+    Ok(spellings)
+}
+
+/// Resolve one readable policy entry, refusing any mount that equals or
+/// contains a withheld daemon endpoint. A broad operator readable entry (a
+/// state directory, a runtime directory) therefore cannot hand a sandbox the
+/// control socket that the callback-only socket exists to keep from it.
 fn resolve_readable_mounts(
+    configured: &str,
+    resolution: &ReadableMountResolution<'_>,
+) -> Result<Vec<ReadableMount>, EngineError> {
+    let mounts = resolve_readable_mounts_unchecked(configured, resolution)?;
+    if let Some(socket) = resolution.daemon_socket {
+        for mount in &mounts {
+            for withheld in &socket.withheld {
+                if mount.destination.starts_with(withheld)
+                    || withheld.starts_with(&mount.destination)
+                    || mount.source.starts_with(withheld)
+                    || withheld.starts_with(&mount.source)
+                {
+                    return Err(refused(format!(
+                        "isolation readable entry `{configured}` resolves to {}, which equals or contains the withheld daemon control socket {}",
+                        mount.destination.display(),
+                        withheld.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(mounts)
+}
+
+fn resolve_readable_mounts_unchecked(
     configured: &str,
     resolution: &ReadableMountResolution<'_>,
 ) -> Result<Vec<ReadableMount>, EngineError> {
@@ -6349,20 +7691,6 @@ fn resolve_readable_mounts(
                 })
             })
             .collect();
-    }
-
-    if configured == "{node_trusted_keys}" {
-        let Some(destination) = resolution.node_trusted_keys_dir else {
-            return Ok(Vec::new());
-        };
-        let source = canonicalize_context_mount("node trusted-keys directory", destination)?;
-        let source_handle = pin_mount_source("node trusted-keys directory", &source)?;
-        return Ok(vec![ReadableMount {
-            source,
-            destination: destination.to_path_buf(),
-            source_handle,
-            layer: 20,
-        }]);
     }
 
     if configured == "{verified_code}" {
@@ -6491,10 +7819,13 @@ fn validate_writable_mount(
             && validation.canonical_checkpoint_dir == Some(path);
         let is_exact_daemon_state_root = mount_authority == WritableMountAuthority::DaemonStateRoot
             && validation.canonical_state_root == Some(path);
+        let is_exact_bundle_state_home = mount_authority == WritableMountAuthority::BundleStateHome
+            && validation.canonical_bundle_state_home == Some(path);
         if paths_overlap(path, app_root)
             && !is_exact_runtime_workspace
             && !is_exact_daemon_checkpoint
             && !is_exact_daemon_state_root
+            && !is_exact_bundle_state_home
         {
             return Err(refused(format!(
                 "isolation writable path {} overlaps protected app root {}",
@@ -6799,6 +8130,94 @@ fn refused(reason: String) -> EngineError {
     EngineError::IsolationPolicyRefused { reason }
 }
 
+/// Open-file limit the target runs under: the caller's request, narrowed by
+/// the policy ceiling.
+fn target_open_files(policy: Option<u64>, requested: Option<u64>) -> Option<u64> {
+    match (policy, requested) {
+        (Some(policy), Some(requested)) => Some(policy.min(requested)),
+        (_, requested) => requested,
+    }
+}
+
+/// Open-file limit for the adapter process that builds the sandbox, derived
+/// from the descriptors it inherits, the highest target slot it places and
+/// the limit its target installs, and bounded by the policy ceiling. A need
+/// above the ceiling is refused here rather than failing mid-setup.
+fn adapter_setup_open_files(
+    inherited_descriptors: usize,
+    highest_target_slot: Option<u32>,
+    target_open_files: Option<u64>,
+    policy: Option<u64>,
+) -> Result<Option<u64>, EngineError> {
+    lillux::descriptor_budget::setup_open_files(
+        inherited_descriptors,
+        highest_target_slot,
+        target_open_files,
+        policy,
+    )
+    .map_err(|error| refused(error.to_string()))
+}
+
+/// Keep every inherited source descriptor off the child's declared target
+/// slots. A target slot is a fixed child coordinate (a sealed payload's
+/// descriptor number, a channel above stdio), while source descriptors are
+/// whatever numbers the daemon holds; one that happens to sit on another
+/// role's slot would be overwritten when that slot is placed, so the
+/// protocol refuses the request. Such a source is duplicated above the
+/// highest slot and the plan names the duplicate.
+fn relocate_sources_off_target_slots(
+    authorities: &mut [IsolationAuthority],
+    authority_handles: &mut [lillux::InheritedDescriptorAuthority],
+    target_channels: &[IsolationTargetChannel],
+    sealed_payloads: &[IsolationTargetSealedPayload],
+) -> Result<(), EngineError> {
+    let slots = target_channels
+        .iter()
+        .filter(|channel| channel.target_fd > 2)
+        .map(|channel| (channel.target_fd, &channel.source))
+        .chain(
+            sealed_payloads
+                .iter()
+                .map(|payload| (payload.target_fd, &payload.source)),
+        )
+        .collect::<BTreeMap<u32, &IsolationAuthorityId>>();
+    let Some(highest) = slots.keys().next_back().copied() else {
+        return Ok(());
+    };
+    let floor = highest
+        .checked_add(1)
+        .ok_or_else(|| refused("target descriptor slot has no successor".into()))?;
+    for authority in authorities.iter_mut() {
+        let Some(owner) = slots.get(&authority.inherited_fd) else {
+            continue;
+        };
+        // A role's own source may already sit on its own slot.
+        if **owner == authority.id {
+            continue;
+        }
+        let handle = authority_handles
+            .iter_mut()
+            .find(|handle| handle.inherited_descriptor().ok() == Some(authority.inherited_fd))
+            .ok_or_else(|| {
+                refused(format!(
+                    "source descriptor of {} sits on a target slot and has no retained owner",
+                    authority.id.as_str()
+                ))
+            })?;
+        let relocated = handle.duplicate_at_or_above(floor).map_err(|error| {
+            refused(format!(
+                "relocate {} off a target slot: {error}",
+                authority.id.as_str()
+            ))
+        })?;
+        authority.inherited_fd = relocated
+            .inherited_descriptor()
+            .map_err(|error| refused(format!("inspect relocated descriptor: {error}")))?;
+        *handle = relocated;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6807,6 +8226,99 @@ mod tests {
         IsolationBackendSelection, IsolationCapability,
     };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn target_open_files_stays_the_request_narrowed_by_policy() {
+        assert_eq!(target_open_files(Some(4096), Some(64)), Some(64));
+        assert_eq!(target_open_files(Some(32), Some(64)), Some(32));
+        assert_eq!(target_open_files(None, Some(64)), Some(64));
+        assert_eq!(target_open_files(Some(4096), None), None);
+    }
+
+    #[test]
+    fn adapter_open_files_follow_inherited_descriptors_not_the_target_request() {
+        let small = adapter_setup_open_files(4, None, Some(64), Some(4096))
+            .unwrap()
+            .unwrap();
+        let large = adapter_setup_open_files(60, None, Some(64), Some(4096))
+            .unwrap()
+            .unwrap();
+        assert!(large > small);
+        // A full bundle set must not be squeezed to the target's 64.
+        assert!(large > 64);
+        assert_eq!(
+            adapter_setup_open_files(60, None, Some(64), None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn adapter_open_files_cover_a_high_sealed_payload_slot() {
+        // A session start seals its delivered secret at a fixed slot far above
+        // what a handful of inherited descriptors would budget.
+        let limit = adapter_setup_open_files(5, Some(197), Some(64), Some(4096))
+            .unwrap()
+            .unwrap();
+        assert!(limit > 197, "{limit}");
+        // With no target limit of its own the target inherits the adapter's,
+        // so the adapter runs at the ceiling.
+        assert_eq!(
+            adapter_setup_open_files(5, Some(197), None, Some(4096)).unwrap(),
+            Some(4096)
+        );
+    }
+
+    #[test]
+    fn adapter_open_files_refuse_above_the_policy_ceiling_with_a_clear_reason() {
+        let error = adapter_setup_open_files(1000, None, Some(64), Some(128)).unwrap_err();
+        match error {
+            EngineError::IsolationPolicyRefused { reason } => {
+                assert!(reason.contains("1000"), "{reason}");
+                assert!(reason.contains("128"), "{reason}");
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_source_on_another_roles_target_slot_is_moved_above_every_slot() {
+        let memfd = |name: &std::ffi::CStr| lillux::sealed_memfd(name, b"x").unwrap();
+        // Put an unrelated authority's source exactly on the payload's slot,
+        // and the payload's own source on its slot too (that one may stay).
+        let slot = 997;
+        let other = memfd(c"other").duplicate_at_or_above(slot).unwrap();
+        let other_fd = other.inherited_descriptor().unwrap();
+        assert_eq!(other_fd, slot, "the test needs the slot free");
+        let payload = memfd(c"payload");
+        let payload_fd = payload.inherited_descriptor().unwrap();
+        let other_id = IsolationAuthorityId::new("character-device-0").unwrap();
+        let payload_id = IsolationAuthorityId::new("target-sealed-payload-0").unwrap();
+        let mut authorities = vec![
+            IsolationAuthority {
+                id: other_id,
+                inherited_fd: other_fd,
+                purpose: IsolationAuthorityPurpose::CharacterDevice,
+            },
+            IsolationAuthority {
+                id: payload_id.clone(),
+                inherited_fd: payload_fd,
+                purpose: IsolationAuthorityPurpose::TargetSealedPayload,
+            },
+        ];
+        let mut handles = vec![other, payload];
+        let payloads = [IsolationTargetSealedPayload {
+            source: payload_id,
+            target_fd: slot,
+            env_name: "SLOT".to_owned(),
+        }];
+        relocate_sources_off_target_slots(&mut authorities, &mut handles, &[], &payloads).unwrap();
+        assert!(authorities[0].inherited_fd > slot);
+        assert_eq!(
+            handles[0].inherited_descriptor().unwrap(),
+            authorities[0].inherited_fd
+        );
+        assert_eq!(authorities[1].inherited_fd, payload_fd);
+    }
 
     fn workspace_receipt_fixture() -> (
         AdapterWorkspaceRequest,
@@ -6969,6 +8481,23 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn compiled_original_launch_requires_reporter_before_request_validation() {
+        let mut backend = resolved_backend();
+        let required = BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]);
+        require_compiled_launch_capabilities(required.clone(), &backend, false).unwrap();
+        assert!(require_compiled_launch_capabilities(required.clone(), &backend, true).is_err());
+        let reporter = IsolationCapability::ProcessOriginalNamespaceTerminalReporting;
+        backend.declaration.capabilities.insert(reporter);
+        // A signed declaration without inspected effective support is insufficient.
+        assert!(require_compiled_launch_capabilities(required.clone(), &backend, true).is_err());
+        backend.effective_capabilities.insert(reporter);
+        require_compiled_launch_capabilities(required, &backend, true).unwrap();
+        // Metadata admission only; these sealed empty fixture handles are not
+        // a qualified native publisher or a protected App acceptance fixture.
     }
 
     fn write_policy(app_root: &Path, policy: &IsolationPolicy) {
@@ -7150,6 +8679,7 @@ mod tests {
             project_destination: project.path(),
             canonical_project: project.path(),
             bundle_roots: &[],
+            project_mirror: true,
         };
         runtime
             .prepare_verified_code(&verified, namespace, true)
@@ -7181,11 +8711,10 @@ mod tests {
         let root = lillux::PinnedDirectory::open(project.path())
             .unwrap()
             .unwrap();
-        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let root_identity = root.identity().unwrap();
         let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
             root: Arc::new(root),
-            root_device_id,
-            root_inode,
+            root_identity,
             denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
                 .into_iter()
                 .map(PathBuf::from)
@@ -7266,11 +8795,10 @@ mod tests {
         let project = parent.path().join("project");
         std::fs::create_dir(&project).unwrap();
         let root = lillux::PinnedDirectory::open(&project).unwrap().unwrap();
-        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let root_identity = root.identity().unwrap();
         let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
             root: Arc::new(root),
-            root_device_id,
-            root_inode,
+            root_identity,
             denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
                 .into_iter()
                 .map(PathBuf::from)
@@ -7287,6 +8815,165 @@ mod tests {
             .capture_verified_command(&command, Some(&project), Some(&live_access))
             .unwrap_err();
         assert!(error.to_string().contains("path binding changed"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_command_refuses_missing_and_data_only_owners() {
+        let target = lillux::sealed_memfd(c"unselected-target", b"data").unwrap();
+        let identity = IsolationVerifiedCode {
+            source_path: "/admitted/owner".into(),
+            content_hash: lillux::sha256_hex(b"data"),
+        };
+        assert!(retain_original_prepared_command(None, &target).is_err());
+        assert!(
+            retain_original_prepared_command(
+                Some(IsolationCommandAuthorityRef::Revalidate(&identity)),
+                &target,
+            )
+            .is_err()
+        );
+        assert!(target.file_identity().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn original_retention_control_command() -> IsolationDescriptorBoundCommand {
+        let bytes = b"original command retention component control";
+        let executable =
+            lillux::sealed_executable_memfd(c"original-command-control", bytes).unwrap();
+        let file_identity = descriptor_file_identity(&executable).unwrap();
+        IsolationDescriptorBoundCommand::new(
+            IsolationVerifiedCode {
+                source_path: "/admitted/owner".into(),
+                content_hash: lillux::sha256_hex(bytes),
+            },
+            executable,
+            file_identity,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_command_refuses_different_inode_with_identical_bytes() {
+        let command = original_retention_control_command();
+        let replacement = original_retention_control_command();
+        assert_eq!(command.identity(), replacement.identity());
+        assert!(
+            retain_original_prepared_command(
+                Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
+                replacement.executable(),
+            )
+            .is_err()
+        );
+        assert!(command.executable().file_identity().is_ok());
+        assert!(replacement.executable().file_identity().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_command_retains_exact_owner_after_source_drop() {
+        let command = original_retention_control_command();
+        let retained = retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::DescriptorBound(&command)),
+            command.executable(),
+        )
+        .unwrap();
+        assert!(retained.same_binding_as(&command.clone().into()).unwrap());
+        let before = command.file_identity();
+        drop(command);
+        let IsolationAdmittedCommand::DescriptorBound(command) = retained else {
+            panic!("retention changed command variant");
+        };
+        assert_eq!(
+            descriptor_file_identity(command.executable()).unwrap(),
+            before
+        );
+        validate_descriptor_bound_command(&command).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_member_retains_root_and_destination_distinctions() {
+        let command = original_retention_control_command();
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let root_a = lillux::PinnedDirectory::open(root_a.path())
+            .unwrap()
+            .unwrap();
+        let root_b = lillux::PinnedDirectory::open(root_b.path())
+            .unwrap()
+            .unwrap();
+        let member = IsolationRealizationMemberCommand::new(
+            command.clone(),
+            root_a.identity().unwrap(),
+            "/runtime/selected".into(),
+        );
+        let retained = retain_original_prepared_command(
+            Some(IsolationCommandAuthorityRef::RealizationMember(&member)),
+            command.executable(),
+        )
+        .unwrap();
+        assert!(retained.same_binding_as(&member.clone().into()).unwrap());
+        let other_root = IsolationRealizationMemberCommand::new(
+            command.clone(),
+            root_b.identity().unwrap(),
+            "/runtime/selected".into(),
+        );
+        let other_destination = IsolationRealizationMemberCommand::new(
+            command,
+            root_a.identity().unwrap(),
+            "/runtime/substituted".into(),
+        );
+        assert!(!retained.same_binding_as(&other_root.into()).unwrap());
+        assert!(!retained.same_binding_as(&other_destination.into()).unwrap());
+        drop(member);
+        let IsolationAdmittedCommand::RealizationMember(member) = retained else {
+            panic!("retention discarded member tree placement");
+        };
+        validate_descriptor_bound_command(member.command()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_prepared_tree_refuses_substitution_and_retains_live_root() {
+        let source = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
+        let other = lillux::PinnedDirectory::open(foreign.path())
+            .unwrap()
+            .unwrap();
+        let member: IsolationAdmittedCommand = IsolationRealizationMemberCommand::new(
+            original_retention_control_command(),
+            root.identity().unwrap(),
+            "/runtime/selected".into(),
+        )
+        .into();
+        let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            source.path().into(),
+            "/runtime/selected".into(),
+            root.inherited_descriptor_authority().unwrap(),
+        );
+        let replacement = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            foreign.path().into(),
+            "/runtime/selected".into(),
+            other.inherited_descriptor_authority().unwrap(),
+        );
+        let wrong_destination = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            source.path().into(),
+            "/runtime/other".into(),
+            root.inherited_descriptor_authority().unwrap(),
+        );
+        assert!(retain_original_prepared_tree(&member, &[]).is_err());
+        assert!(retain_original_prepared_tree(&member, &[replacement]).is_err());
+        assert!(retain_original_prepared_tree(&member, &[wrong_destination]).is_err());
+        let identity = root.identity().unwrap();
+        let retained = retain_original_prepared_tree(&member, &[mount])
+            .unwrap()
+            .unwrap();
+        drop(root);
+        assert_eq!(retained.directory_identity().unwrap(), identity);
     }
 
     #[cfg(target_os = "linux")]
@@ -7347,7 +9034,10 @@ mod tests {
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let cache = tempfile::tempdir().unwrap();
         let command_path = cache.path().join("ordinary-executor-cache-entry");
-        let admitted_bytes = std::fs::read("/bin/echo").unwrap();
+        // A script, not a copied host binary: Ubuntu's multi-call coreutils
+        // refuse to run under another file name, and this fixture is about
+        // descriptor retention, not the host's utilities.
+        let admitted_bytes = b"#!/bin/sh\nprintf '%s\\n' \"$1\"\n".to_vec();
         std::fs::write(&command_path, &admitted_bytes).unwrap();
         std::fs::set_permissions(&command_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let executable = lillux::PinnedDirectory::open(cache.path())
@@ -7410,19 +9100,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(command.identity()),
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/descriptor-bound-disabled",
                     thread_id: "T-descriptor-bound-disabled",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -7457,6 +9150,10 @@ mod tests {
         assert_eq!(seals & required_seals, required_seals);
         assert_ne!(prepared.file_identity().unwrap().mode() & 0o111, 0);
         assert!(std::fs::write(prepared.path(), b"mutate").is_err());
+        assert_eq!(
+            applied.provenance.command_delivery,
+            Some(IsolationCommandDelivery::SealedCopy)
+        );
 
         let result = lillux::run(applied.request);
         assert!(result.success, "stderr: {}", result.stderr);
@@ -7496,19 +9193,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/verified-command",
                     thread_id: "T-verified-command",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -7516,7 +9216,213 @@ mod tests {
         assert_eq!(applied.request.argv0.as_deref(), Some("/bin/true"));
         assert_eq!(applied.request.inherited_fds.len(), 1);
         assert!(std::fs::write(applied.request.inherited_fds[0].path(), b"mutate").is_err());
+        // A root-owned system command runs from its own inode, so a multi-call
+        // binary's self lookup names the real file; a root daemon can write
+        // every file and therefore seals a copy.
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(
+                applied.provenance.command_delivery,
+                Some(IsolationCommandDelivery::SealedCopy)
+            );
+        } else {
+            assert_eq!(
+                applied.provenance.command_delivery,
+                Some(IsolationCommandDelivery::VerifiedHostInode)
+            );
+            assert_eq!(
+                std::fs::read_link(applied.request.inherited_fds[0].path()).unwrap(),
+                std::fs::canonicalize("/bin/true").unwrap()
+            );
+        }
         assert!(lillux::run(applied.request).success);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_admitted_host_command(
+        runtime: &IsolationRuntime,
+        work: &Path,
+        admitted_bytes: &[u8],
+        host_origin: &Path,
+    ) -> Result<AppliedIsolationLaunch, EngineError> {
+        let blob = work.join("blob");
+        std::fs::write(&blob, admitted_bytes).unwrap();
+        let content_hash = lillux::cas::sha256_hex(admitted_bytes);
+        let execution_path = PathBuf::from("/ryeos/admitted-direct-command")
+            .join(&content_hash)
+            .join(host_origin.file_name().unwrap());
+        let command = runtime
+            .bind_admitted_verified_command(
+                IsolationVerifiedCode {
+                    source_path: execution_path.clone(),
+                    content_hash,
+                },
+                std::fs::File::open(&blob).unwrap(),
+            )
+            .unwrap()
+            .with_host_origin(Some(host_origin.to_path_buf()));
+        runtime.apply_with_provenance(
+            lillux::SubprocessRequest {
+                cmd: execution_path.to_string_lossy().into_owned(),
+                argv0: None,
+                args: Vec::new(),
+                cwd: Some(work.to_string_lossy().into_owned()),
+                envs: Vec::new(),
+                stdin_data: None,
+                timeout: 1.0,
+                limits: None,
+                inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
+                supervised_status: None,
+            },
+            IsolationLaunchContext {
+                immutable_project: None,
+                workspace_view: None,
+                project_path: work,
+                project_authority: IsolationProjectAuthority::ReadOnly,
+                filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
+                live_access: None,
+                state_root: None,
+                bundle_state_home: None,
+                checkpoint_dir: None,
+                checkpoint_authority: None,
+                daemon_socket_path: None,
+                captured_callback_socket: false,
+                bundle_roots: &[],
+                verified_code: std::slice::from_ref(command.identity()),
+                verified_command: Some(&command),
+                external_read_only_mounts: &[],
+                writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
+                target_channels: &[],
+                target_sealed_payloads: &[],
+                item_ref: "tool:tests/admitted-host-command",
+                thread_id: "T-admitted-host-command",
+                verbatim_env_names: &[],
+            },
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabled_admitted_command_runs_from_its_unwritable_host_origin() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let origin = std::fs::canonicalize("/bin/true").unwrap();
+        let applied = apply_admitted_host_command(
+            &runtime,
+            app_root.path(),
+            &std::fs::read(&origin).unwrap(),
+            &origin,
+        )
+        .unwrap();
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(
+                applied.provenance.command_delivery,
+                Some(IsolationCommandDelivery::SealedCopy)
+            );
+        } else {
+            assert_eq!(
+                applied.provenance.command_delivery,
+                Some(IsolationCommandDelivery::VerifiedHostInode)
+            );
+            assert_eq!(
+                std::fs::read_link(applied.request.inherited_fds[0].path()).unwrap(),
+                origin
+            );
+        }
+        assert!(lillux::run(applied.request).success);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabled_admitted_command_refuses_a_host_origin_with_other_bytes() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let origin = std::fs::canonicalize("/bin/true").unwrap();
+        let error =
+            apply_admitted_host_command(&runtime, app_root.path(), b"#!/bin/sh\nexit 0\n", &origin)
+                .err()
+                .expect("an origin that no longer carries the admitted bytes must refuse");
+        assert!(
+            error.to_string().contains("changed after verification"),
+            "{error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabled_runtime_seals_a_command_the_daemon_could_change() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".ai")).unwrap();
+        let command = project.path().join("owned-command");
+        std::fs::write(&command, b"#!/bin/sh\nprintf sealed\n").unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let captured = runtime
+            .capture_verified_command(&command, Some(project.path()), None)
+            .unwrap();
+        let applied = runtime
+            .apply_with_provenance(
+                lillux::SubprocessRequest {
+                    cmd: command.to_string_lossy().into_owned(),
+                    argv0: None,
+                    args: Vec::new(),
+                    cwd: Some(project.path().to_string_lossy().into_owned()),
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    inherited_fd_mappings: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    immutable_project: None,
+                    workspace_view: None,
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
+                    live_access: None,
+                    state_root: None,
+                    bundle_state_home: None,
+                    checkpoint_dir: None,
+                    checkpoint_authority: None,
+                    daemon_socket_path: None,
+                    captured_callback_socket: false,
+                    bundle_roots: &[],
+                    verified_code: std::slice::from_ref(&captured),
+                    verified_command: Some(&captured),
+                    external_read_only_mounts: &[],
+                    writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
+                    target_channels: &[],
+                    target_sealed_payloads: &[],
+                    item_ref: "tool:tests/owned-command",
+                    thread_id: "T-owned-command",
+                    verbatim_env_names: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            applied.provenance.command_delivery,
+            Some(IsolationCommandDelivery::SealedCopy)
+        );
+        std::fs::write(&command, b"#!/bin/sh\nprintf mutated\n").unwrap();
+        assert!(std::fs::write(applied.request.inherited_fds[0].path(), b"mutate").is_err());
+        let result = lillux::run(applied.request);
+        assert!(result.success, "stderr: {}", result.stderr);
+        assert_eq!(result.stdout, "sealed");
     }
 
     #[cfg(unix)]
@@ -7564,19 +9470,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &verified_code,
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/sealed-code",
                     thread_id: "T-sealed-code",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -7659,11 +9568,10 @@ mod tests {
         let root = lillux::PinnedDirectory::open(project.path())
             .unwrap()
             .unwrap();
-        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let root_identity = root.identity().unwrap();
         let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
             root: Arc::new(root),
-            root_device_id,
-            root_inode,
+            root_identity,
             denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
                 .into_iter()
                 .map(PathBuf::from)
@@ -7694,19 +9602,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: Some(&live_access),
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&verified),
                     verified_command: None,
                     external_read_only_mounts: std::slice::from_ref(&admitted_mount),
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/enforced-handoff",
                     thread_id: "T-enforced-handoff",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -7970,7 +9881,6 @@ mod tests {
             "{node_public_identity}".to_string(),
             "{daemon_socket}".to_string(),
             "{bundle_roots}".to_string(),
-            "{node_trusted_keys}".to_string(),
             "{verified_code}".to_string(),
         ];
         policy.filesystem.writable = vec!["{project}".to_string(), "{checkpoint_dir}".to_string()];
@@ -8106,19 +10016,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/immutable-project",
                     thread_id: "T-immutable-project",
+                    verbatim_env_names: &[],
                 };
                 let applied = narrowed.apply_with_provenance(request(), context);
                 if !readable_project && !writable_project {
@@ -8246,23 +10159,31 @@ mod tests {
                 network_authority_ceiling: network_ceiling,
                 live_access: None,
                 state_root: exact_state,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: Some(&command),
                 external_read_only_mounts: &external_mounts,
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "worker:tests/captured-plan",
                 thread_id: "T-captured-plan",
+                verbatim_env_names: &[],
             };
-            // These host fixture paths are below /tmp, which is refused by
-            // configuration admission before the planner can consider overlap.
-            for forbidden in [project.path(), private_state.as_path()] {
+            // /tmp is a protected namespace, refused by configuration
+            // admission before the planner can consider overlap. The paths are
+            // spelled explicitly because the fixture roots live wherever the
+            // host's temporary directory is.
+            for forbidden in [
+                Path::new("/tmp/captured-plan"),
+                Path::new("/tmp/a-captured-state"),
+            ] {
                 assert!(
                     IsolationReadOnlyMountAuthority::new_runtime_configuration(
                         baseline.path().to_path_buf(),
@@ -8307,6 +10228,8 @@ mod tests {
                             request(),
                             IsolationLaunchContext {
                                 state_root: Some(invalid_root),
+
+                                bundle_state_home: None,
                                 ..context
                             },
                         )
@@ -8324,6 +10247,8 @@ mod tests {
                         request(),
                         IsolationLaunchContext {
                             state_root: Some(&sibling_state),
+
+                            bundle_state_home: None,
                             ..context
                         },
                     )
@@ -8331,20 +10256,6 @@ mod tests {
                     .expect("overlay outside its exact private root must refuse");
                 assert!(
                     error.to_string().contains("read-only state overlay"),
-                    "{error}"
-                );
-                let error = runtime
-                    .apply_with_provenance(
-                        request(),
-                        IsolationLaunchContext {
-                            node_trusted_keys_dir: Some(app_root.path()),
-                            ..context
-                        },
-                    )
-                    .err()
-                    .expect("an exact private root must not admit ambient trust state");
-                assert!(
-                    error.to_string().contains("ambient filesystem authority"),
                     "{error}"
                 );
             }
@@ -8448,6 +10359,314 @@ mod tests {
         }
     }
 
+    /// An enforced runtime over a fake backend with the capabilities a captured
+    /// launch needs, a verified command, and a scratch project to launch in.
+    #[cfg(target_os = "linux")]
+    struct BundleStateFixture {
+        app_root: tempfile::TempDir,
+        runtime: IsolationRuntime,
+        command: IsolationVerifiedCode,
+        project: lillux::PinnedDirectory,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl BundleStateFixture {
+        fn new() -> Self {
+            let app_root = tempfile::tempdir().unwrap();
+            let mut policy = IsolationPolicy::disabled_for_authoring();
+            policy.mode = IsolationMode::Enforce;
+            policy.backend = Some(resolved_backend().selection.clone());
+            policy.filesystem.readable = vec![
+                "{node_public_identity}".to_string(),
+                "{daemon_socket}".to_string(),
+                "{bundle_roots}".to_string(),
+                "{verified_code}".to_string(),
+            ];
+            policy.filesystem.writable =
+                vec!["{project}".to_string(), "{checkpoint_dir}".to_string()];
+            policy.network.mode = IsolationNetworkMode::Host;
+            write_policy(app_root.path(), &policy);
+            let mut backend = resolved_backend();
+            backend.effective_capabilities = BTreeSet::from([
+                IsolationCapability::FilesystemPrivateRoot,
+                IsolationCapability::FilesystemFdReadOnly,
+                IsolationCapability::FilesystemFdWritable,
+                IsolationCapability::FilesystemOrderedOverlays,
+                IsolationCapability::FilesystemFixedParentViews,
+                IsolationCapability::FilesystemPrivateTmp,
+                IsolationCapability::DevicesMinimal,
+                IsolationCapability::EnvironmentExact,
+                IsolationCapability::NetworkIsolated,
+                IsolationCapability::NetworkHost,
+                IsolationCapability::ProcessHostPidNamespace,
+                IsolationCapability::ProcessIsolatedPidNamespace,
+                IsolationCapability::ProcessTargetPidReporting,
+                IsolationCapability::LifecycleSharedProcessGroup,
+            ]);
+            backend.declaration.capabilities = backend.effective_capabilities.clone();
+            let runtime =
+                IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend)))
+                    .unwrap();
+            let command = runtime
+                .capture_verified_command(Path::new("/bin/true"), None, None)
+                .unwrap();
+            let project = runtime
+                .runtime_workspaces
+                .as_ref()
+                .unwrap()
+                .open_or_create_child(std::ffi::OsStr::new("bundle-state-plan"), 0o700)
+                .unwrap();
+            Self {
+                app_root,
+                runtime,
+                command,
+                project,
+            }
+        }
+
+        /// `<app_root>/.ai/state/bundle-state/<bundle>/<namespace>`, created.
+        fn namespace(&self, bundle: &str, namespace: &str) -> PathBuf {
+            let path = self
+                .app_root
+                .path()
+                .join(crate::AI_DIR)
+                .join("state")
+                .join("bundle-state")
+                .join(bundle)
+                .join(namespace);
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        }
+
+        fn request(&self) -> lillux::SubprocessRequest {
+            lillux::SubprocessRequest {
+                cmd: "/bin/true".to_string(),
+                argv0: None,
+                args: Vec::new(),
+                cwd: Some(self.project.path().to_string_lossy().into_owned()),
+                envs: Vec::new(),
+                stdin_data: None,
+                timeout: 1.0,
+                limits: None,
+                inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
+                supervised_status: None,
+            }
+        }
+
+        fn context<'a>(
+            &'a self,
+            state_root: Option<&'a Path>,
+            bundle_state_home: Option<&'a IsolationBundleStateHome>,
+        ) -> IsolationLaunchContext<'a> {
+            IsolationLaunchContext {
+                immutable_project: None,
+                workspace_view: None,
+                project_path: self.project.path(),
+                project_authority: IsolationProjectAuthority::EphemeralScratch,
+                filesystem_authority_ceiling:
+                    IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                live_access: None,
+                state_root,
+                bundle_state_home,
+                checkpoint_dir: None,
+                checkpoint_authority: None,
+                daemon_socket_path: None,
+                captured_callback_socket: false,
+                bundle_roots: &[],
+                verified_code: &[],
+                verified_command: Some(&self.command),
+                external_read_only_mounts: &[],
+                writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
+                target_channels: &[],
+                target_sealed_payloads: &[],
+                item_ref: "worker:tests/bundle-state",
+                thread_id: "T-bundle-state",
+                verbatim_env_names: &[],
+            }
+        }
+
+        /// The mounts of the plan isolation compiled for `context`.
+        fn mounts(&self, context: IsolationLaunchContext<'_>) -> Vec<serde_json::Value> {
+            let applied = self
+                .runtime
+                .apply_with_provenance(self.request(), context)
+                .unwrap();
+            let (request_bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&request_bytes).unwrap();
+            request["plan"]["mounts"].as_array().unwrap().clone()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundle_state_home_mounts_exact_namespace_only() {
+        let fixture = BundleStateFixture::new();
+        let ns1 = fixture.namespace("central-auth", "realm-a");
+        let ns2 = fixture.namespace("central-auth", "realm-b");
+        let other_bundle = fixture.namespace("other-bundle", "realm-a");
+        let home = IsolationBundleStateHome {
+            namespace_dir: ns1.clone(),
+            writable: true,
+        };
+        let mounts = fixture.mounts(fixture.context(None, Some(&home)));
+        let destinations: Vec<&str> = mounts
+            .iter()
+            .filter_map(|mount| mount["destination"].as_str())
+            .collect();
+        let state_mount = mounts
+            .iter()
+            .find(|mount| mount["destination"] == BUNDLE_STATE_ISOLATION_DESTINATION)
+            .expect("the namespace is mounted at its fixed destination");
+        assert_eq!(state_mount["access"], "writable");
+        // Neither the sibling namespace, the other bundle's home, the bundle
+        // directory, nor the root of all homes is mounted or even named as a
+        // destination.
+        let bundle_state_root = fixture
+            .app_root
+            .path()
+            .join(crate::AI_DIR)
+            .join("state")
+            .join("bundle-state");
+        for hidden in [
+            ns2.as_path(),
+            other_bundle.as_path(),
+            ns1.parent().unwrap(),
+            bundle_state_root.as_path(),
+            ns1.as_path(),
+        ] {
+            assert!(
+                !destinations
+                    .iter()
+                    .any(|destination| Path::new(destination).starts_with(hidden)),
+                "{} must not be visible; destinations: {destinations:?}",
+                hidden.display()
+            );
+        }
+
+        // The app root itself is never a destination (the launch's scratch
+        // project legitimately lives beneath it).
+        assert!(!destinations.contains(&fixture.app_root.path().to_str().unwrap()));
+
+        // Read-only access mounts the same directory read-only.
+        let read_only = IsolationBundleStateHome {
+            namespace_dir: ns2,
+            writable: false,
+        };
+        let mounts = fixture.mounts(fixture.context(None, Some(&read_only)));
+        let state_mount = mounts
+            .iter()
+            .find(|mount| mount["destination"] == BUNDLE_STATE_ISOLATION_DESTINATION)
+            .expect("the read-only namespace is mounted");
+        assert_eq!(state_mount["access"], "read_only");
+
+        // A launch that opened no state home mounts none.
+        let mounts = fixture.mounts(fixture.context(None, None));
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount["destination"] == BUNDLE_STATE_ISOLATION_DESTINATION)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundle_state_home_outside_bundle_state_root_refused() {
+        let fixture = BundleStateFixture::new();
+        let namespace = fixture.namespace("central-auth", "realm-a");
+        let node_state = fixture.app_root.path().join(crate::AI_DIR).join("state");
+        let sibling = node_state.join("unrelated-state");
+        std::fs::create_dir(&sibling).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let deeper = namespace.join("deeper");
+        std::fs::create_dir(&deeper).unwrap();
+        let bundle_dir = namespace.parent().unwrap().to_path_buf();
+        let root = bundle_dir.parent().unwrap().to_path_buf();
+        // A link inside a namespace-looking spelling cannot lead out.
+        let escape = bundle_dir.join("escape");
+        lillux::PinnedDirectory::open(&bundle_dir)
+            .unwrap()
+            .unwrap()
+            .create_symlink(
+                std::ffi::OsStr::new("escape"),
+                outside.path().to_str().unwrap().as_bytes(),
+            )
+            .unwrap();
+        for refused_path in [
+            sibling.as_path(),
+            node_state.as_path(),
+            root.as_path(),
+            bundle_dir.as_path(),
+            deeper.as_path(),
+            outside.path(),
+            escape.as_path(),
+            fixture.app_root.path(),
+        ] {
+            let home = IsolationBundleStateHome {
+                namespace_dir: refused_path.to_path_buf(),
+                writable: true,
+            };
+            let error = fixture
+                .runtime
+                .apply_with_provenance(fixture.request(), fixture.context(None, Some(&home)))
+                .err()
+                .unwrap_or_else(|| panic!("{} must refuse", refused_path.display()));
+            assert!(
+                error.to_string().contains("bundle state home"),
+                "{}: {error}",
+                refused_path.display()
+            );
+        }
+        // The one exact namespace is admitted.
+        let home = IsolationBundleStateHome {
+            namespace_dir: namespace,
+            writable: true,
+        };
+        fixture.mounts(fixture.context(None, Some(&home)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bundle_state_home_coexists_with_pinned_scratch_state_root() {
+        let fixture = BundleStateFixture::new();
+        let namespace = fixture.namespace("central-auth", "realm-a");
+        let scratch = fixture
+            .app_root
+            .path()
+            .join(crate::AI_DIR)
+            .join("state")
+            .join("a-scratch-state");
+        std::fs::create_dir(&scratch).unwrap();
+        let home = IsolationBundleStateHome {
+            namespace_dir: namespace,
+            writable: true,
+        };
+        let mounts = fixture.mounts(fixture.context(Some(&scratch), Some(&home)));
+        let writable_destinations: Vec<&str> = mounts
+            .iter()
+            .filter(|mount| mount["access"] == "writable")
+            .filter_map(|mount| mount["destination"].as_str())
+            .collect();
+        assert!(
+            writable_destinations.contains(&scratch.to_str().unwrap()),
+            "the pinned scratch state root stays mounted: {writable_destinations:?}"
+        );
+        assert!(
+            writable_destinations.contains(&BUNDLE_STATE_ISOLATION_DESTINATION),
+            "the bundle state namespace is mounted beside it: {writable_destinations:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn disabled_runtime_rejects_command_mutation_after_admission() {
@@ -8493,19 +10712,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: Some(&live_access),
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/mutated-command",
                     thread_id: "T-mutated-command",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -8543,6 +10765,91 @@ mod tests {
             Path::new("/project/.ai/tools/task.py"),
             Path::new("/project/.ai/tools/task.py"),
         ));
+    }
+
+    fn host_direct_grant(containment: IsolationHostDirectContainment) -> IsolationHostDirectGrant {
+        IsolationHostDirectGrant {
+            policy_generation: "a".repeat(64),
+            grant_id: "guarded-cargo".into(),
+            item: "tool:ryeos/development/guarded-cargo".into(),
+            signer: "b".repeat(64),
+            source_closure: None,
+            runtime_ref: "tool:ryeos/core/runtimes/python/script".into(),
+            runtime_content_hash: "c".repeat(64),
+            origin: "direct".into(),
+            containment,
+            host_env: vec!["PATH".into()],
+        }
+    }
+
+    fn runtime_with_host_direct(host_direct: IsolationHostDirect) -> IsolationRuntime {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.host_direct = host_direct;
+        IsolationRuntime::resolve(IsolationRuntimeResolution {
+            policy,
+            source: None,
+            digest: None,
+            app_root: None,
+            app_root_authority: None,
+            app_root_destination: None,
+            daemon_socket: None,
+            backend: None,
+            process_scope_provider: None,
+            process_scope_authority_digest: None,
+            scope_admission: ProcessScopeAdmission::DefinitionValidation,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn host_direct_view_needs_an_operator_granted_lane() {
+        let unavailable = runtime_with_host_direct(IsolationHostDirect::Unavailable);
+        let error = unavailable
+            .host_direct_launch(host_direct_grant(IsolationHostDirectContainment::Group))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("host_access_lane_unavailable"), "{error}");
+        assert!(error.contains("unavailable"), "{error}");
+    }
+
+    #[test]
+    fn host_direct_view_applies_no_adapter_and_records_the_grant() {
+        let lane = runtime_with_host_direct(IsolationHostDirect::OperatorGranted);
+        assert!(lane.host_direct_grant().is_none());
+        assert!(lane.launch_provenance(None).execution_posture.is_none());
+        let view = lane
+            .host_direct_launch(host_direct_grant(IsolationHostDirectContainment::Group))
+            .unwrap();
+        assert!(!view.is_enforced());
+        assert_eq!(view.host_direct_grant().unwrap().grant_id, "guarded-cargo");
+        match view.launch_provenance(None).execution_posture {
+            Some(IsolationExecutionPosture::HostDirect(grant)) => {
+                assert_eq!(grant.item, "tool:ryeos/development/guarded-cargo");
+                assert_eq!(grant.containment, IsolationHostDirectContainment::Group);
+            }
+            other => panic!("host-direct provenance missing: {other:?}"),
+        }
+        // The node's shared runtime is untouched.
+        assert!(lane.host_direct_grant().is_none());
+        assert!(
+            view.host_direct_launch(host_direct_grant(IsolationHostDirectContainment::Group))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn host_direct_scope_containment_needs_a_scope_provider() {
+        let lane = runtime_with_host_direct(IsolationHostDirect::OperatorGranted);
+        let error = lane
+            .host_direct_launch(host_direct_grant(IsolationHostDirectContainment::Scope))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("host_access_containment_unavailable"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -8614,19 +10921,22 @@ mod tests {
                 network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: std::slice::from_ref(&external),
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "tool:tests/external-mount",
                 thread_id: "T-external-mount",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("disabled isolation accepted a descriptor mount"),
@@ -8678,19 +10988,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: std::slice::from_ref(&runtime_view),
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "worker:tests/runtime-view-disabled",
                     thread_id: "T-runtime-view-disabled",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -8699,6 +11012,133 @@ mod tests {
             error
                 .to_string()
                 .contains("writable runtime views require an enforced isolation backend")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_only_project_launch_keeps_daemon_checkpoint_writable_and_project_read_only() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string(), "{project}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string(), "{checkpoint_dir}".to_string()];
+        write_policy(app_root.path(), &policy);
+
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::FilesystemPidNamespaceProc,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let canonical_app_root = std::fs::canonicalize(app_root.path()).unwrap();
+        let checkpoint_dir = canonical_app_root
+            .join("threads")
+            .join("T-read-only-checkpoint")
+            .join("checkpoints");
+        std::fs::create_dir_all(&checkpoint_dir).unwrap();
+        let checkpoint_authority = lillux::PinnedDirectory::open(&checkpoint_dir)
+            .unwrap()
+            .unwrap();
+        let request = || lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let context = IsolationLaunchContext {
+            immutable_project: None,
+            workspace_view: None,
+            project_path: project.path(),
+            project_authority: IsolationProjectAuthority::ReadOnly,
+            filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+            network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+            live_access: None,
+            state_root: None,
+            bundle_state_home: None,
+            checkpoint_dir: Some(&checkpoint_dir),
+            checkpoint_authority: Some(&checkpoint_authority),
+            daemon_socket_path: None,
+            captured_callback_socket: false,
+            bundle_roots: &[],
+            verified_code: &[],
+            verified_command: Some(&command),
+            external_read_only_mounts: &[],
+            writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
+            target_channels: &[],
+            target_sealed_payloads: &[],
+            item_ref: "worker:tests/read-only-checkpoint",
+            thread_id: "T-read-only-checkpoint",
+            verbatim_env_names: &[],
+        };
+
+        let applied = runtime.apply_with_provenance(request(), context).unwrap();
+        let (bytes, _) = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mounts = wire["plan"]["mounts"].as_array().unwrap();
+        assert!(
+            mounts.iter().any(|mount| {
+                mount["destination"].as_str() == checkpoint_dir.to_str()
+                    && mount["access"] == "writable"
+            }),
+            "the daemon checkpoint directory must stay writable: {mounts:?}"
+        );
+        assert!(
+            !mounts.iter().any(|mount| {
+                mount["access"] == "writable"
+                    && mount["destination"].as_str().is_some_and(|destination| {
+                        Path::new(destination).starts_with(project.path())
+                    })
+            }),
+            "a read-only project must never become writable: {mounts:?}"
+        );
+
+        let mut without_checkpoint = runtime.clone();
+        without_checkpoint.inspection.filesystem.writable = vec!["{project}".to_string()];
+        let error = without_checkpoint
+            .apply_with_provenance(request(), context)
+            .err()
+            .expect("a policy without {checkpoint_dir} must refuse the checkpoint directory");
+        assert!(
+            error
+                .to_string()
+                .contains("is not writable under the node isolation policy"),
+            "{error}"
         );
     }
 
@@ -8774,19 +11214,22 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: Some(&command),
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &views,
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "worker:tests/runtime-view",
             thread_id: "T-runtime-view",
+            verbatim_env_names: &[],
         };
         let applied = runtime.apply_with_provenance(request(), context).unwrap();
         let (request_bytes, _) = applied
@@ -8841,6 +11284,7 @@ mod tests {
                 std::ffi::OsStr::new("config.toml"),
                 b"model = 'fixture'\n",
                 0o600,
+                crate::ENGINE_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -9032,19 +11476,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &views,
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -9112,17 +11559,20 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -9168,19 +11618,22 @@ mod tests {
                 network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
-                bundle_roots: &[],
-                node_trusted_keys_dir: Some(app_root.path()),
+                captured_callback_socket: false,
+                bundle_roots: &[app_root.path().to_path_buf()],
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: "worker:tests/captured",
                 thread_id: "T-captured",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("captured execution accepted ambient node filesystem policy"),
@@ -9191,6 +11644,865 @@ mod tests {
                 .to_string()
                 .contains("captured execution context carries ambient filesystem authority")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_execution_carries_only_the_admitted_callback_socket() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable =
+            vec!["{verified_code}".to_string(), "{daemon_socket}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        write_policy(app_root.path(), &policy);
+
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        // A real Unix socket in its own directory, so a parent-directory mount
+        // would be distinguishable from the socket entry.
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let runtime = IsolationRuntime::load_for_daemon(
+            app_root.path(),
+            &socket_path,
+            Some(Arc::new(backend)),
+        )
+        .unwrap();
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+        let project = runtime
+            .runtime_workspaces
+            .as_ref()
+            .unwrap()
+            .open_or_create_child(std::ffi::OsStr::new("captured-callback"), 0o700)
+            .unwrap();
+        let request = || lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let socket_ref: &Path = &socket_path;
+        let context = |with_socket: bool, admitted: bool, bundle_roots: &'static [PathBuf]| {
+            IsolationLaunchContext {
+                immutable_project: None,
+                workspace_view: None,
+                project_path: project.path(),
+                project_authority: IsolationProjectAuthority::EphemeralScratch,
+                filesystem_authority_ceiling:
+                    IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                live_access: None,
+                state_root: None,
+                bundle_state_home: None,
+                checkpoint_dir: None,
+                checkpoint_authority: None,
+                daemon_socket_path: with_socket.then_some(socket_ref),
+                captured_callback_socket: admitted,
+                bundle_roots,
+                verified_code: &[],
+                verified_command: Some(&command),
+                external_read_only_mounts: &[],
+                writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
+                target_channels: &[],
+                target_sealed_payloads: &[],
+                item_ref: "worker:tests/captured-callback",
+                thread_id: "T-captured-callback",
+                verbatim_env_names: &[],
+            }
+        };
+        let plan_of = |applied: AppliedIsolationLaunch| {
+            let (bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            serde_json::from_slice::<AdapterLaunchRequest>(&bytes).unwrap()
+        };
+        let socket_text = socket_path.to_string_lossy().into_owned();
+        let parent_text = socket_dir.path().to_string_lossy().into_owned();
+
+        // Baseline: a captured launch without a socket.
+        let baseline = plan_of(
+            runtime
+                .apply_with_provenance(request(), context(false, false, &[]))
+                .unwrap(),
+        );
+        assert!(
+            baseline
+                .plan
+                .mounts
+                .iter()
+                .all(|m| m.destination.as_str() != socket_text)
+        );
+
+        // On the class: exactly one more mount, the socket entry, read-only,
+        // backed by a descriptor authority; the parent directory is not mounted.
+        let admitted = plan_of(
+            runtime
+                .apply_with_provenance(request(), context(true, true, &[]))
+                .unwrap(),
+        );
+        assert_eq!(admitted.plan.mounts.len(), baseline.plan.mounts.len() + 1);
+        let mounts = admitted
+            .plan
+            .mounts
+            .iter()
+            .filter(|m| m.destination.as_str() == socket_text)
+            .collect::<Vec<_>>();
+        assert_eq!(mounts.len(), 1);
+        assert!(
+            admitted
+                .plan
+                .mounts
+                .iter()
+                .all(|m| m.destination.as_str() != parent_text)
+        );
+        assert!(admitted.authorities.iter().any(|authority| {
+            authority.id == mounts[0].source
+                && authority.purpose == IsolationAuthorityPurpose::ReadOnlyMount
+        }));
+
+        // Off the class a captured launch carrying the socket is refused.
+        let error = runtime
+            .apply_with_provenance(request(), context(true, false, &[]))
+            .err()
+            .expect("captured launch off the class must refuse the socket");
+        assert!(
+            error
+                .to_string()
+                .contains("captured execution context carries ambient filesystem authority")
+        );
+
+        // On the class, other ambient authority is still refused.
+        static ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+        let roots = ROOTS.get_or_init(|| vec![PathBuf::from("/ryeos-bundle-root")]);
+        let error = runtime
+            .apply_with_provenance(request(), context(true, true, roots))
+            .err()
+            .expect("bundle roots stay refused under captured execution");
+        assert!(
+            error
+                .to_string()
+                .contains("captured execution context carries ambient filesystem authority")
+        );
+    }
+
+    /// The daemon pins its callback-only socket, never the control socket that
+    /// sits beside it. Both a captured tool on the class and a node-policy
+    /// callback tool receive exactly that one socket entry: not its parent
+    /// directory, and not the control socket.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn callback_tools_mount_only_the_pinned_runtime_socket_entry() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable =
+            vec!["{verified_code}".to_string(), "{daemon_socket}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        write_policy(app_root.path(), &policy);
+
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let control_path = socket_dir.path().join("ryeosd.sock");
+        let runtime_path = socket_dir.path().join("ryeosd-runtime.sock");
+        let _control = std::os::unix::net::UnixListener::bind(&control_path).unwrap();
+        let _runtime = std::os::unix::net::UnixListener::bind(&runtime_path).unwrap();
+        let runtime = IsolationRuntime::load_for_daemon(
+            app_root.path(),
+            &runtime_path,
+            Some(Arc::new(backend)),
+        )
+        .unwrap();
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+        let project = runtime
+            .runtime_workspaces
+            .as_ref()
+            .unwrap()
+            .open_or_create_child(std::ffi::OsStr::new("runtime-socket"), 0o700)
+            .unwrap();
+        let request = || lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let context = |socket: &'static Path,
+                       ceiling: IsolationFilesystemAuthorityCeiling,
+                       captured: bool| IsolationLaunchContext {
+            immutable_project: None,
+            workspace_view: None,
+            project_path: project.path(),
+            project_authority: IsolationProjectAuthority::EphemeralScratch,
+            filesystem_authority_ceiling: ceiling,
+            network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+            live_access: None,
+            state_root: None,
+            bundle_state_home: None,
+            checkpoint_dir: None,
+            checkpoint_authority: None,
+            daemon_socket_path: Some(socket),
+            captured_callback_socket: captured,
+            bundle_roots: &[],
+            verified_code: &[],
+            verified_command: Some(&command),
+            external_read_only_mounts: &[],
+            writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
+            target_channels: &[],
+            target_sealed_payloads: &[],
+            item_ref: "worker:tests/runtime-socket",
+            thread_id: "T-runtime-socket",
+            verbatim_env_names: &[],
+        };
+        static RUNTIME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        static CONTROL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let runtime_static: &'static Path = RUNTIME.get_or_init(|| runtime_path.clone());
+        let control_static: &'static Path = CONTROL.get_or_init(|| control_path.clone());
+        let plan_of = |applied: AppliedIsolationLaunch| {
+            let (bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            serde_json::from_slice::<AdapterLaunchRequest>(&bytes).unwrap()
+        };
+        let runtime_text = runtime_path.to_string_lossy().into_owned();
+        let control_text = control_path.to_string_lossy().into_owned();
+        let parent_text = socket_dir.path().to_string_lossy().into_owned();
+
+        for (label, ceiling, captured) in [
+            (
+                "captured tool on the class",
+                IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                true,
+            ),
+            (
+                "node-policy callback tool",
+                IsolationFilesystemAuthorityCeiling::NodePolicy,
+                false,
+            ),
+        ] {
+            let plan = plan_of(
+                runtime
+                    .apply_with_provenance(request(), context(runtime_static, ceiling, captured))
+                    .unwrap(),
+            );
+            let destinations = plan
+                .plan
+                .mounts
+                .iter()
+                .map(|mount| mount.destination.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                destinations
+                    .iter()
+                    .filter(|destination| **destination == runtime_text)
+                    .count(),
+                1,
+                "{label}: the runtime socket entry is mounted once"
+            );
+            assert!(
+                !destinations.contains(&control_text.as_str()),
+                "{label}: the control socket is not mounted"
+            );
+            assert!(
+                !destinations.contains(&parent_text.as_str()),
+                "{label}: the socket directory is not mounted"
+            );
+
+            // The control socket is not an admissible callback endpoint.
+            let error = runtime
+                .apply_with_provenance(request(), context(control_static, ceiling, captured))
+                .err()
+                .unwrap_or_else(|| panic!("{label}: the control socket must be refused"));
+            assert!(error.to_string().contains("expected"), "{label}: {error}");
+        }
+    }
+
+    /// A broad readable entry must not hand a sandbox the control socket: any
+    /// entry that equals or contains it is refused by name at launch.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readable_entries_cannot_expose_the_control_socket() {
+        let app_root = tempfile::tempdir().unwrap();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let control_path = socket_dir.path().join("ryeosd.sock");
+        let runtime_path = socket_dir.path().join("ryeosd-runtime.sock");
+        let _control = std::os::unix::net::UnixListener::bind(&control_path).unwrap();
+        let _runtime = std::os::unix::net::UnixListener::bind(&runtime_path).unwrap();
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let backend = Arc::new(backend);
+        static RUNTIME_ONLY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let runtime_static: &'static Path = RUNTIME_ONLY.get_or_init(|| runtime_path.clone());
+
+        for broad in [
+            socket_dir.path().to_string_lossy().into_owned(),
+            control_path.to_string_lossy().into_owned(),
+        ] {
+            let mut policy = IsolationPolicy::disabled_for_authoring();
+            policy.mode = IsolationMode::Enforce;
+            policy.backend = Some(resolved_backend().selection.clone());
+            policy.filesystem.readable = vec![
+                "{verified_code}".to_string(),
+                "{daemon_socket}".to_string(),
+                broad.clone(),
+            ];
+            policy.filesystem.writable = vec!["{project}".to_string()];
+            let runtime = IsolationRuntime::resolve_compiled_policy_for_daemon(
+                app_root.path(),
+                &runtime_path,
+                Some(&control_path),
+                policy,
+                app_root.path().join("isolation.yaml"),
+                format!("sha256:{}", "0".repeat(64)),
+                Some(backend.clone()),
+                None,
+                None,
+            )
+            .unwrap();
+            let command = runtime
+                .capture_verified_command(Path::new("/bin/true"), None, None)
+                .unwrap();
+            let project = runtime
+                .runtime_workspaces
+                .as_ref()
+                .unwrap()
+                .open_or_create_child(std::ffi::OsStr::new("withheld"), 0o700)
+                .unwrap();
+            let error = runtime
+                .apply_with_provenance(
+                    lillux::SubprocessRequest {
+                        cmd: "/bin/true".to_string(),
+                        argv0: None,
+                        args: Vec::new(),
+                        cwd: Some(project.path().to_string_lossy().into_owned()),
+                        envs: Vec::new(),
+                        stdin_data: None,
+                        timeout: 1.0,
+                        limits: None,
+                        inherited_fds: Vec::new(),
+                        inherited_fd_mappings: Vec::new(),
+                        supervised_status: None,
+                    },
+                    IsolationLaunchContext {
+                        immutable_project: None,
+                        workspace_view: None,
+                        project_path: project.path(),
+                        project_authority: IsolationProjectAuthority::EphemeralScratch,
+                        filesystem_authority_ceiling:
+                            IsolationFilesystemAuthorityCeiling::NodePolicy,
+                        network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                        live_access: None,
+                        state_root: None,
+                        bundle_state_home: None,
+                        checkpoint_dir: None,
+                        checkpoint_authority: None,
+                        daemon_socket_path: Some(runtime_static),
+                        captured_callback_socket: false,
+                        bundle_roots: &[],
+                        verified_code: &[],
+                        verified_command: Some(&command),
+                        external_read_only_mounts: &[],
+                        writable_runtime_view_mounts: &[],
+                        producer_prepared_mounts: &[],
+                        target_channels: &[],
+                        target_sealed_payloads: &[],
+                        item_ref: "worker:tests/withheld",
+                        thread_id: "T-withheld",
+                        verbatim_env_names: &[],
+                    },
+                )
+                .err()
+                .unwrap_or_else(|| panic!("readable `{broad}` must be refused"));
+            assert!(
+                error.to_string().contains("withheld daemon control socket"),
+                "{broad}: {error}"
+            );
+        }
+    }
+
+    /// The captured verifier on the enforced lane: a read-only project, the
+    /// admitted execution-runtime mounts and the captured-compatible callback
+    /// socket must coexist in one plan, and the node reports the captured
+    /// filesystem guarantee only because its ceilings admit exactly this.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_verifier_plan_carries_readonly_project_runtime_mounts_and_callback_socket() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec![
+            "{verified_code}".to_string(),
+            "{daemon_socket}".to_string(),
+            "{project}".to_string(),
+        ];
+        policy.filesystem.writable = Vec::new();
+        write_policy(app_root.path(), &policy);
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let runtime = IsolationRuntime::load_for_daemon(
+            app_root.path(),
+            &socket_path,
+            Some(Arc::new(backend)),
+        )
+        .unwrap();
+        assert!(runtime.inspection().admits_captured_filesystem());
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let runtime_source = tempfile::tempdir().unwrap();
+        std::fs::write(runtime_source.path().join("member"), b"member").unwrap();
+        let pinned = lillux::PinnedDirectory::open(runtime_source.path())
+            .unwrap()
+            .unwrap();
+        let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            runtime_source.path().to_path_buf(),
+            PathBuf::from("/ryeos/realizations/guest-runtime"),
+            pinned.inherited_descriptor_authority().unwrap(),
+        );
+        let mounts = [mount];
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let applied = runtime
+            .apply_with_provenance(
+                request,
+                IsolationLaunchContext {
+                    immutable_project: None,
+                    workspace_view: None,
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling:
+                        IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                    live_access: None,
+                    state_root: None,
+                    bundle_state_home: None,
+                    checkpoint_dir: None,
+                    checkpoint_authority: None,
+                    daemon_socket_path: Some(&socket_path),
+                    captured_callback_socket: true,
+                    bundle_roots: &[],
+                    verified_code: &[],
+                    verified_command: Some(&command),
+                    external_read_only_mounts: &mounts,
+                    writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
+                    target_channels: &[],
+                    target_sealed_payloads: &[],
+                    item_ref: "tool:tests/captured-verifier",
+                    thread_id: "T-captured-verifier",
+                    verbatim_env_names: &[],
+                },
+            )
+            .expect("the captured verifier launch must compile on the enforced lane");
+        let (bytes, _) = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        let plan = serde_json::from_slice::<AdapterLaunchRequest>(&bytes)
+            .unwrap()
+            .plan;
+        let destinations = plan
+            .mounts
+            .iter()
+            .map(|mount| mount.destination.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let socket_text = socket_path.to_string_lossy().into_owned();
+        assert!(destinations.contains(&socket_text), "{destinations:?}");
+        assert!(
+            destinations
+                .iter()
+                .any(|d| d == "/ryeos/realizations/guest-runtime"),
+            "{destinations:?}"
+        );
+        let project_text = project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            destinations
+                .iter()
+                .any(|d| d.ends_with(&project_text) || *d == project_text),
+            "{project_text} not in {destinations:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn contained_verifier_plan_keeps_readonly_project_runtime_mounts_and_callback_socket_under_pid_namespace_init()
+     {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec![
+            "{verified_code}".to_string(),
+            "{daemon_socket}".to_string(),
+            "{project}".to_string(),
+        ];
+        policy.filesystem.writable = Vec::new();
+        write_policy(app_root.path(), &policy);
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let runtime = IsolationRuntime::load_for_daemon(
+            app_root.path(),
+            &socket_path,
+            Some(Arc::new(backend)),
+        )
+        .unwrap();
+        assert!(runtime.inspection().admits_captured_filesystem());
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let runtime_source = tempfile::tempdir().unwrap();
+        std::fs::write(runtime_source.path().join("member"), b"member").unwrap();
+        let pinned = lillux::PinnedDirectory::open(runtime_source.path())
+            .unwrap()
+            .unwrap();
+        let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            runtime_source.path().to_path_buf(),
+            PathBuf::from("/ryeos/realizations/guest-runtime"),
+            pinned.inherited_descriptor_authority().unwrap(),
+        );
+        let mounts = [mount];
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        // The verifier's PID-namespace init containment (the sealed policy's
+        // `containment_empty`), compiled together with the captured ceilings,
+        // pushed-head read-only project, runtime mounts and callback socket.
+        let applied = runtime
+            .apply_with_provenance_current(
+                request,
+                IsolationLaunchContext {
+                    immutable_project: None,
+                    workspace_view: None,
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling:
+                        IsolationFilesystemAuthorityCeiling::CapturedExecution,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
+                    live_access: None,
+                    state_root: None,
+                    bundle_state_home: None,
+                    checkpoint_dir: None,
+                    checkpoint_authority: None,
+                    daemon_socket_path: Some(&socket_path),
+                    captured_callback_socket: true,
+                    bundle_roots: &[],
+                    verified_code: &[],
+                    verified_command: Some(&command),
+                    external_read_only_mounts: &mounts,
+                    writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
+                    target_channels: &[],
+                    target_sealed_payloads: &[],
+                    item_ref: "tool:tests/captured-verifier",
+                    thread_id: "T-captured-verifier",
+                    verbatim_env_names: &[],
+                },
+                RequestedLaunchLifecycle::Run,
+                RetainedContainment::PidNamespaceInit,
+                None,
+                None,
+                None,
+            )
+            .expect("the contained captured verifier launch must compile on the enforced lane");
+        let (bytes, _) = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        let plan = serde_json::from_slice::<AdapterLaunchRequest>(&bytes)
+            .unwrap()
+            .plan;
+        // setsid/setpgid are permitted (no strict group), contained by the
+        // retained init; no nested sandbox and ordinary task-only proc.
+        assert!(!plan.shared_process_group);
+        assert!(!plan.nested_sandbox);
+        let destinations = plan
+            .mounts
+            .iter()
+            .map(|mount| mount.destination.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let socket_text = socket_path.to_string_lossy().into_owned();
+        assert!(destinations.contains(&socket_text), "{destinations:?}");
+        assert!(
+            destinations
+                .iter()
+                .any(|d| d == "/ryeos/realizations/guest-runtime"),
+            "{destinations:?}"
+        );
+        let project_text = project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            destinations
+                .iter()
+                .any(|d| d.ends_with(&project_text) || *d == project_text),
+            "{project_text} not in {destinations:?}"
+        );
+    }
+
+    /// The rollout shape for a host with no delegated cgroup: scopes
+    /// unconfigured, the floor naming the PID-namespace containment instead of
+    /// any per-scope capability. Containment must not depend on
+    /// `process_scopes: required` or on `exclusive_session` readiness.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pid_namespace_containment_needs_no_configured_process_scopes() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        policy.trusted_process_group_sessions = true;
+        policy.requires_capabilities = [
+            "recovery:pid_namespace",
+            "termination:pid_namespace",
+            "time",
+        ]
+        .into_iter()
+        .map(lillux::process_control::CapabilityRequirement::from)
+        .collect();
+        assert!(matches!(
+            policy.process_scopes,
+            IsolationProcessScopePolicy::Unconfigured {}
+        ));
+        write_policy(app_root.path(), &policy);
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+        let readiness = &runtime.inspection().process_scope_readiness;
+        // No scope policy, no provider: the cgroup lane is genuinely absent.
+        assert!(!readiness.exclusive_session.ready);
+        assert!(!readiness.descendant_containment.cgroup_scope);
+        if !readiness.descendant_containment.pid_namespace.qualified {
+            eprintln!(
+                "skipped: this host does not qualify PID-namespace containment: {}",
+                readiness.descendant_containment.pid_namespace.detail
+            );
+            return;
+        }
+        // Yet descendant containment is available, by the namespace init. This
+        // is the guarantee every admission (connector gate, Q Worker launch,
+        // verifier launch) consults.
+        assert_eq!(
+            readiness.descendant_containment.enforced_guarantee(),
+            Some(DescendantContainmentGuarantee::PidNamespaceInit)
+        );
+        // A PID-namespace scope is accepted at the engine seam without a
+        // process-scope provider or a control timeout.
+        runtime
+            .validate_retained_scope(&lillux::ProcessScope::pid_namespace_init())
+            .unwrap();
+    }
+
+    #[test]
+    fn captured_filesystem_guarantee_follows_the_node_ceilings_not_the_enforced_bit() {
+        let host = GuaranteeHost::default();
+        let inspection = |readable: &[&str], writable: &[&str]| {
+            let mut inspection = IsolationRuntime::disabled_for_authoring()
+                .inspection()
+                .clone();
+            inspection.filesystem.readable = readable.iter().map(|s| s.to_string()).collect();
+            inspection.filesystem.writable = writable.iter().map(|s| s.to_string()).collect();
+            inspection
+        };
+        let held = |inspection: &IsolationInspection, enforced: bool| {
+            let view = inspection.reported_guarantees(enforced, &host);
+            (
+                view.provided.contains_key(ISOLATION_ENFORCED),
+                view.provided.contains_key(FILESYSTEM_CAPTURED_EXECUTION),
+                view.provided.contains_key(CALLBACK_CAPTURED_COMPATIBLE),
+            )
+        };
+        // Admission's ceilings: {verified_code} readable, {project} writable or readable.
+        let writable_project = inspection(&["{verified_code}"], &["{project}"]);
+        assert_eq!(held(&writable_project, true), (true, true, true));
+        let readable_project = inspection(&["{verified_code}", "{project}"], &[]);
+        assert_eq!(held(&readable_project, true), (true, true, true));
+        // Enforced, but without {verified_code} or without any {project} access.
+        let no_code = inspection(&["{project}"], &["{project}"]);
+        assert_eq!(held(&no_code, true), (true, false, false));
+        let view = no_code.reported_guarantees(true, &host);
+        assert!(view.missing[FILESYSTEM_CAPTURED_EXECUTION].contains("ceilings"));
+        let no_project = inspection(&["{verified_code}"], &[]);
+        assert_eq!(held(&no_project, true), (true, false, false));
+        // The ceilings alone are not enforcement.
+        assert_eq!(held(&writable_project, false), (false, false, false));
     }
 
     #[test]
@@ -9224,19 +12536,22 @@ mod tests {
                 network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: std::slice::from_ref(&channel),
+                target_sealed_payloads: &[],
                 item_ref: "worker:tests/channel",
                 thread_id: "T-channel",
+                verbatim_env_names: &[],
             },
         ) {
             Ok(_) => panic!("typed target channel accepted competing stdin"),
@@ -9331,19 +12646,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "graph:tests/native-cow",
                     thread_id: "T-native-cow",
+                    verbatim_env_names: &[],
                 },
             )
             .unwrap();
@@ -9363,6 +12681,161 @@ mod tests {
         assert_eq!(destroyed.mount_identity, created.mount_identity);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_containment_selects_the_group_contract_nested_authority_and_proc_surface() {
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        write_policy(app_root.path(), &policy);
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemFixedParentViews,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::FilesystemPidNamespaceProc,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessIsolatedPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+            IsolationCapability::ProcessNestedSandbox,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let mut runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+        // A broader node ceiling than any one launch's retained authority.
+        runtime.inspection.filesystem.proc_filesystem =
+            ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
+        runtime.inspection.requires_capabilities =
+            vec![lillux::process_control::CapabilityRequirement::from(
+                lillux::process_control::ISOLATION_NAMESPACES,
+            )];
+        assert!(
+            runtime.inspection.nested_sandbox(),
+            "fixture node must permit a nested sandbox so the PID-namespace case proves it is withheld"
+        );
+        let cgroup_recovery: lillux::ProcessScopeRecovery =
+            serde_json::from_value(serde_json::json!({
+                "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
+                "configuration": {"version": 3, "backend": {
+                    "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"}},
+                "backend": {"implementation": "linux_cgroup_v2",
+                    "boot_id": "00000000-0000-4000-8000-000000000000",
+                    "parent": {"filesystem": {"device": 1}, "inode": 2},
+                    "directory": {"filesystem": {"device": 1}, "inode": 3},
+                    "name": "fixture-scope"}
+            }))
+            .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let root_identity = root.identity().unwrap();
+        let live_access = IsolationLiveAccessAuthority::DescriptorRootedFixedParents {
+            root: Arc::new(root),
+            root_identity,
+            denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+        let compile = |containment| {
+            let applied = runtime
+                .apply_with_provenance_current(
+                    lillux::SubprocessRequest {
+                        cmd: "/bin/true".to_string(),
+                        argv0: None,
+                        args: Vec::new(),
+                        cwd: Some(project.path().to_string_lossy().into_owned()),
+                        envs: Vec::new(),
+                        stdin_data: None,
+                        timeout: 1.0,
+                        limits: None,
+                        inherited_fds: Vec::new(),
+                        inherited_fd_mappings: Vec::new(),
+                        supervised_status: None,
+                    },
+                    IsolationLaunchContext {
+                        immutable_project: None,
+                        workspace_view: None,
+                        project_path: project.path(),
+                        project_authority: IsolationProjectAuthority::External,
+                        captured_callback_socket: false,
+                        filesystem_authority_ceiling:
+                            IsolationFilesystemAuthorityCeiling::NodePolicy,
+                        network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
+                        live_access: Some(&live_access),
+                        state_root: None,
+                        bundle_state_home: None,
+                        checkpoint_dir: None,
+                        checkpoint_authority: None,
+                        daemon_socket_path: None,
+                        bundle_roots: &[],
+                        verified_code: &[],
+                        verified_command: None,
+                        external_read_only_mounts: &[],
+                        writable_runtime_view_mounts: &[],
+                        producer_prepared_mounts: &[],
+                        target_channels: &[],
+                        target_sealed_payloads: &[],
+                        item_ref: "tool:tests/containment",
+                        thread_id: "T-containment",
+                        verbatim_env_names: &[],
+                    },
+                    RequestedLaunchLifecycle::Run,
+                    containment,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let (bytes, _) = applied
+                .request
+                .inherited_fds
+                .last()
+                .unwrap()
+                .read_regular_file_stable_bounded(
+                    ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64,
+                )
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let plan = &request["plan"];
+            (
+                plan["shared_process_group"].as_bool().unwrap(),
+                plan["nested_sandbox"].as_bool().unwrap(),
+                plan["proc_filesystem"].as_str().unwrap().to_owned(),
+            )
+        };
+        // Strict group: the sandbox denies setsid/setpgid; no nested sandbox.
+        assert_eq!(
+            compile(RetainedContainment::Group),
+            (true, false, "pid_namespace".to_owned())
+        );
+        // Cgroup scope: retained externally, so descendants may nest sandboxes.
+        assert_eq!(
+            compile(RetainedContainment::Cgroup(&cgroup_recovery)),
+            (false, true, "pid_namespace_nested".to_owned())
+        );
+        // PID-namespace init: setsid/double-fork are permitted (no strict
+        // group), contained by the retained init; a nested sandbox would
+        // need a nested-proc ceiling this mechanism was not designed for.
+        assert_eq!(
+            compile(RetainedContainment::PidNamespaceInit),
+            (false, false, "pid_namespace".to_owned())
+        );
+    }
+
     #[test]
     fn disabled_attachment_compilation_preserves_the_distinct_request_type() {
         let app_root = tempfile::tempdir().unwrap();
@@ -9380,19 +12853,22 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: Some(&live_access),
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
+            verbatim_env_names: &[],
         };
         let request = lillux::SubprocessRequest {
             cmd: "/bin/true".to_string(),
@@ -9440,19 +12916,22 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: Some(&live_access),
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
+            verbatim_env_names: &[],
         };
         let error = runtime
             .apply_awaiting_attachment(request, context)
@@ -9491,19 +12970,22 @@ mod tests {
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: "tool:tests/live",
             thread_id: "T-live",
+            verbatim_env_names: &[],
         };
         runtime
             .apply_with_provenance(request(), context(Some(&unconfined)))
@@ -9525,8 +13007,10 @@ mod tests {
                     .unwrap()
                     .expect("app root"),
             ),
-            root_device_id: 0,
-            root_inode: 0,
+            root_identity: serde_json::from_value(
+                serde_json::json!({"filesystem": {"device": 0}, "inode": 0}),
+            )
+            .unwrap(),
             denied_control_paths: vec![PathBuf::from(".ai")],
             authorized_write_namespaces: vec!["project".to_string()],
         };
@@ -9570,19 +13054,22 @@ mod tests {
                     network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
+                    captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",
+                    verbatim_env_names: &[],
                 },
             )
             .err()
@@ -9619,9 +13106,15 @@ mod tests {
                     validate_workspace_view_context(state, project, None).is_err(),
                     requires_view
                 );
+                let accepts_view = state == IsolationRuntimeState::Enforced
+                    && matches!(
+                        project,
+                        IsolationProjectAuthority::RuntimeWorkspace
+                            | IsolationProjectAuthority::EphemeralScratch
+                    );
                 assert_eq!(
                     validate_workspace_view_context(state, project, Some(&view)).is_ok(),
-                    requires_view
+                    accepts_view
                 );
             }
         }
@@ -9664,7 +13157,6 @@ mod tests {
             daemon_socket: None,
             requested_daemon_socket: None,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code_mounts: &[],
         };
         let readable = resolve_readable_mounts("{project}", &readable_resolution)
@@ -9680,6 +13172,7 @@ mod tests {
     #[test]
     fn launch_plan_digest_redacts_arguments_and_environment_values() {
         let mut plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: IsolationAuthorityId::new("target").unwrap(),
                 argv0: "tool".to_string(),
@@ -9695,6 +13188,7 @@ mod tests {
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
+            target_sealed_payloads: Vec::new(),
             environment: IsolationEnvironment {
                 values: BTreeMap::from([("API_TOKEN".to_string(), "first-token".to_string())]),
             },
@@ -9722,6 +13216,15 @@ mod tests {
         assert_ne!(target.argv_sha256, changed.argv_sha256);
         assert_ne!(target.environment_sha256, changed.environment_sha256);
 
+        plan.target_limits = Some(ryeos_isolation_protocol::IsolationTargetLimits {
+            max_open_files: None,
+            max_address_space_bytes: None,
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+        });
+        assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
+        plan.target_limits = None;
         plan.network = IsolationNetwork::Host;
         assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
     }
@@ -9739,6 +13242,7 @@ mod tests {
             purpose: IsolationAuthorityPurpose::Executable,
         };
         let mut plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: id.clone(),
                 argv0: "tool".into(),
@@ -9754,6 +13258,7 @@ mod tests {
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
+            target_sealed_payloads: Vec::new(),
             environment: IsolationEnvironment {
                 values: BTreeMap::new(),
             },
@@ -9767,11 +13272,15 @@ mod tests {
             shared_process_group: true,
             nested_sandbox: false,
         };
-        let expected = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
+        let expected =
+            expected_mount_preparation_commitments(&plan, std::slice::from_ref(&authority))
+                .unwrap();
         assert_eq!(expected.schema, 1);
         assert_eq!(expected.mount_count, 1);
         plan.mounts[0].access = IsolationMountAccess::Writable;
-        let writable = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
+        let writable =
+            expected_mount_preparation_commitments(&plan, std::slice::from_ref(&authority))
+                .unwrap();
         assert_ne!(
             writable.destination_access_sha256,
             expected.destination_access_sha256
@@ -9788,6 +13297,7 @@ mod tests {
     #[test]
     fn loopback_receipt_requires_exact_held_request_and_one_descriptor() {
         let plan = IsolationPlan {
+            target_limits: None,
             target: IsolationTarget {
                 executable: IsolationAuthorityId::new("target").unwrap(),
                 argv0: "tool".into(),
@@ -9798,6 +13308,7 @@ mod tests {
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
+            target_sealed_payloads: Vec::new(),
             environment: IsolationEnvironment {
                 values: BTreeMap::new(),
             },
@@ -9821,6 +13332,8 @@ mod tests {
             adapter_fd: 10,
             status_fd: 11,
             loopback_transfer_fd: Some(12),
+            original_namespace_occupancy: None,
+            native_terminal_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 13,
                 release_keepalive_fd: 14,
@@ -9918,9 +13431,9 @@ mod tests {
         policy.backend = Some(backend.selection.clone());
         policy.process_scopes = serde_json::from_value(serde_json::json!({
             "mode": "required", "control_timeout_ms": 1000,
-            "nested_sandbox": false,
         }))
         .unwrap();
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
         let source = app_root.path().join("isolation.yaml");
         let digest = format!("sha256:{}", "a".repeat(64));
         let prospective = IsolationRuntime::resolve_compiled_policy_for_definition_validation(
@@ -9966,13 +13479,14 @@ mod tests {
         assert!(runtime.process_scope_control_timeout().is_err());
 
         // Prospective validation does not waive signed backend capabilities.
-        if let IsolationProcessScopePolicy::Required { nested_sandbox, .. } =
-            &mut policy.process_scopes
-        {
-            *nested_sandbox = true;
-        }
+        policy.requires_capabilities = vec![
+            ISOLATION_NAMESPACES.into(),
+            "recovery:scope".into(),
+            "termination:scope".into(),
+        ];
         policy.filesystem.proc_filesystem =
             ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
+        assert!(policy.nested_sandbox());
         let error = IsolationRuntime::resolve_compiled_policy_for_definition_validation(
             app_root.path(),
             policy,
@@ -9989,23 +13503,193 @@ mod tests {
     }
 
     #[test]
+    fn control_timeout_maximum_is_accepted_at_the_boundary_and_refused_above() {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
+        policy.process_scopes = IsolationProcessScopePolicy::Required {
+            control_timeout_ms: MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS,
+        };
+        IsolationRuntime::validate_policy(&policy).unwrap();
+        policy.process_scopes = IsolationProcessScopePolicy::Required {
+            control_timeout_ms: MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS + 1,
+        };
+        match IsolationRuntime::validate_policy(&policy).unwrap_err() {
+            EngineError::IsolationPolicyValueAboveMaximum {
+                field,
+                value_ms,
+                maximum_ms,
+            } => {
+                assert_eq!(field, "process_scopes.control_timeout_ms");
+                assert_eq!(value_ms, MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS + 1);
+                assert_eq!(maximum_ms, MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS);
+            }
+            other => panic!("expected the typed maximum refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_shipped_profile_signs_a_control_timeout_within_the_maximum() {
+        let profiles = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/.ai/node/init/profiles");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&profiles).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for line in text.lines() {
+                let Some(value) = line.trim().strip_prefix("control_timeout_ms:") else {
+                    continue;
+                };
+                let value: u64 = value.trim().parse().unwrap();
+                assert!(
+                    (1..=MAX_PROCESS_SCOPE_CONTROL_TIMEOUT_MS).contains(&value),
+                    "{} signs control_timeout_ms {value}",
+                    path.display()
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no shipped profile declares a control timeout");
+    }
+
+    #[test]
     fn process_scope_policy_is_explicit_and_cannot_advertise_unqualified_support() {
         let policy = IsolationPolicy::disabled_for_authoring();
         IsolationRuntime::validate_policy(&policy).unwrap();
         let mut scoped_without_sandbox = policy.clone();
         scoped_without_sandbox.process_scopes = IsolationProcessScopePolicy::Required {
             control_timeout_ms: 1_000,
-            nested_sandbox: false,
         };
+        // Required scopes cannot run without termination and recovery, so
+        // the declared floor must name both; quiescence stays optional.
+        let error = IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap_err();
+        assert!(
+            error.to_string().contains("need termination:scope"),
+            "{error}"
+        );
+        scoped_without_sandbox.requires_capabilities =
+            vec!["recovery:scope".into(), "termination:scope".into()];
         IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap();
+        let mut unsorted = scoped_without_sandbox.clone();
+        unsorted.requires_capabilities.reverse();
+        assert!(IsolationRuntime::validate_policy(&unsorted).is_err());
+        let mut unconfigured_scope_floor = policy.clone();
+        unconfigured_scope_floor.requires_capabilities = vec!["termination:scope".into()];
+        assert!(IsolationRuntime::validate_policy(&unconfigured_scope_floor).is_err());
+        // A set of alternatives accepts a weaker grade only by naming it.
+        let any_of = |names: &[&str]| {
+            lillux::process_control::CapabilityRequirement::Spec(
+                lillux::process_control::CapabilityRequirementSpec {
+                    name: None,
+                    any_of: names.iter().map(|name| (*name).to_owned()).collect(),
+                    accept: Vec::new(),
+                    providers: Vec::new(),
+                },
+            )
+        };
+        let mut alternatives = policy.clone();
+        alternatives.requires_capabilities = vec![
+            any_of(&["accounting", "residency:swap_absent"]),
+            "time".into(),
+        ];
+        IsolationRuntime::validate_policy(&alternatives).unwrap();
+        let value = serde_json::to_value(&alternatives).unwrap();
+        assert_eq!(
+            value["requires_capabilities"],
+            serde_json::json!([{"any_of": ["accounting", "residency:swap_absent"]}, "time"])
+        );
+        assert_eq!(
+            serde_json::from_value::<IsolationPolicy>(value).unwrap(),
+            alternatives
+        );
+        for (floor, refusal) in [
+            (
+                vec![any_of(&["accounting"]), "time".into()],
+                "at least two names",
+            ),
+            (
+                vec![any_of(&["residency:swap_absent", "accounting"])],
+                "at least two names",
+            ),
+            (
+                vec![any_of(&["accounting", "termination:scope"])],
+                "per-scope capability",
+            ),
+            (
+                vec![any_of(&["accounting", "limits:scope"])],
+                "per-scope capability",
+            ),
+            (
+                vec!["residency:swap_absent".into()],
+                "stronger residency basis does not meet",
+            ),
+            (
+                vec![any_of(&["residency:locked", "residency:swap_absent"])],
+                "stronger residency basis does not meet",
+            ),
+            (
+                vec![
+                    "accounting".into(),
+                    any_of(&["accounting", "residency:swap_absent"]),
+                ],
+                "more than once",
+            ),
+            (
+                vec![
+                    "time".into(),
+                    any_of(&["accounting", "residency:swap_absent"]),
+                ],
+                "sorted and unique",
+            ),
+        ] {
+            let mut invalid = policy.clone();
+            invalid.requires_capabilities = floor;
+            let error = IsolationRuntime::validate_policy(&invalid)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(refusal), "{refusal}: {error}");
+        }
+        let mut inits = scoped_without_sandbox.clone();
+        inits.enclosure_inits = vec![
+            "catatonit".to_owned(),
+            "dumb-init".to_owned(),
+            "tini".to_owned(),
+        ];
+        IsolationRuntime::validate_policy(&inits).unwrap();
+        inits.enclosure_inits.reverse();
+        assert!(IsolationRuntime::validate_policy(&inits).is_err());
+        inits.enclosure_inits = vec!["/usr/bin/tini".to_owned()];
+        assert!(IsolationRuntime::validate_policy(&inits).is_err());
+        let mut bounded = scoped_without_sandbox.clone();
+        bounded.host_lifetime_bound = Some(lillux::process_control::HostLifetimeBound {
+            provider: "test-sandbox".to_owned(),
+            seconds: 86_400,
+        });
+        IsolationRuntime::validate_policy(&bounded).unwrap();
+        let value = serde_json::to_value(&bounded).unwrap();
+        assert_eq!(value["host_lifetime_bound"]["seconds"], 86_400);
+        assert_eq!(
+            serde_json::from_value::<IsolationPolicy>(value).unwrap(),
+            bounded
+        );
+        assert!(
+            serde_json::to_value(&scoped_without_sandbox)
+                .unwrap()
+                .get("host_lifetime_bound")
+                .is_none()
+        );
+        bounded.host_lifetime_bound = Some(lillux::process_control::HostLifetimeBound {
+            provider: "test-sandbox".to_owned(),
+            seconds: 0,
+        });
+        let error = IsolationRuntime::validate_policy(&bounded)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("host lifetime bound must be positive"),
+            "{error}"
+        );
         assert_eq!(scoped_without_sandbox.mode, IsolationMode::Disabled);
-        assert!(matches!(
-            scoped_without_sandbox.process_scopes,
-            IsolationProcessScopePolicy::Required {
-                nested_sandbox: false,
-                ..
-            }
-        ));
+        assert!(!scoped_without_sandbox.nested_sandbox());
         let mut value = serde_json::to_value(&policy).unwrap();
         value.as_object_mut().unwrap().remove("process_scopes");
         assert!(serde_json::from_value::<IsolationPolicy>(value).is_err());
@@ -10028,11 +13712,8 @@ mod tests {
         value["process_scopes"] = serde_json::json!({
             "mode":"required", "control_timeout_ms":1000
         });
-        assert!(
-            serde_json::from_value::<IsolationPolicy>(value.clone()).is_err(),
-            "nested authority must be explicit, not defaulted"
-        );
-        value["process_scopes"]["nested_sandbox"] = true.into();
+        value["requires_capabilities"] =
+            serde_json::json!([ISOLATION_NAMESPACES, "recovery:scope", "termination:scope"]);
         value["process_scopes"]["configuration"] = serde_json::json!({
             "version": 3,
             "backend": {
@@ -10053,11 +13734,12 @@ mod tests {
             IsolationRuntime::validate_policy(&parsed)
                 .unwrap_err()
                 .to_string()
-                .contains("pid_namespace_nested")
+                .contains("requires pid_namespace_nested proc")
         );
         value["filesystem"]["proc_filesystem"] = "pid_namespace_nested".into();
         let parsed: IsolationPolicy = serde_json::from_value(value).unwrap();
         IsolationRuntime::validate_policy(&parsed).unwrap();
+        assert!(parsed.nested_sandbox());
         // Refuse before opening the deliberately inert provider path. A signed
         // declaration/configuration is not native capability qualification.
         let app_root = tempfile::tempdir().unwrap();
@@ -10071,6 +13753,333 @@ mod tests {
             error
                 .to_string()
                 .contains("has not qualified nested-sandbox")
+        );
+    }
+
+    fn spec(
+        name: Option<&str>,
+        any_of: &[&str],
+        accept: &[&str],
+        providers: &[&str],
+    ) -> lillux::process_control::CapabilityRequirement {
+        lillux::process_control::CapabilityRequirement::Spec(
+            lillux::process_control::CapabilityRequirementSpec {
+                name: name.map(str::to_owned),
+                any_of: any_of.iter().map(|name| (*name).to_owned()).collect(),
+                accept: accept.iter().map(|grade| (*grade).to_owned()).collect(),
+                providers: providers.iter().map(|id| (*id).to_owned()).collect(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_policy_document_validates_every_declared_host_class() {
+        let shared = IsolationPolicy::disabled_for_authoring();
+        let mut document = IsolationPolicyDocument::from_selected_policy(shared);
+        let base = document.host_classes.remove(AUTHORING_HOST_CLASS).unwrap();
+        let mut local = base.clone();
+        local.requires_capabilities = vec!["accounting".into(), "time".into()];
+        let mut hosted = base;
+        hosted.requires_capabilities = vec![
+            spec(None, &["accounting", "residency:swap_absent"], &[], &[]),
+            spec(
+                Some("recovery:enclosure_trusted_init"),
+                &[],
+                &["measured", "trusted"],
+                &[],
+            ),
+            spec(
+                Some("termination:enclosure_trusted_init"),
+                &[],
+                &["measured", "trusted"],
+                &[],
+            ),
+            "time".into(),
+        ];
+        document.host_classes = [
+            ("hosted".to_owned(), hosted.clone()),
+            ("local".to_owned(), local),
+        ]
+        .into();
+        IsolationRuntime::validate_policy_document(&document).unwrap();
+
+        // A malformed floor in one class is refused under that class's name.
+        let mut unsorted = document.clone();
+        unsorted
+            .host_classes
+            .get_mut("hosted")
+            .unwrap()
+            .requires_capabilities
+            .reverse();
+        let error = IsolationRuntime::validate_policy_document(&unsorted)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("isolation host class `hosted`"), "{error}");
+        assert!(error.contains("sorted and unique"), "{error}");
+
+        let mut misnamed = document.clone();
+        misnamed.host_classes.insert("Hosted".to_owned(), hosted);
+        let error = IsolationRuntime::validate_policy_document(&misnamed)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a canonical name"), "{error}");
+
+        let mut none = document.clone();
+        none.host_classes.clear();
+        assert!(IsolationRuntime::validate_policy_document(&none).is_err());
+
+        let mut previous = document;
+        previous.version = ISOLATION_POLICY_VERSION - 1;
+        let error = IsolationRuntime::validate_policy_document(&previous)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "unsupported node isolation policy version {}",
+                ISOLATION_POLICY_VERSION - 1
+            )),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn previous_policy_version_is_refused_as_foreign() {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.version = ISOLATION_POLICY_VERSION - 1;
+        let error = IsolationRuntime::validate_policy(&policy)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unsupported node isolation policy version"),
+            "{error}"
+        );
+        let mut value = serde_json::to_value(IsolationPolicy::disabled_for_authoring()).unwrap();
+        value["process_scopes"] = serde_json::json!({
+            "mode": "required", "control_timeout_ms": 1000, "nested_sandbox": false,
+        });
+        let error = serde_json::from_value::<IsolationPolicy>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nested_sandbox"), "{error}");
+    }
+
+    #[test]
+    fn floor_entries_declare_accepted_grades_and_providers() {
+        let policy = IsolationPolicy::disabled_for_authoring();
+        let mut declared = policy.clone();
+        declared.requires_capabilities = vec![
+            spec(
+                None,
+                &["accounting", "residency:swap_absent"],
+                &["measured"],
+                &[],
+            ),
+            spec(Some("storage:durable_root"), &[], &[], &["host"]),
+            spec(Some("termination:process_group"), &[], &["trusted"], &[]),
+            spec(
+                Some("time"),
+                &[],
+                &["measured", "provider_attested"],
+                &["host", "provider_env"],
+            ),
+        ];
+        IsolationRuntime::validate_policy(&declared).unwrap();
+        let value = serde_json::to_value(&declared).unwrap();
+        assert_eq!(
+            value["requires_capabilities"][2]["name"],
+            serde_json::json!("termination:process_group")
+        );
+        assert_eq!(
+            value["requires_capabilities"][2]["accept"],
+            serde_json::json!(["trusted"])
+        );
+        assert_eq!(
+            serde_json::from_value::<IsolationPolicy>(value).unwrap(),
+            declared
+        );
+        let object_form: Vec<lillux::process_control::CapabilityRequirement> =
+            serde_json::from_value(serde_json::json!([
+                {"any_of": ["accounting", "residency:swap_absent"], "accept": ["measured"]},
+                {"name": "storage:durable_root", "providers": ["host"]},
+                {"name": "termination:process_group", "accept": ["trusted"]},
+                {"name": "time", "accept": ["measured", "provider_attested"],
+                 "providers": ["host", "provider_env"]},
+            ]))
+            .unwrap();
+        assert_eq!(object_form, declared.requires_capabilities);
+        assert!(
+            serde_json::from_value::<Vec<lillux::process_control::CapabilityRequirement>>(
+                serde_json::json!([{"name": "time", "grade": "measured"}])
+            )
+            .is_err()
+        );
+
+        for (floor, refusal) in [
+            (
+                vec![spec(Some("time"), &[], &["peer_attested"], &[])],
+                "peer_attested",
+            ),
+            (
+                vec![spec(Some("time"), &[], &["Measured"], &[])],
+                "cannot judge",
+            ),
+            (
+                vec![spec(
+                    Some("time"),
+                    &[],
+                    &["provider_attested", "measured"],
+                    &[],
+                )],
+                "accept sorted and unique",
+            ),
+            (
+                vec![spec(Some("time"), &[], &["measured", "measured"], &[])],
+                "grade measured twice",
+            ),
+            (
+                vec![spec(Some("time"), &[], &[], &["host_service", "host"])],
+                "providers sorted and unique",
+            ),
+            (
+                vec![spec(Some("time"), &[], &[], &["external controller"])],
+                "invalid providers value",
+            ),
+            (
+                vec![spec(Some("accounting"), &["accounting", "time"], &[], &[])],
+                "requires_capabilities",
+            ),
+            (vec![spec(None, &[], &[], &[])], "requires_capabilities"),
+            (
+                vec![spec(None, &["accounting", "termination:scope"], &[], &[])],
+                "per-scope capability",
+            ),
+            (
+                vec![spec(None, &["time", "accounting"], &[], &[])],
+                "requires_capabilities",
+            ),
+            (
+                vec![
+                    "accounting".into(),
+                    spec(Some("accounting"), &[], &["trusted"], &[]),
+                ],
+                "more than once",
+            ),
+        ] {
+            let mut invalid = policy.clone();
+            invalid.requires_capabilities = floor;
+            let error = IsolationRuntime::validate_policy(&invalid)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(refusal), "{refusal}: {error}");
+        }
+    }
+
+    #[test]
+    fn nested_sandbox_is_the_namespaces_floor_entry_with_nested_proc() {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection);
+        policy.process_scopes = IsolationProcessScopePolicy::Required {
+            control_timeout_ms: 1_000,
+        };
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
+        IsolationRuntime::validate_policy(&policy).unwrap();
+        assert!(!policy.nested_sandbox());
+
+        let mut proc_only = policy.clone();
+        proc_only.filesystem.proc_filesystem =
+            ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
+        let error = IsolationRuntime::validate_policy(&proc_only)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("pid_namespace_nested proc requires isolation:namespaces"),
+            "{error}"
+        );
+        assert!(!proc_only.nested_sandbox());
+
+        let mut floor_only = policy.clone();
+        floor_only.requires_capabilities = vec![
+            ISOLATION_NAMESPACES.into(),
+            "recovery:scope".into(),
+            "termination:scope".into(),
+        ];
+        let error = IsolationRuntime::validate_policy(&floor_only)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires pid_namespace_nested proc"),
+            "{error}"
+        );
+        assert!(!floor_only.nested_sandbox());
+
+        let mut nested = floor_only.clone();
+        nested.filesystem.proc_filesystem =
+            ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested;
+        IsolationRuntime::validate_policy(&nested).unwrap();
+        assert!(nested.nested_sandbox());
+        assert!(nested_sandbox_from(
+            &nested.requires_capabilities,
+            nested.filesystem.proc_filesystem
+        ));
+
+        // The object form of the same outright requirement still grants it.
+        let mut constrained = nested.clone();
+        constrained.requires_capabilities[0] =
+            spec(Some(ISOLATION_NAMESPACES), &[], &["measured"], &["host"]);
+        IsolationRuntime::validate_policy(&constrained).unwrap();
+        assert!(constrained.nested_sandbox());
+
+        let mut unscoped = nested.clone();
+        unscoped.process_scopes = IsolationProcessScopePolicy::Unconfigured {};
+        unscoped.requires_capabilities = vec![ISOLATION_NAMESPACES.into()];
+        let error = IsolationRuntime::validate_policy(&unscoped)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires required process scopes"),
+            "{error}"
+        );
+
+        let mut unenforced = nested.clone();
+        unenforced.mode = IsolationMode::Disabled;
+        unenforced.backend = None;
+        let error = IsolationRuntime::validate_policy(&unenforced)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires enforced isolation"), "{error}");
+    }
+
+    #[test]
+    fn scope_provider_is_asked_only_for_the_floor_named_guarantees() {
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.process_scopes = IsolationProcessScopePolicy::Required {
+            control_timeout_ms: 1_000,
+        };
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
+        IsolationRuntime::validate_policy(&policy).unwrap();
+        assert_eq!(
+            policy.required_process_scope_capabilities(),
+            BTreeSet::from([
+                lillux::ProcessScopeCapability::Termination,
+                lillux::ProcessScopeCapability::Recovery,
+            ])
+        );
+        policy.requires_capabilities = vec![
+            spec(
+                Some("quiescence:scope"),
+                &[],
+                &["measured"],
+                &["host_service"],
+            ),
+            "recovery:scope".into(),
+            "termination:scope".into(),
+        ];
+        IsolationRuntime::validate_policy(&policy).unwrap();
+        assert!(
+            policy
+                .required_process_scope_capabilities()
+                .contains(&lillux::ProcessScopeCapability::Quiescence)
         );
     }
 
@@ -10172,6 +14181,7 @@ mod tests {
         rewrite_verified_code_references(
             &mut namespace_preserving,
             &mut namespace_environment,
+            &[],
             logical,
             logical,
             logical,
@@ -10188,6 +14198,7 @@ mod tests {
             rewrite_verified_code_references(
                 &mut embedded_noop,
                 &mut no_environment,
+                &[],
                 logical,
                 logical,
                 logical,
@@ -10207,6 +14218,7 @@ mod tests {
             rewrite_verified_code_references(
                 &mut arguments,
                 &mut environment,
+                &[],
                 &source,
                 &canonical_source,
                 Path::new("/run/verified/entry.py"),
@@ -10215,6 +14227,62 @@ mod tests {
             .to_string()
             .contains("cannot be rewritten safely")
         );
+    }
+
+    #[test]
+    fn verbatim_secret_values_are_neither_rewritten_nor_echoed() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("entry.py");
+        std::fs::write(&source, b"verified\n").unwrap();
+        let canonical_source = std::fs::canonicalize(&source).unwrap();
+        let destination = Path::new("/run/verified/entry.py");
+        let secret = format!("synthetic-secret-{}.backup", source.display());
+        let verbatim = vec!["API_TOKEN".to_string()];
+
+        let mut arguments = Vec::new();
+        let mut environment = vec![("API_TOKEN".to_string(), secret.clone())];
+        rewrite_verified_code_references(
+            &mut arguments,
+            &mut environment,
+            &verbatim,
+            &source,
+            &canonical_source,
+            destination,
+        )
+        .unwrap();
+        rewrite_descriptor_bound_code_references(
+            &mut arguments,
+            &mut environment,
+            &verbatim,
+            &source,
+            destination,
+        )
+        .unwrap();
+        assert_eq!(environment[0].1, secret);
+
+        let refusal = rewrite_verified_code_references(
+            &mut arguments,
+            &mut environment,
+            &[],
+            &source,
+            &canonical_source,
+            destination,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refusal.contains("API_TOKEN"), "{refusal}");
+        assert!(!refusal.contains("synthetic-secret"), "{refusal}");
+        let refusal = rewrite_descriptor_bound_code_references(
+            &mut arguments,
+            &mut environment,
+            &[],
+            &source,
+            destination,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refusal.contains("API_TOKEN"), "{refusal}");
+        assert!(!refusal.contains("synthetic-secret"), "{refusal}");
     }
 
     #[test]

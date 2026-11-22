@@ -45,15 +45,13 @@ pub enum FieldCursor {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub enum FieldCursorRequest {
+    #[default]
     Live,
-    BraidCut { anchor: FieldEventRef },
-}
-
-impl Default for FieldCursorRequest {
-    fn default() -> Self {
-        Self::Live
-    }
+    BraidCut {
+        anchor: FieldEventRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

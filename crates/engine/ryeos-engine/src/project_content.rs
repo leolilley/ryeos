@@ -104,7 +104,7 @@ impl AuthoritativeProjectContent for ryeos_state::PinnedProjectMaterialization {
             ))
         })?;
         self.authoritative_entries_under(prefix, recursive, max_entries)
-            .map_err(|error| EngineError::Internal(error.to_string()))?
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))?
             .into_iter()
             .map(|(relative_path, file)| {
                 Ok(ProjectContentEntry {
@@ -129,7 +129,7 @@ impl AuthoritativeProjectContent for ryeos_state::PinnedProjectMaterialization {
             ))
         })?;
         self.authoritative_file_bounded(relative, max_bytes)
-            .map_err(|error| EngineError::Internal(error.to_string()))
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))
     }
 
     fn validates_file(
@@ -138,12 +138,12 @@ impl AuthoritativeProjectContent for ryeos_state::PinnedProjectMaterialization {
         content_hash: &str,
     ) -> Result<bool, EngineError> {
         self.validates_observed_file(&self.path().join(relative_path), content_hash)
-            .map_err(|error| EngineError::Internal(error.to_string()))
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))
     }
 
     fn validates_absence(&self, relative_path: &Path) -> Result<bool, EngineError> {
         self.validates_observed_absence(&self.path().join(relative_path))
-            .map_err(|error| EngineError::Internal(error.to_string()))
+            .map_err(|error| EngineError::Internal(format!("{error:#}")))
     }
 }
 
@@ -166,12 +166,12 @@ impl AuthoritativeProjectContent for lillux::PinnedDirectory {
         root.visit_regular_files_bounded(
             lillux::DirectoryTraversalBudget::new(max_entries, 64),
             |_relative, is_directory| Ok(is_directory && !recursive),
-            |relative, mut file| {
+            |relative, file| {
                 let before = file.metadata()?;
                 let size = before.len();
                 let normalized_mode = lillux::normalized_portable_regular_mode(&before)?;
                 let (content_hash, after) =
-                    lillux::digest_open_regular_file_stable_exact(&mut file, size)?;
+                    lillux::digest_open_regular_file_stable_exact(&file, size)?;
                 if after.len() != size {
                     anyhow::bail!("live project file changed while it was enumerated");
                 }

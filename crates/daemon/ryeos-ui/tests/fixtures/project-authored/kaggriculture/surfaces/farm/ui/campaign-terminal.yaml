@@ -1,0 +1,25 @@
+# ryeos:signed:2026-08-10T10:56:47Z:2163631f770f822af8f45cf7259af074d47c82ecb116b636a718930d0f1cdc2a:Ja0HtlKYht11fxOKCVquroghMUGp+gtPkwyT9m9C8dECNag1g5BvyMHjJsQA3ArOmRj610Br46w0miW/GC+pCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+name: farm-campaign-terminal
+version: "1.0.0"
+description: "Terminal Kaggriculture campaign workspace over the farm project field."
+
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 0.62, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - view:farm/project/field
+
+style:
+  border: thin
+
+library:
+  - group: Farm campaign
+    views:
+      - view:farm/project/field
+
+ambient:
+  show_background: false
+  opacity: 1.0

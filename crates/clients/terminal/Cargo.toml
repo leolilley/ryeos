@@ -10,15 +10,14 @@ name = "ryeos-tui"
 path = "src/main.rs"
 
 [dependencies]
+ryeos-ui-presentation-contract = { workspace = true }
 ryeos-client-base = { workspace = true }
-ryeos-cli = { workspace = true }
+ryeos-client-runtime = { workspace = true }
 lillux = { workspace = true }
 ed25519-dalek = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-util", "net", "time", "sync"] }
-reqwest = { workspace = true, features = ["rustls-tls"] }
-eventsource-stream = "0.2"
+tokio = { workspace = true, features = ["rt", "macros", "signal", "io-util", "net", "time", "sync"] }
 futures-util = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["osc52"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -30,3 +29,6 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-pub use ryeos_vault::dotenv::read_dotenv_overlay;
 pub use ryeos_vault::paths::{
     default_sealed_store_path, default_vault_public_key_path, default_vault_secret_key_path,
 };
@@ -563,6 +562,9 @@ mod tests {
             (protected.clone(), "private".to_owned()),
             (runtime.clone(), "runtime".to_owned()),
         ]);
+        // The sealed store creates its own private directory but requires the
+        // node state directory above it to exist, as an initialized node has.
+        std::fs::create_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
         write_sealed_secrets(&path, &sk.public_key(), &entries).unwrap();
         assert_eq!(
             run_list(&ListOptions {

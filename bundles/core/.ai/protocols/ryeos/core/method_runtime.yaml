@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-18T22:04:37Z:c9ac8754f66e3031716b46dfce4d4c766b982b0e8025cce99e9fe8085e73b28f:jj2BdIuyOd5JAIR/5Mmqc4Aj00nG0FKF8Rr3oSQGw2OJSLI0ZbUydeBW3nLZlby0MC+b9XxUVmQybp71lV+EAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:27:41Z:350b4d15d9735df170fa656e9c5a686f5b3692bbf2f489e9cbd3fe0c6168773d:bgfkxGbpmFfzWKumbdSBM/ImnkMt8TQdU8GP8FWmpJ5eSRL1H+kaT/30eT/gQnZxNKy3GNEdaUv3868rDJHdCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: method_runtime
 category: ryeos/core
@@ -21,4 +21,4 @@ capabilities:
   allows_detached: false
 lifecycle:
   mode: managed
-callback_channel: http
+callback_channel: runtime_socket

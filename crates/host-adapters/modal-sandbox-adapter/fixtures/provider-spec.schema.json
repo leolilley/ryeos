@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RyeOS Modal sandbox lease provider specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "provider_profile", "settings_schema_digest", "origin_profile", "budget_weight", "network_policy", "facade", "operations"],
+  "properties": {
+    "schema": { "const": 1 },
+    "provider_profile": { "const": "modal_sandbox_v1" },
+    "settings_schema_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "origin_profile": { "const": "modal_lease_facade_v1" },
+    "budget_weight": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "network_policy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["creatable_types"],
+          "properties": { "creatable_types": { "const": ["block-network"] } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["creatable_types", "allow_list"],
+          "properties": {
+            "creatable_types": { "const": ["block-network", "domain-allow-list"] },
+            "allow_list": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rule_protocol", "max_rules", "host_syntax"],
+              "properties": {
+                "rule_protocol": { "const": "https" },
+                "max_rules": { "type": "integer", "minimum": 1, "maximum": 4 },
+                "host_syntax": { "const": "exact_dns_name" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "facade": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "app", "lease_app", "endpoint_label", "response_schema", "policy"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "app": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "lease_app": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "endpoint_label": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "response_schema": { "const": "ryeos.modal_lease_facade.response.v1" },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "cpu", "memory_mib", "image", "command", "stage"],
+          "properties": {
+            "schema": { "const": "ryeos.modal_lease_policy.v2" },
+            "cpu": { "type": "number", "exclusiveMinimum": 0 },
+            "memory_mib": { "type": "integer", "minimum": 1 },
+            "image": { "type": "string", "minLength": 1 },
+            "command": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+            "stage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["max_slots", "max_chunk_bytes", "max_slot_bytes"],
+              "properties": {
+                "max_slots": { "const": 4 },
+                "max_chunk_bytes": { "const": 33554432 },
+                "max_slot_bytes": { "const": 4295032832 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "operations": { "type": "object" }
+  }
+}

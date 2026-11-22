@@ -445,6 +445,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &parent.origin_site_id,
     )?;
     let child_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: admission_provenance.logical_project_root(&parent.current_site_id),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: thread_auth.acting_principal.clone(),
@@ -526,10 +527,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 }
                 existing.child_thread_id
             }
-            None if !re_drive => {
-                let child_id = new_thread_id();
-                child_id
-            }
+            None if !re_drive => new_thread_id(),
             None => {
                 bail!("follow: persisted cohort is missing child index {item_index}");
             }
@@ -628,7 +626,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // observable. Fresh rows use current generic authority; existing rows use
     // their exact stored birth identity and never recapture a snapshot. The
     // in-memory values own secret material and are consumed exactly once.
-    let prepared_follow_children = prepare_follow_children(
+    // Each nested preparation future is boxed: their poll frames otherwise
+    // stack past the daemon worker's limit in debug builds.
+    let prepared_follow_children = Box::pin(prepare_follow_children(
         state,
         &children,
         &authority_indices,
@@ -650,7 +650,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         child_handler_context,
         &cap,
         resolution_engine,
-    )
+    ))
     .await?;
 
     // Publish each fresh durable slot only after its metadata contains the
@@ -917,7 +917,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 // successor/complete the waiting transition.
                 tracing::error!(
                     follow_key,
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "follow suspension committed but waiter transition failed; accepted for reserved reconciliation"
                 );
                 admitted.clear();
@@ -956,7 +956,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     // parent into an error response.
                     tracing::error!(
                         follow_key,
-                        error = %error,
+                        error = %format!("{error:#}"),
                         "follow launch-window admission failed after suspension; queued for sweep"
                     );
                 }
@@ -994,13 +994,16 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             .ok_or_else(|| anyhow::anyhow!("follow: admitted unknown child {launch_child_id}"))?;
         let (launch_handoff, launch_ready) = crate::execution::launch::LaunchHandoff::channel();
         launch_receivers.push((launch_child_id.clone(), launch_ready));
+        // The launch future is built on this worker's stack before the task
+        // takes it; its claim-and-run state machine is boxed so that build
+        // costs a pointer here rather than the whole follow-child launch.
         tokio::spawn(async move {
-            if let Err(e) = crate::execution::launch::launch_prepared_follow_child(
+            if let Err(e) = Box::pin(crate::execution::launch::launch_prepared_follow_child(
                 launch_state,
                 &launch_child_id,
                 prepared,
                 &launch_handoff,
-            )
+            ))
             .await
             {
                 tracing::error!(
@@ -1060,7 +1063,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn admit_follow_child_requests(
     state: &AppState,
     children: &[ryeos_runtime::callback::FollowChildSpec],
@@ -1169,7 +1171,6 @@ struct PreparedFollowChildren {
         std::collections::BTreeMap<usize, crate::execution::launch::PreparedFollowChildLaunch>,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn prepare_follow_children(
     state: &AppState,
     children: &[ryeos_runtime::callback::FollowChildSpec],
@@ -1397,16 +1398,18 @@ async fn prepare_follow_children(
                 admitted_children.get(item_index),
                 Some(AdmittedFollowChildRequest::Persisted(_))
             ) {
-            crate::execution::launch::prepare_existing_follow_child_launch(
-                state,
-                child_thread_id,
-                &meta,
-                launch_provenance,
-                launch_parent_context.clone(),
+            Box::pin(
+                crate::execution::launch::prepare_existing_follow_child_launch(
+                    state,
+                    child_thread_id,
+                    &meta,
+                    launch_provenance,
+                    launch_parent_context.clone(),
+                ),
             )
             .await?
         } else {
-            crate::execution::launch::prepare_follow_child_launch(
+            Box::pin(crate::execution::launch::prepare_follow_child_launch(
                 state,
                 child_thread_id,
                 &meta,
@@ -1416,7 +1419,7 @@ async fn prepare_follow_children(
                 launch_provenance,
                 launch_parent_context.clone(),
                 child_handler_context.clone(),
-            )
+            ))
             .await?
         };
         child_metadata.insert(item_index, prepared.launch_metadata().clone());
@@ -1569,7 +1572,6 @@ fn ensure_follow_product_selections_match(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn commit_follow_child_roots(
     state: &AppState,
     children: &[ryeos_runtime::callback::FollowChildSpec],
@@ -1690,7 +1692,7 @@ fn commit_follow_child_roots(
                         &child_thread_id,
                         json!({
                             "code": "child_link_failed",
-                            "reason": error.to_string(),
+                            "reason": format!("{error:#}"),
                         }),
                     );
                     match cleanup {
@@ -1902,7 +1904,7 @@ mod tests {
                 "declaration_id": declaration_id,
                 "witness_hash": "a".repeat(64),
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": null,
+                "qualification_hash": null, "remote_testimony": null,
             }
         }))
         .unwrap()

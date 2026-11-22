@@ -68,6 +68,32 @@ def audit_bundle(path: Path):
     }
 
 
+def populated_violations(root, triple, bundles, records):
+    """Declared payloads must be present and undeclared executables absent."""
+    violations = []
+    declared = {}
+    for record in records:
+        bundle, binary = record["bundle"], record["binary"]
+        declared.setdefault(bundle, set()).add(binary)
+        if bundle not in bundles:
+            continue
+        target = root / bundle / ".ai/bin" / triple / binary
+        if not target.is_file() or target.is_symlink() or not os.access(target, os.X_OK):
+            violations.append(
+                f"{bundle}: missing populated executable .ai/bin/{triple}/{binary}"
+            )
+    for bundle in bundles:
+        bin_root = root / bundle / ".ai/bin" / triple
+        if not bin_root.is_dir():
+            continue
+        for target in sorted(bin_root.iterdir()):
+            if target.is_file() and os.access(target, os.X_OK) and target.name not in declared.get(bundle, set()):
+                violations.append(
+                    f"{bundle}: undeclared populated executable .ai/bin/{triple}/{target.name}"
+                )
+    return violations
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True, type=Path)
@@ -93,26 +119,9 @@ def main():
             f"{bundle}/{item}" for item in report["bundles"][bundle]["violations"]
         )
     if args.require_populated:
-        declared = {}
-        for record in records:
-            bundle, binary = record["bundle"], record["binary"]
-            declared.setdefault(bundle, set()).add(binary)
-            if bundle not in args.bundles:
-                continue
-            target = args.root / bundle / ".ai/bin" / args.triple / binary
-            if not target.is_file() or target.is_symlink() or not os.access(target, os.X_OK):
-                report["violations"].append(
-                    f"{bundle}: missing populated executable .ai/bin/{args.triple}/{binary}"
-                )
-        for bundle in args.bundles:
-            bin_root = args.root / bundle / ".ai/bin" / args.triple
-            if not bin_root.is_dir():
-                continue
-            for target in sorted(bin_root.iterdir()):
-                if target.is_file() and os.access(target, os.X_OK) and target.name not in declared.get(bundle, set()):
-                    report["violations"].append(
-                        f"{bundle}: undeclared populated executable .ai/bin/{args.triple}/{target.name}"
-                    )
+        report["violations"].extend(
+            populated_violations(args.root, args.triple, args.bundles, records)
+        )
     report["violations"].sort()
     json.dump(report, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")

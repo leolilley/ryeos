@@ -1,0 +1,206 @@
+# ryeos:signed:2026-11-17T17:22:28Z:56caa8258b80e0f0dfd107339f22a63d5ebe0ed3594619ff9db5cd0492e27ea7:kQ3LC5x6xsK67bi1+hrygW8lN0d5ZLAbW1nl8jomwDTP4yv6527qyq2ssgv/D+45YPJZpJyref810/nCW2E6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/graph"
+inventory_policy:
+  admission:
+    capability_template: "ryeos.execute.{kind}.{bare_id}"
+version: "1.1.0"
+location:
+  directory: graphs
+resolution:
+  - step: resolve_extends_chain
+effective_trust:
+  include_references: false
+# Which spaces and trust classes may supply a launch root of this kind.
+# Work signed by an unpinned key runs only where node policy admits it.
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
+  operator_may_admit: [untrusted_project]
+execution:
+  # Kind-owned location of the graph author's durable-effect ceiling. The
+  # generic dispatcher projects this signed field exactly as it does for
+  # Tools; absence (or `live`) remains ineligible for durable dispatch. A
+  # declared `sealed` is the author's testimony: without qualification
+  # evidence a caller may claim at most `recorded`, and a `sealed` request is
+  # refused (`durable_effect_sealed_unqualified`).
+  effect_class_ceiling:
+    path: [effects]
+    unproven_max: recorded
+  # Explicit delegation to the runtime registry. The dispatcher will
+  # call `RuntimeRegistry::lookup_for("graph")` to find the default
+  # runtime serving this kind (today: `runtime:graph-runtime`).
+  # Without this `delegate` block the dispatcher refuses to consult
+  # the registry — there is no implicit fallback.
+  delegate:
+    via: runtime_registry
+  thread_profile:
+    name: graph_run
+    root_executable: true
+    # A graph walker has NO interrupt contract. There is no in-flight signal a
+    # running segment-walk honors and reseals as a partial turn (the way a
+    # directive folds SIGUSR1 into a `finish: "interrupted"` cognition_out).
+    # Declaring interrupt support would let `allowed_actions` offer — and
+    # `commands/submit` accept — an `interrupt` command the walker cannot
+    # service, i.e. undefined behavior. So the profile withholds it:
+    # `allowed_actions(graph_run, running, …)` omits `interrupt` and
+    # `commands/submit` refuses it (belt), and no client surfaces an interrupt
+    # control for a graph (suspenders). To stop a graph, cancel or kill it. See
+    # .ai/knowledge/ryeos/development/steering-graph-interrupt-and-cancel-path.md.
+    supports_interrupt: false
+    # A graph self-continues by MACHINE only: when a segment-step budget is
+    # exhausted the walker checkpoints the frontier and a machine successor
+    # resumes it from that checkpoint. So the kind IS continuation-capable.
+    supports_continuation: true
+    # But a graph folds no conversation, so an operator follow-up
+    # (threads.input) has nowhere to deliver input — it is refused. Graph
+    # *follow* — a graph driving and polling a CHILD's continuation to terminal —
+    # is a separate capability and grants the parent no operator follow-up.
+    supports_operator_followup: false
+  hooks:
+    authored_path: [config, hooks]
+    plan_derived: effective_hook_plan
+    events:
+      graph_started:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event, graph_id, graph_run_id, state, inputs]
+        allowed_results: [discard, observation]
+      graph_step_completed:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event, graph_id, graph_run_id, node, step, status, state, error]
+        allowed_results: [discard, observation]
+      graph_completed:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event, graph_id, graph_run_id, status, settled, steps, success, state, inputs]
+        allowed_results: [discard, observation]
+  # Items of this kind may declare top-level `external_content`: content
+  # outside the signed closure that must be captured into CAS at admission
+  # and executed from its realization. The reserved derived slot carries the
+  # realized set into the effective digest; descendants inherit it.
+  external_content:
+    realization_derived: effective_external_realizations
+    allowed_roots: [project_files]
+    # Explicit Graph-owned inputs may be shared by its descendants. This does
+    # not pre-admit environments belonging to possible future child actions.
+    allowed_mount_roots: [project, execution_runtime]
+    max_declarations: 4
+    large_content:
+      max_total_bytes: 68719476736
+  effective_validator:
+    handler: handler:ryeos/core/graph-effective-validator
+    config: {}
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:ryeos/core/extends-chain
+composer_config:
+  extends_field: extends
+  fields:
+    - name: version
+      strategy: root_verbatim
+      required: true
+      expect_value_type: string
+    - name: category
+      strategy: root_verbatim
+      required: true
+      expect_value_type: string
+    - name: description
+      strategy: replace_root_last
+      expect_value_type: string
+    # Durable-effect eligibility is vouched by the selected root itself; it
+    # is never inherited from an ancestor Graph.
+    - name: effects
+      strategy: root_verbatim
+      expect_value_type: string
+    # Shallow root-last mapping merge. Each config key is inherited or
+    # replaced atomically; node maps and hook lists are never deep-merged.
+    - name: config
+      strategy: dict_merge_root_last
+      required: true
+      expect_value_type: mapping
+    - name: requires
+      strategy: narrow_requires_capabilities
+      expect_value_type: mapping
+    # Execution limits are merged generically by the launcher (the same
+    # nested `deadline` group a directive may author).
+    - name: limits
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    # Atomic inherit-or-replace: a child's declaration replaces the inherited
+    # set entirely; explicit `[]` declares none and is preserved as such.
+    - name: external_content
+      strategy: replace_root_last
+      expect_value_type: sequence
+    - name: external_product_slots
+      strategy: replace_root_last
+      expect_value_type: sequence
+    # Product declarations belong to the signed producer root. Descendants
+    # must restate the complete relationship intentionally rather than inherit
+    # a recipe selected by an ancestor.
+    - name: product_recipe
+      strategy: root_verbatim
+      expect_value_type: string
+  policy_facts:
+    - name: effective_caps
+      path: [requires, capabilities, declared]
+      expect: array_of_strings
+composed_value_contract:
+  root_type: mapping
+  required:
+    version:
+      type: single
+      prim: string
+    category:
+      type: single
+      prim: string
+    config:
+      type: single
+      prim: mapping
+  optional:
+    extends:
+      type: union
+      prims: [string, "null"]
+    description:
+      type: single
+      prim: string
+    effects:
+      type: single
+      prim: string
+    # Unified capability requirements narrowed across every direct ancestor
+    # edge and finally bounded by the signed manifest at launch.
+    requires:
+      type: single
+      prim: mapping
+    limits:
+      type: single
+      prim: mapping
+    external_content:
+      type: single
+      prim: sequence
+    external_product_slots:
+      type: single
+      prim: sequence
+    product_recipe:
+      type: single
+      prim: string
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: relative_dir
+      required: true
+    executor_id:
+      from: path
+      key: executor_id

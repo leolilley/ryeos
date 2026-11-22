@@ -96,6 +96,7 @@ impl Drop for PreparedProjectSnapshotTransfer {
         let _ = self.root.remove_contents_recursive().and_then(|()| {
             self.parent
                 .remove_empty_child_if_same(&self.name, &self.root)
+                .map(|receipt| receipt.is_some())
                 .and_then(|removed| {
                     if removed {
                         Ok(())
@@ -133,67 +134,14 @@ pub fn prepare_project_snapshot_transfer(
     transfer_parent.require_owner_private_directory()?;
     let (name, root) = transfer_parent.create_unique_child("snapshot", 0o700)?;
     root.require_owner_private_directory()?;
-    let result = (|| -> Result<ProjectSnapshotTransferMeasurement> {
-        let target = lillux::CasStore::from_pinned_root(root.try_clone()?);
-        let mut entries =
-            Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
-        let mut total_bytes = 0_u64;
-        for hash in &closure.object_hashes {
-            let value = source
-                .get_object(hash)?
-                .ok_or_else(|| anyhow::anyhow!("base snapshot object {hash} disappeared"))?;
-            let bytes = lillux::canonical_json(&value)?.len() as u64;
-            total_bytes = total_bytes
-                .checked_add(bytes)
-                .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
-            anyhow::ensure!(
-                target.store_object(&value)? == *hash,
-                "base snapshot object address changed during transfer"
-            );
-            entries.push(serde_json::json!({"kind":"object","hash":hash,"bytes":bytes}));
-        }
-        for hash in &closure.blob_hashes {
-            let (file, bytes) = source
-                .open_blob(hash)?
-                .ok_or_else(|| anyhow::anyhow!("base snapshot blob {hash} disappeared"))?;
-            total_bytes = total_bytes
-                .checked_add(bytes)
-                .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
-            let copied = target.put_blob_from_open_regular_bounded(
-                file,
-                Path::new("<external-base-snapshot-blob>"),
-                bytes,
-            )?;
-            anyhow::ensure!(
-                copied.hash == *hash && copied.size == bytes,
-                "base snapshot blob address changed during transfer"
-            );
-            entries.push(serde_json::json!({"kind":"blob","hash":hash,"bytes":bytes}));
-        }
-        let pruned = target.prune_abandoned_blob_captures(false)?;
-        anyhow::ensure!(
-            pruned.files == 0 && pruned.bytes == 0,
-            "fresh base snapshot transfer contained interrupted blob capture state"
-        );
-        let expected = ProjectSnapshotTransferMeasurement {
-            snapshot_hash: snapshot_hash.to_owned(),
-            closure_digest: transfer_closure_digest(snapshot_hash, &entries)?,
-            object_count: u64::try_from(closure.object_hashes.len())?,
-            blob_count: u64::try_from(closure.blob_hashes.len())?,
-            total_bytes,
-        };
-        let observed = inspect_project_snapshot_transfer(&root, snapshot_hash)?;
-        anyhow::ensure!(
-            observed == expected,
-            "prepared base snapshot transfer changed during verification"
-        );
-        Ok(observed)
-    })();
+    let result = copy_project_snapshot_closure(&source, &closure, &root, snapshot_hash);
     let measurement = match result {
         Ok(value) => value,
         Err(error) => {
             let _ = root.remove_contents_recursive();
-            let _ = transfer_parent.remove_empty_child_if_same(&name, &root);
+            let _ = transfer_parent
+                .remove_empty_child_if_same(&name, &root)
+                .map(|receipt| receipt.is_some());
             return Err(error);
         }
     };
@@ -209,6 +157,70 @@ pub fn prepare_project_snapshot_transfer(
         blob_count: measurement.blob_count,
         total_bytes: measurement.total_bytes,
     })
+}
+
+/// Copy one already-collected, complete snapshot closure from `source` into
+/// the empty private CAS root `root`, reverifying every address, and return
+/// the transfer's measurement as `inspect_project_snapshot_transfer` sees it.
+pub fn copy_project_snapshot_closure(
+    source: &lillux::CasStore,
+    closure: &ryeos_state::object_closure::ObjectClosureReport,
+    root: &lillux::PinnedDirectory,
+    snapshot_hash: &str,
+) -> Result<ProjectSnapshotTransferMeasurement> {
+    let target = lillux::CasStore::from_pinned_root(root.try_clone()?);
+    let mut entries = Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
+    let mut total_bytes = 0_u64;
+    for hash in &closure.object_hashes {
+        let value = source
+            .get_object(hash)?
+            .ok_or_else(|| anyhow::anyhow!("base snapshot object {hash} disappeared"))?;
+        let bytes = lillux::canonical_json(&value)?.len() as u64;
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
+        anyhow::ensure!(
+            target.store_object(&value)? == *hash,
+            "base snapshot object address changed during transfer"
+        );
+        entries.push(serde_json::json!({"kind":"object","hash":hash,"bytes":bytes}));
+    }
+    for hash in &closure.blob_hashes {
+        let (file, bytes) = source
+            .open_blob(hash)?
+            .ok_or_else(|| anyhow::anyhow!("base snapshot blob {hash} disappeared"))?;
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
+        let copied = target.put_blob_from_open_regular_bounded(
+            file,
+            Path::new("<external-base-snapshot-blob>"),
+            bytes,
+        )?;
+        anyhow::ensure!(
+            copied.hash == *hash && copied.size == bytes,
+            "base snapshot blob address changed during transfer"
+        );
+        entries.push(serde_json::json!({"kind":"blob","hash":hash,"bytes":bytes}));
+    }
+    let pruned = target.prune_abandoned_blob_captures(false)?;
+    anyhow::ensure!(
+        pruned.files == 0 && pruned.bytes == 0,
+        "fresh base snapshot transfer contained interrupted blob capture state"
+    );
+    let expected = ProjectSnapshotTransferMeasurement {
+        snapshot_hash: snapshot_hash.to_owned(),
+        closure_digest: transfer_closure_digest(snapshot_hash, &entries)?,
+        object_count: u64::try_from(closure.object_hashes.len())?,
+        blob_count: u64::try_from(closure.blob_hashes.len())?,
+        total_bytes,
+    };
+    let observed = inspect_project_snapshot_transfer(root, snapshot_hash)?;
+    anyhow::ensure!(
+        observed == expected,
+        "prepared base snapshot transfer changed during verification"
+    );
+    Ok(observed)
 }
 
 /// Inspect a descriptor-pinned partial CAS and prove that it contains exactly
@@ -249,10 +261,10 @@ pub fn inspect_project_snapshot_transfer(
         entries.push(serde_json::json!({"kind":"object","hash":hash,"bytes":bytes}));
     }
     for hash in &closure.blob_hashes {
-        let (mut file, bytes) = cas
+        let (file, bytes) = cas
             .open_blob(hash)?
             .ok_or_else(|| anyhow::anyhow!("base snapshot blob {hash} is missing"))?;
-        let (outcome, _) = lillux::digest_open_regular_file_stable_exact(&mut file, bytes)?;
+        let (outcome, _) = lillux::digest_open_regular_file_stable_exact(&file, bytes)?;
         anyhow::ensure!(
             outcome == *hash,
             "base snapshot blob {hash} changed content address"
@@ -343,7 +355,8 @@ pub fn install_project_snapshot_transfer(
         Ok(root) => root,
         Err(error) => {
             let _ = candidate_runtime
-                .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root);
+                .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root)
+                .map(|receipt| receipt.is_some());
             return Err(error);
         }
     };
@@ -384,16 +397,19 @@ pub fn install_project_snapshot_transfer(
                 lillux::DirectoryTraversalBudget::new(MAX_TRANSFER_ENTRIES, MAX_TRANSFER_DEPTH),
             );
             let _ = candidate_runtime
-                .remove_empty_child_if_same(std::ffi::OsStr::new("recovery"), &recovery);
+                .remove_empty_child_if_same(std::ffi::OsStr::new("recovery"), &recovery)
+                .map(|receipt| receipt.is_some());
         }
         let _ = cas_root.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(
             MAX_TRANSFER_ENTRIES,
             MAX_TRANSFER_DEPTH,
         ));
         let _ = candidate_runtime
-            .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root);
-        let _ =
-            candidate_runtime.remove_empty_child_if_same(std::ffi::OsStr::new("refs"), &refs_root);
+            .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root)
+            .map(|receipt| receipt.is_some());
+        let _ = candidate_runtime
+            .remove_empty_child_if_same(std::ffi::OsStr::new("refs"), &refs_root)
+            .map(|receipt| receipt.is_some());
     }
     result
 }
@@ -411,6 +427,10 @@ fn transfer_closure_digest(snapshot_hash: &str, entries: &[serde_json::Value]) -
 
 /// Capture one complete project tree with descriptor-relative traversal and
 /// streaming blob ingestion. The policy is immutable input to this capture.
+///
+/// This and the other `ingest_project_tree*` functions capture FULL-PROJECT
+/// policies only; an AI-only policy is refused because its capture filter is
+/// the node's `sync_include` table. Use [`ingest_project_tree_ai_only`].
 pub fn ingest_project_tree(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
@@ -438,6 +458,28 @@ pub fn ingest_project_tree_with_operational_exclusions(
         policy,
         operational_exclusions,
         None,
+        None,
+    )
+}
+
+/// Capture an AI-only project tree: only paths inside `include` are admitted,
+/// judged against the capturing node's current table. This is a production
+/// point (sender capture), so it takes the table explicitly.
+pub fn ingest_project_tree_ai_only(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+    include: &ryeos_state::project_sync::SyncInclude,
+) -> Result<ProjectTree> {
+    ingest_project_tree_inner(
+        authority,
+        guard,
+        project_root,
+        policy,
+        &[],
+        None,
+        Some(include),
     )
 }
 
@@ -467,7 +509,15 @@ pub fn ingest_project_tree_bounded(
     policy: &ProjectSnapshotPolicy,
     budget: ProjectCaptureBudget,
 ) -> Result<ProjectTree> {
-    ingest_project_tree_inner(authority, guard, project_root, policy, &[], Some(budget))
+    ingest_project_tree_inner(
+        authority,
+        guard,
+        project_root,
+        policy,
+        &[],
+        Some(budget),
+        None,
+    )
 }
 
 pub fn ingest_project_tree_bounded_with_exclusions(
@@ -485,6 +535,7 @@ pub fn ingest_project_tree_bounded_with_exclusions(
         policy,
         operational_exclusions,
         Some(budget),
+        None,
     )
 }
 
@@ -495,12 +546,19 @@ fn ingest_project_tree_inner(
     policy: &ProjectSnapshotPolicy,
     operational_exclusions: &[String],
     budget: Option<ProjectCaptureBudget>,
+    include: Option<&ryeos_state::project_sync::SyncInclude>,
 ) -> Result<ProjectTree> {
     if let Some(budget) = budget {
         budget.check()?;
     }
     authority.ensure_guard(guard)?;
     policy.validate()?;
+    if policy.sync_scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly && include.is_none()
+    {
+        anyhow::bail!(
+            "AI-only project capture requires the node's sync_include table; this entry point captures full_project policies only"
+        );
+    }
     validate_operational_exclusions(operational_exclusions)?;
     let matcher = policy.matcher()?;
     let cas = authority.cas_store()?;
@@ -523,9 +581,15 @@ fn ingest_project_tree_inner(
             {
                 return Ok(true);
             }
-            if policy.sync_scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly {
+            if let Some(include) = include
+                && policy.sync_scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly
+            {
                 return Ok(!matches!(
-                    ryeos_state::project_sync::classify_project_ai_path(&rel, Some(&matcher)),
+                    ryeos_state::project_sync::classify_project_ai_path(
+                        &rel,
+                        Some(&matcher),
+                        include
+                    ),
                     ryeos_state::project_sync::ProjectAiPathClass::Deployable(_)
                 ));
             }
@@ -543,11 +607,19 @@ fn ingest_project_tree_inner(
                 );
             }
             let rel = canonical_relative_path(relative)?;
-            ryeos_state::project_sync::validate_project_manifest_path(
-                &rel,
-                policy.sync_scope,
-                Some(&matcher),
-            )?;
+            match include {
+                Some(include) => ryeos_state::project_sync::validate_project_manifest_path(
+                    &rel,
+                    policy.sync_scope,
+                    Some(&matcher),
+                    include,
+                )?,
+                None => ryeos_state::project_sync::validate_stored_project_manifest_path(
+                    &rel,
+                    policy.sync_scope,
+                    Some(&matcher),
+                )?,
+            }
             let streamed = if let Some(budget) = budget {
                 cas.put_blob_from_open_regular_with_deadline(
                     file,
@@ -591,7 +663,12 @@ fn ingest_project_tree_inner(
         },
     )?;
     let tree = ProjectTree { files };
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, policy)?;
+    match include {
+        Some(include) => {
+            ryeos_state::project_sync::validate_project_tree_paths(&tree, policy, include)?
+        }
+        None => ryeos_state::project_sync::validate_stored_project_tree_paths(&tree, policy)?,
+    }
     if let Some(budget) = budget {
         budget.check()?;
     }
@@ -688,7 +765,7 @@ mod tests {
         ingest_project_tree, is_operationally_excluded, materialize_project_file,
         restore_operational_shadow_files,
     };
-    use ryeos_app::node_policy::NodePolicySection as _;
+    use ryeos_node_runtime::node_policy::NodePolicySection as _;
 
     #[test]
     fn live_descriptor_capture_cannot_be_redirected_by_rebinding_diagnostic_path() {
@@ -699,9 +776,11 @@ mod tests {
         std::fs::write(original.join("policy.py"), b"exact candidate").unwrap();
         let root = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
         let state_root = tempfile::tempdir().unwrap();
-        let db =
-            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let db = ryeos_state::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
@@ -812,28 +891,29 @@ mod tests {
             "/../../../bundles/.ai/node/init/profiles/standard.yaml"
         ));
         let body = lillux::signature::strip_signature_lines(raw);
-        let profile: ryeos_app::node_policy::generation::NodeInitProfile =
+        let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
             serde_yaml::from_str(&body).unwrap();
         profile
             .validate(
-                &ryeos_app::node_policy::NodePolicyTable::new(),
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
                 Path::new("standard.yaml"),
             )
             .unwrap();
-        let parsed = ryeos_app::node_policy::sections::ingest_ignore::IngestIgnorePolicySection
-            .parse(
-                &ryeos_app::node_policy::NodePolicyContext {
-                    section: "ingest_ignore".to_owned(),
-                    source_file: "standard.yaml".into(),
-                    signer_fingerprint: "ab".repeat(32),
-                },
-                profile.policies().get("ingest_ignore").unwrap(),
-            )
-            .unwrap();
+        let parsed =
+            ryeos_node_runtime::node_policy::sections::ingest_ignore::IngestIgnorePolicySection
+                .parse(
+                    &ryeos_node_runtime::node_policy::NodePolicyContext {
+                        section: "ingest_ignore".to_owned(),
+                        source_file: "standard.yaml".into(),
+                        signer_fingerprint: "ab".repeat(32),
+                    },
+                    profile.policies().get("ingest_ignore").unwrap(),
+                )
+                .unwrap();
         let policy_record = parsed
             .as_any()
             .downcast_ref::<
-                ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy,
+                ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy,
             >()
             .unwrap();
 
@@ -855,9 +935,11 @@ mod tests {
         }
 
         let state_root = tempfile::tempdir().unwrap();
-        let state_db =
-            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let state_db = ryeos_state::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = state_db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let project_root = lillux::PinnedDirectory::open(project.path())

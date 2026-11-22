@@ -610,6 +610,9 @@ fn launch_preparer_validation_request(
                         crate::runtime_registry::RefBindingSource::Caller => {
                             ryeos_handler_protocol::RefBindingSourceWire::Caller
                         }
+                        crate::runtime_registry::RefBindingSource::CallerOrPrimaryRef => {
+                            ryeos_handler_protocol::RefBindingSourceWire::CallerOrPrimaryRef
+                        }
                         crate::runtime_registry::RefBindingSource::PrimaryField { path } => {
                             ryeos_handler_protocol::RefBindingSourceWire::PrimaryField {
                                 path: path.clone(),
@@ -629,6 +632,14 @@ fn launch_preparer_validation_request(
                         .copied()
                         .map(trust_class_wire)
                         .collect(),
+                    continuation_rebind: match binding.continuation_rebind {
+                        crate::runtime_registry::ContinuationRebind::Never => {
+                            ryeos_handler_protocol::ContinuationRebindWire::Never
+                        }
+                        crate::runtime_registry::ContinuationRebind::Operator => {
+                            ryeos_handler_protocol::ContinuationRebindWire::Operator
+                        }
+                    },
                 },
             )
         })
@@ -769,6 +780,7 @@ fn launch_preparer_validation_request(
             max_variables_per_contribution: contract
                 .environment_contributions
                 .max_variables_per_contribution,
+            max_delivered_secrets: contract.environment_contributions.max_delivered_secrets,
         },
         financial_authority: match contract.financial_authority {
             crate::runtime_registry::FinancialAuthorityDecl::None => {
@@ -855,6 +867,8 @@ pub fn validate_protocol_builder(
             args: &[],
             cwd: dummy_path,
             project_path: dummy_path,
+            bundle_state_home: None,
+            runtime_state_root: dummy_path,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
@@ -2009,14 +2023,17 @@ composed_value_contract:
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: crate::protocols::descriptor::ProtocolLifecycle {
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         }
     }
 
@@ -2049,6 +2066,8 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
+            bundle_state_home: None,
+            runtime_state_root: dummy,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
@@ -2095,14 +2114,17 @@ composed_value_contract:
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: crate::protocols::descriptor::ProtocolLifecycle {
                 mode: LifecycleMode::DetachedOk,
             },
             callback_channel: CallbackChannel::None,
-            requires_qualification_purpose: false,
+            qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
+            holding: None,
         };
 
         let synthetic_ref = CanonicalRef::parse("tool:synthetic/test").unwrap();
@@ -2113,6 +2135,8 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
+            bundle_state_home: None,
+            runtime_state_root: dummy,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),

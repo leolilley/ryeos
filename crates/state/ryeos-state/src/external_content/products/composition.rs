@@ -25,7 +25,7 @@ use crate::objects::{
 
 pub const PRODUCT_RELATIONSHIPS_SCHEMA: &str = "ryeos.product_relationships.v1";
 pub const RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA: &str =
-    "ryeos.resolved_external_product_selection.v4";
+    "ryeos.resolved_external_product_selection.v5";
 pub const EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY: &str = "effective_external_product_selections";
 pub const MAX_PRODUCT_RELATIONSHIPS: usize = 32;
 pub const MAX_PRODUCT_SELECTIONS: usize = 32;
@@ -365,6 +365,35 @@ pub struct ProductSelection {
     /// the signed relationship. Absence never means "find the latest proof".
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub qualification_hash: Option<String>,
+    /// `Some` selects a remote qualification testimony accepted under local
+    /// policy; `qualification_hash` is then the origin's attestation hash and
+    /// `witness_source` is the received product's acceptance. `None` is the
+    /// local path.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub remote_testimony: Option<ProductSelectionRemoteTestimony>,
+}
+
+/// The accepted remote testimony a product selection relies on: the local
+/// acceptance record and the local policy it was accepted under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductSelectionRemoteTestimony {
+    pub acceptance_hash: String,
+    pub acceptance_policy_ref: String,
+}
+
+impl ProductSelectionRemoteTestimony {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_hash("product selection remote acceptance", &self.acceptance_hash)?;
+        validate_canonical_unsuffixed_ref(
+            "product selection acceptance policy",
+            &self.acceptance_policy_ref,
+        )?;
+        if !self.acceptance_policy_ref.starts_with("config:") {
+            bail!("product selection acceptance policy must be a Config ref");
+        }
+        Ok(())
+    }
 }
 
 impl ProductSelection {
@@ -374,6 +403,22 @@ impl ProductSelection {
         self.witness_source.validate()?;
         if let Some(hash) = &self.qualification_hash {
             validate_hash("product selection qualification", hash)?;
+        }
+        if let Some(testimony) = &self.remote_testimony {
+            testimony.validate()?;
+            if self.qualification_hash.is_none() {
+                bail!("a remote testimony selection requires its qualification hash");
+            }
+            // The received-product admission and the testimony acceptance are
+            // two records in two namespaces; the receiver joins them against
+            // the acceptance's recorded product source. Here only the source
+            // kind is fixed: a remote testimony qualifies a received product.
+            if !matches!(
+                self.witness_source,
+                super::transfer::ProductWitnessSource::Received { .. }
+            ) {
+                bail!("a remote testimony selection requires a received product");
+            }
         }
         Ok(())
     }
@@ -387,6 +432,7 @@ impl ProductSelection {
             witness_hash,
             witness_source: _,
             qualification_hash,
+            remote_testimony: _,
         } = self;
         #[derive(Serialize)]
         struct Identity<'a> {
@@ -521,12 +567,22 @@ pub struct ResolvedExternalProductSelection {
     pub relationship_name: String,
     pub relationship_ref: String,
     pub relationship_raw_content_digest: String,
+    /// Whether the relationship's full resolution (root, ancestors or
+    /// referenced items) draws on project space. Decided by the one shared
+    /// project-contributor predicate; a selection whose relationship is
+    /// bundle-owned does not make its consumer project-dependent.
+    pub relationship_project_dependent: bool,
     pub relationship: ProductRelationship,
     pub witness_hash: String,
     pub witness_source: super::transfer::ProductWitnessSource,
     pub witness_coordinate: ProductCaptureCoordinate,
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub qualification: Option<AdmittedProductQualification>,
+    /// `Some` marks `qualification` as a remote testimony accepted under local
+    /// policy; the retained acceptance lets recovery re-authenticate it
+    /// without current grants. `qualification` stays the origin's proof.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub remote_testimony: Option<crate::objects::RetainedRemoteQualificationTestimony>,
     pub producer: ProductProducerAdmission,
     pub owner_principal: String,
     pub consumer_source: ResolvedProductConsumerSource,
@@ -665,7 +721,8 @@ impl ResolvedExternalProductSelection {
                 validate_hash("admitted product qualification", &proof.attestation_hash)?;
                 proof.evidence.validate()?;
                 if proof.evidence.product_witness_hash != self.witness_hash
-                    || proof.evidence.witness_source != self.witness_source
+                    || (self.remote_testimony.is_none()
+                        && proof.evidence.witness_source != self.witness_source)
                     || proof.evidence.product_coordinate != self.witness_coordinate
                     || &proof.evidence.policy_source.canonical_ref != policy_ref
                     || proof.evidence.result.subject_manifest_hash != self.manifest_hash
@@ -678,6 +735,18 @@ impl ResolvedExternalProductSelection {
                 )?;
             }
             _ => bail!("product selection requires exactly its declared qualification proof"),
+        }
+        if let Some(testimony) = &self.remote_testimony {
+            testimony.validate()?;
+            if self.qualification.is_none() {
+                bail!("a retained remote testimony requires its admitted qualification");
+            }
+            if !matches!(
+                self.witness_source,
+                super::transfer::ProductWitnessSource::Received { .. }
+            ) {
+                bail!("a retained remote testimony requires a received product");
+            }
         }
         self.declaration.validate()?;
         let allowed_parameters_digest = self.relationship.producer.admitted_parameters_digest()?;
@@ -715,11 +784,13 @@ impl ResolvedExternalProductSelection {
             relationship_name,
             relationship_ref,
             relationship_raw_content_digest,
+            relationship_project_dependent,
             relationship,
             witness_hash,
             witness_source: _,
             witness_coordinate,
             qualification,
+            remote_testimony: _,
             producer,
             owner_principal,
             consumer_source,
@@ -740,6 +811,7 @@ impl ResolvedExternalProductSelection {
             relationship_name: &'a str,
             relationship_ref: &'a str,
             relationship_raw_content_digest: &'a str,
+            relationship_project_dependent: bool,
             relationship: &'a ProductRelationship,
             witness_hash: &'a str,
             witness_coordinate: &'a ProductCaptureCoordinate,
@@ -771,6 +843,7 @@ impl ResolvedExternalProductSelection {
             relationship_name,
             relationship_ref,
             relationship_raw_content_digest,
+            relationship_project_dependent: *relationship_project_dependent,
             relationship,
             witness_hash,
             witness_coordinate,
@@ -923,6 +996,9 @@ mod tests {
         changed.relationship_raw_content_digest = "f".repeat(64);
         assert_ne!(digest, changed.semantic_identity_digest().unwrap());
         changed = original.clone();
+        changed.relationship_project_dependent = !original.relationship_project_dependent;
+        assert_ne!(digest, changed.semantic_identity_digest().unwrap());
+        changed = original.clone();
         changed.pre_selection_effective_definition_digest = "e".repeat(64);
         assert_ne!(digest, changed.semantic_identity_digest().unwrap());
 
@@ -939,6 +1015,7 @@ mod tests {
             witness_hash: "a".repeat(64),
             witness_source: ProductWitnessSource::LocalCapture {},
             qualification_hash: None,
+            remote_testimony: None,
         };
         let semantic = local.semantic_identity_value().unwrap();
         for hash in ["b".repeat(64), "c".repeat(64)] {
@@ -1260,6 +1337,7 @@ mod tests {
             witness_hash: "a".repeat(64),
             witness_source: super::super::transfer::ProductWitnessSource::LocalCapture {},
             qualification_hash: None,
+            remote_testimony: None,
         };
         let root = ProductSelectionInput {
             target: ProductSelectionTarget::Root {},
@@ -1275,8 +1353,8 @@ mod tests {
             canonicalize_product_selection_inputs(vec![dependency.clone(), root.clone()]).unwrap();
         assert_eq!(canonical, vec![root.clone(), dependency.clone()]);
         validate_product_selection_inputs(&canonical).unwrap();
-        assert!(validate_product_selection_inputs(&vec![dependency, root.clone()]).is_err());
-        assert!(validate_product_selection_inputs(&vec![root.clone(), root]).is_err());
+        assert!(validate_product_selection_inputs(&[dependency, root.clone()]).is_err());
+        assert!(validate_product_selection_inputs(&[root.clone(), root]).is_err());
         assert!(
             serde_json::from_value::<ProductSelectionInput>(json!({
                 "target":{"kind":"root"},
@@ -1325,6 +1403,7 @@ mod tests {
             relationship_name: relationship.name.clone(),
             relationship_ref: witness.recipe_ref.clone(),
             relationship_raw_content_digest: witness.recipe_raw_content_digest.clone(),
+            relationship_project_dependent: false,
             relationship,
             witness_hash: proof.product_witness_hash.clone(),
             witness_source: proof.witness_source.clone(),
@@ -1333,6 +1412,7 @@ mod tests {
                 attestation_hash: "8".repeat(64),
                 evidence: proof,
             }),
+            remote_testimony: None,
             producer: witness.producer.clone(),
             owner_principal: witness.owner_principal.clone(),
             consumer_source: ResolvedProductConsumerSource::PinnedProject {
@@ -1353,6 +1433,35 @@ mod tests {
             },
         };
         selection.validate().unwrap();
+        let acceptance = "e".repeat(64);
+        let retained = crate::objects::RetainedRemoteQualificationTestimony {
+            acceptance_hash: acceptance.clone(),
+            acceptance: super::super::qualification_testimony::tests::product_acceptance_evidence(
+                &acceptance,
+            ),
+        };
+        retained.validate().unwrap();
+        let received = |hash: &String| super::super::transfer::ProductWitnessSource::Received {
+            acceptance_hash: hash.clone(),
+        };
+        // The origin's evidence keeps its local-capture source; only the
+        // selection's source is the receiver's admission.
+        let with_source = |source: super::super::transfer::ProductWitnessSource| {
+            let mut remote = selection.clone();
+            remote.remote_testimony = Some(retained.clone());
+            remote.witness_source = source;
+            remote
+        };
+        with_source(received(&acceptance)).validate().unwrap();
+        // Another received-product admission is a different record from the
+        // testimony acceptance; the join between them is the receiver's, not
+        // this value's.
+        with_source(received(&"f".repeat(64))).validate().unwrap();
+        assert!(
+            with_source(super::super::transfer::ProductWitnessSource::LocalCapture {})
+                .validate()
+                .is_err()
+        );
         let mut missing = selection.clone();
         missing.qualification = None;
         assert!(missing.validate().is_err());

@@ -7,7 +7,7 @@
 //! (per-chunk, timeout-bounded) and stops once it has seen the terminal
 //! event, rather than blocking on a full-body read that would never end.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -221,7 +221,14 @@ async fn read_until_terminal(mut resp: reqwest::Response, deadline: Duration) ->
 
 async fn boot_and_run_directive_with_extra_keys(
     extra_keys: &[SigningKey],
-) -> (DaemonHarness, SigningKey, String, String) {
+) -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    String,
+    String,
+) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
@@ -232,7 +239,7 @@ async fn boot_and_run_directive_with_extra_keys(
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-chain-tail-model-config",
@@ -291,14 +298,12 @@ async fn boot_and_run_directive_with_extra_keys(
         .expect("thread.thread_id")
         .to_string();
 
-    std::mem::forget(project);
-    std::mem::forget(mock);
-    (h, user_sk, node_fp, thread_id)
+    (Box::new((project, mock)), h, user_sk, node_fp, thread_id)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chain_tail_tails_root_chain_and_delivers_terminal() {
-    let (h, user_sk, node_fp, thread_id) = boot_and_run_directive_with_extra_keys(&[]).await;
+    let (_keep, h, user_sk, node_fp, thread_id) = boot_and_run_directive_with_extra_keys(&[]).await;
 
     // For a root thread, chain_root_id == thread_id.
     let audience = format!("fp:{node_fp}");
@@ -345,7 +350,7 @@ async fn chain_tail_tails_root_chain_and_delivers_terminal() {
 #[tokio::test(flavor = "multi_thread")]
 async fn chain_tail_returns_404_for_non_owner() {
     let other_sk = SigningKey::generate(&mut rand::rngs::OsRng);
-    let (h, _user_sk, node_fp, thread_id) =
+    let (_keep, h, _user_sk, node_fp, thread_id) =
         boot_and_run_directive_with_extra_keys(std::slice::from_ref(&other_sk)).await;
 
     let audience = format!("fp:{node_fp}");

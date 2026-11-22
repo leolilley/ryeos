@@ -32,14 +32,11 @@ fn development_source_policy_keeps_source_and_excludes_generated_payloads() {
         "nvim.log",
         ".ai/directives/test/replay-smoke.md",
         ".ai/tools/test/echo.yaml",
-        ".ai/surfaces/ryeos/ui/atlas.yaml",
         "tests/e2e/execute-stream-latency/.ai/state/threads/old/thread.json",
         "tests/e2e/execute-stream-latency/outputs/probe/samples.jsonl",
         "tests/e2e/manual-directives/.ai/state/threads/old/thread.json",
         "tests/e2e/manual-directives/.ai/knowledge/agent/threads/old.md",
         "bundles/sandbox-linux-bubblewrap/.ai/bin/retired-adapter",
-        "bundles/tv-tracker-authoring/PUBLISHER_TRUST.toml",
-        "bundles/tv-tracker-authoring/.ai/bin/generated-tool",
     ] {
         assert!(matcher.is_ignored(generated), "captured {generated}");
     }
@@ -61,10 +58,10 @@ fn development_source_policy_keeps_source_and_excludes_generated_payloads() {
         ".ai/tools/ryeos/development/check.yaml",
         "tests/e2e/execute-stream-latency/run-latency-matrix.mjs",
         "tests/e2e/manual-directives/.ai/directives/test/context/base_context.md",
-        "tests/e2e/manual-directives/.ai/knowledge/test-findings.md",
+        "tests/e2e/manual-directives/.ai/tools/mcp/servers/context7.yaml",
         "tests/e2e/development-cargo/qualification.json",
-        "bundles/tv-tracker-authoring/.ai/manifest.source.yaml",
-        "bundles/tv-tracker-authoring/.ai/tools/tv-tracker-authoring/author-context-doc.yaml",
+        "bundles/central-auth/.ai/manifest.source.yaml",
+        "bundles/central-auth/.ai/tools/central-auth/login.yaml",
     ] {
         assert!(!matcher.is_ignored(source), "excluded {source}");
     }

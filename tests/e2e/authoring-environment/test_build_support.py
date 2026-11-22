@@ -183,8 +183,9 @@ class BuildSupportTests(unittest.TestCase):
             self.assertEqual(tool_header[field], contract[field])
         self.assertEqual(tool_header["external_content"],
                          [entry for entry in contract["external_content"]
-                          if entry["id"] not in {"authoring-tools", "authoring-build-support"}])
-        self.assertIn("authoring-build-support is selected by the enclosing producer Graph", tool)
+                          if entry["id"] not in {"authoring-tools", "authoring-build-support", "platform"}])
+        self.assertIn("authoring-build-support and the qualified platform product are selected", tool)
+        self.assertIn("by the enclosing producer Graph", tool)
         self.assertIn("from utility_production import main", tool)
         self.assertNotIn("build_utilities(", tool)
         execution = yaml.safe_load((ROOT / ".ai/config/execution/execution.yaml").read_text())

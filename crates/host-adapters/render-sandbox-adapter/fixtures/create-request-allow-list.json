@@ -1,0 +1,1 @@
+{"networkPolicy":{"rules":[{"domain":"controller.example.com","protocol":"https"}],"type":"allow-list"},"ownerId":"owner-fixture","plan":"standard","region":"oregon","snapshotId":"snp-fixture-001","timeoutSeconds":600}

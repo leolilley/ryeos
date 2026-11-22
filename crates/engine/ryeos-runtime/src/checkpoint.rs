@@ -100,6 +100,7 @@ fn publish_checkpoint_bytes(directory: &lillux::PinnedDirectory, bytes: &[u8]) -
             incumbent.as_ref(),
             bytes,
             0o600,
+            crate::RUNTIME_TEMP_PURPOSE,
         )
         .with_context(|| format!("publish checkpoint in {}", directory.path().display()))
 }

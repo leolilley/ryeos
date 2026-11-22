@@ -130,6 +130,31 @@ pub(super) fn reconcile_terminal_finalization(
     authority: &ThreadTerminalAuthority,
     runtime_result: &RuntimeResult,
 ) -> anyhow::Result<RuntimeResult> {
+    // The daemon failed this run `head_advance_not_applied` over the
+    // runtime's own report. The signed terminal and its rebuilt envelope
+    // supersede stdout, which still carries the runtime's claim.
+    if let (Some(raw_envelope), true) = (
+        authority.managed_envelope.as_ref(),
+        is_head_advance_not_applied(authority),
+    ) {
+        let envelope = decode_managed_runtime_terminal_envelope(raw_envelope).map_err(|error| {
+            anyhow::anyhow!("head-advance terminal managed envelope is malformed: {error}")
+        })?;
+        if runtime_terminal_status(envelope.status) != authority.status
+            || envelope.child_thread_id != runtime_result.thread_id
+        {
+            anyhow::bail!("head-advance terminal managed envelope contradicts its terminal");
+        }
+        return Ok(RuntimeResult {
+            success: envelope.success,
+            status: envelope.status,
+            thread_id: runtime_result.thread_id.clone(),
+            result: Some(envelope.result),
+            outputs: envelope.outputs,
+            cost: envelope.cost,
+            warnings: envelope.warnings,
+        });
+    }
     if authority.managed_envelope.is_some() {
         reconcile_callback_finalization(authority, runtime_result)?;
         return Ok(runtime_result.clone());
@@ -159,9 +184,100 @@ pub(super) fn reconcile_terminal_finalization(
     })
 }
 
+fn is_head_advance_not_applied(authority: &ThreadTerminalAuthority) -> bool {
+    authority.status == ThreadStatus::Failed
+        && authority
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            == Some(crate::execution::HEAD_ADVANCE_NOT_APPLIED)
+}
+
+/// Finalization of a managed runtime that exited without a callback and
+/// whose fold-back HEAD advance was refused before any write: `failed` with
+/// outcome `head_advance_not_applied` and the retained-generation payload,
+/// the same terminal the callback lane commits.
+pub(super) fn head_advance_not_applied_finalization(
+    thread_id: &str,
+    runtime_result: &RuntimeResult,
+    not_applied: &crate::execution::HeadAdvanceNotApplied,
+) -> FallbackFinalization {
+    let mut error = not_applied.error_payload();
+    error
+        .as_object_mut()
+        .expect("head-advance payload is an object")
+        .insert(
+            "reported_status".into(),
+            json!(runtime_terminal_status(runtime_result.status).as_str()),
+        );
+    let final_cost = runtime_result
+        .cost
+        .as_ref()
+        .map(|cost| ryeos_engine::contracts::FinalCost {
+            turns: 0,
+            input_tokens: cost.input_tokens,
+            output_tokens: cost.output_tokens,
+            spend: cost.total_usd,
+            provider: None,
+            basis: cost.basis.clone(),
+            metadata: None,
+        });
+    let raw_cost = runtime_result.cost.as_ref().map(|cost| {
+        serde_json::to_value(cost)
+            .expect("validated runtime cost must serialize for head-advance settlement")
+    });
+    let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
+        thread_id,
+        ThreadStatus::Failed.as_str(),
+        None,
+        Some(&error),
+        raw_cost.as_ref(),
+        &Value::Null,
+        &runtime_result.warnings,
+    );
+    let mut canonical = runtime_result.clone();
+    canonical.status = RuntimeResultStatus::Failed;
+    canonical.success = false;
+    canonical.result = Some(error.clone());
+    canonical.outputs = Value::Null;
+    FallbackFinalization {
+        params: ThreadFinalizeParams {
+            thread_id: thread_id.to_string(),
+            status: ThreadStatus::Failed.as_str().to_string(),
+            outcome_code: Some(crate::execution::HEAD_ADVANCE_NOT_APPLIED.to_string()),
+            result: None,
+            error: Some(error),
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost,
+            summary_json: None,
+        },
+        managed_envelope,
+        runtime_result: canonical,
+    }
+}
+
 /// Materialize the canonical DB finalization and complete managed terminal
 /// envelope when a runtime exits without finalizing itself through its
 /// callback.
+/// The thread status a stopped runtime settles under once its result is
+/// final. A replacement result built from the canonical session projection
+/// is the authority over the runtime's stdout in both directions: a declared
+/// worker failure value fails the thread even when stdout said completed, and
+/// a completed projection completes it even when stdout said failed. An
+/// operator stop (`Killed`, `Cancelled`) still settles as that stop.
+pub(super) fn settled_terminal_status(
+    current: ThreadStatus,
+    runtime_result: &RuntimeResult,
+) -> ThreadStatus {
+    if matches!(current, ThreadStatus::Killed | ThreadStatus::Cancelled) {
+        current
+    } else {
+        runtime_terminal_status(runtime_result.status)
+    }
+}
+
 pub(super) fn fallback_finalization(
     thread_id: &str,
     runtime_result: &RuntimeResult,
@@ -237,6 +353,55 @@ mod tests {
     use super::super::{BuildAndLaunchError, retained_launch_failure};
     use super::*;
 
+    /// The canonical projection of a session whose worker reported its
+    /// profile's `crashed` failure value: the session ended normally, the
+    /// result-status declaration named the outcome `worker_failure`.
+    fn crashed_worker_projection() -> RuntimeResult {
+        ryeos_runtime::envelope::dedicated_session_terminal_result(
+            "T-crashed".to_string(),
+            json!({
+                "state": "terminal",
+                "terminal_reason": "completed",
+                "outcome_kind": "worker_failure",
+                "worker_result": {
+                    "status": "crashed",
+                    "result": {"text": "stub: claude code crashed"},
+                },
+            }),
+        )
+    }
+
+    #[test]
+    fn a_worker_failure_projection_settles_the_thread_failed_over_a_completed_stdout() {
+        let projection = crashed_worker_projection();
+        assert_eq!(projection.status, RuntimeResultStatus::Failed);
+        // The runtime's own stdout had said completed.
+        let status = settled_terminal_status(ThreadStatus::Completed, &projection);
+        assert_eq!(status, ThreadStatus::Failed);
+        let fallback = fallback_finalization("T-crashed", &projection, status);
+        assert_eq!(fallback.params.status, "failed");
+        assert_eq!(fallback.params.outcome_code.as_deref(), Some("failed"));
+        assert!(!fallback.runtime_result.success);
+        // The partial result stays attached for the graph's on_error reader.
+        assert_eq!(
+            fallback.params.result.as_ref().unwrap()["session"]["outcome_kind"],
+            json!("worker_failure")
+        );
+    }
+
+    #[test]
+    fn an_operator_stop_keeps_precedence_over_the_projection() {
+        let projection = crashed_worker_projection();
+        for stop in [ThreadStatus::Killed, ThreadStatus::Cancelled] {
+            assert_eq!(settled_terminal_status(stop, &projection), stop);
+        }
+        let completed = runtime_result(RuntimeResultStatus::Completed);
+        assert_eq!(
+            settled_terminal_status(ThreadStatus::Failed, &completed),
+            ThreadStatus::Completed
+        );
+    }
+
     fn runtime_result(status: RuntimeResultStatus) -> RuntimeResult {
         RuntimeResult {
             success: status.is_success(),
@@ -247,6 +412,69 @@ mod tests {
             cost: None,
             warnings: vec!["warning".to_string()],
         }
+    }
+
+    fn not_applied() -> crate::execution::HeadAdvanceNotApplied {
+        crate::execution::HeadAdvanceNotApplied {
+            refusal: ryeos_state::refs::ProjectHeadAdvanceRefusal::Conflict {
+                expected: "b".repeat(64),
+                observed: Some("e".repeat(64)),
+            },
+            expected_head: "b".repeat(64),
+            retained: ryeos_state::objects::WorkspaceGenerationPair {
+                snapshot_hash: "c".repeat(64),
+                output_capture_hash: None,
+            },
+        }
+    }
+
+    #[test]
+    fn stopped_lane_head_advance_refusal_fails_with_a_failure_envelope() {
+        let reported = runtime_result(RuntimeResultStatus::Completed);
+        let finalization =
+            head_advance_not_applied_finalization("T-runtime-thread", &reported, &not_applied());
+        assert_eq!(finalization.params.status, "failed");
+        assert_eq!(
+            finalization.params.outcome_code.as_deref(),
+            Some(crate::execution::HEAD_ADVANCE_NOT_APPLIED)
+        );
+        assert!(finalization.params.result.is_none());
+        let error = finalization.params.error.clone().unwrap();
+        assert_eq!(error["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(error["reported_status"], "completed");
+        let envelope =
+            decode_managed_runtime_terminal_envelope(&finalization.managed_envelope).unwrap();
+        assert!(!envelope.success, "a following parent sees a failure");
+        assert_eq!(envelope.status, RuntimeResultStatus::Failed);
+        assert_eq!(envelope.result, error);
+        assert!(!finalization.runtime_result.success);
+        assert_eq!(
+            finalization.runtime_result.status,
+            RuntimeResultStatus::Failed
+        );
+    }
+
+    #[test]
+    fn a_head_advance_terminal_supersedes_the_runtime_success_on_stdout() {
+        let finalization = head_advance_not_applied_finalization(
+            "T-runtime-thread",
+            &runtime_result(RuntimeResultStatus::Completed),
+            &not_applied(),
+        );
+        let authority = ThreadTerminalAuthority {
+            status: ThreadStatus::Failed,
+            result: None,
+            error: finalization.params.error.clone(),
+            final_cost: None,
+            managed_envelope: Some(finalization.managed_envelope.clone()),
+        };
+        let reconciled = reconcile_terminal_finalization(
+            &authority,
+            &runtime_result(RuntimeResultStatus::Completed),
+        )
+        .expect("the daemon's head-advance terminal is authoritative");
+        assert_eq!(reconciled.status, RuntimeResultStatus::Failed);
+        assert!(!reconciled.success);
     }
 
     fn authority(status: ThreadStatus) -> ThreadTerminalAuthority {

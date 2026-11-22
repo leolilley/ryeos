@@ -11,6 +11,37 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use anyhow::{Result, bail};
 
+/// Serialize restored-occurrence verification and termination from durable
+/// recheck through provider return. This is process-local coordination, not
+/// restart authority: journals still prohibit replaying uncertain contact.
+pub(crate) fn with_qualification_occurrence_contact<T>(
+    qualification_operation_id: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    static GATES: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+    let gate = {
+        let mut gates = GATES
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| anyhow::anyhow!("qualification contact gate registry poisoned"))?;
+        gates.retain(|_, gate| gate.strong_count() != 0);
+        if let Some(gate) = gates
+            .get(qualification_operation_id)
+            .and_then(Weak::upgrade)
+        {
+            gate
+        } else {
+            let gate = Arc::new(Mutex::new(()));
+            gates.insert(qualification_operation_id.to_owned(), Arc::downgrade(&gate));
+            gate
+        }
+    };
+    let _lease = gate
+        .lock()
+        .map_err(|_| anyhow::anyhow!("qualification occurrence contact gate poisoned"))?;
+    operation()
+}
+
 #[derive(Default)]
 struct ExclusiveState {
     exclusive_held: bool,
@@ -163,10 +194,86 @@ pub async fn acquire_credential_profile_operation(
         .map_err(|error| anyhow::anyhow!("join credential-profile operation acquisition: {error}"))
 }
 
+/// Longest a dedicated-session start waits for the credential profile's
+/// operation gate. The gate is held for the length of every worker contact and
+/// of every other exclusive profile operation, so a start queued behind one
+/// that never returns would otherwise wait with no log and no outcome.
+pub const CREDENTIAL_PROFILE_START_GATE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
+/// Acquire the profile's exclusive operation ownership, refusing with the
+/// typed code `credential_profile_gate_timeout` when `timeout` elapses first.
+/// The wait runs on a blocking owner, so an async caller keeps its executor
+/// thread.
+pub async fn acquire_credential_profile_operation_within(
+    profile_id: &str,
+    timeout: std::time::Duration,
+) -> Result<CredentialProfileOperationLease> {
+    let owned = profile_id.to_owned();
+    let deadline = lillux::time::MonotonicDeadline::after(timeout);
+    tokio::task::spawn_blocking(move || {
+        acquire_credential_profile_operation_until(&owned, deadline)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("join credential-profile operation acquisition: {error}"))?
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "credential_profile_gate_timeout: the credential profile's operation gate stayed \
+             held for {} s ({error:#})",
+            timeout.as_secs()
+        )
+    })
+}
+
 pub fn acquire_credential_profile_operation_sync(
     profile_id: &str,
 ) -> CredentialProfileOperationLease {
     acquire_credential_profile_operation_blocking(profile_id)
+}
+
+/// Acquire exclusive profile-operation ownership under the caller's original
+/// monotonic deadline. This blocks the calling thread; async callers must use
+/// a blocking owner. Expiry removes writer priority and wakes contacts that
+/// were waiting only for this operation, without changing existing leases.
+pub fn acquire_credential_profile_operation_until(
+    profile_id: &str,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<CredentialProfileOperationLease> {
+    let gate = credential_gate(profile_id);
+    {
+        let mut state = gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if deadline.has_elapsed() {
+            bail!("credential-profile operation deadline elapsed before acquisition");
+        }
+        state.exclusive_waiters = state
+            .exclusive_waiters
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("credential-profile operation waiter count overflow"))?;
+        loop {
+            // Recheck before granting, including after a notification or a
+            // spurious wake. A newly free gate never renews the caller's clock.
+            let remaining = deadline.remaining();
+            if remaining.is_zero() {
+                state.exclusive_waiters -= 1;
+                gate.changed.notify_all();
+                bail!("credential-profile operation deadline elapsed while waiting");
+            }
+            if !state.exclusive_held && state.active_contacts == 0 {
+                state.exclusive_waiters -= 1;
+                state.exclusive_held = true;
+                break;
+            }
+            let (next, _) = gate
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+        }
+    }
+    Ok(CredentialProfileOperationLease { gate })
 }
 
 /// Acquire a primary worker-contact lane. Waiting exclusive operations block
@@ -570,6 +677,45 @@ pub async fn begin_hosted_root_handoff_recovery_async(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_start_behind_a_held_profile_gate_refuses_with_the_typed_code() {
+        let held = acquire_credential_profile_operation_sync("gate-timeout-fixture");
+        let refusal = acquire_credential_profile_operation_within(
+            "gate-timeout-fixture",
+            std::time::Duration::from_millis(150),
+        )
+        .await
+        .err()
+        .expect("a held gate must refuse the bounded wait");
+        assert!(
+            format!("{refusal:#}").starts_with("credential_profile_gate_timeout:"),
+            "{refusal:#}"
+        );
+        drop(held);
+        acquire_credential_profile_operation_within(
+            "gate-timeout-fixture",
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("the gate is free again after the holder drops");
+    }
+
+    #[test]
+    fn qualification_contact_gate_releases_after_refusal() {
+        let result: Result<()> =
+            with_qualification_occurrence_contact("qualification-contact-refusal-fixture", || {
+                bail!("fixture refusal")
+            });
+        assert!(result.is_err());
+        assert_eq!(
+            with_qualification_occurrence_contact("qualification-contact-refusal-fixture", || Ok(
+                7
+            ),)
+            .unwrap(),
+            7
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn root_drain_and_late_operation_leave_single_thread_executor_available() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -577,25 +723,21 @@ mod tests {
 
         let root_id = "root-async-drain-fixture";
         let dir = tempfile::tempdir().unwrap();
-        let runtime_state_dir = dir.path().join(".ai/state");
         let identity =
-            crate::identity::NodeIdentity::create(&dir.path().join("node-key.pem")).unwrap();
+            ryeos_node_runtime::identity::NodeIdentity::create(&dir.path().join("node-key.pem"))
+                .unwrap();
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let state_store = Arc::new(
-            crate::state_store::StateStore::new_with_head_trust(
-                dir.path().to_path_buf(),
-                runtime_state_dir.clone(),
-                runtime_state_dir.join("runtime.sqlite3"),
-                signer,
-                crate::write_barrier::WriteBarrier::new(),
-                Arc::new(head_trust),
-            )
-            .unwrap(),
-        );
+        let store_owner = crate::state_store::test_native::TestStateStore::open(
+            dir.path(),
+            signer,
+            Arc::new(head_trust),
+        )
+        .unwrap();
+        let state_store = Arc::clone(store_owner.store());
         let appendable = Arc::new(AtomicBool::new(true));
         let operation = Arc::new(Mutex::new(Some(
             begin_hosted_root_operation_with_check(root_id, || Ok(true)).unwrap(),
@@ -725,6 +867,92 @@ mod tests {
                 Ok(appendable.load(std::sync::atomic::Ordering::Acquire))
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn expired_credential_operation_never_takes_an_available_gate() {
+        let profile = "profile-expired-bounded-operation";
+        let gate = credential_gate(profile);
+        assert!(
+            acquire_credential_profile_operation_until(
+                profile,
+                lillux::time::MonotonicDeadline::after(std::time::Duration::ZERO),
+            )
+            .is_err()
+        );
+        let state = gate.state.lock().unwrap();
+        assert!(!state.exclusive_held);
+        assert_eq!(state.exclusive_waiters, 0);
+    }
+
+    fn wait_for_credential_writer(gate: &ExclusiveGate) {
+        let deadline = lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2));
+        while gate.state.lock().unwrap().exclusive_waiters == 0 {
+            assert!(!deadline.has_elapsed(), "credential writer did not queue");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn bounded_credential_operation_acquires_only_after_prior_owner_releases() {
+        let profile = "profile-bounded-operation-release";
+        let prior = acquire_credential_profile_operation_sync(profile);
+        let gate = credential_gate(profile);
+        let waiter = std::thread::spawn(move || {
+            acquire_credential_profile_operation_until(
+                profile,
+                lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2)),
+            )
+        });
+        wait_for_credential_writer(&gate);
+        assert!(!waiter.is_finished());
+        drop(prior);
+        let next = waiter.join().unwrap().unwrap();
+        assert!(gate.state.lock().unwrap().exclusive_held);
+        assert_eq!(gate.state.lock().unwrap().exclusive_waiters, 0);
+        drop(next);
+        assert!(!gate.state.lock().unwrap().exclusive_held);
+    }
+
+    #[test]
+    fn expired_writer_releases_priority_and_preserves_causal_contacts() {
+        let profile = "profile-bounded-operation-expiry";
+        let primary = acquire_credential_profile_contact_blocking(profile, "active", false);
+        let gate = credential_gate(profile);
+        let waiter = std::thread::spawn(move || {
+            acquire_credential_profile_operation_until(
+                profile,
+                lillux::time::MonotonicDeadline::after(std::time::Duration::from_millis(100)),
+            )
+        });
+        wait_for_credential_writer(&gate);
+        // A queued writer still admits causal settlement of the active command.
+        let causal = acquire_credential_profile_contact_blocking(profile, "active", true);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let unrelated = std::thread::spawn(move || {
+            let contact = acquire_credential_profile_contact_blocking(profile, "unrelated", false);
+            sender.send(()).unwrap();
+            contact
+        });
+        assert!(waiter.join().unwrap().is_err());
+        // Primary remains held: this new contact can proceed only because the
+        // expired writer removed its priority and notified waiting contacts.
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let unrelated = unrelated.join().unwrap();
+        assert_eq!(gate.state.lock().unwrap().exclusive_waiters, 0);
+        assert!(!gate.state.lock().unwrap().exclusive_held);
+        drop(unrelated);
+        drop(causal);
+        drop(primary);
+        drop(
+            acquire_credential_profile_operation_until(
+                profile,
+                lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(1)),
+            )
+            .unwrap(),
         );
     }
 

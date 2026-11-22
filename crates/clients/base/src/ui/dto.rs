@@ -4,7 +4,6 @@
 //! without making those endpoint names part of the RyeOs product model.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// How the daemon delivered a `service:threads/input` submit. Typed so the
 /// client branches on a variant, not a string literal. Unknown/future values
@@ -82,18 +81,6 @@ impl ThreadStatus {
             _ => Self::Unknown,
         }
     }
-}
-
-/// The fields the braid lens reads from a `cognition_out` event payload. Typed
-/// so the projection branches on a field rather than a raw JSON key. Other
-/// payload fields (turn, tokens, content, tool_calls) reach the feed through the
-/// event projection, not this struct, so they are intentionally omitted.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct CognitionOutPayload {
-    /// The cognition was cut mid-flight by a live interrupt; the braid marks the
-    /// seam where it was cut and the next `cognition_in` folds.
-    #[serde(default)]
-    pub interrupted: bool,
 }
 
 /// Daemon-authored per-execution facts, surfaced both on thread projections
@@ -227,6 +214,8 @@ pub struct RyeOsDimensionDto {
     #[serde(default)]
     pub remotes: Vec<RyeOsRemoteDto>,
     #[serde(default)]
+    pub invalid_remotes: Vec<RyeOsInvalidRemoteDto>,
+    #[serde(default)]
     pub threads: RyeOsThreadSummaryDto,
     #[serde(default)]
     pub schedules: RyeOsScheduleSummaryDto,
@@ -234,12 +223,206 @@ pub struct RyeOsDimensionDto {
     pub gc: RyeOsGcSummaryDto,
 }
 
+/// The one attention response contract this client reads.
+pub const ATTENTION_CONTRACT: &str = "ryeos.ui.attention.v3";
+
+/// The attention queue as the daemon reports it. The counts are the daemon's
+/// own; a client never derives them from the items.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionDto {
+    #[serde(default)]
+    pub schema_version: String,
+    /// One page of the needs-you queue, oldest first.
+    #[serde(default, rename = "attention")]
+    pub items: Vec<RyeOsAttentionItemDto>,
+    #[serde(default)]
+    pub counts: RyeOsAttentionCountsDto,
+    #[serde(default)]
+    pub running: RyeOsRunningDto,
+}
+
+impl RyeOsAttentionDto {
+    /// Read a response of the contract this client speaks; any other version
+    /// is refused with the reason, since there is no reader for it.
+    pub fn from_response(value: &serde_json::Value) -> Result<Self, String> {
+        let found = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str);
+        if found != Some(ATTENTION_CONTRACT) {
+            return Err(format!(
+                "attention response is {}; this client reads {ATTENTION_CONTRACT}",
+                found.unwrap_or("unversioned")
+            ));
+        }
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
+}
+
+/// The one coverage-wording response contract this client reads.
+pub const COVERAGE_WORDING_CONTRACT: &str = "ryeos.ui.coverage_wording.v1";
+
+/// The tones a wording entry may name. `none` draws as the neutral ink.
+const WORDING_TONES: [&str; 5] = ["none", "good", "warn", "danger", "accent"];
+
+/// One sentence and the tone it is drawn in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RyeOsWordingEntry {
+    pub label: String,
+    pub tone: String,
+}
+
+/// The signed words for a table's coverage line, as the daemon serves them.
+/// The client holds no wording of its own: with no words loaded, every
+/// coverage line reads as unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RyeOsCoverageWordingDto {
+    /// Used when the state is not one of `states`.
+    pub fallback: RyeOsWordingEntry,
+    /// The default sentence for each state.
+    pub states: std::collections::BTreeMap<String, RyeOsWordingEntry>,
+    /// The sentence for a reason, whichever state reports it.
+    pub reasons: std::collections::BTreeMap<String, RyeOsWordingEntry>,
+}
+
+impl RyeOsCoverageWordingDto {
+    /// Read a response of the contract this client speaks. Any other version,
+    /// an empty sentence or a tone outside the closed list is refused.
+    pub fn from_response(value: &serde_json::Value) -> Result<Self, String> {
+        let found = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str);
+        if found != Some(COVERAGE_WORDING_CONTRACT) {
+            return Err(format!(
+                "coverage wording is {}; this client reads {COVERAGE_WORDING_CONTRACT}",
+                found.unwrap_or("unversioned")
+            ));
+        }
+        let wording: Self =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        let entries = std::iter::once(&wording.fallback)
+            .chain(wording.states.values())
+            .chain(wording.reasons.values());
+        for entry in entries {
+            if entry.label.trim().is_empty() {
+                return Err("coverage wording has an empty sentence".into());
+            }
+            if !WORDING_TONES.contains(&entry.tone.as_str()) {
+                return Err(format!(
+                    "coverage wording has an unknown tone {}",
+                    entry.tone
+                ));
+            }
+        }
+        Ok(wording)
+    }
+
+    /// The sentence for a reported `(state, reason)`: the reason's own when it
+    /// has one and the state is known, else the state's default, else the
+    /// fallback. A code is never returned as text.
+    pub fn resolve(&self, state: &str, reason: &str) -> &RyeOsWordingEntry {
+        match self.states.get(state) {
+            Some(default) => self.reasons.get(reason).unwrap_or(default),
+            None => &self.fallback,
+        }
+    }
+}
+
+/// One attention or running item, as far as the shell reads it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionItemDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub tone: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub since_ms: i64,
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub subject: RyeOsAttentionSubjectDto,
+    /// The actions the item allows, by name.
+    #[serde(default)]
+    pub actions: std::collections::BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionSubjectDto {
+    #[serde(default)]
+    pub chain_root_id: String,
+    #[serde(default)]
+    pub thread_id: String,
+}
+
+/// The count of one project's items; a null root is a projectless run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsProjectCountDto {
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub count: usize,
+}
+
+/// What the principal is running: launched or followed, never scheduled or
+/// child runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsRunningDto {
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub tone: String,
+    #[serde(default)]
+    pub by_project: Vec<RyeOsProjectCountDto>,
+    #[serde(default)]
+    pub chains: Vec<String>,
+    #[serde(default)]
+    pub chains_truncated: bool,
+    #[serde(default)]
+    pub items: Vec<RyeOsAttentionItemDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionCountsDto {
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub by_kind: Vec<RyeOsAttentionKindCountDto>,
+    #[serde(default)]
+    pub by_project: Vec<RyeOsProjectCountDto>,
+    #[serde(default)]
+    pub chains: Vec<String>,
+    #[serde(default)]
+    pub chains_truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RyeOsAttentionKindCountDto {
+    #[serde(default)]
+    pub kind: String,
+    /// The noun the bars show beside the count.
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub tone: String,
+    #[serde(default)]
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsSessionDto {
     #[serde(default)]
     pub session_id: String,
     #[serde(default)]
-    pub surface_ref: String,
+    pub root_ref: String,
+    #[serde(default)]
+    pub title: String,
     #[serde(default)]
     pub user_principal_id: Option<String>,
 }
@@ -360,6 +543,9 @@ pub struct RyeOsThreadSummaryDto {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsScheduleSummaryDto {
+    pub identity_filtered: bool,
+    pub owner_principal_id: String,
+    pub coverage: String,
     #[serde(default)]
     pub total: usize,
     #[serde(default)]
@@ -369,133 +555,19 @@ pub struct RyeOsScheduleSummaryDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsGcSummaryDto {
     #[serde(default)]
-    pub running: bool,
+    pub activity: String,
+    #[serde(default)]
+    pub coverage: String,
     #[serde(default)]
     pub recent_events: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyDto {
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-    #[serde(default)]
-    pub nodes: Vec<RyeOsTopologyNodeDto>,
-    #[serde(default)]
-    pub edges: Vec<RyeOsTopologyEdgeDto>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyNodeDto {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default, rename = "ref")]
-    pub ref_: String,
-    #[serde(default)]
-    pub space: Option<String>,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub namespace: Option<String>,
-    #[serde(default, rename = "virtual")]
-    pub virtual_: bool,
-    #[serde(default)]
-    pub missing: bool,
-    #[serde(default)]
-    pub status: Option<RyeOsTopologyNodeStatusDto>,
-    #[serde(default)]
-    pub trust: Option<RyeOsTopologyTrustSummaryDto>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyNodeStatusDto {
-    #[serde(default)]
-    pub resolved: bool,
-    #[serde(default)]
-    pub composed: Option<bool>,
-    #[serde(default)]
-    pub executable: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyTrustSummaryDto {
-    #[serde(default, rename = "class")]
-    pub class_: String,
-    #[serde(default)]
-    pub signer: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyEdgeDto {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub from: String,
-    #[serde(default)]
-    pub to: String,
-    #[serde(default, rename = "type")]
-    pub type_: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub source: Option<RyeOsTopologyEdgeSourceDto>,
-    #[serde(default)]
-    pub confidence: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsTopologyEdgeSourceDto {
-    #[serde(default)]
-    pub field: Option<String>,
-    #[serde(default)]
-    pub path: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsItemsDto {
-    #[serde(default)]
-    pub schema_version: String,
-    #[serde(default)]
-    pub counts: RyeOsItemCountsDto,
-    #[serde(default)]
-    pub items: Vec<RyeOsItemDto>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsItemCountsDto {
-    #[serde(default)]
-    pub by_kind: BTreeMap<String, usize>,
-    #[serde(default)]
-    pub by_space: BTreeMap<String, usize>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsItemDto {
-    #[serde(default)]
-    pub canonical_ref: String,
-    #[serde(default)]
-    pub item_kind: String,
-    #[serde(default)]
-    pub bare_id: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub namespace: Option<String>,
-    #[serde(default)]
-    pub space: String,
-    #[serde(default)]
-    pub source_path: String,
-    #[serde(default)]
-    pub executable: bool,
-    #[serde(default)]
-    pub trust: Option<serde_json::Value>,
+pub struct RyeOsInvalidRemoteDto {
+    pub name: String,
+    pub scope: String,
+    pub error: String,
+    pub repair_hint: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -518,44 +590,6 @@ pub struct RyeOsFilesDto {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RyeOsFileEntryDto {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub is_dir: bool,
-    #[serde(default)]
-    pub size: Option<u64>,
-    #[serde(default)]
-    pub modified: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsFileSpaceDto {
-    #[serde(default)]
-    pub schema_version: String,
-    #[serde(default)]
-    pub root: String,
-    #[serde(default)]
-    pub path: String,
-    #[serde(default)]
-    pub max_depth: usize,
-    #[serde(default)]
-    pub max_entries: usize,
-    #[serde(default)]
-    pub truncated: bool,
-    #[serde(default)]
-    pub watchable: bool,
-    #[serde(default)]
-    pub supports_expand: bool,
-    #[serde(default)]
-    pub ignore_mode: String,
-    #[serde(default)]
-    pub entries: Vec<RyeOsFileSpaceEntryDto>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsFileSpaceEntryDto {
-    #[serde(default)]
-    pub path: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]

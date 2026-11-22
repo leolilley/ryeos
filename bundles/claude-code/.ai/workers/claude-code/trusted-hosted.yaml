@@ -1,0 +1,42 @@
+# ryeos:signed:2026-11-22T01:01:22Z:4d6636ac8cba8c114e44acdc48ed1942bd1c2330bbf7620dac6adb74e33e30c5:J0lJH22TdfA/39j5/Q7S82+myC1sJ+4KA0UiJg3HoVdxct8TUCdBhbwF7sEmhdFympP/ZewfR5/tiE076BKZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "claude-code"
+version: "0.1.0"
+executor_id: "@subprocess"
+description: "Trusted disposable Claude Code adapter profile for nodes that explicitly admit trusted process-group sessions."
+execution_protocol: protocol:ryeos/core/trusted_structured_session
+external_product_slots: []
+supported_target:
+  os: linux
+  arch: x86_64
+  resources: []
+
+# RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
+# process tree. The kind-owned compiler caps and freezes this signed override;
+# RyeOS separately limits session groups and total dedicated workers.
+session_resources:
+  real_uid_process_limit: 4096
+
+source:
+  root: "lib/hosted"
+  entry: "structured-session.profile.json"
+  digest: "6b5a4c5a862b23f9b0ab7f49e35132553bf89c5f5ecf4116f2345716f43c3d55"
+
+# The workload executable is this bundle's own signed binary, captured at
+# admission. It is mounted in the execution runtime namespace so it never
+# creates a mountpoint in the project copy.
+external_content:
+  - id: adapter
+    kind: file
+    bundle_binary: "bin:claude-code-adapter"
+    mode: captured
+    mount_root: execution_runtime
+    mount: claude-code-adapter
+
+config:
+  command: "bin:core/ryeos-structured-session-bridge"
+  args: ["${source.entry}"]
+  env:
+    PATH: ""
+    LANG: "C"
+    LC_ALL: "C"
+  timeout_secs: 0

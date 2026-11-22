@@ -85,7 +85,7 @@ mode. The awaited producer returns the typed accepted-product result.
 
 `qualification-bundle-overlay/` contains two explicit unsigned Bundle overlays:
 
-- `standard/.ai/` owns `config:test/runtime-qualification` and its fixed-pin
+- `environment-qualification/.ai/` owns `config:test/runtime-qualification` and its fixed-pin
   `tool:test/verify-runtime`;
 - `codex/.ai/` owns `worker:fixture/enrollment`, which uses a separately granted literal pin for
   the public credential-enrollment ceremony;
@@ -98,7 +98,7 @@ mode. The awaited producer returns the typed accepted-product result.
 Both Workers use the existing packaged
 `bin:core/ryeos-structured-session-bridge`. That is binary packaging only:
 their definitions and worker-executions live alongside that binary in the
-disposable Codex Bundle, not in Standard with an undeclared cross-Bundle edge.
+disposable Codex Bundle, not in the environment-qualification Bundle with an undeclared cross-Bundle edge.
 the fixture never selects `worker:codex/hosted`, a Codex profile, Codex
 credential state, a provider route, or network access. The admitted product
 program implements the finite JSON-RPC methods locally and reports
@@ -139,7 +139,7 @@ source and exact reproduction command live in `runtime-program.c` and
 The product and verifier use `mount_root: execution_runtime`, and the verifier
 uses the admitted `realization_member` command owner. They therefore require
 enforced isolation. Of the existing publisher-authored profiles, `development`
-is the enforced profile and its exact bundle set is `full`. Do not use the
+is the enforced profile and its exact bundle set is `development`. Do not use the
 disabled `hosted-workflow` profile for this run and do not patch a live policy.
 
 First copy and validate the unsigned overlay using the exact observed manifest:
@@ -148,8 +148,8 @@ First copy and validate the unsigned overlay using the exact observed manifest:
 tests/e2e/environment-products/prepare-qualification-bundle.sh \
   94c66e97825a25091abe924ae3de4715d26469332aa59f31cfb39854bdb59881 \
   <new-overlay-directory>
-cp -a <new-overlay-directory>/standard/.ai/. \
-  <disposable-repository-source>/bundles/standard/.ai/
+cp -a <new-overlay-directory>/environment-qualification/.ai/. \
+  <disposable-repository-source>/bundles/environment-qualification/.ai/
 cp -a <new-overlay-directory>/codex/.ai/. \
   <disposable-repository-source>/bundles/codex/.ai/
 ```
@@ -158,15 +158,15 @@ Then use the repository's ordinary publisher flow. It must sign the complete
 source and stage the full existing binary set, including the generic bridge:
 
 When replacing an older disposable fixture source, remove only its obsolete
-`bundles/standard/.ai/workers/fixture` and
-`bundles/standard/.ai/worker-executions/fixture` copies before repopulation.
+`bundles/environment-qualification/.ai/workers/fixture` and
+`bundles/environment-qualification/.ai/worker-executions/fixture` copies before repopulation.
 The preparation checker refuses those stale duplicates. This changes no
 installed node or production Bundle ownership.
 
 ```text
 (cd <disposable-repository-source> && \
   ./scripts/populate-bundles.sh --key <publisher-key> --owner <test-owner> \
-    --bundle-set full --all)
+    --bundle-set development --all)
 tests/e2e/environment-products/prepare-disposable-node-source.sh \
   <absolute-disposable-repository-source> <new-absolute-node-source>
 <matching-ryeos> init --non-interactive \
@@ -176,7 +176,7 @@ tests/e2e/environment-products/prepare-disposable-node-source.sh \
 ```
 
 `prepare-disposable-node-source.sh` verifies that all six overlay definitions
-are publisher-signed, copies only the existing closed `full` set and shared
+are publisher-signed, copies only the existing closed `development` set and shared
 init authority, and performs no signing or node lifecycle operation. Sign the
 five project definitions through the new node's ordinary project signing flow;
 do not copy signatures from another generation.

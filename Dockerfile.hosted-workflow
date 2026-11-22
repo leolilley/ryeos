@@ -3,13 +3,12 @@
 # ryeosd-hosted-workflow — hosted remote-node image that also runs
 # workflow workloads.
 #
-# Bakes the exact hosted-workflow bundle set: core + central-auth + standard +
-# hosted-node + codex + opencode. This is the remote
-# admission/execution substrate of the hosted-node image PLUS the
-# standard bundle's scheduler/graph/directive/knowledge services,
+# Bakes the exact hosted-workflow bundle set: core + scheduling + knowledge +
+# directive + graph + ryeos-docs + codex + opencode. This is the remote admission/execution substrate plus the
+# selected scheduling and graph/directive/knowledge services,
 # kind schemas, and runtimes. Use this when a hosted node owns
-# schedules or runs graph/directive work; use ryeosd-hosted-node when
-# it should stay a lean control plane.
+# schedules or runs graph/directive work; use the core image when it should
+# stay a lean control plane.
 
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
@@ -57,9 +56,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 
 WORKDIR /app
+
+# Node account. The daemon, `ryeos init` and every operator command in this
+# image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
+# root as the recorded actor of `ryeos node allow-restart` and
+# `ryeos node capacity reissue`, so a node running as root could never have
+# its restart inhibition cleared from inside its own container. The
+# entrypoint script is pid 1 and starts as root only to hand /data (a
+# platform volume, mounted root-owned) to this account, then replaces itself
+# with tini running as ryeos, so the init and the daemon share one uid and
+# the init needs no capability to forward the stop signal. The script runs
+# again under tini before any ryeos command.
+RUN groupadd --gid 10000 ryeos && \
+    useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
+      --shell /usr/sbin/nologin ryeos && \
+    install -d -o ryeos -g ryeos -m 0750 /data /data/app
 
 COPY --from=builder /build/target/release/ryeosd           /usr/local/bin/ryeosd
 COPY --from=builder /build/target/release/ryeos            /usr/local/bin/ryeos
@@ -67,11 +82,12 @@ COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-
 
 COPY --from=builder /build/bundles/.ai        /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core        /opt/ryeos/core
-COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
-COPY --from=builder /build/bundles/standard    /opt/ryeos/standard
-COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
+COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=builder /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=builder /build/bundles/directive /opt/ryeos/directive
+COPY --from=builder /build/bundles/graph /opt/ryeos/graph
+COPY --from=builder /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=builder /build/bundles/codex       /opt/ryeos/codex
-COPY --from=builder /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=builder /build/bundles/opencode    /opt/ryeos/opencode
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -91,10 +107,12 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="hosted-workflow"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

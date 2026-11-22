@@ -16,7 +16,6 @@ use crate::error::CliDispatchError;
 ///
 /// Thin wrapper around the shared binder, returning `Result` to match
 /// the fallible binding seam used at the call sites.
-#[allow(dead_code)]
 pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
     Ok(ryeos_runtime::bind_argv(tail))
 }
@@ -89,10 +88,10 @@ pub fn parse_input_arg(tail: &[String]) -> Result<Option<Value>, CliDispatchErro
         } else {
             arg.strip_prefix("--input=")
         };
-        if let Some(candidate) = candidate {
-            if source.replace(candidate).is_some() {
-                return Err(invalid("duplicate --input sources are not allowed"));
-            }
+        if let Some(candidate) = candidate
+            && source.replace(candidate).is_some()
+        {
+            return Err(invalid("duplicate --input sources are not allowed"));
         }
     }
     source
@@ -244,14 +243,14 @@ mod tests {
 
     #[test]
     fn bind_positional() {
-        let tail = vec!["./bundles/standard".into()];
+        let tail = vec!["./bundles/directive".into()];
         let result = bind_tail(&tail).unwrap();
         assert_eq!(result.get("_args").unwrap().as_array().unwrap().len(), 1);
     }
 
     #[test]
     fn bind_mixed() {
-        let tail = vec!["--seed".into(), "119".into(), "./bundles/standard".into()];
+        let tail = vec!["--seed".into(), "119".into(), "./bundles/directive".into()];
         let result = bind_tail(&tail).unwrap();
         assert_eq!(result.get("seed").unwrap(), "119");
         assert_eq!(result.get("_args").unwrap().as_array().unwrap().len(), 1);

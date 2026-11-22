@@ -16,25 +16,31 @@ mod execution_endpoint;
 mod execution_plan;
 mod execution_target;
 mod runtime_decorations;
+mod secret_env;
+mod subprocess_limits;
 pub use crate::scheduled_fire_context::ScheduledFireContext;
 pub use execution_endpoint::{ExecutionEndpointRequirement, ExternalEndpointBindingIdentity};
 pub use execution_plan::{
-    EngineContext, ExecutionPlan, MaterializationRequirement, PlanArgument,
-    PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
+    EngineContext, ExecutionPlan, ExecutionPosture, HOST_AUTHORITY_REQUIRED,
+    MaterializationRequirement, PlanArgument, PlanBundleExecutorIdentity, PlanCapabilities,
+    PlanContext, PlanExecutionProjectFileInput, PlanNode, PlanNodeId, PlanRuntimeBinarySelection,
     PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand,
     SubjectResolutionAuthority,
 };
 pub use execution_target::{
-    ExecutionResourceAccess, ExecutionResourceAdmissionPolicy, ExecutionResourceAllocation,
-    ExecutionResourceAuthorityCeiling, ExecutionResourceEnforcement, ExecutionResourceFactValue,
-    ExecutionResourceRequirement, ExecutionResourceSelection, ExecutionTargetLimits,
-    ExecutionTargetRequirement, MAX_EXECUTION_RESOURCE_COUNT,
+    CurrentExecutionTargetRequest, ExecutionResourceAccess, ExecutionResourceAdmissionPolicy,
+    ExecutionResourceAllocation, ExecutionResourceAuthorityCeiling, ExecutionResourceEnforcement,
+    ExecutionResourceFactValue, ExecutionResourceRequirement, ExecutionResourceSelection,
+    ExecutionTargetLimits, ExecutionTargetRequirement, MAX_EXECUTION_RESOURCE_COUNT,
     MAX_EXECUTION_RESOURCE_FACT_KEY_BYTES, MAX_EXECUTION_RESOURCE_FACT_VALUE_BYTES,
     MAX_EXECUTION_RESOURCE_FACTS, MAX_EXECUTION_TARGET_REQUIREMENTS,
 };
 pub use runtime_decorations::{
-    CancellationMode, ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec, RuntimeEnvSource,
+    CancellationMode, DEFAULT_CANCELLATION_GRACE_SECS, ExecutionDecorations, NativeAsyncSpec,
+    NativeResumeSpec, RuntimeEnvSource,
 };
+pub use secret_env::DeliveredSecretEnv;
+pub use subprocess_limits::ExecutionSubprocessLimits;
 
 // ── Wiring contract: ValueShape ──────────────────────────────────────
 
@@ -136,7 +142,6 @@ impl<'de> Deserialize<'de> for ValueShape {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ShapeType {
     Mapping,
-    #[serde(alias = "array")]
     Sequence,
     Scalar,
     Any,
@@ -295,7 +300,6 @@ pub enum PrimType {
     Integer,
     Boolean,
     Mapping,
-    #[serde(alias = "array")]
     Sequence,
     Null,
     Any,
@@ -1292,6 +1296,29 @@ mod value_shape_tests {
     // ── Strictness hardening: deserialization rejects nonsense ───────
 
     #[test]
+    fn deserialize_refuses_array_spelling_of_sequence() {
+        let root = "root_type: array\n";
+        let err = serde_yaml::from_str::<ValueShape>(root).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant `array`") && msg.contains("sequence"),
+            "root_type `array` must be refused naming `sequence`, got: {msg}"
+        );
+
+        let prim = "\
+root_type: mapping
+optional:
+  items: { type: single, prim: array }
+";
+        let err = serde_yaml::from_str::<ValueShape>(prim).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant `array`") && msg.contains("sequence"),
+            "prim `array` must be refused naming `sequence`, got: {msg}"
+        );
+    }
+
+    #[test]
     fn deserialize_rejects_unknown_fields() {
         // `deny_unknown_fields` on the wire form: a typo like
         // `requierd` must blow up loudly instead of silently widening
@@ -1614,8 +1641,8 @@ optional:
   extends: { type: union, prims: [string, \"null\"] }
   input: { type: single, prim: mapping }
   ambient: { type: single, prim: mapping }
-  affordances: { type: single, prim: array }
-  instruments: { type: single, prim: array }
+  affordances: { type: single, prim: sequence }
+  instruments: { type: single, prim: sequence }
   capabilities: { type: single, prim: mapping }
 ",
             // client
@@ -3082,6 +3109,10 @@ pub struct ResolvedItem {
     /// adding any one of them can change which source wins.
     pub probed_absent: Vec<ProbedAbsence>,
     pub materialized_project_root: Option<PathBuf>,
+    /// The logical project the item belongs to (see
+    /// `PlanContext::logical_project_root`). Signer project scopes are judged
+    /// against this value.
+    pub logical_project_root: Option<PathBuf>,
     /// Engine-bound authority under which this exact item was resolved.
     /// Verification rejects a context carrying a different authority even
     /// when both happen to name the same local materialization path.
@@ -3131,6 +3162,21 @@ pub struct VerifiedItem {
     pub signer: Option<SignerFingerprint>,
     pub trust_class: TrustClass,
     pub pinned_version: Option<PinnedVersion>,
+}
+
+impl VerifiedItem {
+    /// The launch trust class of this item: its signature verdict combined
+    /// with the space it came from.
+    pub fn launch_trust_class(&self) -> crate::resolution::TrustClass {
+        use crate::resolution::TrustClass as LaunchTrustClass;
+        match (self.trust_class, self.resolved.source_space) {
+            (TrustClass::Trusted, ItemSpace::Bundle) => LaunchTrustClass::TrustedBundle,
+            (TrustClass::Trusted, ItemSpace::Project) => LaunchTrustClass::TrustedProject,
+            (TrustClass::Trusted, ItemSpace::Node) => LaunchTrustClass::TrustedNode,
+            (TrustClass::Untrusted, _) => LaunchTrustClass::UntrustedProject,
+            (TrustClass::Unsigned, _) => LaunchTrustClass::Unsigned,
+        }
+    }
 }
 
 // ── Launch mode ──────────────────────────────────────────────────────
@@ -3220,6 +3266,10 @@ pub enum ThreadTerminalStatus {
     Cancelled,
     Continued,
     Killed,
+    /// The run deadline stopped the thread. A runtime that reaches its own
+    /// hard stop finalizes with this status; the daemon settles the same
+    /// status when its kill timeout fires first.
+    TimedOut,
 }
 
 impl ThreadTerminalStatus {
@@ -3232,6 +3282,7 @@ impl ThreadTerminalStatus {
             Self::Cancelled => "cancelled",
             Self::Continued => "continued",
             Self::Killed => "killed",
+            Self::TimedOut => "timed_out",
         }
     }
 }
@@ -3423,3 +3474,5 @@ pub struct EventEnvelope {
     pub timestamp: String,
     pub sequence: i64,
 }
+
+pub(crate) use execution_target::project_current_target_data;

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::TrustStore;
 use crate::objects::{
     EXTERNAL_CONTENT_TREE_SCHEMA, EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
     EXTERNAL_LARGE_CONTENT_SCHEMA, ExternalContentManifestEntry, ExternalContentManifestEntryKind,
@@ -8,7 +9,6 @@ use crate::objects::{
     ExternalLargeContentManifestObject,
 };
 use crate::signer::TestSigner;
-use crate::{StateDb, TrustStore};
 
 fn declaration() -> super::super::ProductDeclaration {
     super::super::ProductDeclaration {
@@ -319,7 +319,7 @@ fn durable_retry_returns_incumbent_and_refuses_contradictory_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
     let trust = trust(&signer);
-    let db = StateDb::open(temp.path(), Arc::clone(&trust)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), Arc::clone(&trust)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
     let evidence = evidence(store_manifest(&authority), "T-build");
@@ -394,7 +394,7 @@ fn exact_owner_node_lookup_survives_reopen_without_historical_objects() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
     let trust = trust(&signer);
-    let db = StateDb::open(temp.path(), Arc::clone(&trust)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), Arc::clone(&trust)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
     let evidence = evidence(store_manifest(&authority), "T-collected-history");
@@ -414,7 +414,7 @@ fn exact_owner_node_lookup_survives_reopen_without_historical_objects() {
     drop(authority);
     drop(db);
 
-    let reopened = StateDb::open(temp.path(), trust).unwrap();
+    let reopened = crate::test_support::TestState::open(temp.path(), trust).unwrap();
     let authority = reopened.pinned_authority().unwrap();
     let witness = found(
         lookup_product_witness(
@@ -466,7 +466,7 @@ fn exact_owner_node_lookup_survives_reopen_without_historical_objects() {
 fn identical_bytes_keep_distinct_execution_witnesses_and_integrity_is_not_missing() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
     let manifest_hash = store_manifest(&authority);
@@ -514,8 +514,10 @@ fn identical_bytes_keep_distinct_execution_witnesses_and_integrity_is_not_missin
         .unwrap(),
         ProductWitnessLookup::Missing
     );
-    let mut too_small = ObjectClosureLimits::default();
-    too_small.max_blob_bytes = 1;
+    let too_small = ObjectClosureLimits {
+        max_blob_bytes: 1,
+        ..ObjectClosureLimits::default()
+    };
     assert!(
         lookup_product_witness_guarded(
             &authority,
@@ -532,7 +534,7 @@ fn identical_bytes_keep_distinct_execution_witnesses_and_integrity_is_not_missin
 fn publication_refuses_manifest_sizes_that_contradict_retained_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
     let cas = authority.cas_store().unwrap();
@@ -575,7 +577,7 @@ fn publication_refuses_manifest_sizes_that_contradict_retained_bytes() {
 fn tree_product_accepts_single_content_entry_in_both_storage_tiers() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
 
@@ -629,7 +631,7 @@ fn workspace_output_product_publication_preserves_rich_tree_and_scrubs_real_byte
     ] {
         let temp = tempfile::tempdir().unwrap();
         let signer = TestSigner::new();
-        let db = StateDb::open(temp.path(), trust(&signer)).unwrap();
+        let db = crate::test_support::TestState::open(temp.path(), trust(&signer)).unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let (manifest_hash, manifest_kind) = store_rich_tree_manifest(&authority, storage);
@@ -688,7 +690,7 @@ fn workspace_output_product_publication_preserves_rich_tree_and_scrubs_real_byte
 fn publication_applies_declaration_file_and_depth_bounds_to_manifest_entries() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
 
@@ -739,7 +741,7 @@ fn publication_applies_declaration_file_and_depth_bounds_to_manifest_entries() {
 fn relationship_bounds_recheck_actual_manifest_file_and_depth_metrics_without_chunk_scrub() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
 
@@ -782,7 +784,7 @@ fn relationship_bounds_recheck_actual_manifest_file_and_depth_metrics_without_ch
 fn witness_body_is_bounded_by_product_and_current_node_limits_before_decode() {
     let temp = tempfile::tempdir().unwrap();
     let signer = TestSigner::new();
-    let db = StateDb::open(temp.path(), trust(&signer)).unwrap();
+    let db = crate::test_support::TestState::open(temp.path(), trust(&signer)).unwrap();
     let authority = db.pinned_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
     let evidence = evidence(store_manifest(&authority), "T-wire-bound");
@@ -791,8 +793,10 @@ fn witness_body_is_bounded_by_product_and_current_node_limits_before_decode() {
         .sign_attestation(&signer, "2026-09-07T00:00:00Z".into())
         .unwrap();
 
-    let mut node_limited = ObjectClosureLimits::default();
-    node_limited.max_object_bytes = 1;
+    let node_limited = ObjectClosureLimits {
+        max_object_bytes: 1,
+        ..ObjectClosureLimits::default()
+    };
     let error = publish_product_witness(
         &authority,
         &coordinate,

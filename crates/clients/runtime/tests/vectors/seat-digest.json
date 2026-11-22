@@ -1,0 +1,369 @@
+[
+  {
+    "name": "float 0.000001",
+    "input": [
+      {
+        "engine_seq": {
+          "$int": "0"
+        },
+        "event_type": "seat.facet",
+        "payload": {
+          "key": "float",
+          "value": 0.000001
+        }
+      }
+    ],
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|a1:{o3:{s10:engine_seqi0;s10:event_types10:seat.facets7:payloado2:{s3:keys5:floats5:valued3eb0c6f7a0b5ed8d;}}}",
+      "sha256_hex": "84550fb1cf3501cfdde9221974751fe5085b5bc1aed9ce7329e88467aaebc950"
+    },
+    "provenance": "test-verbatim-hex; framed string computed from TS",
+    "test_assertion": "framed string matches /d3eb0c6f7a0b5ed8d;/ (f64 bits of 0.000001)"
+  },
+  {
+    "name": "thresholds 1e-7, 1.5, -0",
+    "input": [
+      {
+        "engine_seq": {
+          "$int": "0"
+        },
+        "event_type": "seat.facet",
+        "payload": {
+          "key": "thresholds",
+          "value": [
+            1e-7,
+            1.5,
+            {
+              "$number": "-0"
+            }
+          ]
+        }
+      }
+    ],
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|a1:{o3:{s10:engine_seqi0;s10:event_types10:seat.facets7:payloado2:{s3:keys10:thresholdss5:valuea3:{d3e7ad7f29abcaf48;d3ff8000000000000;i0;}}}}",
+      "sha256_hex": "6d0e2ab6e500346d7a21fcc6baef8401bfa2b1ce0a13d8816bc53883709bdd3f"
+    },
+    "provenance": "test-verbatim-hex; framed string computed from TS"
+  },
+  {
+    "name": "u64 max",
+    "input": [
+      {
+        "engine_seq": {
+          "$int": "0"
+        },
+        "event_type": "seat.facet",
+        "payload": {
+          "key": "u64",
+          "value": {
+            "$int": "18446744073709551615"
+          }
+        }
+      }
+    ],
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|a1:{o3:{s10:engine_seqi0;s10:event_types10:seat.facets7:payloado2:{s3:keys3:u64s5:valuei18446744073709551615;}}}",
+      "sha256_hex": "b714cf712cbfc663f9eb93095596465167564a7d6bfa738c723376ff5609b209"
+    },
+    "provenance": "test-verbatim-hex; framed string computed from TS"
+  },
+  {
+    "name": "unicode keys incl. U+E000 empty-looking key and own __proto__ key",
+    "input": [
+      {
+        "engine_seq": {
+          "$int": "0"
+        },
+        "event_type": "seat.facet",
+        "payload": {
+          "key": "unicode",
+          "value": {
+            "😀": "é",
+            "𐀀": [
+              null,
+              true
+            ],
+            "": {
+              "__proto__": "inert"
+            }
+          }
+        }
+      }
+    ],
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|a1:{o3:{s10:engine_seqi0;s10:event_types10:seat.facets7:payloado2:{s3:keys7:unicodes5:valueo3:{s3:o1:{s9:__proto__s5:inert}s4:𐀀a2:{nt}s4:😀s2:é}}}}",
+      "sha256_hex": "9f001b4f3bc1e8ccc924b29d7280435dbcefbc1777d5395a6ac080d4494d7835"
+    },
+    "provenance": "test-verbatim-hex; framed string computed from TS"
+  },
+  {
+    "name": "non-ASCII event payload keys",
+    "input": [
+      {
+        "engine_seq": {
+          "$int": "0"
+        },
+        "event_type": "seat.facet",
+        "payload": {
+          "é": "😀",
+          "a": "𐀀"
+        }
+      }
+    ],
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|a1:{o3:{s10:engine_seqi0;s10:event_types10:seat.facets7:payloado2:{s1:as4:𐀀s2:és4:😀}}}",
+      "sha256_hex": "40442791210ae66e4e67d762a8102f444250935db90a1976d743cb9952eed572"
+    },
+    "provenance": "test-verbatim-hex; framed string computed from TS"
+  },
+  {
+    "name": "-0 digests as 0",
+    "input": {
+      "$number": "-0"
+    },
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|i0;",
+      "sha256_hex": "a46354db497d4422a065385d017548eb8e80c31fa556d44c5c3a1fe49c3d1372"
+    },
+    "provenance": "computed",
+    "note": "test asserts encodeSeatPayloadDigest(-0) === encodeSeatPayloadDigest(0)"
+  },
+  {
+    "name": "zero",
+    "input": 0,
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|i0;",
+      "sha256_hex": "a46354db497d4422a065385d017548eb8e80c31fa556d44c5c3a1fe49c3d1372"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "null",
+    "input": null,
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|n",
+      "sha256_hex": "f7d7136879f11be6b8a1745fe6606d10cf0b6e214eeb5cb73e2633bd74382e8e"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "true / false",
+    "input": [
+      true,
+      false
+    ],
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|a2:{tf}",
+      "sha256_hex": "355421427f1500e3323533f305dc9e7b75026d3ccdd3aeb91700a36a72983869"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "empty string",
+    "input": "",
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|s0:",
+      "sha256_hex": "ff9308a44d1f92182228ec8bc21a6133e606c8557269486b67e59f4be696769f"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "string length is UTF-8 bytes",
+    "input": [
+      "é",
+      "😀",
+      "a"
+    ],
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|a3:{s2:és4:😀s1:a}",
+      "sha256_hex": "860bd1f7ca120a55656505a9f873bb720e86ad9fb78133643d1a54729eb05747"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "empty object and array",
+    "input": {
+      "a": {},
+      "b": []
+    },
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|o2:{s1:ao0:{}s1:ba0:{}}",
+      "sha256_hex": "6cfece83716eaa234bf64ceed6b0bc9b96cbdf4aaaf8c7ec975238d825cbca8a"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "object keys sorted by scalar value, keys framed as strings",
+    "input": {
+      "b": {
+        "$int": "1"
+      },
+      "a": {
+        "$int": "2"
+      },
+      "é": {
+        "$int": "3"
+      },
+      "😀": {
+        "$int": "4"
+      },
+      "￿": {
+        "$int": "5"
+      }
+    },
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|o5:{s1:ai2;s1:bi1;s2:éi3;s3:￿i5;s4:😀i4;}",
+      "sha256_hex": "62e8dadcc56de4cec03a0e2c735af2d5acd4bcd7393a230e95f8780d41f1ff8d"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "integral Number is an integer",
+    "input": 5,
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|i5;",
+      "sha256_hex": "b66cea7dab492aabb6b6164754d15ac5467c4034b8c599b8dbfe6262e45346fd"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "negative safe integer",
+    "input": -5,
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|i-5;",
+      "sha256_hex": "f45a1afc671a2402afe52f71e697b399ce2c67d5787db919f89ad492b3d8629f"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "fractional Number uses f64 bits",
+    "input": 0.5,
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|d3fe0000000000000;",
+      "sha256_hex": "64371fd70157a5c29d82241583e3f9d403f45686616e534befb82381b0781f51"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "negative fraction",
+    "input": -1.5,
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|dbff8000000000000;",
+      "sha256_hex": "6af30ea801feafa4fb0f1d1acd4b72c23a82082801b48c0f20bf61c0dc1ef5e2"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "bigint i64 min",
+    "input": {
+      "$int": "-9223372036854775808"
+    },
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|i-9223372036854775808;",
+      "sha256_hex": "e499be07de5bf7364b1582a5005e68fc08a1ea441bfd2f29329e19f98f26d9cf"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "bigint u64 max",
+    "input": {
+      "$int": "18446744073709551615"
+    },
+    "expected": {
+      "framed": "ryeos.seat.payload.v1|i18446744073709551615;",
+      "sha256_hex": "f8579d452c6af14a8aabfc38c7d138d9277bc8abe3fe3cdf55cd0a89c2495107"
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "bigint above u64 refused",
+    "input": {
+      "$int": "18446744073709551616"
+    },
+    "expected": {
+      "error": {
+        "class": "TypeError",
+        "message": "JSON integer is outside the daemon i64/u64 value domain"
+      }
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "unsafe integer Number refused",
+    "input": 9007199254740992,
+    "expected": {
+      "error": {
+        "class": "TypeError",
+        "message": "seat digest contains an unsafe integer; use BigInt for exact identity"
+      }
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "1e21 refused (integer-valued f64 above safe range)",
+    "input": 1e+21,
+    "expected": {
+      "error": {
+        "class": "TypeError",
+        "message": "seat digest contains an unsafe integer; use BigInt for exact identity"
+      }
+    },
+    "provenance": "computed",
+    "note": "Rust would digest the token 1e21 as an f64; see divergences.md"
+  },
+  {
+    "name": "NaN refused",
+    "input": {
+      "$number": "NaN"
+    },
+    "expected": {
+      "error": {
+        "class": "TypeError",
+        "message": "seat digest contains a non-finite number"
+      }
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "undefined refused",
+    "input": {
+      "$undefined": true
+    },
+    "expected": {
+      "error": {
+        "class": "TypeError",
+        "message": "seat digest contains unsupported undefined"
+      }
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "lone surrogate refused",
+    "input": {
+      "$utf16": [
+        55296
+      ]
+    },
+    "expected": {
+      "error": {
+        "class": "TypeError",
+        "message": "JSON contains an unpaired high surrogate"
+      }
+    },
+    "provenance": "computed"
+  },
+  {
+    "name": "cycle refused",
+    "input": {
+      "$cycle": "array containing itself"
+    },
+    "expected": {
+      "error": {
+        "class": "TypeError",
+        "message": "seat digest contains a cycle"
+      }
+    },
+    "provenance": "computed"
+  }
+]

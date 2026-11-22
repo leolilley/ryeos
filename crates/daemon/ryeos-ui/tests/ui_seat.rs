@@ -1,7 +1,10 @@
-mod test_state;
+use ryeos_ui::test_support as test_state;
 use test_state::{build_test_state_with_live_bundles, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_client_base::ui::{
+    UiPresentationProducerObservation, UiSeatControlRequest, UiSeatProducerClaim,
+};
 use ryeos_ui::state::get_ui_state;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -31,6 +34,7 @@ async fn invoke_seat_route(
         principal: None,
         workspace_lifeline: None,
         launch_timings: None,
+        publication: None,
         state: state.as_ref().clone(),
         webhook_dedupe: Arc::new(Default::default()),
     };
@@ -54,6 +58,7 @@ async fn invoke_seat_route(
         principal: Some(principal),
         workspace_lifeline: None,
         launch_timings: None,
+        publication: None,
         state: state.as_ref().clone(),
         webhook_dedupe: Arc::new(Default::default()),
     };
@@ -68,13 +73,67 @@ async fn invoke_seat_route(
     }
 }
 
-fn session_context(user_principal_id: Option<String>) -> ryeos_ui::browser_session::LaunchContext {
-    launch_context(
-        "surface:ryeos/ui/base",
-        None,
+/// Exercise the compiled authenticated POST stream rather than the retired
+/// JSON replay pager. Stop at its completion fence or at source EOF.
+fn session_context(
+    state: &ryeos_app::state::AppState,
+    principal: Option<String>,
+) -> ryeos_ui::browser_session::LaunchContext {
+    // A real, signed Config root; never a Surface masquerading as Config.
+    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: []\n    affordances: []\n";
+    // The shell's presentation Config is read from installed bundles only,
+    // so the fixture Config is an item of the state's fixture bundle. Its
+    // binding is the one the daemon would mint: the engine's own effective
+    // identity of the Config, resolved with no project, and of its View
+    // closure, resolved under the session project.
+    test_state::write_fixture_bundle_item(state, "config/test/presentation.yaml", body);
+    let project_root = state.config.app_root.canonicalize().unwrap();
+    let mut context = launch_context(
+        "config:test/presentation",
+        project_root.to_str(),
         ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
-        user_principal_id,
-    )
+        principal,
+    );
+    let authority = context
+        .project_authority
+        .clone()
+        .expect("fixture project authority");
+    let embedded = state
+        .engine
+        .with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
+            let root =
+                generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
+                    item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
+                        "config:test/presentation",
+                    )?,
+                    expected_kind: Some("config".into()),
+                    project_root: None,
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                            None,
+                        ),
+                })?;
+            ryeos_api::surface_views::resolve_effective_ui_view_closure_in_generation(
+                generation,
+                Some(&project_root),
+                Some(authority.as_ref()),
+                &root,
+                vec!["view:ryeos/home".into()],
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .expect("resolve fixture composition");
+    let binding = &mut Arc::make_mut(&mut context.compiled_binding).binding;
+    binding.surface = embedded.identity.surface;
+    binding.views = embedded.identity.views;
+    context.presentation = ryeos_client_base::presentation::UiCompositionPresentation {
+        definition: ryeos_client_base::presentation::UiCompositionDefinition::SharedPresentation {
+            config: serde_yaml::from_str(body).unwrap(),
+        },
+        views: embedded.values,
+    };
+    context
 }
 
 fn handler_context(session_id: &str) -> HandlerContext {
@@ -85,499 +144,2883 @@ fn handler_context(session_id: &str) -> HandlerContext {
     )
 }
 
-fn open_request(state: &ryeos_app::state::AppState, session_id: &str) -> Value {
+fn activate(state: &ryeos_app::state::AppState) -> String {
+    let (id, token) =
+        test_state::mint_launch(state, session_context(state, Some("fp:user-1".into())));
+    assert_eq!(
+        get_ui_state(state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(id.clone())
+    );
+    id
+}
+
+fn prepare_request(
+    state: &ryeos_app::state::AppState,
+    session_id: &str,
+    request_id: &str,
+) -> Value {
     let session = get_ui_state(state)
         .unwrap()
         .browser_sessions
         .get_session(session_id)
-        .expect("active session");
-    let coordinate = session
-        .attachments
-        .get(&session.surface_attachment_id)
-        .expect("surface attachment")
-        .coordinate();
-    serde_json::json!({
-        "binding_attachment_id": coordinate.binding_attachment_id,
-        "binding_generation": coordinate.binding_generation,
-        "binding_digest": coordinate.binding_digest,
+        .unwrap();
+    let root = session.attachments[&session.root_attachment_id].coordinate();
+    json!({"action":"prepare","creation_request_id":request_id,
+        "binding_attachment_id":root.binding_attachment_id,
+        "binding_generation":root.binding_generation,"binding_digest":root.binding_digest})
+}
+
+async fn route(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    descriptor: &ryeos_api::registry::ServiceDescriptor,
+    input: Value,
+) -> anyhow::Result<Value> {
+    invoke_seat_route(descriptor, input, handler_context(session), state.clone()).await
+}
+
+async fn prepare(state: &Arc<ryeos_app::state::AppState>, session: &str) -> Value {
+    route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        prepare_request(state, session, "00000000-0000-4000-8000-000000000010"),
+    )
+    .await
+    .unwrap()
+}
+
+async fn observe(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    prepared: &Value,
+) -> anyhow::Result<UiPresentationProducerObservation> {
+    Ok(serde_json::from_value(
+        route(
+            state,
+            session,
+            &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+            json!({"action":"observe", "presentation_id":prepared["presentation_id"],
+                "thread_id":prepared["thread_id"], "chain_root_id":prepared["chain_root_id"]}),
+        )
+        .await?,
+    )?)
+}
+
+fn identify_control(mut request: UiSeatControlRequest) -> anyhow::Result<Value> {
+    request.assign_identity().map_err(anyhow::Error::msg)?;
+    request.validate().map_err(anyhow::Error::msg)?;
+    Ok(serde_json::to_value(request)?)
+}
+
+// Only for a new intent. Exact retries must reuse the returned request rather
+// than observing a later predecessor or drawing a new nonce.
+async fn claim_request(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    prepared: &Value,
+    nonce: &str,
+    claim: Value,
+) -> anyhow::Result<Value> {
+    let observed = observe(state, session, prepared).await?;
+    identify_control(UiSeatControlRequest::Claim {
+        schema: 2,
+        operation_id: String::new(),
+        presentation_id: observed.presentation_id,
+        thread_id: observed.thread_id,
+        chain_root_id: observed.chain_root_id,
+        predecessor: observed.control_predecessor,
+        intent_nonce: nonce.into(),
+        claim: serde_json::from_value::<UiSeatProducerClaim>(claim)?,
     })
 }
 
-fn append_request(
+async fn claim(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    prepared: &Value,
+    nonce: &str,
+    claim: Value,
+) -> anyhow::Result<Value> {
+    let request = claim_request(state, session, prepared, nonce, claim).await?;
+    route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        request,
+    )
+    .await
+}
+
+async fn fresh_with_request(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+) -> (Value, Value) {
+    let prepared = prepare(state, session).await;
+    let request = claim_request(
+        state,
+        session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000011",
+        json!({"kind":"fresh"}),
+    )
+    .await
+    .unwrap();
+    let opened = route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        request.clone(),
+    )
+    .await
+    .unwrap();
+    (opened, request)
+}
+
+async fn fresh(state: &Arc<ryeos_app::state::AppState>, session: &str) -> Value {
+    fresh_with_request(state, session).await.0
+}
+
+fn append_request(opened: &Value, _op: &str, first: u64, payloads: &[Value]) -> Value {
+    let events:Vec<_> = payloads.iter().enumerate().map(|(offset,payload)|
+        json!({"engine_seq":first+offset as u64,"event_type":"seat.facet","payload":payload})).collect();
+    let mut request = json!({"presentation_id":opened["presentation_id"],"thread_id":opened["thread_id"],
+        "producer_incarnation":opened["producer_incarnation"],"operation_id":"",
+        "first_engine_seq":first,"last_engine_seq":first+payloads.len() as u64-1,
+        "event_count":payloads.len(),"payload_digest":"","events":events});
+    identify_append(opened, &mut request);
+    request
+}
+
+fn identify_append(opened: &Value, request: &mut Value) {
+    let digest = ryeos_client_base::ui::seat_payload_digest(&request["events"]).unwrap();
+    let identity = ryeos_client_base::ui::admission_operation::UiSeatAppendIdentity {
+        presentation_id: opened["presentation_id"].as_str().unwrap().into(),
+        chain_root_id: opened["chain_root_id"].as_str().unwrap().into(),
+        thread_id: opened["thread_id"].as_str().unwrap().into(),
+        producer_incarnation: opened["producer_incarnation"].as_str().unwrap().into(),
+        first_engine_seq: request["first_engine_seq"].as_u64().unwrap(),
+        last_engine_seq: request["last_engine_seq"].as_u64().unwrap(),
+        event_count: request["event_count"].as_u64().unwrap(),
+        payload_digest: digest.clone(),
+    }
+    .derive_identity()
+    .unwrap();
+    request["payload_digest"] = json!(digest);
+    request["operation_id"] = json!(identity);
+}
+
+async fn transition_request(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
     opened: &Value,
-    operation_id: &str,
-    first_engine_seq: u64,
-    payloads: &[Value],
+    nonce: &str,
+    action: &str,
 ) -> Value {
-    let events = payloads
-        .iter()
-        .enumerate()
-        .map(|(offset, payload)| {
-            json!({
-                "engine_seq": first_engine_seq + offset as u64,
-                "event_type": "seat.facet",
-                "payload": payload,
-            })
-        })
-        .collect::<Vec<_>>();
-    let payload_digest = ryeos_ui::handlers::ui_seat::seat_payload_digest(&json!(events)).unwrap();
-    json!({
-        "thread_id": opened["thread_id"],
-        "producer_incarnation": opened["producer_incarnation"],
-        "operation_id": operation_id,
-        "first_engine_seq": first_engine_seq,
-        "last_engine_seq": first_engine_seq + payloads.len() as u64 - 1,
-        "event_count": payloads.len(),
-        "payload_digest": payload_digest,
-        "events": events,
-    })
+    let observed = observe(state, session, opened).await.unwrap();
+    let producer_incarnation = opened["producer_incarnation"].as_str().unwrap().into();
+    let request = match action {
+        "relinquish" => UiSeatControlRequest::Relinquish {
+            schema: 2,
+            operation_id: String::new(),
+            presentation_id: observed.presentation_id,
+            thread_id: observed.thread_id,
+            chain_root_id: observed.chain_root_id,
+            predecessor: observed.control_predecessor,
+            intent_nonce: nonce.into(),
+            producer_incarnation,
+        },
+        "close" => UiSeatControlRequest::Close {
+            schema: 2,
+            operation_id: String::new(),
+            presentation_id: observed.presentation_id,
+            thread_id: observed.thread_id,
+            chain_root_id: observed.chain_root_id,
+            predecessor: observed.control_predecessor,
+            intent_nonce: nonce.into(),
+            producer_incarnation,
+        },
+        _ => panic!("unknown test control action"),
+    };
+    identify_control(request).unwrap()
 }
 
 #[tokio::test]
-async fn ui_seat_open_reattaches_running_session_seat() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, token) =
-        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
-    assert_eq!(
-        get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(&token),
-        Some(session_id.clone())
-    );
-    let ctx = handler_context(&session_id);
-
-    let first = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx.clone(),
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("open seat");
-    let second = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx,
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("reattach seat");
-
-    assert_eq!(first["thread_id"], second["thread_id"]);
-    assert_eq!(first["reattached"], false);
-    assert_eq!(second["reattached"], true);
-
-    let detail = state
+async fn producer_observation_is_exact_read_only_and_does_not_infer_liveness() {
+    use ryeos_ui::handlers::ui_seat::{CLOSE_DESCRIPTOR, OPEN_DESCRIPTOR};
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let foreign = activate(&state);
+    let state = Arc::new(state);
+    let prepared = prepare(&state, &session).await;
+    let request = json!({"action":"observe", "presentation_id":prepared["presentation_id"],
+        "thread_id":prepared["thread_id"], "chain_root_id":prepared["chain_root_id"]});
+    let observed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(observed["producer"], json!({"kind":"unclaimed"}));
+    assert_eq!(observed["root_binding"], prepared["root_binding"]);
+    assert_eq!(observed["presentation_id"], prepared["presentation_id"]);
+    assert_eq!(observed["thread_id"], prepared["thread_id"]);
+    assert_eq!(observed["chain_root_id"], prepared["chain_root_id"]);
+    assert_eq!(observed["control_predecessor"]["kind"], "initialization");
+    let initialization_predecessor = observed["control_predecessor"].clone();
+    route(&state, &foreign, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .expect_err("same principal in a different session cannot observe this presentation");
+    for field in ["presentation_id", "thread_id", "chain_root_id"] {
+        let mut forged = request.clone();
+        forged[field] = json!("00000000-0000-4000-8000-000000000099");
+        route(&state, &session, &OPEN_DESCRIPTOR, forged)
+            .await
+            .expect_err("all retained presentation coordinates must match");
+    }
+    let opened = fresh(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap();
+    let detail = state.state_store.get_thread(thread).unwrap().unwrap();
+    let before = state
         .state_store
-        .get_thread(first["thread_id"].as_str().unwrap())
+        .capture_thread_event_read_anchor(&detail.chain_root_id, thread)
         .unwrap()
         .unwrap();
-    assert_eq!(detail.kind, "seat_session");
+    let owner = detail.requested_by.as_deref().unwrap();
+    // Absence of a lease is not evidence that a retained active writer died.
+    // Observation must neither guess a replacement nor recreate the lease.
+    state.state_store.remove_seat_lease(thread).unwrap();
+    let observed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
     assert_eq!(
-        detail.requested_by.as_deref(),
-        Some(format!("session:{session_id}").as_str())
+        observed["producer"],
+        json!({"kind":"active",
+        "producer_incarnation":opened["producer_incarnation"]})
     );
-}
-
-#[tokio::test]
-async fn ui_seat_open_rejects_stale_attachment_policy_generation() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
-    let stale_digest = "99".repeat(32);
-    let mut context = session_context(None);
-    Arc::make_mut(&mut context.compiled_binding)
-        .binding
-        .node_policy_generation_digest = stale_digest.clone();
-    let (session_id, token, _) = get_ui_state(&state)
+    assert_eq!(observed["control_predecessor"]["kind"], "control");
+    assert_ne!(observed["control_predecessor"], initialization_predecessor);
+    let active_predecessor = observed["control_predecessor"].clone();
+    assert!(
+        state
+            .state_store
+            .seat_leases_for_owner_client(owner, &detail.executor_ref)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        state
+            .state_store
+            .capture_thread_event_read_anchor(&detail.chain_root_id, thread)
+            .unwrap()
+            .unwrap()
+            .tip(),
+        before.tip(),
+        "observation appends no event and claims no producer"
+    );
+    let released = route(
+        &state,
+        &session,
+        &CLOSE_DESCRIPTOR,
+        transition_request(
+            &state,
+            &session,
+            &opened,
+            "00000000-0000-4000-8000-000000000070",
+            "relinquish",
+        )
+        .await,
+    )
+    .await
+    .unwrap();
+    let observed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        observed["producer"],
+        json!({"kind":"relinquished",
+        "producer_incarnation":released["producer_incarnation"]})
+    );
+    assert_eq!(
+        released["producer_incarnation"],
+        opened["producer_incarnation"]
+    );
+    assert_eq!(observed["control_predecessor"]["kind"], "control");
+    assert_ne!(
+        observed["control_predecessor"], active_predecessor,
+        "relinquish advances the CAS predecessor even when incarnation is unchanged"
+    );
+    let resumed = claim(
+        &state,
+        &session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000071",
+        json!({"kind":"resume","expected_producer_incarnation":released["producer_incarnation"]}),
+    )
+    .await
+    .unwrap();
+    route(
+        &state,
+        &session,
+        &CLOSE_DESCRIPTOR,
+        transition_request(
+            &state,
+            &session,
+            &resumed,
+            "00000000-0000-4000-8000-000000000072",
+            "close",
+        )
+        .await,
+    )
+    .await
+    .unwrap();
+    let observed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        observed["producer"],
+        json!({"kind":"closed",
+        "producer_incarnation":resumed["producer_incarnation"]})
+    );
+    route(
+        &state,
+        &session,
+        &OPEN_DESCRIPTOR,
+        claim_request(
+            &state,
+            &session,
+            &prepared,
+            "00000000-0000-4000-8000-000000000073",
+            json!({"kind":"resume","expected_producer_incarnation":resumed["producer_incarnation"]}),
+        )
+        .await
+        .unwrap(),
+    )
+    .await
+    .expect_err("an exact Closed predecessor is not a resumable native presentation");
+    let root: ryeos_ui::browser_session::BindingAttachmentCoordinate =
+        serde_json::from_value(prepared["root_binding"].clone()).unwrap();
+    get_ui_state(&state)
         .unwrap()
         .browser_sessions
-        .mint_token(context, 16, &stale_digest)
-        .expect("mint stale-policy fixture");
-    assert_eq!(
-        get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(&token),
-        Some(session_id.clone())
-    );
-
-    let error = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        handler_context(&session_id),
-        Arc::new(state),
-    )
-    .await
-    .expect_err("stale node-policy attachment must not create a seat");
-    assert!(format!("{error:?}").contains("ui_binding_stale"));
-}
-
-#[tokio::test]
-async fn same_principal_sessions_cannot_reattach_each_others_seats() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
-    let (first_id, first_token) =
-        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
-    let (second_id, second_token) =
-        test_state::mint_launch(&state, session_context(Some("fp:user-1".into())));
-    let sessions = &get_ui_state(&state).unwrap().browser_sessions;
-    assert_eq!(
-        sessions.consume_launch_token(&first_token),
-        Some(first_id.clone())
-    );
-    assert_eq!(
-        sessions.consume_launch_token(&second_token),
-        Some(second_id.clone())
-    );
-
-    let first = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &first_id),
-        handler_context(&first_id),
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("open first session seat");
-    let second = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &second_id),
-        handler_context(&second_id),
-        Arc::new(state.clone()),
-    )
-    .await
-    .expect("open second session seat");
-
-    assert_ne!(first["thread_id"], second["thread_id"]);
-    assert_eq!(second["reattached"], false);
-}
-
-#[tokio::test]
-async fn ui_seat_append_replay_and_close_round_trip() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, token) = test_state::mint_launch(&state, session_context(None));
-    assert_eq!(
-        get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(&token),
-        Some(session_id.clone())
-    );
-    let ctx = handler_context(&session_id);
-    let state = Arc::new(state);
-
-    let opened = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("open seat");
-    let thread_id = opened["thread_id"].as_str().unwrap();
-
-    let touched = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::TOUCH_DESCRIPTOR,
-        serde_json::json!({ "thread_id": thread_id }),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("touch seat through authenticated route");
-    assert_eq!(touched["touched"], true);
-
-    let project_action = ryeos_ui::handlers::ALL
-        .iter()
-        .find(|descriptor| descriptor.service_ref == "service:projects/open")
+        .revoke_attachment(&session, &root)
         .unwrap();
-    let denied = invoke_seat_route(
-        project_action,
-        serde_json::json!({}),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("a cookie must not bypass compiled-binding dispatch for project actions");
-    assert!(
-        denied
-            .to_string()
-            .contains("cannot invoke session-local service")
-    );
-
-    let appended = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &opened,
-            "00000000-0000-4000-8000-000000000001",
-            0,
-            &[json!({ "key": "selection", "value": { "item": "T-1" } })],
-        ),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("append seat event");
-    assert_eq!(appended["appended"], 1);
-
-    let replay = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::REPLAY_DESCRIPTOR,
-        serde_json::json!({ "chain_root_id": thread_id }),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("replay seat");
-    assert_eq!(replay["events"].as_array().unwrap().len(), 1);
-    assert_eq!(replay["events"][0]["event_type"], "seat.facet");
-    assert_eq!(
-        replay["events"][0]["payload"]["payload"]["key"],
-        "selection"
-    );
-
-    let closed = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::CLOSE_DESCRIPTOR,
-        serde_json::json!({ "thread_id": thread_id }),
-        ctx,
-        state.clone(),
-    )
-    .await
-    .expect("close seat");
-    assert_eq!(closed["status"], "completed");
+    route(&state, &session, &OPEN_DESCRIPTOR, request)
+        .await
+        .expect_err("revoked root attachment fences even read-only producer observation");
 }
 
 #[tokio::test]
-async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gaps() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, token) = test_state::mint_launch(&state, session_context(None));
-    assert_eq!(
-        get_ui_state(&state)
-            .unwrap()
-            .browser_sessions
-            .consume_launch_token(&token),
-        Some(session_id.clone())
-    );
-    let ctx = handler_context(&session_id);
+async fn prepare_is_idempotent_without_claiming_or_stealing_a_producer() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let foreign = activate(&state);
     let state = Arc::new(state);
-    let opened = invoke_seat_route(
+    let prepared = prepare(&state, &session).await;
+    assert!(prepared.get("producer_incarnation").is_none());
+    assert_eq!(prepare(&state, &session).await, prepared);
+    let unclaimed_session = activate(&state);
+    let unclaimed = prepare(&state, &unclaimed_session).await;
+    let initialized_thread = unclaimed["thread_id"].as_str().unwrap();
+    let initialized_detail = state
+        .state_store
+        .get_thread(initialized_thread)
+        .unwrap()
+        .unwrap();
+    state
+        .state_store
+        .remove_seat_lease(initialized_thread)
+        .unwrap();
+    assert_eq!(prepare(&state, &unclaimed_session).await, unclaimed);
+    assert!(
+        state
+            .state_store
+            .seat_leases_for_owner_client(
+                initialized_detail.requested_by.as_deref().unwrap(),
+                &initialized_detail.executor_ref
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let (opened, original_claim) = fresh_with_request(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap();
+    let detail = state.state_store.get_thread(thread).unwrap().unwrap();
+    let control_before = observe(&state, &session, &prepared).await.unwrap();
+    state.state_store.remove_seat_lease(thread).unwrap();
+    assert_eq!(prepare(&state, &session).await, prepared);
+    assert_eq!(
+        observe(&state, &session, &prepared).await.unwrap(),
+        control_before
+    );
+    assert!(
+        state
+            .state_store
+            .seat_leases_for_owner_client(
+                detail.requested_by.as_deref().unwrap(),
+                &detail.executor_ref
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let retry = route(&state, &session, &OPEN_DESCRIPTOR, original_claim.clone())
+        .await
+        .unwrap();
+    assert_eq!(retry, opened);
+    let mut competing = original_claim.clone();
+    competing["intent_nonce"] = json!("00000000-0000-4000-8000-000000000012");
+    let competing = identify_control(serde_json::from_value(competing).unwrap()).unwrap();
+    assert_ne!(competing["operation_id"], original_claim["operation_id"]);
+    route(&state, &session, &OPEN_DESCRIPTOR, competing)
+        .await
+        .expect_err("a new fresh intent cannot reuse the consumed initialization predecessor");
+    route(&state, &foreign, &OPEN_DESCRIPTOR, original_claim)
+        .await
+        .expect_err("same principal is not same session");
+    let sibling = route(
+        &state,
+        &session,
         &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx.clone(),
-        state.clone(),
+        prepare_request(&state, &session, "00000000-0000-4000-8000-000000000013"),
     )
     .await
-    .expect("open seat");
-    assert_eq!(opened["next_engine_seq"], "0");
+    .unwrap();
+    assert_ne!(prepared["thread_id"], sibling["thread_id"]);
+    let mut wrong = prepare_request(&state, &session, "00000000-0000-4000-8000-000000000010");
+    wrong["binding_digest"] = json!("aa".repeat(32));
+    route(
+        &state,
+        &session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        wrong,
+    )
+    .await
+    .expect_err("same creation request cannot substitute its exact root");
+}
 
-    let operation_id = "00000000-0000-4000-8000-000000000002";
-    let request = append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]);
-    // Cross-language vector for the browser/server typed digest protocol.
+#[tokio::test]
+async fn legacy_and_forged_control_intents_do_not_claim_a_producer() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let prepared = prepare(&state, &session).await;
+    let before = observe(&state, &session, &prepared).await.unwrap();
+    let request = claim_request(
+        &state,
+        &session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000031",
+        json!({"kind":"fresh"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(request["schema"], 2);
+    assert_eq!(
+        request["predecessor"],
+        serde_json::to_value(&before.control_predecessor).unwrap()
+    );
+    assert_eq!(
+        request["operation_id"].as_str().unwrap().as_bytes()[14],
+        b'8'
+    );
+    let mut rejected = vec![json!({"action":"claim",
+        "presentation_id":prepared["presentation_id"],
+        "operation_id":"00000000-0000-4000-8000-000000000031", "claim":{"kind":"fresh"}})];
+    for field in [
+        "schema",
+        "thread_id",
+        "chain_root_id",
+        "predecessor",
+        "intent_nonce",
+    ] {
+        let mut missing = request.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        rejected.push(missing);
+    }
+    for (field, value) in [
+        ("schema", json!(1)),
+        (
+            "operation_id",
+            json!("00000000-0000-4000-8000-000000000031"),
+        ),
+        (
+            "intent_nonce",
+            json!("00000000-0000-4000-8000-000000000032"),
+        ),
+        (
+            "predecessor",
+            json!({"kind":"initialization", "event_hash":"ab".repeat(32)}),
+        ),
+    ] {
+        let mut contradicted = request.clone();
+        contradicted[field] = value;
+        rejected.push(contradicted);
+    }
+    let mut invented_predecessor = request.clone();
+    invented_predecessor["predecessor"]["event_hash"] = json!("ab".repeat(32));
+    rejected.push(identify_control(serde_json::from_value(invented_predecessor).unwrap()).unwrap());
+    for invalid in rejected {
+        route(&state, &session, &OPEN_DESCRIPTOR, invalid)
+            .await
+            .expect_err("old shape, false identity or unauthenticated predecessor must refuse");
+        assert_eq!(observe(&state, &session, &prepared).await.unwrap(), before);
+    }
+    let opened = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        route(&state, &session, &OPEN_DESCRIPTOR, request)
+            .await
+            .unwrap(),
+        opened,
+        "retry retains its original predecessor, nonce and derived ID"
+    );
+}
+
+#[tokio::test]
+async fn append_receipts_survive_takeover_and_close_without_granting_old_producer() {
+    use ryeos_ui::handlers::ui_seat::*;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let foreign = activate(&state);
+    let state = Arc::new(state);
+    let (opened, original_claim) = fresh_with_request(&state, &session).await;
+    let op = "00000000-0000-4000-8000-000000000002";
+    let request = append_request(&opened, op, 0, &[json!({"key":"é😀","value":{"a":"𐀀"}})]);
+    let op = request["operation_id"].as_str().unwrap().to_owned();
     assert_eq!(
         request["payload_digest"],
-        "40442791210ae66e4e67d762a8102f444250935db90a1976d743cb9952eed572"
+        "a7b97b79ab2c07cfaf889d314a1dcf70276b5f8b59a37c2b75f81f8148b6307b"
     );
-    let first = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        request.clone(),
-        ctx.clone(),
-        state.clone(),
+    let ack = route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    let acknowledged = ack["events"].as_array().unwrap();
+    assert_eq!(ack["events_authority"], "authoritative");
+    assert_eq!(acknowledged.len(), 1);
+    assert_eq!(acknowledged[0]["event_type"], "seat.facet");
+    assert_eq!(acknowledged[0]["durability"], "durable");
+    assert!(acknowledged[0].get("event_id").is_none());
+    assert!(acknowledged[0].get("storage_class").is_none());
+    assert_eq!(acknowledged[0]["payload"]["seq"], 0);
+    assert_eq!(
+        acknowledged[0]["payload"]["payload"],
+        request["events"][0]["payload"]
+    );
+    assert_eq!(acknowledged[0]["event_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        acknowledged[0]["chain_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+            + 1,
+        ack["chain_seq"].as_str().unwrap().parse::<i64>().unwrap()
+    );
+    assert_eq!(
+        acknowledged[0]["thread_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+            + 1,
+        ack["receipt_thread_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+    );
+    let receipt_hash = ack["receipt_event_hash"].as_str().unwrap();
+    assert_eq!(receipt_hash.len(), 64);
+    assert!(receipt_hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
+            .await
+            .unwrap(),
+        ack
+    );
+    for (op, seq) in [
+        ("00000000-0000-4000-8000-000000000003", 2),
+        ("00000000-0000-4000-8000-000000000004", 0),
+    ] {
+        route(
+            &state,
+            &session,
+            &APPEND_DESCRIPTOR,
+            append_request(&opened, op, seq, &[json!({"key":"different","value":true})]),
+        )
+        .await
+        .expect_err("gap/overlap");
+    }
+    route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
+        append_request(&opened, &op, 0, &[json!({"key":"different","value":true})]),
     )
     .await
-    .expect("first append");
-    let replayed_ack = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        request,
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("lost-response-equivalent exact replay");
-    assert_eq!(replayed_ack, first);
-
-    let replay = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::REPLAY_DESCRIPTOR,
-        json!({ "chain_root_id": opened["thread_id"] }),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect("replay seat");
-    assert_eq!(replay["events"].as_array().unwrap().len(), 1);
-
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &opened,
-            operation_id,
-            0,
-            &[json!({ "key": "selection", "value": "different" })],
-        ),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("operation identity must bind the exact request");
-
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &opened,
-            "00000000-0000-4000-8000-000000000003",
-            2,
-            &[json!({ "key": "selection", "value": "gap" })],
-        ),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("sequence gaps must be refused");
-
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(
-            &opened,
-            "00000000-0000-4000-8000-000000000007",
-            0,
-            &[json!({ "key": "selection", "value": "overlap" })],
-        ),
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("sequence overlaps must be refused");
-
+    .expect_err("operation contradiction");
+    let mut reused_id = append_request(
+        &opened,
+        "ignored",
+        1,
+        &[json!({"key":"new_interval","value":true})],
+    );
+    reused_id["operation_id"] = json!(op);
+    route(&state, &session, &APPEND_DESCRIPTOR, reused_id)
+        .await
+        .expect_err("an old operation ID cannot name a new engine interval");
     let mut malformed = append_request(
         &opened,
-        "00000000-0000-4000-8000-000000000004",
+        "00000000-0000-4000-8000-000000000005",
         1,
-        &[json!({ "key": "selection", "value": "bad digest" })],
+        &[json!({"key":"empty","value":null})],
     );
-    malformed["payload_digest"] = json!("not-a-digest");
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        malformed,
-        ctx.clone(),
-        state.clone(),
-    )
-    .await
-    .expect_err("malformed digest must be refused");
-
-    let float_append = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+    malformed["payload_digest"] = json!("bad");
+    route(&state, &session, &APPEND_DESCRIPTOR, malformed)
+        .await
+        .expect_err("malformed digest");
+    let second_ack = route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
         append_request(
             &opened,
             "00000000-0000-4000-8000-000000000006",
             1,
-            &[json!({ "key": "fraction", "value": 0.000001 })],
+            &[
+                json!({"key":"fraction","value":0.000001}),
+                json!({"key":"second","value":true}),
+            ],
         ),
-        ctx.clone(),
-        state.clone(),
     )
     .await
-    .expect("typed digest accepts a float across JS/serde exponent spelling thresholds");
-    assert_eq!(float_append["appended"], 1);
-
-    let rotated = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &session_id),
-        ctx.clone(),
-        state.clone(),
+    .unwrap();
+    assert_eq!(second_ack["events"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        second_ack["events"][0]["chain_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+            + 1,
+        second_ack["events"][1]["chain_seq"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+    );
+    assert_ne!(
+        second_ack["events"][0]["event_hash"],
+        ack["events"][0]["event_hash"]
+    );
+    let rotated = claim(
+        &state,
+        &session,
+        &opened,
+        "00000000-0000-4000-8000-000000000014",
+        json!({"kind":"takeover","expected_producer_incarnation":opened["producer_incarnation"]}),
     )
     .await
-    .expect("rotate the producer after the accepted operation");
+    .unwrap();
     assert_ne!(
         rotated["producer_incarnation"],
         opened["producer_incarnation"]
     );
-    let rotated_replay = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]),
-        ctx.clone(),
-        state.clone(),
+    assert_eq!(
+        route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
+            .await
+            .unwrap(),
+        ack
+    );
+    route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
+        append_request(
+            &opened,
+            "00000000-0000-4000-8000-000000000015",
+            2,
+            &[json!({"key":"empty","value":null})],
+        ),
     )
     .await
-    .expect("an accepted operation remains exactly replayable after producer rotation");
-    assert_eq!(rotated_replay, first);
-
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::CLOSE_DESCRIPTOR,
-        json!({ "thread_id": opened["thread_id"] }),
-        ctx.clone(),
-        state.clone(),
+    .expect_err("stale producer");
+    route(&state, &foreign, &APPEND_DESCRIPTOR, request.clone())
+        .await
+        .expect_err("foreign session");
+    let lookup = json!({"presentation_id":opened["presentation_id"],"chain_root_id":opened["chain_root_id"],
+        "receipt":{"thread_id":opened["thread_id"],"producer_incarnation":opened["producer_incarnation"],
+            "operation_id":op,"first_engine_seq":0,"last_engine_seq":0,"event_count":1,"payload_digest":request["payload_digest"]}});
+    let found = route(&state, &session, &REPLAY_DESCRIPTOR, lookup.clone())
+        .await
+        .unwrap();
+    assert_eq!(found["receipt_status"], "found");
+    assert_eq!(found["receipt"], ack);
+    let mut missing = lookup.clone();
+    missing["receipt"]["operation_id"] = json!("00000000-0000-4000-8000-000000000099");
+    let absent = route(&state, &session, &REPLAY_DESCRIPTOR, missing)
+        .await
+        .unwrap();
+    assert_eq!(absent["receipt_status"], "not_found");
+    let mut mixed = lookup.clone();
+    mixed["limit"] = json!(5);
+    route(&state, &session, &REPLAY_DESCRIPTOR, mixed)
+        .await
+        .expect_err("receipt lookup cannot silently become cursor replay");
+    let close = transition_request(
+        &state,
+        &session,
+        &rotated,
+        "00000000-0000-4000-8000-000000000016",
+        "close",
+    )
+    .await;
+    route(&state, &session, &OPEN_DESCRIPTOR, original_claim)
+        .await
+        .expect_err("historical claim receipt must not re-advertise displaced producer as active");
+    let closed = route(&state, &session, &CLOSE_DESCRIPTOR, close.clone())
+        .await
+        .unwrap();
+    assert_eq!(closed["state"], "closed");
+    assert_eq!(
+        route(&state, &session, &CLOSE_DESCRIPTOR, close)
+            .await
+            .unwrap(),
+        closed
+    );
+    assert_eq!(
+        route(&state, &session, &APPEND_DESCRIPTOR, request)
+            .await
+            .unwrap(),
+        ack
+    );
+    assert_eq!(
+        route(&state, &session, &REPLAY_DESCRIPTOR, lookup)
+            .await
+            .unwrap()["receipt"],
+        ack
+    );
+    route(
+        &state,
+        &session,
+        &REPLAY_DESCRIPTOR,
+        json!({"presentation_id":opened["presentation_id"],"chain_root_id":opened["chain_root_id"]}),
     )
     .await
-    .expect("close seat after committed operation");
-    let settled_replay = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]),
-        ctx,
-        state,
-    )
-    .await
-    .expect("durable receipt remains replayable after seat settlement");
-    assert_eq!(settled_replay, first);
+    .expect_err("the receipt route cannot serve unauthenticated cursor pages");
 }
 
 #[tokio::test]
-async fn ui_seat_new_open_invalidates_stale_and_foreign_producers() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
-    let (owner_id, owner_token) = test_state::mint_launch(&state, session_context(None));
-    let (foreign_id, foreign_token) = test_state::mint_launch(&state, session_context(None));
-    let sessions = &get_ui_state(&state).unwrap().browser_sessions;
-    assert_eq!(
-        sessions.consume_launch_token(&owner_token),
-        Some(owner_id.clone())
-    );
-    assert_eq!(
-        sessions.consume_launch_token(&foreign_token),
-        Some(foreign_id.clone())
-    );
+async fn relinquish_resume_and_touch_are_exact_producer_fenced() {
+    use ryeos_ui::handlers::ui_seat::*;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
     let state = Arc::new(state);
-    let owner_ctx = handler_context(&owner_id);
-    let first = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &owner_id),
-        owner_ctx.clone(),
-        state.clone(),
+    let opened = fresh(&state, &session).await;
+    let touch = json!({"presentation_id":opened["presentation_id"],"thread_id":opened["thread_id"],"producer_incarnation":opened["producer_incarnation"]});
+    assert_eq!(
+        route(&state, &session, &TOUCH_DESCRIPTOR, touch.clone())
+            .await
+            .unwrap()["touched"],
+        true
+    );
+    let stale_resume = claim_request(
+        &state,
+        &session,
+        &opened,
+        "00000000-0000-4000-8000-000000000021",
+        json!({"kind":"resume","expected_producer_incarnation":opened["producer_incarnation"]}),
     )
     .await
-    .expect("open seat");
-    let second = invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
-        open_request(&state, &owner_id),
-        owner_ctx.clone(),
-        state.clone(),
+    .unwrap();
+    route(&state, &session, &OPEN_DESCRIPTOR, stale_resume.clone())
+        .await
+        .expect_err("active producer cannot be resumed implicitly");
+    let relinquish = transition_request(
+        &state,
+        &session,
+        &opened,
+        "00000000-0000-4000-8000-000000000022",
+        "relinquish",
+    )
+    .await;
+    let released = route(&state, &session, &CLOSE_DESCRIPTOR, relinquish.clone())
+        .await
+        .unwrap();
+    assert_eq!(released["state"], "relinquished");
+    assert_eq!(
+        route(&state, &session, &CLOSE_DESCRIPTOR, relinquish.clone())
+            .await
+            .unwrap(),
+        released
+    );
+    route(&state, &session, &OPEN_DESCRIPTOR, stale_resume)
+        .await
+        .expect_err("resume observed before relinquish cannot reuse the same incarnation with an old CAS predecessor");
+    route(&state, &session, &TOUCH_DESCRIPTOR, touch)
+        .await
+        .expect_err("relinquished writer");
+    let resumed = claim(
+        &state,
+        &session,
+        &opened,
+        "00000000-0000-4000-8000-000000000023",
+        json!({"kind":"resume","expected_producer_incarnation":opened["producer_incarnation"]}),
     )
     .await
-    .expect("reattach seat");
+    .unwrap();
     assert_ne!(
-        first["producer_incarnation"],
-        second["producer_incarnation"]
+        resumed["producer_incarnation"],
+        opened["producer_incarnation"]
+    );
+    assert_eq!(
+        route(&state, &session, &CLOSE_DESCRIPTOR, relinquish)
+            .await
+            .unwrap(),
+        released,
+        "historical exact relinquish retry returns its retained result without replacing the current writer"
+    );
+    assert_eq!(
+        serde_json::to_value(observe(&state, &session, &opened).await.unwrap()).unwrap()["producer"],
+        json!({"kind":"active", "producer_incarnation":resumed["producer_incarnation"]})
+    );
+    route(
+        &state,
+        &session,
+        &CLOSE_DESCRIPTOR,
+        transition_request(
+            &state,
+            &session,
+            &opened,
+            "00000000-0000-4000-8000-000000000024",
+            "close",
+        )
+        .await,
+    )
+    .await
+    .expect_err("stale close cannot terminate seat");
+    let action = ryeos_ui::handlers::ALL
+        .iter()
+        .find(|d| d.service_ref == "service:projects/open")
+        .unwrap();
+    route(&state, &session, action, json!({}))
+        .await
+        .expect_err("cookie is not compiled action authority");
+}
+
+#[tokio::test]
+async fn exact_append_retry_survives_a_later_unreceipted_signed_tip() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    let request = append_request(
+        &opened,
+        "00000000-0000-4000-8000-000000000071",
+        0,
+        &[json!({"key":"selection","value":"retained"})],
+    );
+    let acknowledged = route(&state, &session, &APPEND_DESCRIPTOR, request.clone())
+        .await
+        .unwrap();
+    let detail = state
+        .state_store
+        .get_thread(opened["thread_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    state
+        .threads
+        .append_thread_events(
+            &detail.chain_root_id,
+            &detail.thread_id,
+            &[ryeos_app::state_store::NewEventRecord {
+                event_type: "seat.facet".into(),
+                storage_class: "indexed".into(),
+                payload: json!({
+                    "seq": 1,
+                    "operation_id": "unreceipted-crash-fixture",
+                    "payload": {"key":"selection","value":"unsettled"}
+                }),
+            }],
+        )
+        .unwrap()
+        .expect("signed orphan fixture commits one event");
+
+    assert_eq!(
+        route(&state, &session, &APPEND_DESCRIPTOR, request)
+            .await
+            .unwrap(),
+        acknowledged,
+        "an exact authenticated receipt is replayable without folding a later incomplete tip"
+    );
+}
+
+#[tokio::test]
+async fn prepare_rejects_stale_attachment_policy() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let mut context = session_context(&state, None);
+    let stale = "99".repeat(32);
+    Arc::make_mut(&mut context.compiled_binding)
+        .binding
+        .node_policy_generation_digest = stale.clone();
+    let sessions = &get_ui_state(&state).unwrap().browser_sessions;
+    let (id, token, _) = sessions.mint_token(context, 16, &stale).unwrap();
+    assert_eq!(sessions.consume_launch_token(&token), Some(id.clone()));
+    let request = prepare_request(&state, &id, "00000000-0000-4000-8000-000000000010");
+    route(
+        &Arc::new(state),
+        &id,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        request,
+    )
+    .await
+    .expect_err("stale policy");
+}
+
+/// The compose-result cache must not hide the change the revalidations exist
+/// for: an item edited in place while every installed bundle manifest stays as
+/// it was. The fixture Config is such an item. After its seat was prepared,
+/// and a retry was answered from cached composes, the Config is rewritten at
+/// the same ref with different content and a valid signature. The next
+/// prepare re-reads and re-verifies it, composes the new content afresh and
+/// refuses the binding as stale.
+#[tokio::test]
+async fn prepare_refuses_an_item_edited_in_place_although_composes_are_cached() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let composes = || state.engine.composers.result_cache_stats();
+
+    let prepared = prepare(&state, &session).await;
+    let after_prepare = composes();
+    assert!(after_prepare.misses > 0, "the first prepare composes");
+
+    // A retry re-resolves the whole admission and launches no composer.
+    assert_eq!(prepare(&state, &session).await, prepared);
+    let after_retry = composes();
+    assert_eq!(after_retry.misses, after_prepare.misses);
+    assert!(after_retry.hits > after_prepare.hits);
+
+    // Edit the Config in place: same ref, same signer, different content.
+    let path = test_state::fixture_bundle_root(&state).join(".ai/config/test/presentation.yaml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let body: String = original
+        .lines()
+        .filter(|line| !line.starts_with("# ryeos:signed:"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let edited = body.replace("title: Test presentation", "title: Edited presentation");
+    assert_ne!(edited, body);
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .unwrap();
+    std::fs::write(
+        &path,
+        lillux::signature::sign_content(&edited, &key, "#", None),
+    )
+    .unwrap();
+
+    let refused = route(
+        &state,
+        &session,
+        &OPEN_DESCRIPTOR,
+        prepare_request(&state, &session, "00000000-0000-4000-8000-000000000010"),
+    )
+    .await
+    .expect_err("an edited item makes the admitted binding stale");
+    let detail = format!("{refused:#}");
+    assert!(
+        detail.contains("changed after session mint") || detail.contains("ui_binding_stale"),
+        "{detail}"
+    );
+    let after_edit = composes();
+    assert!(
+        after_edit.misses > after_retry.misses,
+        "the edited content was composed afresh, not answered from the cache"
     );
 
-    let stale_request = append_request(
-        &first,
-        "00000000-0000-4000-8000-000000000005",
-        0,
-        &[json!({ "key": "selection", "value": "stale" })],
+    // Restoring the exact original bytes makes the admission current again.
+    std::fs::write(&path, original).unwrap();
+    assert_eq!(prepare(&state, &session).await, prepared);
+    assert_eq!(composes().misses, after_edit.misses);
+}
+
+/// Rewrite the fixture Config in place with a different title and a valid
+/// signature, so the admission retained by a prepared seat no longer holds.
+fn edit_fixture_config_in_place(state: &ryeos_app::state::AppState) {
+    let path = test_state::fixture_bundle_root(state).join(".ai/config/test/presentation.yaml");
+    let body: String = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with("# ryeos:signed:"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let edited = body.replace("title: Test presentation", "title: Edited presentation");
+    assert_ne!(edited, body);
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .unwrap();
+    std::fs::write(
+        &path,
+        lillux::signature::sign_content(&edited, &key, "#", None),
+    )
+    .unwrap();
+}
+
+/// The route answers a claim on an edited Config with the binding's own typed
+/// refusal: the structured 409 `ui_binding_stale`, carried across the service
+/// boundary with its code and status, never an internal error.
+fn assert_stale_binding_refusal(refused: &anyhow::Error) {
+    let route_error = refused
+        .downcast_ref::<ryeos_api::route_error::RouteDispatchError>()
+        .unwrap_or_else(|| panic!("the refusal is a route answer: {refused:#}"));
+    assert!(
+        matches!(
+            route_error,
+            ryeos_api::route_error::RouteDispatchError::Structured { code, status: 409, .. }
+                if code == "ui_binding_stale"
+        ),
+        "{route_error:?}"
     );
-    invoke_seat_route(
-        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        stale_request,
-        owner_ctx,
+}
+
+/// A seat whose initialization record was written but whose admission no
+/// longer holds, as after a prepare that answered an error past its writes,
+/// is refused at claim with a typed conflict, and claims nothing. An ordinary
+/// claim of an unchanged seat still works.
+#[tokio::test]
+async fn claim_refuses_a_seat_whose_admission_no_longer_holds() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+
+    // The ordinary claim works.
+    let healthy = activate(&state);
+    let opened = fresh(&state, &healthy).await;
+    assert!(opened.get("producer_incarnation").is_some());
+
+    // Another session is prepared, its claim request built, and only then does
+    // the admission stop holding.
+    let session = activate(&state);
+    let prepared = prepare(&state, &session).await;
+    let request = claim_request(
+        &state,
+        &session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000011",
+        json!({"kind":"fresh"}),
+    )
+    .await
+    .unwrap();
+    edit_fixture_config_in_place(&state);
+
+    let refused = route(&state, &session, &OPEN_DESCRIPTOR, request)
+        .await
+        .expect_err("a stale admission cannot be claimed");
+    assert_stale_binding_refusal(&refused);
+
+    // Nothing was claimed: the seat has no producer.
+    let observed = observe(&state, &session, &prepared).await.unwrap();
+    let observed = serde_json::to_value(observed).unwrap();
+    assert!(
+        observed
+            .get("producer_incarnation")
+            .is_none_or(Value::is_null),
+        "{observed}"
+    );
+}
+
+/// A claim that already committed is replayed after the admission stopped
+/// holding: the retry carrying the same operation id still returns the
+/// retained producer, so the client can learn it; a different operation on the
+/// same seat is a new claim and is refused as stale.
+#[tokio::test]
+async fn a_committed_claim_is_replayed_after_the_admission_stops_holding() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let session = activate(&state);
+
+    let (opened, request) = fresh_with_request(&state, &session).await;
+    assert!(opened.get("producer_incarnation").is_some());
+
+    edit_fixture_config_in_place(&state);
+
+    // The same request, with the same operation id, is the replay.
+    let replayed = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .expect("a committed claim is still answered after the admission changed");
+    assert_eq!(
+        replayed["producer_incarnation"],
+        opened["producer_incarnation"]
+    );
+    assert_eq!(replayed["operation_id"], opened["operation_id"]);
+
+    // A different intent on the same seat is a new claim and is refused.
+    let prepared = json!({
+        "presentation_id": opened["presentation_id"],
+        "thread_id": opened["thread_id"],
+        "chain_root_id": opened["chain_root_id"],
+    });
+    let other = claim_request(
+        &state,
+        &session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000012",
+        json!({"kind":"takeover",
+            "expected_producer_incarnation": opened["producer_incarnation"]}),
+    )
+    .await
+    .unwrap();
+    assert_ne!(other["operation_id"], request["operation_id"]);
+    let refused = route(&state, &session, &OPEN_DESCRIPTOR, other)
+        .await
+        .expect_err("a new claim on a stale admission is refused");
+    assert_stale_binding_refusal(&refused);
+}
+
+/// A project file placed at the shell Config's ref after prepare does not
+/// stop the claim. The seat's recorded root was fixed when prepare admitted
+/// it, and the claim revalidates the retained binding, which resolves the
+/// shell Config from installed bundles with no project root, so the project
+/// file is never read and the binding is unchanged. Re-running root admission
+/// at claim would instead see the project file and refuse a seat that was
+/// prepared legitimately.
+#[tokio::test]
+async fn claim_succeeds_after_a_project_file_appears_at_the_shell_config_ref() {
+    use ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let session = activate(&state);
+    let prepared = prepare(&state, &session).await;
+
+    // The session's project is the application root. Give it a validly
+    // signed Config at the shell Config's ref, with different content.
+    let key = lillux::crypto::load_signing_key(
+        &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+    )
+    .unwrap();
+    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Project presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: ['*']\n    affordances: ['*']\n";
+    let dir = state.config.app_root.join(".ai/config/test");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("presentation.yaml"),
+        lillux::signature::sign_content(body, &key, "#", None),
+    )
+    .unwrap();
+
+    let request = claim_request(
+        &state,
+        &session,
+        &prepared,
+        "00000000-0000-4000-8000-000000000013",
+        json!({"kind":"fresh"}),
+    )
+    .await
+    .unwrap();
+    let opened = route(&state, &session, &OPEN_DESCRIPTOR, request.clone())
+        .await
+        .expect("a project file at the shell Config's ref does not refuse the claim");
+    assert_eq!(opened["presentation_id"], prepared["presentation_id"]);
+    assert_eq!(opened["thread_id"], prepared["thread_id"]);
+    assert!(opened["producer_incarnation"].is_string(), "{opened}");
+
+    // The retry of the same claim is answered with the same producer.
+    let replayed = route(&state, &session, &OPEN_DESCRIPTOR, request)
+        .await
+        .expect("the committed claim is replayed");
+    assert_eq!(
+        replayed["producer_incarnation"],
+        opened["producer_incarnation"]
+    );
+}
+
+#[tokio::test]
+async fn forged_presentation_operation_records_do_not_change_the_seat() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap();
+    let root = opened["chain_root_id"].as_str().unwrap();
+    let before = state
+        .state_store
+        .capture_thread_event_read_anchor(root, thread)
+        .unwrap()
+        .unwrap();
+    for (index, event_type, payload) in [
+        (
+            0,
+            "seat.presentation_operation.prepared",
+            json!({"operation_id":"00000000-0000-4000-8000-000000000081"}),
+        ),
+        (
+            1,
+            "seat.presentation_operation.completed",
+            json!({"operation_id":"00000000-0000-4000-8000-000000000082","result":{}}),
+        ),
+    ] {
+        let mut request = append_request(
+            &opened,
+            &format!("00000000-0000-4000-8000-{:012}", 90 + index),
+            0,
+            &[payload],
+        );
+        request["events"][0]["event_type"] = json!(event_type);
+        identify_append(&opened, &mut request);
+        route(&state, &session, &APPEND_DESCRIPTOR, request)
+            .await
+            .expect_err("unproven preparation/completion must refuse");
+        assert_eq!(
+            state
+                .state_store
+                .capture_thread_event_read_anchor(root, thread)
+                .unwrap()
+                .unwrap()
+                .tip(),
+            before.tip(),
+            "refused forged operations must not advance the signed seat"
+        );
+    }
+}
+
+fn install_transfer_composition() {
+    ryeos_app::object_contracts::install_with_event_contracts(
+        ryeos_ui::transfer_store::retention::event_contracts(),
+    )
+    .unwrap();
+    ryeos_app::object_contracts::install_retained_evidence_validator(
+        ryeos_ui::transfer_store::retention::validate_retained_evidence,
+    )
+    .unwrap();
+}
+
+/// A second presentation in the same session: its own creation request and
+/// claim intent, otherwise the same Prepare and fresh Claim.
+async fn fresh_distinct(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    request_id: &str,
+    nonce: &str,
+) -> Value {
+    let prepared = route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        prepare_request(state, session, request_id),
+    )
+    .await
+    .unwrap();
+    let request = claim_request(state, session, &prepared, nonce, json!({"kind":"fresh"}))
+        .await
+        .unwrap();
+    route(
+        state,
+        session,
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        request,
+    )
+    .await
+    .unwrap()
+}
+
+fn transfer_seat(
+    opened: &Value,
+    revision: u64,
+) -> ryeos_ui_presentation_contract::transfer::TransferSeat {
+    ryeos_ui_presentation_contract::transfer::TransferSeat {
+        presentation_id: opened["presentation_id"].as_str().unwrap().into(),
+        thread_id: opened["thread_id"].as_str().unwrap().into(),
+        chain_root_id: opened["chain_root_id"].as_str().unwrap().into(),
+        producer_incarnation: opened["producer_incarnation"].as_str().unwrap().into(),
+        revision,
+    }
+}
+
+/// The destination's inbound commitment, written where a seat's own browser
+/// transfer testimony lands: after its authenticated producer frontier.
+fn append_inbound(
+    state: &ryeos_app::state::AppState,
+    destination: &Value,
+    seq: u64,
+    transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+) {
+    let record = ryeos_ui_presentation_contract::transfer::TransferRecord {
+        schema: 1,
+        transfer: transfer.clone(),
+        phase: ryeos_ui_presentation_contract::transfer::TransferPhase::InboundCommitment,
+    };
+    state
+        .state_store
+        .append_events(
+            destination["chain_root_id"].as_str().unwrap(),
+            destination["thread_id"].as_str().unwrap(),
+            &[ryeos_app::state_store::NewEventRecord {
+                event_type: ryeos_ui_presentation_contract::transfer::TRANSFER_EVENT.into(),
+                storage_class: "indexed".into(),
+                payload: serde_json::to_value(
+                    ryeos_ui_presentation_contract::transfer::TransferEventPayload {
+                        seq,
+                        operation_id: transfer.operation_id.clone(),
+                        payload: record,
+                    },
+                )
+                .unwrap(),
+            }],
+        )
+        .unwrap();
+}
+
+fn pair_transfer(
+    source: ryeos_ui_presentation_contract::transfer::TransferSeat,
+    destination: ryeos_ui_presentation_contract::transfer::TransferSeat,
+) -> ryeos_ui_presentation_contract::transfer::TransferIdentity {
+    ryeos_ui_presentation_contract::transfer::TransferIdentity {
+        operation_id: "33333333-3333-4333-8333-333333333333".into(),
+        source,
+        destination,
+        export_digest: ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(
+            &json!({"mode":"copy"}),
+        )
+        .unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn session_current_folds_a_transfer_bearing_seat_through_its_completed_paired_cut() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let source = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let ordinary = ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
         state.clone(),
     )
     .await
-    .expect_err("previous open's producer must be stale");
+    .unwrap();
+    assert_eq!(ordinary["presentations"].as_array().unwrap().len(), 2);
+    let reported = ordinary["presentations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["presentation_id"] == source["presentation_id"])
+        .unwrap();
+    assert_eq!(reported["thread_id"], source["thread_id"]);
+    assert_eq!(reported["chain_root_id"], source["chain_root_id"]);
 
-    invoke_seat_route(
+    let source_revision = observe(&state, &session, &source).await.unwrap().revision;
+    let destination_revision = observe(&state, &session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    let transfer = pair_transfer(
+        transfer_seat(&source, source_revision),
+        transfer_seat(&destination, destination_revision),
+    );
+    let next_engine_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    append_inbound(&state, &destination, next_engine_seq, &transfer);
+
+    // One seat's fold cannot judge transfer testimony; only the completed
+    // paired cut reads it, and observation now reads through that cut.
+    let observed = observe(&state, &session, &destination).await.unwrap();
+    assert_eq!(
+        observed.revision, destination_revision,
+        "an inbound commitment witnesses the frontier without changing composition"
+    );
+    let current = ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(current["presentations"], ordinary["presentations"]);
+}
+
+#[tokio::test]
+async fn session_current_refuses_a_transfer_naming_a_seat_the_session_does_not_hold() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let destination_revision = observe(&state, &session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    let mut ghost = transfer_seat(&destination, 0);
+    ghost.presentation_id = "55555555-5555-4555-8555-555555555555".into();
+    ghost.thread_id = "T-ghost".into();
+    ghost.chain_root_id = "T-ghost".into();
+    let transfer = pair_transfer(ghost, transfer_seat(&destination, destination_revision));
+    let next_engine_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    append_inbound(&state, &destination, next_engine_seq, &transfer);
+    ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .expect_err("a counterpart with neither a signed head nor a fence has no authenticated cut");
+}
+
+#[tokio::test]
+async fn session_current_refuses_a_transfer_whose_witness_is_stale() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let source = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let transfer = pair_transfer(transfer_seat(&source, 0), transfer_seat(&destination, 0));
+    // The witness names a producer sequence the seat has not reached.
+    append_inbound(&state, &destination, 7, &transfer);
+    ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .expect_err("a transfer witness must equal the authenticated producer frontier");
+}
+
+#[tokio::test]
+async fn a_transfer_bearing_seat_appends_and_relinquishes_through_its_paired_cut() {
+    use ryeos_ui::handlers::ui_seat::{APPEND_DESCRIPTOR, CLOSE_DESCRIPTOR};
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let source = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let source_revision = observe(&state, &session, &source).await.unwrap().revision;
+    let destination_revision = observe(&state, &session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    let transfer = pair_transfer(
+        transfer_seat(&source, source_revision),
+        transfer_seat(&destination, destination_revision),
+    );
+    let next_engine_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    append_inbound(&state, &destination, next_engine_seq, &transfer);
+
+    // The inbound commitment witnesses the frontier without consuming a
+    // producer sequence, so the destination's own next edit still lands at
+    // the sequence it was claimed at. Before the paired cut owned admission
+    // this append was refused outright.
+    let ack = route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
+        append_request(
+            &destination,
+            "",
+            next_engine_seq,
+            &[json!({"key": "after.inbound", "value": 1})],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ack["appended"], 1);
+
+    // The control writer reads through the same cut.
+    let relinquish = transition_request(
+        &state,
+        &session,
+        &destination,
+        "00000000-0000-4000-8000-000000000032",
+        "relinquish",
+    )
+    .await;
+    let released = route(&state, &session, &CLOSE_DESCRIPTOR, relinquish)
+        .await
+        .unwrap();
+    assert_eq!(released["state"], "relinquished");
+    assert_eq!(
+        serde_json::to_value(observe(&state, &session, &destination).await.unwrap()).unwrap()["producer"],
+        json!({"kind": "relinquished", "producer_incarnation": destination["producer_incarnation"]})
+    );
+}
+
+/// Publish the destination InboundCommitment and the source Prepared event
+/// through the typed pair writer, from completed reads of both seats. The
+/// export is the writer's own closed input; the browser ingress would first
+/// bind it to a mounted source composition.
+fn prepare_pair_directly(
+    state: &Arc<ryeos_app::state::AppState>,
+    source: (&str, &Value),
+    destination: (&str, &Value),
+    transfer: &ryeos_ui_presentation_contract::transfer::TransferIdentity,
+    export: &Value,
+) -> anyhow::Result<ryeos_app::state_store::CutPairAppendResult> {
+    use ryeos_ui::transfer_store::appends::{
+        PreparationInputs, TransferCutDependencies, TransferSeatContext, TransferSeatPair,
+        append_transfer_preparation_pair,
+    };
+    use ryeos_ui::transfer_store::reader::{
+        begin_fixed_seat_read, finish_fixed_seat_read, read_fixed_seat_page,
+    };
+
+    let policy = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()?;
+    let max_append_bytes = state
+        .node_config
+        .routes
+        .iter()
+        .find(|route| {
+            route.response.source.as_deref()
+                == Some(ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref)
+        })
+        .unwrap()
+        .limits
+        .body_bytes_max;
+    let anchor_of = |opened: &Value| {
+        state
+            .state_store
+            .capture_thread_event_read_anchor(
+                opened["chain_root_id"].as_str().unwrap(),
+                opened["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let detail_of = |opened: &Value| {
+        state
+            .state_store
+            .get_thread(opened["thread_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap()
+    };
+    let (source_anchor, destination_anchor) = (anchor_of(source.1), anchor_of(destination.1));
+    let (source_detail, destination_detail) = (detail_of(source.1), detail_of(destination.1));
+    let (source_owner, destination_owner) = (
+        format!("session:{}", source.0),
+        format!("session:{}", destination.0),
+    );
+    fn context<'a>(
+        anchor: &'a ryeos_state::AuthoritativeThreadEventReadAnchor,
+        owner: &'a str,
+        detail: &'a ryeos_app::state_store::ThreadDetail,
+        opened: &'a Value,
+        max_append_bytes: u64,
+    ) -> TransferSeatContext<'a> {
+        TransferSeatContext {
+            anchor,
+            owner,
+            surface: &detail.item_ref,
+            client_ref: &detail.executor_ref,
+            presentation_id: opened["presentation_id"].as_str().unwrap(),
+            producer_incarnation: opened["producer_incarnation"].as_str().unwrap(),
+            revision: 0,
+            next_engine_seq: 0,
+            max_append_bytes,
+        }
+    }
+    let source_context = context(
+        &source_anchor,
+        &source_owner,
+        &source_detail,
+        source.1,
+        max_append_bytes,
+    );
+    let destination_context = context(
+        &destination_anchor,
+        &destination_owner,
+        &destination_detail,
+        destination.1,
+        max_append_bytes,
+    );
+    let completed = |seat: &ryeos_ui_presentation_contract::transfer::TransferSeat, anchor| {
+        let mut read = begin_fixed_seat_read(
+            state.state_store.clone(),
+            anchor,
+            seat,
+            std::slice::from_ref(transfer),
+        )
+        .unwrap();
+        while !read_fixed_seat_page(&mut read, 64, 2 * 1024 * 1024).unwrap() {}
+        finish_fixed_seat_read(read).unwrap()
+    };
+    let source_proof = completed(&transfer.source, source_anchor.clone());
+    let destination_proof = completed(&transfer.destination, destination_anchor.clone());
+    append_transfer_preparation_pair(
+        &state.state_store,
+        &policy.seat.kind,
+        &PreparationInputs {
+            transfer,
+            export,
+            source_proof: &source_proof,
+            destination_proof: &destination_proof,
+        },
+        TransferSeatPair {
+            target: &destination_context,
+            counterpart: &source_context,
+        },
+        TransferCutDependencies {
+            current_anchors: &[],
+            retired: &[],
+        },
+        || Ok(true),
+    )
+}
+
+#[tokio::test]
+async fn signed_transfer_preparation_does_not_consume_a_producer_sequence() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let (source, _, destination, _) = two_seats(&state, &session).await;
+    let export = set_export(
+        &state,
+        &session,
+        &source,
+        ryeos_client_base::ui::transfer_export::UiTransferExportMode::Copy,
+    );
+    let transfer = export_transfer(&source, 0, &destination, 0, &export);
+    let outcome = prepare_pair_directly(
+        &state,
+        (&session, &source),
+        (&session, &destination),
+        &transfer,
+        &export,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ryeos_app::state_store::CutPairAppendResult::Committed { .. }
+        ),
+        "{outcome:?}"
+    );
+
+    // The source's first producer sequence is still free after Prepared.
+    let ack = route(
+        &state,
+        &session,
+        &APPEND_DESCRIPTOR,
+        append_request(
+            &source,
+            "",
+            0,
+            &[json!({"key": "after.transfer", "value": true})],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ack["first_engine_seq"], "0");
+    assert_eq!(ack["appended"], 1);
+
+    // A second preparation of the same operation is never a second pair: the
+    // completed reads now hold the first one's phases.
+    prepare_pair_directly(
+        &state,
+        (&session, &source),
+        (&session, &destination),
+        &transfer,
+        &export,
+    )
+    .expect_err("a preparation repeats an existing source phase");
+}
+
+/// The compiled route shape the stream source accepts, without the signed
+/// bundle document that deploys it.
+fn history_route() -> ryeos_app::route_raw::RawRouteSpec {
+    serde_yaml::from_str(
+        "id: ui/api/session/seat/history\npath: /ui/api/session/seat/history\nmethods: [POST]\nauth: browser_session\nlimits: { body_bytes_max: 16384, timeout_ms: 0, concurrent_max: 8 }\nrequest: { body: json }\nresponse: { mode: event_stream, source: ui_seat_history }\n",
+    )
+    .unwrap()
+}
+
+async fn open_history_stream(
+    state: &Arc<ryeos_app::state::AppState>,
+    session_id: &str,
+    presentation_id: &str,
+    chain_root_id: &str,
+) -> anyhow::Result<ryeos_api::routes::invocation::RouteEventStream> {
+    use ryeos_api::routes::invocation::{
+        CompiledRouteInvocation, RouteInvocationContext, RouteInvocationResult,
+    };
+    use ryeos_api::routes::response_modes::event_stream_mode::{
+        EventStreamStrategy, StreamSourceCompiler,
+    };
+
+    let raw = history_route();
+    let EventStreamStrategy::BodyJson { invoker } =
+        ryeos_ui::invokers::seat_history_invocation::SeatHistorySourceFactory.compile(&raw)?
+    else {
+        anyhow::bail!("seat history route did not compile to POST JSON");
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("cookie", format!("ryeos_session={session_id}").parse()?);
+    let input = json!({"presentation_id": presentation_id, "chain_root_id": chain_root_id});
+    let context = |headers, principal| -> anyhow::Result<RouteInvocationContext> {
+        Ok(RouteInvocationContext {
+            route_id: raw.id.clone().into(),
+            method: axum::http::Method::POST,
+            uri: raw.path.parse()?,
+            captures: Default::default(),
+            headers,
+            body_raw: Vec::new(),
+            input: input.clone(),
+            principal,
+            workspace_lifeline: None,
+            launch_timings: None,
+            publication: None,
+            state: state.as_ref().clone(),
+            webhook_dedupe: Arc::new(Default::default()),
+        })
+    };
+    let auth = ryeos_ui::invokers::browser_session_invocation::CompiledBrowserSessionVerifier {
+        ui: get_ui_state(state).unwrap().clone(),
+    }
+    .invoke(context(headers, None)?)
+    .await?;
+    let RouteInvocationResult::Principal(principal) = auth else {
+        anyhow::bail!("browser session route did not authenticate");
+    };
+    let RouteInvocationResult::Stream(stream) = invoker
+        .invoke(context(Default::default(), Some(principal))?)
+        .await?
+    else {
+        anyhow::bail!("seat history route did not return a stream");
+    };
+    Ok(stream)
+}
+
+async fn collect_history_until_fence_or_eof(
+    mut stream: ryeos_api::routes::invocation::RouteEventStream,
+) -> anyhow::Result<Vec<ryeos_app::stream_envelope::RouteStreamEnvelope>> {
+    use tokio_stream::StreamExt;
+    let mut frames = Vec::new();
+    loop {
+        let Some(frame) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.events.next()).await?
+        else {
+            break;
+        };
+        let frame = frame.map_err(|never| match never {})?;
+        let completed = frame.event_type == "ui_seat.replay.complete.v1";
+        frames.push(frame);
+        if completed {
+            break;
+        }
+        if frames.len() >= 64 {
+            anyhow::bail!("seat history exceeded fixture frame bound before completion or EOF");
+        }
+    }
+    Ok(frames)
+}
+
+/// The stream's tasks hold clones of the state; a test must not end while one
+/// still does, or the host would see a live store at teardown.
+async fn wait_for_stream_release(state: &Arc<ryeos_app::state::AppState>, baseline: usize) {
+    for _ in 0..200 {
+        if Arc::strong_count(&state.state_store) <= baseline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the seat history stream never released the state it held");
+}
+
+async fn history_frames_until_fence_or_eof(
+    state: &Arc<ryeos_app::state::AppState>,
+    session_id: &str,
+    presentation_id: &str,
+    chain_root_id: &str,
+) -> anyhow::Result<Vec<ryeos_app::stream_envelope::RouteStreamEnvelope>> {
+    let baseline = Arc::strong_count(&state.state_store);
+    let frames = collect_history_until_fence_or_eof(
+        open_history_stream(state, session_id, presentation_id, chain_root_id).await?,
+    )
+    .await;
+    wait_for_stream_release(state, baseline).await;
+    frames
+}
+
+#[tokio::test]
+async fn signed_fixed_anchor_history_completes_for_current_seat() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    let frames = history_frames_until_fence_or_eof(
+        &state,
+        &session,
+        opened["presentation_id"].as_str().unwrap(),
+        opened["chain_root_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frames.first().unwrap().event_type,
+        "ui_seat.replay.begin.v1"
+    );
+    assert_eq!(
+        frames.last().unwrap().event_type,
+        "ui_seat.replay.complete.v1",
+        "a valid signed seat must reach the fixed-anchor completion fence"
+    );
+}
+
+#[tokio::test]
+async fn fixed_anchor_stream_rechecks_attachment_and_tip_before_completion() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+    use tokio_stream::StreamExt;
+
+    for revoke_root in [true, false] {
+        let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+        let session = activate(&state);
+        let state = Arc::new(state);
+        let opened = fresh(&state, &session).await;
+        let presentation_id = opened["presentation_id"].as_str().unwrap().to_owned();
+        let chain_root_id = opened["chain_root_id"].as_str().unwrap().to_owned();
+        // Four fully receipted intervals cannot fit alongside completion in
+        // the route's two-frame channel. After reading only Begin, the source
+        // cannot have published Complete, regardless of task scheduling.
+        for batch in 0..4_u64 {
+            let payloads = (0..32_u64)
+                .map(|offset| json!({"key": format!("stream.fixture.{}", batch * 32 + offset), "value": offset}))
+                .collect::<Vec<_>>();
+            route(
+                &state,
+                &session,
+                &APPEND_DESCRIPTOR,
+                append_request(&opened, "", batch * 32, &payloads),
+            )
+            .await
+            .unwrap();
+        }
+        let valid =
+            history_frames_until_fence_or_eof(&state, &session, &presentation_id, &chain_root_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            valid.last().unwrap().event_type,
+            "ui_seat.replay.complete.v1",
+            "the unmodified multi-frame history must independently complete"
+        );
+
+        let baseline = Arc::strong_count(&state.state_store);
+        let mut stream = open_history_stream(&state, &session, &presentation_id, &chain_root_id)
+            .await
+            .unwrap();
+        let begin = tokio::time::timeout(std::time::Duration::from_secs(5), stream.events.next())
+            .await
+            .unwrap()
+            .expect("Begin before mutation")
+            .unwrap();
+        assert_eq!(begin.event_type, "ui_seat.replay.begin.v1");
+        if revoke_root {
+            let ui = get_ui_state(&state).unwrap();
+            let held = ui.browser_sessions.get_session(&session).unwrap();
+            let root = held.attachments[&held.root_attachment_id].coordinate();
+            ui.browser_sessions
+                .revoke_attachment(&session, &root)
+                .unwrap();
+        } else {
+            // The anchor was captured before Begin. A subsequent admitted
+            // append must invalidate this provisional cut, not be silently
+            // omitted while its old anchor is advertised as current.
+            route(
+                &state,
+                &session,
+                &APPEND_DESCRIPTOR,
+                append_request(
+                    &opened,
+                    "",
+                    128,
+                    &[json!({"key": "stream.fixture.late", "value": true})],
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        let remaining = collect_history_until_fence_or_eof(stream).await.unwrap();
+        wait_for_stream_release(&state, baseline).await;
+        assert!(
+            remaining
+                .iter()
+                .all(|frame| frame.event_type != "ui_seat.replay.complete.v1"),
+            "revoked attachment or advanced signed tip must end without Complete (revoke_root={revoke_root})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn signed_orphan_producer_event_does_not_complete_fixed_anchor_history() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    state
+        .state_store
+        .append_events(
+            opened["chain_root_id"].as_str().unwrap(),
+            opened["thread_id"].as_str().unwrap(),
+            &[ryeos_app::state_store::NewEventRecord {
+                event_type: "seat.facet".into(),
+                storage_class: "indexed".into(),
+                payload: json!({"seq": 0, "operation_id": "orphan", "payload": {"key": "selection", "value": "unsettled"}}),
+            }],
+        )
+        .expect("signed orphan fixture commits one event");
+    let frames = history_frames_until_fence_or_eof(
+        &state,
+        &session,
+        opened["presentation_id"].as_str().unwrap(),
+        opened["chain_root_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frames.first().unwrap().event_type,
+        "ui_seat.replay.begin.v1"
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.event_type != "ui_seat.replay.complete.v1"),
+        "orphan producer testimony must end without a completion fence"
+    );
+}
+
+#[tokio::test]
+async fn a_transfer_bearing_seat_streams_its_proof_frames_before_completing() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let source = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        &state,
+        &session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let source_revision = observe(&state, &session, &source).await.unwrap().revision;
+    let destination_revision = observe(&state, &session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    let transfer = pair_transfer(
+        transfer_seat(&source, source_revision),
+        transfer_seat(&destination, destination_revision),
+    );
+    let next_engine_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    append_inbound(&state, &destination, next_engine_seq, &transfer);
+    let frames = history_frames_until_fence_or_eof(
+        &state,
+        &session,
+        destination["presentation_id"].as_str().unwrap(),
+        destination["chain_root_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let kinds = frames
+        .iter()
+        .map(|frame| frame.event_type.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds.first(), Some(&"ui_seat.replay.begin.v1"));
+    assert_eq!(kinds.last(), Some(&"ui_seat.replay.complete.v1"));
+    let proof = kinds
+        .iter()
+        .position(|kind| *kind == "ui_seat.replay.transfer_proof.v1")
+        .expect("the destination's inbound commitment is disclosed as a proof frame");
+    let first_events = kinds
+        .iter()
+        .position(|kind| *kind == "ui_seat.replay.events.v1")
+        .expect("the seat's own history is replayed");
+    assert!(proof < first_events, "proofs precede every canonical row");
+}
+
+/// The transfer service is deployed by a signed service document that is not
+/// part of this build's bundle yet, so the handler runs directly under the
+/// session's context rather than through the compiled service route.
+async fn transfer_route(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    input: Value,
+) -> anyhow::Result<Value> {
+    (ryeos_ui::handlers::ui_seat::TRANSFER_DESCRIPTOR.handler)(
+        input,
+        handler_context(session),
+        state.clone(),
+    )
+    .await
+}
+
+/// A closed view-set export holding one empty set owned by a Surface the
+/// source never mounted. It decodes and validates as an export, which is all
+/// the typed pair writer and the paired readers ask of it; binding it to a
+/// mounted source composition is the browser ingress's own, later check.
+fn set_export(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+    source: &Value,
+    mode: ryeos_client_base::ui::transfer_export::UiTransferExportMode,
+) -> Value {
+    use ryeos_client_base::ids::{PresentationId, SurfaceInstanceId, UiViewMountOwner, ViewSetId};
+    use ryeos_client_base::ui::binding::UiBindingAttachmentCoordinate;
+    use ryeos_client_base::ui::transfer_export::{
+        UI_TRANSFER_EXPORT_SCHEMA, UiTransferExport, UiTransferExportContent, UiTransferSetExport,
+    };
+    let held = get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(session)
+        .unwrap();
+    let root = held.attachments[&held.root_attachment_id].coordinate();
+    let export = UiTransferExport {
+        schema: UI_TRANSFER_EXPORT_SCHEMA,
+        mode,
+        content: UiTransferExportContent::ViewSets {
+            active_set: Some("empty".into()),
+            sets: vec![UiTransferSetExport {
+                handle: "empty".into(),
+                source_view_set_id: ViewSetId::new(1),
+                source_owner: UiViewMountOwner::Surface {
+                    presentation_id: PresentationId::try_new(
+                        source["presentation_id"].as_str().unwrap(),
+                    )
+                    .unwrap(),
+                    surface_instance_id: SurfaceInstanceId::try_new(
+                        "99999999-9999-4999-8999-999999999999",
+                    )
+                    .unwrap(),
+                },
+                binding: UiBindingAttachmentCoordinate {
+                    binding_attachment_id: root.binding_attachment_id,
+                    binding_generation: root.binding_generation,
+                    binding_digest: root.binding_digest,
+                },
+                seed: ryeos_client_base::surface::view_sets::ViewSetSeedSpec {
+                    schema: 2,
+                    id: "empty".into(),
+                    title: "Empty".into(),
+                    root: None,
+                    ..Default::default()
+                },
+                focused_view: None,
+                mounts: vec![],
+            }],
+        },
+    };
+    serde_json::to_value(export).unwrap()
+}
+
+fn empty_export(mode: &str) -> Value {
+    json!({"schema": 2, "mode": mode,
+        "content": {"kind": "view_sets", "active_set": null, "sets": []}})
+}
+
+fn export_transfer(
+    source: &Value,
+    source_revision: u64,
+    destination: &Value,
+    destination_revision: u64,
+    export: &Value,
+) -> ryeos_ui_presentation_contract::transfer::TransferIdentity {
+    ryeos_ui_presentation_contract::transfer::TransferIdentity {
+        operation_id: "33333333-3333-4333-8333-333333333333".into(),
+        source: transfer_seat(source, source_revision),
+        destination: transfer_seat(destination, destination_revision),
+        export_digest: ryeos_ui_presentation_contract::payload_digest::seat_payload_digest(export)
+            .unwrap(),
+    }
+}
+
+async fn two_seats(
+    state: &Arc<ryeos_app::state::AppState>,
+    session: &str,
+) -> (Value, u64, Value, u64) {
+    let source = fresh_distinct(
+        state,
+        session,
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+    )
+    .await;
+    let destination = fresh_distinct(
+        state,
+        session,
+        "00000000-0000-4000-8000-000000000030",
+        "00000000-0000-4000-8000-000000000031",
+    )
+    .await;
+    let source_revision = observe(state, session, &source).await.unwrap().revision;
+    let destination_revision = observe(state, session, &destination)
+        .await
+        .unwrap()
+        .revision;
+    (source, source_revision, destination, destination_revision)
+}
+
+#[tokio::test]
+async fn transfer_requests_refuse_unheld_seats_old_selectors_and_a_single_seat() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let foreign = activate(&state);
+    let state = Arc::new(state);
+    let (source, source_revision, destination, destination_revision) =
+        two_seats(&state, &session).await;
+    let anchor_of = |opened: &Value| {
+        state
+            .state_store
+            .capture_thread_event_read_anchor(
+                opened["chain_root_id"].as_str().unwrap(),
+                opened["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let (before_source, before_destination) = (anchor_of(&source), anchor_of(&destination));
+    let export = empty_export("copy");
+    let transfer = export_transfer(
+        &source,
+        source_revision,
+        &destination,
+        destination_revision,
+        &export,
+    );
+
+    // A session that holds neither seat has no standing to move anything.
+    let error = transfer_route(
+        &state,
+        &foreign,
+        json!({"action": "prepare", "transfer": transfer, "export": export, "freeze": null}),
+    )
+    .await
+    .expect_err("a foreign session holds neither transfer seat");
+    assert!(
+        format!("{error:#}").to_lowercase().contains("presentation")
+            || format!("{error:#}").to_lowercase().contains("forbidden"),
+        "{error:#}"
+    );
+
+    // Predecessor lifecycle selectors and unknown actions are not requests.
+    for action in ["settle", "reap", "transfer_lifecycle_v2"] {
+        transfer_route(
+            &state,
+            &session,
+            json!({"action": action, "transfer": transfer}),
+        )
+        .await
+        .expect_err("an old selector is not a transfer action");
+    }
+
+    // One seat cannot be both ends.
+    let mut single = transfer.clone();
+    single.destination = single.source.clone();
+    transfer_route(
+        &state,
+        &session,
+        json!({"action": "prepare", "transfer": single, "export": export, "freeze": null}),
+    )
+    .await
+    .expect_err("a transfer needs two distinct seats");
+
+    // Neither end advanced: nothing was written by any refusal.
+    for (opened, before) in [
+        (&source, &before_source),
+        (&destination, &before_destination),
+    ] {
+        let anchor = state
+            .state_store
+            .capture_thread_event_read_anchor(
+                opened["chain_root_id"].as_str().unwrap(),
+                opened["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(&anchor, before);
+    }
+}
+
+#[tokio::test]
+async fn a_move_without_its_receipted_freeze_and_a_copy_with_one_are_both_refused() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let (source, source_revision, destination, destination_revision) =
+        two_seats(&state, &session).await;
+    let before = state
+        .state_store
+        .capture_thread_event_read_anchor(
+            source["chain_root_id"].as_str().unwrap(),
+            source["thread_id"].as_str().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+
+    let move_export = empty_export("move");
+    let moved = export_transfer(
+        &source,
+        source_revision,
+        &destination,
+        destination_revision,
+        &move_export,
+    );
+    let error = transfer_route(
+        &state,
+        &session,
+        json!({"action": "prepare", "transfer": moved, "export": move_export, "freeze": null}),
+    )
+    .await
+    .expect_err("a MOVE is admitted only through the receipted typed Core freeze");
+    assert!(format!("{error:#}").contains("freeze"), "{error:#}");
+
+    let copy_export = empty_export("copy");
+    let copied = export_transfer(
+        &source,
+        source_revision,
+        &destination,
+        destination_revision,
+        &copy_export,
+    );
+    let links = json!({
+        "preparation": {"event_hash": "a".repeat(64), "chain_seq": 4},
+        "completion": {"event_hash": "b".repeat(64), "chain_seq": 5},
+    });
+    transfer_route(
+        &state,
+        &session,
+        json!({"action": "prepare", "transfer": copied, "export": copy_export, "freeze": links}),
+    )
+    .await
+    .expect_err("a COPY cannot carry MOVE freeze links");
+
+    assert_eq!(
+        state
+            .state_store
+            .capture_thread_event_read_anchor(
+                source["chain_root_id"].as_str().unwrap(),
+                source["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap(),
+        before,
+        "a refused preparation writes nothing"
+    );
+}
+
+#[tokio::test]
+async fn an_export_that_snapshots_nothing_is_refused_before_any_write() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let (source, source_revision, destination, destination_revision) =
+        two_seats(&state, &session).await;
+    let export = empty_export("copy");
+    let transfer = export_transfer(
+        &source,
+        source_revision,
+        &destination,
+        destination_revision,
+        &export,
+    );
+    let anchor_of = |opened: &Value| {
+        state
+            .state_store
+            .capture_thread_event_read_anchor(
+                opened["chain_root_id"].as_str().unwrap(),
+                opened["thread_id"].as_str().unwrap(),
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let (before_source, before_destination) = (anchor_of(&source), anchor_of(&destination));
+    let error = transfer_route(
+        &state,
+        &session,
+        json!({"action": "prepare", "transfer": transfer, "export": export, "freeze": null}),
+    )
+    .await
+    .expect_err("an empty export is not a snapshot of the source composition");
+    assert!(
+        format!("{error:#}").contains("inventory is empty"),
+        "{error:#}"
+    );
+    assert_eq!(anchor_of(&source), before_source);
+    assert_eq!(anchor_of(&destination), before_destination);
+}
+
+#[tokio::test]
+async fn a_prepared_pair_is_read_through_its_cut_by_every_seat_service() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    install_transfer_composition();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let (source, _, destination, _) = two_seats(&state, &session).await;
+    let export = set_export(
+        &state,
+        &session,
+        &source,
+        ryeos_client_base::ui::transfer_export::UiTransferExportMode::Copy,
+    );
+    let transfer = export_transfer(&source, 0, &destination, 0, &export);
+    let outcome = prepare_pair_directly(
+        &state,
+        (&session, &source),
+        (&session, &destination),
+        &transfer,
+        &export,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ryeos_app::state_store::CutPairAppendResult::Committed { .. }
+        ),
+        "{outcome:?}"
+    );
+
+    // The session bootstraps through the completed pair, the destination
+    // observes and appends, and the source streams its proof before completing.
+    let current = ryeos_ui::handlers::ui_session_current::handle(
+        json!({}),
+        handler_context(&session),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(current["presentations"].as_array().unwrap().len(), 2);
+    observe(&state, &session, &destination).await.unwrap();
+    let destination_seq: u64 = destination["next_engine_seq"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    route(
+        &state,
+        &session,
         &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
         append_request(
-            &second,
-            "00000000-0000-4000-8000-000000000006",
-            0,
-            &[json!({ "key": "selection", "value": "foreign" })],
+            &destination,
+            "",
+            destination_seq,
+            &[json!({"key": "after.prepared", "value": true})],
         ),
-        handler_context(&foreign_id),
-        state,
     )
     .await
-    .expect_err("foreign session must not append an owned seat");
+    .unwrap();
+    let frames = history_frames_until_fence_or_eof(
+        &state,
+        &session,
+        source["presentation_id"].as_str().unwrap(),
+        source["chain_root_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let kinds = frames
+        .iter()
+        .map(|frame| frame.event_type.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        kinds.contains(&"ui_seat.replay.transfer_proof.v1"),
+        "{kinds:?}"
+    );
+    assert_eq!(kinds.last(), Some(&"ui_seat.replay.complete.v1"));
+}
+
+#[tokio::test]
+async fn retained_surface_close_repairs_a_lost_projection_without_revoking_root_or_seat() {
+    use ryeos_ui::handlers::ui_seat::{APPEND_DESCRIPTOR, OPEN_DESCRIPTOR, TOUCH_DESCRIPTOR};
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let (session_id, context, original, coordinate) =
+        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/assistant-observe")
+            .await;
+    let state = Arc::new(state);
+    let ui = get_ui_state(&state).unwrap();
+    let before = ui.browser_sessions.get_session(&session_id).unwrap();
+    let membership = &before.presentations[&original.presentation_id];
+    let surface = membership.public_descriptor().surfaces[0].clone();
+    let original_claim = json!({"presentation_id":original.presentation_id,"chain_root_id":membership.chain_root_id.clone().unwrap(),"thread_id":original.thread_id,
+        "producer_incarnation":original.producer_incarnation});
+    let rotated = claim(
+        &state,
+        &session_id,
+        &original_claim,
+        &uuid::Uuid::new_v4().to_string(),
+        json!({"kind":"takeover","expected_producer_incarnation":original.producer_incarnation}),
+    )
+    .await
+    .unwrap();
+    let closure = json!({"presentation_id":original.presentation_id,
+        "surface_instance_id":surface.surface_instance_id,"binding":surface.binding});
+    let mut stale = append_request(
+        &original_claim,
+        &uuid::Uuid::new_v4().to_string(),
+        0,
+        std::slice::from_ref(&closure),
+    );
+    stale["events"][0]["event_type"] = json!(ryeos_client_base::ui::seat::SURFACE_CLOSED_EVENT);
+    identify_append(&original_claim, &mut stale);
+    route(&state, &session_id, &APPEND_DESCRIPTOR, stale)
+        .await
+        .expect_err("replaced writer cannot close a Surface");
+    assert_eq!(
+        ui.browser_sessions
+            .get_session(&session_id)
+            .unwrap()
+            .presentations[&original.presentation_id]
+            .public_descriptor()
+            .surfaces
+            .len(),
+        1
+    );
+
+    // Model the precise crash gap: the complete atomic producer batch committed,
+    // but the transient membership projection and response were not updated.
+    let detail = state
+        .state_store
+        .get_thread(&original.thread_id)
+        .unwrap()
+        .unwrap();
+    let event_type = ryeos_client_base::ui::seat::SURFACE_CLOSED_EVENT;
+    let semantic = json!([{"engine_seq":0,"event_type":event_type,"payload":closure.clone()}]);
+    let payload_digest = ryeos_client_base::ui::seat_payload_digest(&semantic).unwrap();
+    let operation_id = ryeos_client_base::ui::admission_operation::UiSeatAppendIdentity {
+        presentation_id: original.presentation_id.clone(),
+        chain_root_id: detail.chain_root_id.clone(),
+        thread_id: detail.thread_id.clone(),
+        producer_incarnation: rotated["producer_incarnation"].as_str().unwrap().into(),
+        first_engine_seq: 0,
+        last_engine_seq: 0,
+        event_count: 1,
+        payload_digest: payload_digest.clone(),
+    }
+    .derive_identity()
+    .unwrap();
+    state.threads.append_thread_events(&detail.chain_root_id,&detail.thread_id,&[
+        ryeos_app::state_store::NewEventRecord {
+            event_type:event_type.into(),
+            storage_class:"indexed".into(),payload:json!({"seq":0,"operation_id":surface.surface_instance_id,"payload":closure}),
+        },
+        ryeos_app::state_store::NewEventRecord {
+            event_type:"ui_seat.append_receipt.v2".into(),
+            storage_class:"indexed".into(),
+            payload:json!({"schema_version":"ryeos.ui.seat.append-receipt.v2",
+                "producer_incarnation":rotated["producer_incarnation"],
+                "operation_id":operation_id,"first_engine_seq":0,"last_engine_seq":0,
+                "event_count":1,"payload_digest":payload_digest}),
+        },
+    ]).unwrap().expect("running seat persists close evidence");
+    assert_eq!(
+        ui.browser_sessions
+            .get_session(&session_id)
+            .unwrap()
+            .presentations[&original.presentation_id]
+            .public_descriptor()
+            .surfaces
+            .len(),
+        1
+    );
+    let current =
+        ryeos_ui::handlers::ui_session_current::handle(json!({}), context.clone(), state.clone())
+            .await
+            .unwrap();
+    let after = ui.browser_sessions.get_session(&session_id).unwrap();
+    assert!(
+        after.presentations[&original.presentation_id]
+            .public_descriptor()
+            .surfaces
+            .is_empty()
+    );
+    assert_eq!(
+        after.attachments.len(),
+        before.attachments.len(),
+        "history remains retained"
+    );
+    assert!(
+        ui.browser_sessions
+            .require_presentation_attachment(
+                &session_id,
+                &original.presentation_id,
+                &coordinate,
+                state.node_policy.generation_digest()
+            )
+            .is_err()
+    );
+    assert!(
+        ui.browser_sessions
+            .require_presentation_attachment(
+                &session_id,
+                &original.presentation_id,
+                &membership.root_coordinate,
+                state.node_policy.generation_digest()
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        state
+            .state_store
+            .get_thread(&original.thread_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    let attachments = current["binding_attachments"].as_array().unwrap();
+    assert!(
+        !attachments
+            .iter()
+            .any(|item| item["binding_attachment_id"] == coordinate.binding_attachment_id)
+    );
+    assert!(
+        attachments.iter().any(|item| item["binding_attachment_id"]
+            == membership.root_coordinate.binding_attachment_id)
+    );
+    // Repair is read-only with respect to producer control: the current writer
+    // can still touch its presentation, and a repeated bootstrap is stable.
+    route(
+        &state,
+        &session_id,
+        &TOUCH_DESCRIPTOR,
+        json!({"presentation_id":rotated["presentation_id"],
+        "thread_id":rotated["thread_id"],"producer_incarnation":rotated["producer_incarnation"]}),
+    )
+    .await
+    .unwrap();
+    let observe = route(&state,&session_id,&OPEN_DESCRIPTOR,json!({"action":"observe",
+        "presentation_id":rotated["presentation_id"],"thread_id":rotated["thread_id"],"chain_root_id":rotated["chain_root_id"]})).await.unwrap();
+    assert_eq!(
+        observe["producer"]["producer_incarnation"],
+        rotated["producer_incarnation"]
+    );
+    assert_eq!(
+        ryeos_ui::handlers::ui_session_current::handle(json!({}), context, state)
+            .await
+            .unwrap()["binding_attachments"],
+        current["binding_attachments"]
+    );
+}
+
+#[tokio::test]
+async fn an_executable_admission_the_signed_binding_does_not_declare_is_refused_by_the_validator() {
+    use ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR;
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let session = activate(&state);
+    let state = Arc::new(state);
+    let opened = fresh(&state, &session).await;
+    let thread = opened["thread_id"].as_str().unwrap();
+    let root = opened["chain_root_id"].as_str().unwrap();
+    let held = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session)
+        .unwrap();
+    let coordinate = held.attachments[&held.root_attachment_id].coordinate();
+    let body_limit = |service_ref: &str| {
+        state
+            .node_config
+            .routes
+            .iter()
+            .find(|route| route.response.source.as_deref() == Some(service_ref))
+            .map(|route| route.limits.body_bytes_max)
+            .unwrap()
+    };
+    let operation_id = "00000000-0000-4000-8000-000000000071";
+    let presentation = opened["presentation_id"].as_str().unwrap();
+    let mut prepared: ryeos_client_base::ui::admission_operation::UiPreparedPresentationOperation =
+        serde_json::from_value(json!({
+            "schema": 2, "prepared_engine_seq": 0, "operation_id": operation_id,
+            "producer": {
+                "presentation_id": presentation, "thread_id": thread,
+                "producer_incarnation": opened["producer_incarnation"],
+            },
+            "root_binding": coordinate,
+            "request_bounds": {
+                "max_request_bytes": body_limit(
+                    ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref),
+                "max_input_bytes": body_limit(
+                    ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref),
+                "max_seat_append_bytes": body_limit(APPEND_DESCRIPTOR.service_ref),
+            },
+            "body": {
+                "kind": "admission", "purpose": "resume_particular_view_set",
+                "surface_open_target": null,
+                "particular_selection": {
+                    "kind": "view_set", "id": "current", "expected_revision": 0,
+                    "surface_ref": "surface:ryeos/ui/base",
+                },
+                "invocation_origin": format!("seat:{presentation}:dialog:left"),
+                "request": {
+                    "binding_attachment_id": coordinate.binding_attachment_id,
+                    "binding_generation": coordinate.binding_generation,
+                    "binding_digest": coordinate.binding_digest,
+                    "coordinate": {
+                        "kind": "affordance", "view_ref": "view:test/undeclared",
+                        "affordance_id": "open",
+                    },
+                    "payload": {"kind": "selection",
+                        "record": {"creation_request_id": operation_id}},
+                },
+                "success_notice": null,
+            },
+        }))
+        .unwrap();
+    prepared.assign_identity().unwrap();
+    let before = state
+        .state_store
+        .capture_thread_event_read_anchor(root, thread)
+        .unwrap()
+        .unwrap();
+    let mut request = append_request(&opened, "", 0, &[serde_json::to_value(&prepared).unwrap()]);
+    request["events"][0]["event_type"] = json!("seat.presentation_operation.prepared");
+    identify_append(&opened, &mut request);
+    let error = route(&state, &session, &APPEND_DESCRIPTOR, request)
+        .await
+        .expect_err("a preparation the signed binding does not declare must be refused");
+    let message = format!("{error:#}");
+    // The validator refuses with Forbidden, which the service dispatch
+    // reports as the service's own refusal; the retired stopgap refused with
+    // a bad request.
+    assert!(
+        message.contains("service_refused"),
+        "the signed-binding validator must refuse: {message}"
+    );
+    assert_eq!(
+        state
+            .state_store
+            .capture_thread_event_read_anchor(root, thread)
+            .unwrap()
+            .unwrap()
+            .tip(),
+        before.tip(),
+        "the refused preparation must not advance the signed seat: {message}"
+    );
+}
+
+#[tokio::test]
+async fn thread_inspection_facets_cross_a_fixed_anchor_page_boundary() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let (session_id, ctx, producer, _) =
+        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/assistant-observe")
+            .await;
+    let detail = state
+        .state_store
+        .get_thread(&producer.thread_id)
+        .unwrap()
+        .unwrap();
+    let mut events = vec![ryeos_app::state_store::NewEventRecord {
+        event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+        storage_class: "indexed".into(),
+        payload: json!({"key": "phase", "value": "old"}),
+    }];
+    for index in 0..64 {
+        events.push(ryeos_app::state_store::NewEventRecord {
+            event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+            storage_class: "indexed".into(),
+            payload: json!({"key": format!("filler.{index}"), "value": "present"}),
+        });
+    }
+    events.push(ryeos_app::state_store::NewEventRecord {
+        event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+        storage_class: "indexed".into(),
+        payload: json!({"key": "phase", "value": "new"}),
+    });
+    events.push(ryeos_app::state_store::NewEventRecord {
+        event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+        storage_class: "journal".into(),
+        payload: json!({"key": "phase", "value": "journal"}),
+    });
+    state
+        .threads
+        .append_thread_events(&detail.chain_root_id, &detail.thread_id, &events)
+        .unwrap()
+        .expect("signed facet fixture commits");
+    let session = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .unwrap();
+    let attachment = session.attachments[&session.root_attachment_id].clone();
+    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
+            json!({"thread_id": producer.thread_id, "event_limit": 1}),
+            ctx,
+            Arc::new(state),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(inspected["facets"]["phase"], "new");
+    assert_eq!(inspected["facets"]["filler.0"], "present");
+    assert_eq!(inspected["facets"]["filler.63"], "present");
+    // The launch facts are always an explicit row; a thread that recorded no
+    // realization says so instead of defaulting a containment answer.
+    let launch_facts = inspected["launch_facts"].as_array().unwrap();
+    assert_eq!(launch_facts.len(), 1);
+    match launch_facts[0]["state"].as_str().unwrap() {
+        "recorded" => assert!(launch_facts[0]["properties"].is_object()),
+        "absent" | "unavailable" => {
+            assert!(launch_facts[0].get("properties").is_none());
+            assert!(launch_facts[0]["reason"].is_string());
+        }
+        other => panic!("unexpected launch facts state {other}"),
+    }
+    assert!(
+        inspected["evidence_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["subject"] == "facets" && entry["state"] == "complete" })
+    );
+}
+
+#[tokio::test]
+async fn thread_inspection_does_not_publish_a_partial_facet_map_at_page_budget() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let (session_id, ctx, producer, _) =
+        test_state::live_presentation_with_surface(&state, "surface:ryeos/ui/assistant-observe")
+            .await;
+    let detail = state
+        .state_store
+        .get_thread(&producer.thread_id)
+        .unwrap()
+        .unwrap();
+    state
+        .threads
+        .append_thread_events(
+            &detail.chain_root_id,
+            &detail.thread_id,
+            &[ryeos_app::state_store::NewEventRecord {
+                event_type: ryeos_state::event_types::THREAD_FACET_SET.into(),
+                storage_class: "indexed".into(),
+                payload: json!({"key": "phase", "value": "old"}),
+            }],
+        )
+        .unwrap()
+        .expect("signed facet fixture commits");
+    // More than the inspection reader's eight 64-event pages. Journal
+    // testimony is signed but not a facet; it must not turn an unfinished
+    // walk into an authoritative empty or partial facet collection.
+    for batch in 0..9 {
+        let events = (0..64)
+            .map(|index| ryeos_app::state_store::NewEventRecord {
+                event_type: "ui.test.facet-history-padding".into(),
+                storage_class: "journal".into(),
+                payload: json!({"batch": batch, "index": index}),
+            })
+            .collect::<Vec<_>>();
+        state
+            .threads
+            .append_thread_events(&detail.chain_root_id, &detail.thread_id, &events)
+            .unwrap()
+            .expect("signed journal fixture commits");
+    }
+    let session = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .unwrap();
+    let attachment = session.attachments[&session.root_attachment_id].clone();
+    let inspected = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_threads::INSPECT_DESCRIPTOR.handler)(
+            json!({"thread_id": producer.thread_id, "event_limit": 1}),
+            ctx,
+            Arc::new(state),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(inspected["facets"], json!({}));
+    assert!(
+        inspected["evidence_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["subject"] == "facets"
+                    && entry["state"] == "unavailable"
+                    && entry["reason"] == "signed_facet_map_not_proven"
+            })
+    );
 }

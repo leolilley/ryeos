@@ -83,6 +83,7 @@ pub fn run_verify(params: VerifyParams, engine: &Engine) -> Result<VerifyRun> {
     let batch_mode = total > 1;
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "inspect-tool".to_string(),
             scopes: vec!["bundle.read".to_string()],

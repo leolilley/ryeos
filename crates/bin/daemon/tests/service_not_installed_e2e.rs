@@ -3,25 +3,20 @@
 //! error (404) with the installed-bundle list — not an opaque
 //! `internal: not found` 500.
 //!
-//! Downstream motivation: a lean hosted-node image (core + hosted-node
-//! policy, no standard) receiving `ryeos remote run <node>
+//! Downstream motivation: a lean hosted-node image (core only, no
+//! scheduling bundle) receiving `ryeos remote run <node>
 //! service:scheduler/register` must tell the operator *why* the service
 //! is missing and what is actually installed.
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::DaemonHarness;
 
-/// Core-only node: `service:scheduler/register` ships in the standard
+/// Core-only node: `service:scheduler/register` ships in the scheduling
 /// bundle, which is deliberately NOT registered here.
 #[tokio::test]
 async fn execute_missing_service_returns_service_not_installed() -> anyhow::Result<()> {
-    let (harness, _fixture) = DaemonHarness::start_fast_with(
-        // No plant hook: only the core bundle is registered.
-        |_state_path, _user_space, _fixture| Ok(()),
-        |_| {},
-    )
-    .await?;
+    let (harness, _fixture) = DaemonHarness::start_fast_core_only_prepared().await?;
 
     let project = harness.state_path.display().to_string();
     let (status, body) = harness
@@ -56,9 +51,15 @@ async fn execute_missing_service_returns_service_not_installed() -> anyhow::Resu
         installed.iter().any(|b| b == "core"),
         "installed_bundles must list core, got: {installed:?}"
     );
+    for workflow in ["knowledge", "directive", "graph", "ryeos-docs"] {
+        assert!(
+            !installed.iter().any(|b| b == workflow),
+            "{workflow} must not be listed on a core-only node, got: {installed:?}"
+        );
+    }
     assert!(
-        !installed.iter().any(|b| b == "standard"),
-        "standard must not be listed on a core-only node, got: {installed:?}"
+        !installed.iter().any(|b| b == "scheduling"),
+        "scheduling must not be listed on a core-only node, got: {installed:?}"
     );
 
     assert!(
@@ -80,8 +81,7 @@ async fn execute_missing_service_returns_service_not_installed() -> anyhow::Resu
 /// `EngineError::ItemNotFound` only).
 #[tokio::test]
 async fn installed_service_does_not_map_to_not_installed() -> anyhow::Result<()> {
-    let (harness, _fixture) =
-        DaemonHarness::start_fast_with(|_state_path, _user_space, _fixture| Ok(()), |_| {}).await?;
+    let (harness, _fixture) = DaemonHarness::start_fast_core_only_prepared().await?;
 
     let project = harness.state_path.display().to_string();
     // bundle.list ships in core and takes no params — must succeed.
@@ -106,8 +106,7 @@ async fn installed_service_does_not_map_to_not_installed() -> anyhow::Result<()>
 /// registered bundles with their installed paths.
 #[tokio::test]
 async fn system_routes_reports_routes_and_bundles() -> anyhow::Result<()> {
-    let (harness, _fixture) =
-        DaemonHarness::start_fast_with(|_state_path, _user_space, _fixture| Ok(()), |_| {}).await?;
+    let (harness, _fixture) = DaemonHarness::start_fast_core_only_prepared().await?;
 
     let project = harness.state_path.display().to_string();
     let (status, body) = harness

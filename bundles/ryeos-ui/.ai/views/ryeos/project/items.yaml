@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:09Z:86671c46763baf1e473cbfa79f3cda418037ff7617a8a39737709a9f989266bb:bzRa/J8JisMLgiIYsL0G+EnOKWFKNadgKx4/xIW8Og5QQTGwAEPbCzW61tkx8UguAN71LR06grUxSDAg8eg9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T05:58:47Z:10a985714cb2dc5e4bb842b3832cb01f82cee9221f315cc8c4fdb052e823818a:LFvTmk599jqLfIYcNYXDYH4VgXJkO6eWRGwMRtNDklDPiq+X7S84jeGuEUtArN17dGoF+JAfpjsf/9+Z0gzmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-items
 title: Items
 version: "1.0.0"
@@ -12,13 +12,16 @@ sources:
       limit: 500
       project_path: "@session:project_root"
     collection: items
+    coverage: coverage
     requires_project: true
 projections:
   columns:
     - label: item
       field: canonical_ref
+      role: ref
     - label: kind
       field: item_kind
+      role: kind
     - label: space
       field: space
     - label: trust
@@ -41,6 +44,8 @@ affordances:
       facet: selection
       value:
         item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/inspector
+      drill: true
   - id: explain
     label: Explain
     invoke:

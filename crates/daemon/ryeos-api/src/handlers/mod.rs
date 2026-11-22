@@ -35,22 +35,36 @@ pub mod commands_get;
 pub mod commands_list;
 pub mod commands_submit;
 pub mod commands_wait;
-pub mod content_pin;
 pub mod credential_profiles;
 pub mod dedicated_sessions;
+pub mod endorsements;
 pub mod events_chain_replay;
 pub mod events_replay;
+pub mod external_content_accept_qualification_testimony;
 pub mod external_content_activate;
 pub mod external_content_bind;
+pub mod external_content_export_qualification_testimony;
 pub mod external_content_import;
+pub mod external_content_product_accept;
+pub mod external_content_product_offer;
+pub mod external_content_product_push;
 pub mod external_content_product_receive;
 pub mod external_content_products;
+pub mod external_content_rebind;
 pub mod external_content_release;
 pub mod external_content_scrub;
+pub mod external_content_unregister;
+pub mod external_execution_candidate_program;
 pub mod external_execution_channel;
+pub mod external_execution_product_program;
+pub mod external_execution_provider_inventory;
+pub mod external_execution_settle_unknown_allocation;
+pub mod external_execution_status;
 pub mod federated_follow;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
+pub(crate) mod grant_schedules;
+pub(crate) mod grant_terms;
 pub mod health_status;
 pub mod identity_public_key;
 pub mod ingest_ignore;
@@ -58,13 +72,21 @@ pub mod items_effective;
 pub mod launch_cancel;
 pub mod launch_status;
 pub mod maintenance_gc;
+#[cfg(feature = "model-provider-setup")]
 pub mod model_providers_validate;
+pub mod node_locality;
+pub mod node_locality_groups;
+pub mod node_machine_declare;
+pub mod node_machine_list;
+pub mod node_machine_remove;
 pub mod node_status;
 pub mod objects_closure_describe;
 pub mod objects_closure_get;
 pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
+pub mod objects_stage_chunk;
+pub mod offline_operations;
 pub mod product_qualification_launch;
 pub mod project_apply_snapshot;
 pub mod project_snapshot_status;
@@ -72,21 +94,28 @@ pub mod project_status;
 pub mod push_head;
 pub(crate) mod qualification_project_context;
 pub mod rebuild;
+pub mod records;
 pub mod remote_admit;
+pub mod remote_admit_principal;
 pub mod remote_authorize;
 pub mod remote_bind_project;
 pub mod remote_bundle_install;
 pub mod remote_configure;
+pub mod remote_delegation;
+pub mod remote_descriptor;
 pub mod remote_doctor;
 pub mod remote_execute;
 pub mod remote_import_admitted_head;
 pub mod remote_import_admitted_root;
 pub mod remote_list;
+pub mod remote_offline_operations;
+pub mod remote_pin;
 pub mod remote_project_status;
 pub mod remote_pull;
 pub mod remote_pull_worker_result;
 pub mod remote_push;
 pub mod remote_reconcile_project_head;
+pub mod remote_revoke;
 pub mod remote_run;
 pub mod remote_status;
 pub mod remote_sync_admitted_heads;
@@ -97,15 +126,25 @@ pub mod remote_vault_delete;
 pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod remote_worker_workflows;
+pub mod renew_key;
+pub mod revisions;
+pub mod revoke_key;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_deregister;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_explain;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_list;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_pause;
+#[cfg(feature = "scheduling")]
+pub mod scheduler_reauthorize;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_register;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_resume;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_show_fires;
-pub mod seat;
-pub mod sign;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
 pub mod system_routes;
@@ -118,9 +157,11 @@ pub mod threads_list;
 pub mod threads_receipts;
 pub mod threads_set_facet;
 pub mod threads_tail;
+pub mod threads_timeline;
 pub mod tool_env_check;
 pub mod trace_branch;
 pub mod trace_inspect;
+pub mod trust_list;
 pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
@@ -146,12 +187,20 @@ pub const ALL: &[ServiceDescriptor] = &[
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     node_status::DESCRIPTOR,
+    node_locality::DESCRIPTOR,
+    node_locality_groups::DESCRIPTOR,
+    node_machine_declare::DESCRIPTOR,
+    node_machine_list::DESCRIPTOR,
+    node_machine_remove::DESCRIPTOR,
+    #[cfg(feature = "model-provider-setup")]
     model_providers_validate::DESCRIPTOR,
     system_routes::DESCRIPTOR,
     ingest_ignore::DESCRIPTOR,
     objects_has::DESCRIPTOR,
     objects_put::DESCRIPTOR,
     objects_get::DESCRIPTOR,
+    objects_get::ANY_DESCRIPTOR,
+    objects_stage_chunk::DESCRIPTOR,
     objects_closure_describe::DESCRIPTOR,
     objects_closure_get::DESCRIPTOR,
     push_head::DESCRIPTOR,
@@ -164,18 +213,13 @@ pub const ALL: &[ServiceDescriptor] = &[
     threads_get::DESCRIPTOR,
     threads_receipts::DESCRIPTOR,
     threads_tail::DESCRIPTOR,
+    threads_timeline::DESCRIPTOR,
     threads_cancel::DESCRIPTOR,
     threads_children::DESCRIPTOR,
     threads_set_facet::DESCRIPTOR,
     commands_dispatch::DESCRIPTOR,
     commands_list::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
-    sign::DESCRIPTOR,
-    seat::OPEN_DESCRIPTOR,
-    seat::LIST_DESCRIPTOR,
-    seat::APPEND_DESCRIPTOR,
-    seat::TOUCH_DESCRIPTOR,
-    seat::CLOSE_DESCRIPTOR,
     threads_input::DESCRIPTOR,
     accounting_summary::DESCRIPTOR,
     usage_summary::DESCRIPTOR,
@@ -183,23 +227,44 @@ pub const ALL: &[ServiceDescriptor] = &[
     events_chain_replay::DESCRIPTOR,
     external_content_import::DESCRIPTOR,
     external_content_product_receive::DESCRIPTOR,
+    external_content_product_offer::DESCRIPTOR,
+    external_content_product_accept::DESCRIPTOR,
+    external_content_product_push::DESCRIPTOR,
+    external_content_export_qualification_testimony::DESCRIPTOR,
+    external_content_accept_qualification_testimony::DESCRIPTOR,
     external_content_products::CAPTURE_DESCRIPTOR,
     external_content_products::PRODUCE_RUNTIME_SNAPSHOT_DESCRIPTOR,
+    external_content_products::CONTINUE_RUNTIME_SNAPSHOT_CREATE_DESCRIPTOR,
+    external_content_products::BOOTSTRAP_RUNTIME_SOURCE_DESCRIPTOR,
+    external_content_products::GET_BOOTSTRAP_RUNTIME_SOURCE_DESCRIPTOR,
+    external_content_products::OBSERVE_BOOTSTRAP_RUNTIME_SOURCE_DESCRIPTOR,
+    external_content_products::TERMINATE_BOOTSTRAP_RUNTIME_SOURCE_DESCRIPTOR,
+    external_content_products::GET_BOOTSTRAP_RUNTIME_SOURCE_TERMINATION_DESCRIPTOR,
     external_content_products::GET_RUNTIME_SNAPSHOT_DESCRIPTOR,
     external_content_products::OBSERVE_RUNTIME_SNAPSHOT_READINESS_DESCRIPTOR,
     external_content_products::CREATE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
     external_content_products::VERIFY_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
+    external_content_products::OBSERVE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
+    external_content_products::RUN_PRODUCT_QUALIFICATION_WORKER_DESCRIPTOR,
     external_content_products::TERMINATE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
     external_content_products::GET_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
     external_content_products::GET_RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_DESCRIPTOR,
     external_content_products::GET_DESCRIPTOR,
     external_content_products::COMPOSE_DESCRIPTOR,
     external_content_products::QUALIFY_DESCRIPTOR,
+    external_content_products::QUALIFY_CONTENT_DESCRIPTOR,
+    external_content_products::DERIVE_CONSUMER_QUALIFICATION_CONTEXT_DESCRIPTOR,
     product_qualification_launch::DESCRIPTOR,
+    product_qualification_launch::CONTENT_DESCRIPTOR,
     external_content_activate::DESCRIPTOR,
     external_content_bind::DESCRIPTOR,
+    external_content_rebind::BINDINGS_DESCRIPTOR,
+    external_content_rebind::REBIND_DESCRIPTOR,
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
+    external_content_unregister::DESCRIPTOR,
+    external_execution_candidate_program::DESCRIPTOR,
+    external_execution_product_program::DESCRIPTOR,
     external_execution_channel::DESCRIPTOR,
     external_execution_channel::EXCHANGE_DESCRIPTOR,
     trace_branch::DESCRIPTOR,
@@ -207,11 +272,11 @@ pub const ALL: &[ServiceDescriptor] = &[
     commands_submit::DESCRIPTOR,
     commands_get::DESCRIPTOR,
     commands_wait::DESCRIPTOR,
-    content_pin::DESCRIPTOR,
     credential_profiles::CREATE_DESCRIPTOR,
     credential_profiles::GET_DESCRIPTOR,
     credential_profiles::LIST_DESCRIPTOR,
     credential_profiles::CONFIRM_DESCRIPTOR,
+    credential_profiles::ABANDON_LOGIN_DESCRIPTOR,
     credential_profiles::REVOKE_DESCRIPTOR,
     credential_profiles::DELETE_DESCRIPTOR,
     dedicated_sessions::STATUS_DESCRIPTOR,
@@ -238,6 +303,13 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_install::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
+    trust_list::LIST_DESCRIPTOR,
+    records::GET_DESCRIPTOR,
+    records::LIST_DESCRIPTOR,
+    records::KINDS_DESCRIPTOR,
+    revisions::LIST_DESCRIPTOR,
+    revisions::GET_DESCRIPTOR,
+    trust_list::SHOW_DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,
     bundle_catalog::UPLOAD,
@@ -271,21 +343,50 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_release::STATUS,
     bundle_smoke::DESCRIPTOR,
     bundle_verify::DESCRIPTOR,
+    external_execution_provider_inventory::DESCRIPTOR,
+    external_execution_settle_unknown_allocation::DESCRIPTOR,
+    external_execution_status::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,
     rebuild::VERIFY_DESCRIPTOR,
     rebuild::REBUILD_DESCRIPTOR,
     authorize_key::DESCRIPTOR,
+    renew_key::DESCRIPTOR,
+    revoke_key::DESCRIPTOR,
+    endorsements::RECORD,
+    endorsements::REVOKE,
+    endorsements::LIST,
+    remote_delegation::DELEGATE,
+    remote_delegation::LIST,
+    remote_delegation::REVOKE,
+    remote_delegation::TOMBSTONE,
     authorize_client::DESCRIPTOR,
+    offline_operations::SUBMIT,
+    offline_operations::FACTS,
+    offline_operations::STATUS,
+    remote_offline_operations::SUBMIT,
+    remote_offline_operations::FACTS,
+    remote_offline_operations::STATUS,
+    #[cfg(feature = "scheduling")]
     scheduler_register::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_deregister::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_explain::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_list::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_show_fires::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_pause::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
     scheduler_resume::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
+    scheduler_reauthorize::DESCRIPTOR,
     sync_jobs_list::DESCRIPTOR,
     sync_jobs_inspect::DESCRIPTOR,
     remote_configure::DESCRIPTOR,
+    remote_pin::DESCRIPTOR,
+    remote_descriptor::DESCRIPTOR,
     remote_bind_project::DESCRIPTOR,
     remote_doctor::DESCRIPTOR,
     remote_list::DESCRIPTOR,
@@ -305,7 +406,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_sync_admitted_heads::DESCRIPTOR,
     remote_run::DESCRIPTOR,
     remote_admit::DESCRIPTOR,
+    remote_admit_principal::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,
+    remote_revoke::DESCRIPTOR,
     remote_threads::DESCRIPTOR,
     remote_thread_status::DESCRIPTOR,
     remote_bundle_install::DESCRIPTOR,

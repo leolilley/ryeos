@@ -18,6 +18,7 @@ use lillux::cas::CasStore;
 use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::{PinnedStateAuthority, StagedCasRootLease};
 
+use crate::objects_read_scope::ReadRoot;
 use crate::remote::client::RemoteClient;
 
 /// Result of pulling remote execution results.
@@ -79,6 +80,9 @@ impl From<lillux::CanonicalJsonError> for PullResultsError {
 ///
 /// # Arguments
 /// * `client` — RemoteClient connected to the remote node
+/// * `read_root` — The remote root the result snapshot is read under: the
+///   execution thread whose result it is, or the worker placement that
+///   produced it.
 /// * `authority` — One descriptor-pinned local state authority captured by the
 ///   caller for the complete push/execute/pull operation.
 /// * `pushed_snapshot_hash` — The snapshot we pushed (lineage anchor). The
@@ -91,6 +95,7 @@ impl From<lillux::CanonicalJsonError> for PullResultsError {
 /// * `base_tree` — The exact tree that was pushed (from PushResult.tree)
 pub async fn pull_results(
     client: &RemoteClient,
+    read_root: &ReadRoot,
     authority: &PinnedStateAuthority,
     pushed_snapshot_hash: &str,
     remote_snapshot_hash: &str,
@@ -112,6 +117,7 @@ pub async fn pull_results(
 
     let operation = pull_results_staged(
         client,
+        read_root,
         authority,
         &local_cas,
         &mut staged_roots,
@@ -127,9 +133,9 @@ pub async fn pull_results(
 
 // The staged pull transaction keeps its remote, authority, lease, and three
 // snapshot identities explicit so none can be silently substituted.
-#[allow(clippy::too_many_arguments)]
 async fn pull_results_staged(
     client: &RemoteClient,
+    read_root: &ReadRoot,
     authority: &PinnedStateAuthority,
     local_cas: &CasStore,
     staged_roots: &mut StagedCasRootLease,
@@ -147,7 +153,7 @@ async fn pull_results_staged(
         Some(value) => value,
         None => {
             let snapshot_objs = client
-                .objects_get(&[remote_snapshot_hash.to_string()], &[])
+                .objects_get(read_root, &[remote_snapshot_hash.to_string()], &[])
                 .await
                 .map_err(PullResultsError::Other)?;
             let value = snapshot_objs
@@ -158,12 +164,19 @@ async fn pull_results_staged(
                         remote_snapshot_hash
                     ))
                 })?;
-            store_remote_object(
+            let canonical_bytes = snapshot_objs
+                .find_object_bytes(remote_snapshot_hash)
+                .ok_or_else(|| {
+                    PullResultsError::InvalidRemoteSnapshot(
+                        "objects/get omitted canonical snapshot bytes".to_owned(),
+                    )
+                })?;
+            store_remote_object_bytes(
                 authority,
                 staged_roots,
                 local_cas,
                 remote_snapshot_hash,
-                &value,
+                canonical_bytes,
             )?;
             fetched_count += 1;
             value
@@ -181,14 +194,14 @@ async fn pull_results_staged(
     // exact stored policy; a destination cannot reinterpret the tree using
     // its current ignore configuration.
     let snapshot = ProjectSnapshot::from_value(&snapshot_val)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     let pushed_snapshot_value = local_cas.get_object(pushed_snapshot_hash)?.ok_or_else(|| {
         PullResultsError::InvalidRemoteSnapshot(format!(
             "locally pushed snapshot {pushed_snapshot_hash} is absent"
         ))
     })?;
     let pushed_snapshot = ProjectSnapshot::from_value(&pushed_snapshot_value)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     if snapshot.effective_policy_hash != pushed_snapshot.effective_policy_hash {
         return Err(PullResultsError::InvalidRemoteSnapshot(format!(
             "result snapshot changed project policy from {} to {} without an authorized policy transition",
@@ -212,7 +225,7 @@ async fn pull_results_staged(
     } else {
         Some(
             client
-                .objects_get(&missing_roots, &[])
+                .objects_get(read_root, &missing_roots, &[])
                 .await
                 .map_err(PullResultsError::Other)?,
         )
@@ -221,26 +234,39 @@ async fn pull_results_staged(
         if let Some(value) = local_cas.get_object(hash)? {
             return Ok(value);
         }
-        let value = roots_response
-            .as_ref()
-            .and_then(|response| response.find_object(hash))
-            .ok_or_else(|| {
-                PullResultsError::InvalidRemoteSnapshot(format!("{label} {hash} is absent"))
-            })?;
-        store_remote_object(authority, staged_roots, local_cas, hash, &value)?;
+        let response = roots_response.as_ref().ok_or_else(|| {
+            PullResultsError::InvalidRemoteSnapshot(format!("{label} {hash} is absent"))
+        })?;
+        let value = response.find_object(hash).ok_or_else(|| {
+            PullResultsError::InvalidRemoteSnapshot(format!("{label} {hash} is absent"))
+        })?;
+        let bytes = response.find_object_bytes(hash).ok_or_else(|| {
+            PullResultsError::InvalidRemoteSnapshot(format!(
+                "{label} {hash} has no raw canonical bytes"
+            ))
+        })?;
+        store_remote_object_bytes(authority, staged_roots, local_cas, hash, bytes)?;
         fetched_count += 1;
         Ok(value)
     };
     let tree_val = resolve_root("project tree", &snapshot.project_tree_hash)?;
     let policy_val = resolve_root("project policy", &snapshot.effective_policy_hash)?;
     let remote_tree = ProjectTree::from_value(&tree_val)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     let policy = ProjectSnapshotPolicy::from_value(&policy_val)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
-    ryeos_state::project_sync::validate_project_tree_paths(&remote_tree, &policy)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
+    // Pulled results come from full_project remote execution only. An AI-only
+    // tree would need this node's sync_include admission, which a pull does
+    // not perform, so it is refused rather than admitted without that check.
+    if policy.sync_scope != ryeos_state::project_sync::ProjectSyncScope::FullProject {
+        return Err(PullResultsError::InvalidRemoteSnapshot(
+            "pulled remote result is not a full_project snapshot".to_owned(),
+        ));
+    }
+    ryeos_state::project_sync::validate_stored_project_tree_paths(&remote_tree, &policy)
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
     ryeos_state::project_sync::validate_captured_policy_source(local_cas, &remote_tree, &policy)
-        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
 
     let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
     let mut project_files = Vec::with_capacity(remote_tree.files.len());
@@ -249,7 +275,7 @@ async fn pull_results_staged(
             Some(value) => value,
             None => {
                 let response = client
-                    .objects_get(std::slice::from_ref(object_hash), &[])
+                    .objects_get(read_root, std::slice::from_ref(object_hash), &[])
                     .await
                     .map_err(PullResultsError::Other)?;
                 let value = response.find_object(object_hash).ok_or_else(|| {
@@ -257,20 +283,26 @@ async fn pull_results_staged(
                         "project file object {object_hash} is absent"
                     ))
                 })?;
-                store_remote_object(authority, staged_roots, local_cas, object_hash, &value)?;
+                let bytes = response.find_object_bytes(object_hash).ok_or_else(|| {
+                    PullResultsError::InvalidRemoteSnapshot(format!(
+                        "project file object {object_hash} has no raw canonical bytes"
+                    ))
+                })?;
+                store_remote_object_bytes(authority, staged_roots, local_cas, object_hash, bytes)?;
                 fetched_count += 1;
                 value
             }
         };
         let file = ProjectFile::from_value(&value)
-            .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+            .map_err(|error| PullResultsError::InvalidRemoteSnapshot(format!("{error:#}")))?;
         project_files.push(file);
     }
     for file in &project_files {
         if local_cas.has_blob(&file.blob_hash)? {
             continue;
         }
-        fetch_remote_blob_streaming(client, authority, staged_roots, local_cas, file).await?;
+        fetch_remote_blob_streaming(client, read_root, authority, staged_roots, local_cas, file)
+            .await?;
         fetched_count += 1;
     }
     let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
@@ -308,18 +340,19 @@ async fn pull_results_staged(
     })
 }
 
-fn store_remote_object(
+fn store_remote_object_bytes(
     authority: &PinnedStateAuthority,
     staged_roots: &mut StagedCasRootLease,
     local_cas: &CasStore,
     expected_hash: &str,
-    value: &Value,
+    canonical_bytes: &[u8],
 ) -> Result<(), PullResultsError> {
     let guard = authority
         .acquire_shared_guard()
         .map_err(PullResultsError::Other)?;
+    let limit = ryeos_state::object_closure::REMOTE_CLOSURE_MAX_OBJECT_BYTES as usize;
     let stored = staged_roots
-        .store_object_admitted(&guard, local_cas, value)
+        .store_object_bytes_admitted(&guard, local_cas, canonical_bytes, limit)
         .map_err(PullResultsError::Other)?;
     if stored != expected_hash {
         return Err(PullResultsError::InvalidRemoteSnapshot(format!(
@@ -331,6 +364,7 @@ fn store_remote_object(
 
 async fn fetch_remote_blob_streaming(
     client: &RemoteClient,
+    read_root: &ReadRoot,
     authority: &PinnedStateAuthority,
     staged_roots: &mut StagedCasRootLease,
     local_cas: &CasStore,
@@ -343,6 +377,7 @@ async fn fetch_remote_blob_streaming(
         while offset < file.size {
             let chunk = client
                 .objects_get_blob_chunk(
+                    read_root,
                     &file.blob_hash,
                     offset,
                     crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
@@ -1241,7 +1276,12 @@ fn write_pull_recovery_journal(
         )));
     }
     if backup
-        .atomic_create_regular(std::ffi::OsStr::new("journal.json"), &bytes, 0o600)?
+        .atomic_create_regular(
+            std::ffi::OsStr::new("journal.json"),
+            &bytes,
+            0o600,
+            crate::API_TEMP_PURPOSE,
+        )?
         .is_none()
     {
         return Err(PullResultsError::Other(anyhow::anyhow!(
@@ -1540,6 +1580,7 @@ impl Drop for PinnedScratchDirectory {
         if let Err(error) = self.directory.remove_contents_recursive().and_then(|()| {
             self.parent
                 .remove_empty_child_if_same(&self.name, &self.directory)
+                .map(|receipt| receipt.is_some())
                 .and_then(|removed| {
                     if removed {
                         Ok(())
@@ -1661,7 +1702,10 @@ fn recover_interrupted_pull_apply(
                 )));
             }
             project_root.ensure_path_binding()?;
-            if !project_root.remove_empty_child_if_same(&backup_name, &backup)? {
+            if !project_root
+                .remove_empty_child_if_same(&backup_name, &backup)
+                .map(|receipt| receipt.is_some())?
+            {
                 return Err(PullResultsError::RecoveryRequired(format!(
                     "pre-journal pull directory {backup_name_str:?} was not empty; preserve it for operator inspection"
                 )));
@@ -1825,7 +1869,10 @@ fn cleanup_recovery_directory(
 ) -> Result<(), PullResultsError> {
     project_root.ensure_path_binding()?;
     directory.remove_contents_recursive()?;
-    if !project_root.remove_empty_child_if_same(name, directory)? {
+    if !project_root
+        .remove_empty_child_if_same(name, directory)
+        .map(|receipt| receipt.is_some())?
+    {
         return Err(PullResultsError::RecoveryRequired(format!(
             "recovery directory {} remained non-empty",
             project_root.path().join(name).display()

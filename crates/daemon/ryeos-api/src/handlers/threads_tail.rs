@@ -24,7 +24,7 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 /// Canonical ids of the SSE routes the descriptor points at, defined in
-/// `bundles/standard/.ai/node/routes/{thread-events-stream,chain-events-stream}.yaml`.
+/// `bundles/core/.ai/node/routes/{thread-events-stream,chain-events-stream}.yaml`.
 /// Referenced by id so each path template lives in exactly one place (its route).
 const THREAD_EVENTS_ROUTE_ID: &str = "thread/events-stream";
 const CHAIN_EVENTS_ROUTE_ID: &str = "chain/events-stream";
@@ -50,7 +50,7 @@ pub async fn handle(
     let thread = state
         .threads
         .get_thread_view(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let Some(view) = thread else {
         // Mirror threads.get: null (not 403) for an unknown thread avoids
         // leaking existence to a non-owner.
@@ -231,6 +231,7 @@ mod tests {
             execute: None,
             request: Default::default(),
             source_file: Default::default(),
+            authority: None,
         }
     }
 
@@ -254,6 +255,7 @@ mod tests {
             execute: None,
             request: Default::default(),
             source_file: Default::default(),
+            authority: None,
         }
     }
 

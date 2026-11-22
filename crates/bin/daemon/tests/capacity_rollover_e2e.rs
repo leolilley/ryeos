@@ -1,0 +1,610 @@
+//! Native-capacity epochs end to end.
+//!
+//! The fast tests seal a real issuance (schema 6) on a disposable root and
+//! drive operator re-issuance through the public `ryeos-node` surface: the
+//! next epoch opens exactly once, reruns converge, a held state lock (what a
+//! running daemon holds) refuses the command, and a tampered document is
+//! refused without repair.
+//!
+//! The daemon-level rollover loop needs real served windows. A window cannot
+//! be shorter than the drain margin plus the cleanup occupancy the reservation
+//! requires, so the fixture uses 150 s windows and runs 21 rollovers in about
+//! an hour. It is ignored unless `RYEOS_LONG_E2E=1`.
+
+use ryeosd::test_support as common;
+
+use std::path::Path;
+
+use common::DaemonHarness;
+use common::fast_fixture::{self, FastFixtureProfile};
+use lillux::crypto::SigningKey;
+use ryeos_node::native_capacity::{
+    CapacityCure, CapacityFile, CapacityRecordTorn, ReanchorRequest, ReissueRequest, RepairRequest,
+    inspect_capacity_account, read_capacity_reanchors, read_capacity_reissuances,
+    read_capacity_repairs, reanchor_capacity, reissue_capacity, repair_capacity_account,
+};
+use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+
+const COMMAND: &str = "capacity_rollover_e2e";
+
+/// A sealed Core root: real issuance, no daemon, no SQLite.
+fn sealed_core_root() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    tempfile::TempDir,
+    fast_fixture::FastFixture,
+) {
+    let (node_dir, app_root) = common::copy_core_to_temp();
+    let user_dir = tempfile::tempdir().expect("temporary fixture user");
+    let fixture = fast_fixture::populate_initialized_state_with_profile(
+        &app_root,
+        user_dir.path(),
+        FastFixtureProfile::Core,
+    )
+    .expect("prepare isolated Core fixture");
+    fast_fixture::register_core_bundle_at_state(&app_root, &fixture)
+        .expect("register prepared Core");
+    fast_fixture::seal_initialized_state(&app_root).expect("seal fixture issuance");
+    (node_dir, app_root, user_dir, fixture)
+}
+
+/// The operator key as `ryeos node capacity reissue` reads it from the root.
+fn operator_key(app_root: &Path) -> SigningKey {
+    let pem = String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(
+            &app_root.join(".ai/node/operator/signing/private_key.pem"),
+            32 * 1024,
+        )
+        .expect("read operator key"),
+    )
+    .expect("operator key is utf-8");
+    use lillux::crypto::DecodePrivateKey as _;
+    lillux::crypto::SigningKey::from_pkcs8_pem(&pem).expect("decode operator key")
+}
+
+fn reissue(
+    app_root: &Path,
+    lock: &StateLock,
+    operator: &SigningKey,
+    reason: &str,
+) -> anyhow::Result<ryeos_node::native_capacity::ReissueReport> {
+    reissue_capacity(ReissueRequest {
+        app_root,
+        state_lock: lock,
+        signer: ryeos_node::apply_authority::DocumentSigner::Operator(operator),
+        reason,
+        command: COMMAND,
+    })
+}
+
+#[test]
+fn a_torn_account_is_repaired_and_a_torn_anchor_is_renewed_from_the_account_record() {
+    let (_node_dir, app_root, _user_dir, _fixture) = sealed_core_root();
+    let operator = operator_key(&app_root);
+    let lock = StateLock::acquire(&default_lock_path(&app_root)).expect("stopped node lock");
+    let directory = app_root.join(".ai/node/native-capacity");
+    let original = std::fs::read(directory.join("account")).expect("read account");
+
+    // A flipped byte: no write the redo model produces leaves this account.
+    let mut torn = original.clone();
+    torn[40] ^= 0xff;
+    std::fs::write(directory.join("account"), &torn).expect("tear the account");
+    let refusal = reissue(&app_root, &lock, &operator, "e2e torn account")
+        .expect_err("a torn account is not renewed from");
+    let typed = refusal
+        .downcast_ref::<CapacityRecordTorn>()
+        .expect("typed torn refusal");
+    assert_eq!(
+        (typed.file, typed.cure),
+        (CapacityFile::Account, CapacityCure::RepairAccount)
+    );
+    assert_eq!(std::fs::read(directory.join("account")).unwrap(), torn);
+
+    let repair = |reason: &str| {
+        repair_capacity_account(RepairRequest {
+            app_root: &app_root,
+            state_lock: &lock,
+            signer: ryeos_node::apply_authority::DocumentSigner::Operator(&operator),
+            reason,
+            command: COMMAND,
+        })
+    };
+    let report = repair("e2e repair").expect("repair the torn account");
+    assert!(report.repaired);
+    assert_eq!(std::fs::read(directory.join("account")).unwrap(), original);
+    assert_eq!(
+        read_capacity_repairs(&app_root.join(".ai/state"))
+            .expect("read repair evidence")
+            .len(),
+        1
+    );
+    assert!(!repair("e2e rerun").expect("idempotent rerun").repaired);
+
+    // A torn anchor over a sound account: the next epoch opens from the account.
+    let mut anchor = std::fs::read(directory.join("anchor")).expect("read anchor");
+    anchor[2000] ^= 0xff;
+    std::fs::write(directory.join("anchor"), &anchor).expect("tear the anchor");
+    let refusal = inspect_capacity_account(&app_root).expect_err("a torn anchor is reported");
+    let typed = refusal
+        .downcast_ref::<CapacityRecordTorn>()
+        .expect("typed torn refusal");
+    assert_eq!(
+        (typed.file, typed.cure),
+        (CapacityFile::Anchor, CapacityCure::ReissueFromAccount)
+    );
+    let refusal = repair("e2e anchor torn").expect_err("repair never touches a torn anchor");
+    assert_eq!(
+        refusal.downcast_ref::<CapacityRecordTorn>().map(|t| t.file),
+        Some(CapacityFile::Anchor)
+    );
+    let renewed = reissue(&app_root, &lock, &operator, "e2e torn anchor").expect("renew");
+    assert!(renewed.from_account_record);
+    assert_eq!((renewed.from_epoch, renewed.to_epoch), (1, 2));
+    let summary = inspect_capacity_account(&app_root)
+        .expect("inspect renewed")
+        .expect("issued");
+    assert_eq!(summary.epoch, 2);
+    assert_eq!(summary.last_operation, "operator_reissue");
+}
+
+#[test]
+fn operator_reissue_opens_one_epoch_reruns_idempotently_and_refuses_tampering() {
+    let (_node_dir, app_root, _user_dir, fixture) = sealed_core_root();
+    let fresh = inspect_capacity_account(&app_root)
+        .expect("inspect fresh account")
+        .expect("issued");
+    assert_eq!(fresh.epoch, 1);
+    assert_eq!(fresh.incarnations_remaining, 16);
+    assert_eq!(fresh.recovery_attempts_used, 0);
+    assert!(
+        fresh.renewal.operator_reissue,
+        "Core pre-authorises operator re-issuance"
+    );
+
+    let operator = operator_key(&app_root);
+    assert_eq!(
+        operator.to_bytes(),
+        fixture.user.to_bytes(),
+        "the fixture operator is the user key"
+    );
+    let lock = StateLock::acquire(&default_lock_path(&app_root)).expect("stopped node lock");
+
+    let first = reissue(&app_root, &lock, &operator, "e2e first epoch").expect("first re-issuance");
+    assert_eq!(
+        (first.from_epoch, first.to_epoch, first.already_applied),
+        (1, 2, false)
+    );
+    assert_eq!(
+        first.settled_incarnation, None,
+        "a never-started node settles nothing"
+    );
+    let renewed = inspect_capacity_account(&app_root)
+        .expect("inspect renewed")
+        .expect("issued");
+    assert_eq!(renewed.epoch, 2);
+    assert_eq!(renewed.incarnations_remaining, 16);
+    assert_eq!(renewed.recovery_attempts_used, 0);
+    assert_eq!(renewed.last_operation, "operator_reissue");
+    assert_eq!(renewed.sequence, fresh.sequence);
+
+    let document_path = app_root.join(".ai/config/onboarding/native-capacity-reissuance.json");
+    let document = std::fs::read(&document_path).expect("published re-issuance document");
+    let evidence = read_capacity_reissuances(&app_root.join(".ai/state")).expect("read evidence");
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].document_digest, first.document_digest);
+    assert_eq!((evidence[0].from_epoch, evidence[0].to_epoch), (1, 2));
+    assert_eq!(evidence[0].command, COMMAND);
+
+    // Rerunning converges on the same epoch and writes nothing new.
+    let again = reissue(&app_root, &lock, &operator, "e2e rerun").expect("idempotent rerun");
+    assert!(again.already_applied);
+    assert_eq!((again.from_epoch, again.to_epoch), (1, 2));
+    assert_eq!(again.document_digest, first.document_digest);
+    assert_eq!(std::fs::read(&document_path).unwrap(), document);
+    assert_eq!(
+        read_capacity_reissuances(&app_root.join(".ai/state"))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        inspect_capacity_account(&app_root).unwrap().unwrap().epoch,
+        2
+    );
+
+    // A tampered document is not the one the anchor names: refused, nothing repaired.
+    let mut tampered: serde_json::Value = serde_json::from_slice(&document).unwrap();
+    tampered["body"]["reason"] = serde_json::Value::String("tampered".to_owned());
+    std::fs::write(&document_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let error =
+        reissue(&app_root, &lock, &operator, "e2e tampered").expect_err("tampered document");
+    assert!(format!("{error:#}").contains("stale"), "{error:#}");
+    assert_eq!(
+        inspect_capacity_account(&app_root).unwrap().unwrap().epoch,
+        2
+    );
+    assert_eq!(
+        read_capacity_reissuances(&app_root.join(".ai/state"))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A document signed by another key for the same body is foreign for the
+    // same reason: its bytes are not the ones the anchor authorised.
+    let foreign = SigningKey::from_bytes(&[5; 32]);
+    let body = serde_json::from_slice::<serde_json::Value>(&document).unwrap()["body"].clone();
+    let canonical = lillux::canonical_json(&body).unwrap();
+    let signature = lillux::crypto::Signer::sign(&foreign, canonical.as_bytes());
+    let foreign_document = serde_json::json!({
+        "body": body,
+        "signature": format!("ed25519:{}", base64_standard(&signature.to_bytes())),
+    });
+    std::fs::write(
+        &document_path,
+        serde_json::to_vec(&foreign_document).unwrap(),
+    )
+    .unwrap();
+    assert!(reissue(&app_root, &lock, &operator, "e2e foreign").is_err());
+    assert_eq!(
+        inspect_capacity_account(&app_root).unwrap().unwrap().epoch,
+        2
+    );
+
+    // The original document restores the idempotent path.
+    std::fs::write(&document_path, &document).unwrap();
+    assert!(
+        reissue(&app_root, &lock, &operator, "e2e restored")
+            .unwrap()
+            .already_applied
+    );
+
+    // Another operator key is refused before anything is read or written.
+    let other = SigningKey::from_bytes(&[11; 32]);
+    let error = reissue(&app_root, &lock, &other, "e2e other key").expect_err("foreign operator");
+    assert!(
+        format!("{error:#}").contains("operator key differs"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(&document_path).unwrap(), document);
+}
+
+fn base64_standard(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[test]
+fn reissue_is_refused_while_another_owner_holds_the_state_lock() {
+    let (_node_dir, app_root, _user_dir, _fixture) = sealed_core_root();
+    let operator = operator_key(&app_root);
+    // The command acquires the node's state lock first; whoever already holds
+    // it (a running daemon, a stop in progress, another operator command) is
+    // refused before the account is opened.
+    let held = StateLock::acquire(&default_lock_path(&app_root)).expect("first owner");
+    assert!(
+        StateLock::acquire(&default_lock_path(&app_root)).is_err(),
+        "the lock is exclusive"
+    );
+    assert!(
+        !app_root
+            .join(".ai/config/onboarding/native-capacity-reissuance.json")
+            .exists()
+    );
+    assert_eq!(
+        inspect_capacity_account(&app_root).unwrap().unwrap().epoch,
+        1
+    );
+    // A lock protecting a different root is not this node's exclusion either.
+    let other_root = tempfile::tempdir().unwrap();
+    let foreign_lock =
+        StateLock::acquire(&default_lock_path(other_root.path())).expect("other root lock");
+    let error =
+        reissue(&app_root, &foreign_lock, &operator, "e2e wrong lock").expect_err("wrong lock");
+    assert!(!format!("{error:#}").is_empty());
+    assert_eq!(
+        inspect_capacity_account(&app_root).unwrap().unwrap().epoch,
+        1
+    );
+    drop(held);
+    let report = reissue(
+        &app_root,
+        &StateLock::acquire(&default_lock_path(&app_root)).unwrap(),
+        &operator,
+        "e2e after release",
+    )
+    .unwrap();
+    assert_eq!(report.to_epoch, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reissue_is_refused_while_the_daemon_runs() {
+    let (harness, _fixture) = DaemonHarness::start_fast_core_only_prepared()
+        .await
+        .expect("start fast daemon");
+    let app_root = harness.state_path.clone();
+    // The live daemon holds the state lock for its whole life.
+    let refused = StateLock::acquire(&default_lock_path(&app_root));
+    assert!(
+        refused.is_err(),
+        "a running daemon must hold the state lock"
+    );
+    assert!(
+        !app_root
+            .join(".ai/config/onboarding/native-capacity-reissuance.json")
+            .exists()
+    );
+    let summary = inspect_capacity_account(&app_root)
+        .expect("inspect live account")
+        .expect("issued");
+    assert_eq!(summary.epoch, 1);
+    assert!(
+        summary.outstanding_incarnation,
+        "the running daemon's incarnation is charged"
+    );
+    assert_eq!(summary.incarnations_remaining, 15);
+    drop(harness);
+}
+
+/// Rewrite the fixture's native-capacity allowance so an epoch funds exactly
+/// one incarnation (connection tickets bind first), re-signed by the fixture
+/// node key before the init completion seals the generation.
+fn fund_one_incarnation(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/native_capacity.yaml");
+    let raw = std::fs::read_to_string(&path)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    let tickets = policy["incarnation"]["units"]["connection_tickets"].clone();
+    anyhow::ensure!(tickets.is_u64(), "incarnation connection tickets");
+    policy["allowance"]
+        .as_mapping_mut()
+        .expect("allowance")
+        .insert("connection_tickets".into(), tickets);
+    let body = serde_yaml::to_string(&policy)?;
+    let signed =
+        lillux::signature::sign_content_at(&body, node, "#", None, fast_fixture::FAST_FIXTURE_TIME);
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// `ryeos start` on a spent epoch refuses before launch with
+/// `native_capacity_exhausted` and records no restart inhibition; the
+/// operator re-issues and the node starts again.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_refuses_a_spent_epoch_before_launch_until_reissue() {
+    let (mut harness, _fixture) = DaemonHarness::start_fast_with(
+        |state_path, _user_space, fixture| fund_one_incarnation(state_path, &fixture.node),
+        |_| {},
+    )
+    .await
+    .expect("start fast daemon on a one-incarnation epoch");
+    let app_root = harness.state_path.clone();
+    let running = inspect_capacity_account(&app_root).unwrap().unwrap();
+    assert_eq!(running.epoch, 1);
+    assert_eq!(
+        running.incarnations_remaining, 0,
+        "the running daemon holds the epoch's only incarnation"
+    );
+    harness.stop_gracefully().await.expect("orderly stop");
+
+    let output = tokio::process::Command::new(common::ryeos_binary())
+        .args(["start", "--app-root"])
+        .arg(&app_root)
+        .env("RYEOS_APP_ROOT", &app_root)
+        .env("HOME", harness.user_space.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .expect("run ryeos start");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a spent epoch refuses the start; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(ryeos_node::start::NativeCapacityExhausted::CODE),
+        "the refusal carries its code; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ryeos node capacity reissue"),
+        "the refusal names its cure; stderr:\n{stderr}"
+    );
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).state();
+    assert!(
+        !ryeos_node::lifecycle_marker::restart_inhibition_record(&state_dir).exists(),
+        "a refused start records no restart inhibition"
+    );
+    let unchanged = inspect_capacity_account(&app_root).unwrap().unwrap();
+    assert_eq!((unchanged.epoch, unchanged.incarnations_remaining), (1, 0));
+
+    let report = reissue(
+        &app_root,
+        &StateLock::acquire(&default_lock_path(&app_root)).unwrap(),
+        &operator_key(&app_root),
+        "e2e spent epoch",
+    )
+    .expect("operator re-issue");
+    assert_eq!(report.to_epoch, 2);
+    harness
+        .respawn_with(|_| {})
+        .await
+        .expect("the node starts after re-issue");
+    let restarted = inspect_capacity_account(&app_root).unwrap().unwrap();
+    assert_eq!(restarted.epoch, 2);
+    harness.stop_gracefully().await.expect("final stop");
+}
+
+/// Rewrite the fixture's native-capacity policy member with a short service
+/// window, re-signed by the fixture node key before the init completion seals
+/// the generation. The window must still exceed the drain margin plus the
+/// cleanup occupancy the reservation requires (60 s each).
+fn shorten_service_window(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/native_capacity.yaml");
+    let raw = std::fs::read_to_string(&path)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    let incarnation = policy["incarnation"]
+        .as_mapping_mut()
+        .expect("incarnation envelope");
+    incarnation.insert("maximum_occupancy_ms".into(), 150_000u64.into());
+    incarnation.insert("cleanup_occupancy_ms".into(), 60_000u64.into());
+    incarnation.insert("rollover_drain_margin_ms".into(), 60_000u64.into());
+    let body = serde_yaml::to_string(&policy)?;
+    let signed =
+        lillux::signature::sign_content_at(&body, node, "#", None, fast_fixture::FAST_FIXTURE_TIME);
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// Twenty-one orderly rollovers, each renewing the epoch, on a sixteen
+/// incarnation allowance: the account never exhausts and recovery stays at
+/// zero. Each window is 150 s, so the whole run takes about an hour.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "runs about an hour of real service windows; set RYEOS_LONG_E2E=1 and run with --ignored"]
+async fn twenty_one_rollovers_renew_the_epoch_without_exhausting() {
+    if std::env::var("RYEOS_LONG_E2E").as_deref() != Ok("1") {
+        eprintln!("RYEOS_LONG_E2E is not 1; skipping the long rollover loop");
+        return;
+    }
+    let (mut harness, _fixture) = DaemonHarness::start_fast_with(
+        |state_path, _user_space, fixture| shorten_service_window(state_path, &fixture.node),
+        |_| {},
+    )
+    .await
+    .expect("start fast daemon with a 150 s window");
+    let app_root = harness.state_path.clone();
+    const ROLLOVERS: u64 = 21;
+    for rollover in 1..=ROLLOVERS {
+        let status =
+            tokio::time::timeout(std::time::Duration::from_secs(300), harness.child.wait())
+                .await
+                .expect("the service window ends within its bound")
+                .expect("wait for daemon exit");
+        assert_eq!(
+            status.code(),
+            Some(75),
+            "rollover {rollover} exits as a service-window rollover: {status:?}"
+        );
+        let summary = inspect_capacity_account(&app_root)
+            .expect("inspect after rollover")
+            .expect("issued");
+        assert_eq!(
+            summary.epoch,
+            1 + rollover,
+            "rollover {rollover} opened the next epoch"
+        );
+        assert_eq!(
+            summary.recovery_attempts_used, 0,
+            "rollover {rollover} charged no recovery"
+        );
+        assert_eq!(
+            summary.incarnations_remaining, 16,
+            "rollover {rollover} renewed the allowance"
+        );
+        assert!(
+            !summary.outstanding_incarnation,
+            "rollover {rollover} settled its incarnation"
+        );
+        assert_eq!(summary.last_operation, "rollover_renewal");
+        harness
+            .respawn_with(|_| {})
+            .await
+            .expect("restart after rollover");
+        let debited = inspect_capacity_account(&app_root).unwrap().unwrap();
+        assert_eq!(debited.epoch, 1 + rollover);
+        assert_eq!(debited.incarnations_remaining, 15);
+    }
+    harness.stop_gracefully().await.expect("final stop");
+}
+
+/// Copy a sealed root to a fresh directory: every inode and the root
+/// directory itself differ, as they would on a different filesystem.
+fn moved_copy(app_root: &Path) -> (tempfile::TempDir, std::path::PathBuf) {
+    let destination = tempfile::tempdir().expect("destination for the moved node");
+    let status = std::process::Command::new("cp")
+        .arg("-a")
+        .arg(format!("{}/.", app_root.display()))
+        .arg(destination.path())
+        .status()
+        .expect("copy the app root");
+    assert!(status.success(), "copy the app root");
+    let moved = destination.path().to_path_buf();
+    (destination, moved)
+}
+
+fn reanchor(
+    app_root: &Path,
+    lock: &StateLock,
+    operator: &SigningKey,
+) -> anyhow::Result<ryeos_node::native_capacity::ReanchorReport> {
+    reanchor_capacity(ReanchorRequest {
+        app_root,
+        state_lock: lock,
+        signer: ryeos_node::apply_authority::DocumentSigner::Operator(operator),
+        reason: "e2e move to another filesystem",
+        command: COMMAND,
+    })
+}
+
+#[test]
+fn reanchor_moves_the_account_only_through_the_operator_signed_document() {
+    let (_node_dir, app_root, _user_dir, _fixture) = sealed_core_root();
+    let operator = operator_key(&app_root);
+    // A node that was never moved is found anchored where it is.
+    {
+        let lock = StateLock::acquire(&default_lock_path(&app_root)).expect("stopped node lock");
+        let unmoved = reanchor(&app_root, &lock, &operator).expect("unmoved node");
+        assert!(unmoved.already_applied && unmoved.document_digest.is_none());
+    }
+    let (_moved_dir, moved) = moved_copy(&app_root);
+    let refusal = inspect_capacity_account(&moved).expect_err("the moved root names old places");
+    assert!(
+        format!("{refusal:#}").contains("ryeos node capacity reanchor"),
+        "{refusal:#}"
+    );
+    let lock = StateLock::acquire(&default_lock_path(&moved)).expect("stopped moved node lock");
+    let first = reanchor(&moved, &lock, &operator).expect("reanchor the moved node");
+    assert!(!first.already_applied);
+    let document_digest = first.document_digest.clone().expect("a signed document");
+    assert!(first.prior_binding_digest.is_some());
+    inspect_capacity_account(&moved)
+        .expect("boot accepts the account at the new place")
+        .expect("issued");
+    ryeos_node::init::verify_init_completion(&moved)
+        .expect("the resealed completion verifies")
+        .expect("completed");
+    let evidence = read_capacity_reanchors(&moved.join(".ai/state")).expect("read evidence");
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].document_digest, document_digest);
+    assert_eq!(evidence[0].command, COMMAND);
+
+    // Rerunning finds the recorded binding already names this place.
+    let again = reanchor(&moved, &lock, &operator).expect("idempotent rerun");
+    assert!(again.already_applied);
+    assert_eq!(
+        again.document_digest.as_deref(),
+        Some(document_digest.as_str())
+    );
+
+    // The re-anchored account keeps its issuance: re-issuance still works.
+    let reissued = reissue(&moved, &lock, &operator, "e2e after reanchor").expect("reissue");
+    assert_eq!((reissued.from_epoch, reissued.to_epoch), (1, 2));
+    drop(lock);
+
+    // Boot accepts the new place only through the signed document: a changed
+    // byte, or an absent document, is refused.
+    let document_path = moved.join(format!(
+        ".ai/config/onboarding/native-capacity-reanchor.{document_digest}.json"
+    ));
+    let signed = std::fs::read(&document_path).expect("published document");
+    let mut tampered = String::from_utf8(signed.clone()).unwrap();
+    tampered = tampered.replace("e2e move to another filesystem", "e2e move elsewhere");
+    std::fs::write(&document_path, tampered).unwrap();
+    assert!(inspect_capacity_account(&moved).is_err());
+    std::fs::remove_file(&document_path).unwrap();
+    assert!(inspect_capacity_account(&moved).is_err());
+    std::fs::write(&document_path, signed).unwrap();
+    inspect_capacity_account(&moved)
+        .expect("the genuine document restores acceptance")
+        .expect("issued");
+}

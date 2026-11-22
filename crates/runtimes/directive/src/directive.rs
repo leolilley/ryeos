@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use ryeos_directive_definition::{ContinuationConfig, OutputSpec, ReturnNudge};
+use ryeos_provider_contract::{Part, Role, ToolResultStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -10,6 +11,9 @@ use serde_json::Value;
 /// tool exposure, lifecycle detection, event recording, and replay cannot
 /// silently diverge.
 pub(crate) const DIRECTIVE_RETURN_TOOL: &str = "directive_return";
+/// The built-in read-only tool that reports the run deadline's clock. The
+/// runner answers it in process; it never reaches the daemon.
+pub(crate) const TIME_LEFT_TOOL: &str = "time_left";
 
 /// Directive-runtime continuation *behavior* config, loaded by the runtime from
 /// `ryeos-runtime/continuation` (defaults if absent) — the same mechanism as
@@ -34,6 +38,11 @@ pub struct ContinuationRuntimeConfig {
     /// Upper bound a directive's declared `carry_turns` is clamped to.
     #[serde(default = "default_carry_turns_cap")]
     pub carry_turns_cap: u32,
+    /// Estimated tokens a successor's starting conversation (pinned inputs plus
+    /// recent turns) should fit. Pinned inputs over this budget are carried
+    /// alone; pinned inputs over the continuation threshold are refused.
+    #[serde(default = "default_successor_start_tokens")]
+    pub successor_start_tokens: u64,
 }
 
 fn default_context_threshold_ratio() -> f64 {
@@ -45,6 +54,9 @@ fn default_carry_turns() -> u32 {
 fn default_carry_turns_cap() -> u32 {
     32
 }
+fn default_successor_start_tokens() -> u64 {
+    crate::resume::DEFAULT_SUCCESSOR_START_TOKENS
+}
 
 impl Default for ContinuationRuntimeConfig {
     fn default() -> Self {
@@ -53,6 +65,7 @@ impl Default for ContinuationRuntimeConfig {
             context_threshold_ratio: default_context_threshold_ratio(),
             carry_turns_default: default_carry_turns(),
             carry_turns_cap: default_carry_turns_cap(),
+            successor_start_tokens: default_successor_start_tokens(),
         }
     }
 }
@@ -129,22 +142,322 @@ pub struct ExecutionConfig {
     /// budget and the fleet's concurrent directive count in mind.
     #[serde(default = "default_tool_concurrency")]
     pub tool_concurrency: u32,
+    /// Upper bound, in milliseconds, on the delay before any provider retry.
+    /// The delay is `backoff_base_ms * 2^attempt`, capped here.
+    #[serde(default = "default_backoff_max_ms")]
+    pub backoff_max_ms: u64,
+    /// Retry policy for provider failures that leave it unknown whether the
+    /// provider acted (timeout, send failure after the connection, a stream
+    /// cut after content began). Absent means such outcomes are never retried.
+    /// Even when present, a retry also needs the directive's
+    /// `provider_contact: repeatable` declaration on a remote provider route;
+    /// launch preparation seals the resulting ceiling and the daemon enforces
+    /// it. `max_retries` counts the first retries of a turn that may follow an
+    /// unknown outcome and shares the early attempts with `retries`.
     #[serde(default)]
-    pub retry_on_timeout: bool,
-    /// Retry a stream that dies MID-READ (chunk timeout, reset, dropped
-    /// connection) under the same `retries` budget. The request is idempotent
-    /// (same message array); deltas persisted before the cut stay in the braid
-    /// as the record of the abandoned partial, delimited by the
-    /// `provider_retry` event. On by default — a dropped stream is the same
-    /// transient transport class as a pre-stream connect failure, and without
-    /// this every long generation is one hiccup away from a dead thread. Set
-    /// `false` to fail a directive on the first mid-stream cut.
-    #[serde(default = "default_retry_mid_stream")]
-    pub retry_mid_stream: bool,
+    pub unknown_outcome_retry: Option<ryeos_directive_definition::UnknownOutcomeRetryPolicy>,
+    /// Recovery when the provider ends a turn at its output limit. Absent, or
+    /// `max_consecutive: 0`, fails the thread as before. When enabled, the turn
+    /// is recorded with `finish: "length"` and, if it carried no tool calls, a
+    /// harness input carrying `message` starts the next turn.
+    #[serde(default)]
+    pub on_output_limit: Option<OutputLimitPolicy>,
     /// Execution-owned provider-attempt accounting policy. Wire parsing stays
     /// in the signed provider schema; budget/failure behavior belongs here.
     #[serde(default)]
     pub accounting: AttemptAccountingConfig,
+    /// Limits on the images tools return, in addition to the node's attachment
+    /// policy and the model's own limits.
+    #[serde(default)]
+    pub tool_images: ToolImagesConfig,
+    /// How an oversize tool result is shown to the model and stored.
+    #[serde(default)]
+    pub tool_output: ToolOutputConfig,
+    /// Detection of a run that repeats itself or stops making progress.
+    #[serde(default)]
+    pub loop_guards: LoopGuardsConfig,
+}
+
+/// Signed thresholds for the loop and stall detectors. A finding first warns
+/// the model with a durable harness input; the same finding still present
+/// `grace_turns` turns later stops the run with the typed failure
+/// `loop_detected`. `enabled: false` turns every detector off explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LoopGuardsConfig {
+    #[serde(default = "default_loop_guards_enabled")]
+    pub enabled: bool,
+    /// Turns a repetition is counted over.
+    #[serde(default = "default_loop_window_turns")]
+    pub window_turns: u32,
+    /// The same call with the same result this many times in the window.
+    #[serde(default = "default_loop_repeat_threshold")]
+    pub repeat_threshold: u32,
+    /// An alternation of calls repeated this many full cycles with nothing new.
+    #[serde(default = "default_loop_pingpong_cycles")]
+    pub pingpong_cycles: u32,
+    /// Longest alternation period looked for, in turns.
+    #[serde(default = "default_loop_pingpong_max_period")]
+    pub pingpong_max_period: u32,
+    /// Consecutive turns whose results and text were all seen before.
+    #[serde(default = "default_loop_no_progress_turns")]
+    pub no_progress_turns: u32,
+    /// Consecutive turns with neither a tool call nor text.
+    #[serde(default = "default_loop_idle_turns")]
+    pub idle_turns: u32,
+    /// Turns between a warning and the stop for the same finding.
+    #[serde(default = "default_loop_grace_turns")]
+    pub grace_turns: u32,
+}
+
+fn default_loop_guards_enabled() -> bool {
+    true
+}
+
+fn default_loop_window_turns() -> u32 {
+    16
+}
+
+fn default_loop_repeat_threshold() -> u32 {
+    5
+}
+
+fn default_loop_pingpong_cycles() -> u32 {
+    4
+}
+
+fn default_loop_pingpong_max_period() -> u32 {
+    4
+}
+
+fn default_loop_no_progress_turns() -> u32 {
+    8
+}
+
+fn default_loop_idle_turns() -> u32 {
+    3
+}
+
+fn default_loop_grace_turns() -> u32 {
+    2
+}
+
+impl Default for LoopGuardsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_loop_guards_enabled(),
+            window_turns: default_loop_window_turns(),
+            repeat_threshold: default_loop_repeat_threshold(),
+            pingpong_cycles: default_loop_pingpong_cycles(),
+            pingpong_max_period: default_loop_pingpong_max_period(),
+            no_progress_turns: default_loop_no_progress_turns(),
+            idle_turns: default_loop_idle_turns(),
+            grace_turns: default_loop_grace_turns(),
+        }
+    }
+}
+
+impl LoopGuardsConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.window_turns == 0
+            || self.repeat_threshold < 2
+            || self.pingpong_cycles < 2
+            || self.pingpong_max_period < 2
+            || self.no_progress_turns == 0
+            || self.idle_turns == 0
+            || self.grace_turns == 0
+        {
+            anyhow::bail!(
+                "execution.loop_guards thresholds must be positive, repeat_threshold and pingpong_cycles at least 2, pingpong_max_period at least 2; set `enabled: false` to turn the detectors off"
+            );
+        }
+        if self.repeat_threshold > self.window_turns {
+            anyhow::bail!(
+                "execution.loop_guards repeat_threshold exceeds window_turns, so a repetition could never be seen"
+            );
+        }
+        let longest = u64::from(self.pingpong_cycles) * u64::from(self.pingpong_max_period);
+        if longest > u64::from(self.window_turns) {
+            anyhow::bail!(
+                "execution.loop_guards pingpong_cycles x pingpong_max_period exceeds window_turns, so the longest alternation could never be seen"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Signed thresholds for oversize tool results. A result longer than
+/// `spill_threshold_bytes` is stored whole beside its event and the model sees
+/// a head-and-tail preview that says it is partial. When the node cannot store
+/// it, the result is cut at `hard_cut_bytes` instead and the record names why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutputConfig {
+    #[serde(default = "default_tool_spill_threshold_bytes")]
+    pub spill_threshold_bytes: u64,
+    #[serde(default = "default_tool_preview_head_bytes")]
+    pub preview_head_bytes: u64,
+    #[serde(default = "default_tool_preview_tail_bytes")]
+    pub preview_tail_bytes: u64,
+    /// Most bytes of one result stored; keep it within the node's
+    /// `thread_attachments` per-attachment limit, which refuses a larger one.
+    #[serde(default = "default_tool_spill_stored_bytes")]
+    pub max_stored_bytes: u64,
+    /// The cut applied when a result is not stored.
+    #[serde(default = "default_tool_hard_cut_bytes")]
+    pub hard_cut_bytes: u64,
+}
+
+fn default_tool_spill_threshold_bytes() -> u64 {
+    64 * 1024
+}
+
+fn default_tool_preview_head_bytes() -> u64 {
+    24 * 1024
+}
+
+fn default_tool_preview_tail_bytes() -> u64 {
+    8 * 1024
+}
+
+fn default_tool_spill_stored_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
+fn default_tool_hard_cut_bytes() -> u64 {
+    100 * 1024
+}
+
+impl Default for ToolOutputConfig {
+    fn default() -> Self {
+        Self {
+            spill_threshold_bytes: default_tool_spill_threshold_bytes(),
+            preview_head_bytes: default_tool_preview_head_bytes(),
+            preview_tail_bytes: default_tool_preview_tail_bytes(),
+            max_stored_bytes: default_tool_spill_stored_bytes(),
+            hard_cut_bytes: default_tool_hard_cut_bytes(),
+        }
+    }
+}
+
+impl ToolOutputConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.spill_threshold_bytes == 0
+            || self.preview_head_bytes == 0
+            || self.preview_tail_bytes == 0
+            || self.max_stored_bytes == 0
+            || self.hard_cut_bytes == 0
+        {
+            anyhow::bail!("execution.tool_output limits must all be positive");
+        }
+        if self.preview_head_bytes + self.preview_tail_bytes >= self.spill_threshold_bytes {
+            anyhow::bail!(
+                "execution.tool_output preview_head_bytes + preview_tail_bytes must be below spill_threshold_bytes, or the preview would not be smaller than the result it replaces"
+            );
+        }
+        if self.max_stored_bytes < self.spill_threshold_bytes {
+            anyhow::bail!(
+                "execution.tool_output max_stored_bytes must be at least spill_threshold_bytes"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Signed ceilings on the images a run's tools may return. The per-run
+/// counters are restored from the record on resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolImagesConfig {
+    /// Most bytes one image may hold; keep it within the node's
+    /// `thread_attachments` limit, which refuses a larger append.
+    #[serde(default = "default_tool_image_max_bytes")]
+    pub max_bytes_per_image: u64,
+    #[serde(default = "default_tool_images_per_result")]
+    pub max_images_per_result: u32,
+    /// Most image bytes one result may hold, kept under the 4 MiB a tool's
+    /// stored result may take once base64 inflates them.
+    #[serde(default = "default_tool_image_bytes_per_result")]
+    pub max_bytes_per_result: u64,
+    #[serde(default = "default_tool_images_per_run")]
+    pub max_images_per_run: u32,
+    /// Most distinct image bytes a run may store.
+    #[serde(default = "default_tool_image_bytes_per_run")]
+    pub max_bytes_per_run: u64,
+    /// Most pixels on either side of one image, read from its header. A
+    /// truncated body is not detectable without decoding, so this bounds what
+    /// the header claims, not what the bytes hold.
+    #[serde(default = "default_tool_image_dimension")]
+    pub max_image_dimension: u32,
+}
+
+fn default_tool_image_dimension() -> u32 {
+    8000
+}
+
+fn default_tool_image_max_bytes() -> u64 {
+    2 * 1024 * 1024
+}
+
+fn default_tool_images_per_result() -> u32 {
+    4
+}
+
+/// A subprocess tool's whole result is stored in the thread's result, which
+/// holds at most 4 MiB of compact JSON; base64 makes an image a third larger,
+/// so 3 MB of image bytes leaves about 190 KB for the text and wrapper.
+fn default_tool_image_bytes_per_result() -> u64 {
+    3_000_000
+}
+
+fn default_tool_images_per_run() -> u32 {
+    256
+}
+
+fn default_tool_image_bytes_per_run() -> u64 {
+    48 * 1024 * 1024
+}
+
+impl Default for ToolImagesConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes_per_image: default_tool_image_max_bytes(),
+            max_images_per_result: default_tool_images_per_result(),
+            max_bytes_per_result: default_tool_image_bytes_per_result(),
+            max_images_per_run: default_tool_images_per_run(),
+            max_bytes_per_run: default_tool_image_bytes_per_run(),
+            max_image_dimension: default_tool_image_dimension(),
+        }
+    }
+}
+
+impl ToolImagesConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.max_bytes_per_image == 0
+            || self.max_images_per_result == 0
+            || self.max_bytes_per_result == 0
+            || self.max_images_per_run == 0
+            || self.max_bytes_per_run == 0
+            || self.max_image_dimension == 0
+        {
+            anyhow::bail!("execution.tool_images limits must all be positive");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OutputLimitPolicy {
+    /// How many turns in a row may end at the output limit before the thread
+    /// fails. `0` disables recovery.
+    pub max_consecutive: u32,
+    /// The harness input recorded after a turn that ended at the limit with no
+    /// tool call.
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -195,7 +508,11 @@ fn default_retries() -> u32 {
 }
 
 fn default_retry_status_codes() -> Vec<u16> {
-    vec![429, 500, 502, 503]
+    vec![429, 500, 502, 503, 504, 529]
+}
+
+fn default_backoff_max_ms() -> u64 {
+    60_000
 }
 
 fn default_backoff_base_ms() -> u64 {
@@ -218,10 +535,6 @@ fn default_max_provider_stream_frame_bytes() -> u64 {
     1_048_576
 }
 
-fn default_retry_mid_stream() -> bool {
-    true
-}
-
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
@@ -236,9 +549,13 @@ impl Default for ExecutionConfig {
             max_provider_stream_frame_bytes: default_max_provider_stream_frame_bytes(),
             tool_preload: false,
             tool_concurrency: default_tool_concurrency(),
-            retry_on_timeout: false,
-            retry_mid_stream: default_retry_mid_stream(),
+            backoff_max_ms: default_backoff_max_ms(),
+            unknown_outcome_retry: None,
+            on_output_limit: None,
             accounting: AttemptAccountingConfig::default(),
+            tool_images: ToolImagesConfig::default(),
+            tool_output: ToolOutputConfig::default(),
+            loop_guards: LoopGuardsConfig::default(),
         }
     }
 }
@@ -251,6 +568,35 @@ impl ExecutionConfig {
                 self.tool_concurrency
             );
         }
+        if self.backoff_max_ms < self.backoff_base_ms {
+            anyhow::bail!(
+                "execution.backoff_max_ms ({}) must not be below execution.backoff_base_ms ({})",
+                self.backoff_max_ms,
+                self.backoff_base_ms
+            );
+        }
+        if let Some(policy) = &self.on_output_limit
+            && (policy.message.trim().is_empty()
+                || policy.message.len() > 4096
+                || policy.message.chars().any(char::is_control))
+        {
+            anyhow::bail!(
+                "execution.on_output_limit.message must be 1-4096 bytes without control characters"
+            );
+        }
+        if let Some(policy) = &self.unknown_outcome_retry {
+            policy.validate()?;
+            if policy.max_retries > self.retries {
+                anyhow::bail!(
+                    "execution.unknown_outcome_retry.max_retries ({}) must not exceed execution.retries ({})",
+                    policy.max_retries,
+                    self.retries
+                );
+            }
+        }
+        self.tool_images.validate()?;
+        self.tool_output.validate()?;
+        self.loop_guards.validate()?;
         // `budget_mode: hard` is structurally valid configuration; whether the
         // route is ledger-eligible (Paid/ExplicitlyFree sealed authority) is a
         // launch fact and is enforced at runtime start, not here.
@@ -298,20 +644,186 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderMessage {
-    pub role: String,
-    pub content: Option<Value>,
-    #[serde(default)]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(default)]
-    pub tool_call_id: Option<String>,
-    /// Provider-specific hidden reasoning that must be replayed with an
-    /// assistant tool-call message for OpenAI-compatible reasoning models
-    /// such as DeepSeek thinking-mode endpoints.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_content: Option<String>,
+/// The in-memory conversation message: the neutral turn, a role and an
+/// ordered list of parts.
+pub type ProviderMessage = ryeos_provider_contract::Message;
+
+/// The id the runtime gives a tool call whose provider issued none. It is a
+/// function of the turn and the call's position, so a replay and a recovery
+/// derive the same id the live run used.
+pub fn synthesised_call_id(turn: u32, call_index: usize) -> String {
+    format!("call_t{turn}_{call_index}")
+}
+
+/// Constructors and readers the directive runtime uses on a message.
+pub trait ProviderMessageExt: Sized {
+    fn system(text: impl Into<String>) -> Self;
+    fn user(text: impl Into<String>) -> Self;
+    fn assistant_text(text: impl Into<String>) -> Self;
+    /// An assistant message: reasoning, text, then the tool calls, in that
+    /// order. Every call must carry an id by the time it is recorded.
+    #[cfg(test)]
+    fn assistant(
+        text: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        reasoning: Option<String>,
+    ) -> Self;
+    /// A tool message holding the result text of the call named `call_id`.
+    #[cfg(test)]
+    fn tool_result(call_id: impl Into<String>, text: impl Into<String>) -> Self;
+    /// A tool message holding the result text of the call named `call_id`,
+    /// with the status the result guard recorded for it.
+    fn tool_result_with_status(
+        call_id: impl Into<String>,
+        text: impl Into<String>,
+        status: ToolResultStatus,
+    ) -> Self;
+    /// The wire role name: `system`, `user`, `assistant` or `tool`.
+    fn role(&self) -> &str;
+    /// Joined text of the message; for a tool message, of its result. `None`
+    /// when there is no text part (an empty text part counts).
+    fn text(&self) -> Option<String>;
+    /// The text as a JSON string value.
+    fn content_value(&self) -> Option<Value>;
+    /// The tool calls the message proposes, in order.
+    fn calls(&self) -> Vec<ToolCall>;
+    fn has_tool_calls(&self) -> bool;
+    /// The call id a tool message answers.
+    fn tool_call_id(&self) -> Option<&str>;
+    /// Joined text of the reasoning parts.
+    fn reasoning_text(&self) -> Option<String>;
+}
+
+impl ProviderMessageExt for ProviderMessage {
+    fn system(text: impl Into<String>) -> Self {
+        Self::text(Role::System, text)
+    }
+
+    fn user(text: impl Into<String>) -> Self {
+        Self::text(Role::User, text)
+    }
+
+    fn assistant_text(text: impl Into<String>) -> Self {
+        Self::text(Role::Assistant, text)
+    }
+
+    #[cfg(test)]
+    fn assistant(
+        text: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        reasoning: Option<String>,
+    ) -> Self {
+        let mut parts = Vec::new();
+        if let Some(reasoning) = reasoning {
+            parts.push(Part::Reasoning(ryeos_provider_contract::ReasoningPart {
+                text: Some(reasoning),
+                artefact: None,
+            }));
+        }
+        if let Some(text) = text {
+            parts.push(Part::text(text));
+        }
+        for call in tool_calls {
+            parts.push(Part::tool_call(
+                call.id.unwrap_or_default(),
+                call.name,
+                call.arguments,
+            ));
+        }
+        Self::new(Role::Assistant, parts)
+    }
+
+    #[cfg(test)]
+    fn tool_result(call_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::tool_result_with_status(call_id, text, ToolResultStatus::Ok)
+    }
+
+    fn tool_result_with_status(
+        call_id: impl Into<String>,
+        text: impl Into<String>,
+        status: ToolResultStatus,
+    ) -> Self {
+        Self::new(
+            Role::Tool,
+            vec![Part::tool_result(call_id, vec![Part::text(text)], status)],
+        )
+    }
+
+    fn role(&self) -> &str {
+        self.role.as_str()
+    }
+
+    fn text(&self) -> Option<String> {
+        let mut out: Option<String> = None;
+        for part in &self.parts {
+            match part {
+                Part::Text(text) => out.get_or_insert_with(String::new).push_str(&text.text),
+                Part::ToolResult(result) => {
+                    for inner in &result.parts {
+                        if let Part::Text(text) = inner {
+                            out.get_or_insert_with(String::new).push_str(&text.text);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn content_value(&self) -> Option<Value> {
+        self.text().map(Value::String)
+    }
+
+    fn calls(&self) -> Vec<ToolCall> {
+        self.tool_calls()
+            .map(|call| ToolCall {
+                id: Some(call.call_id.clone()),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            })
+            .collect()
+    }
+
+    fn has_tool_calls(&self) -> bool {
+        self.tool_calls().next().is_some()
+    }
+
+    fn tool_call_id(&self) -> Option<&str> {
+        self.parts.iter().find_map(|part| match part {
+            Part::ToolResult(result) => Some(result.call_id.as_str()),
+            _ => None,
+        })
+    }
+
+    fn reasoning_text(&self) -> Option<String> {
+        let mut out: Option<String> = None;
+        for part in &self.parts {
+            if let Part::Reasoning(reasoning) = part
+                && let Some(text) = &reasoning.text
+            {
+                out.get_or_insert_with(String::new).push_str(text);
+            }
+        }
+        out
+    }
+}
+
+/// A provider answer may not issue one tool call id twice. The turn fails
+/// instead of the second use being given a synthesised id, because a result
+/// is matched to its call by id and the provider's own id is evidence the
+/// runtime does not rewrite.
+pub fn ensure_distinct_call_ids(message: &ProviderMessage) -> anyhow::Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    for call in message.tool_calls() {
+        if !seen.insert(call.call_id.as_str()) {
+            anyhow::bail!(
+                "provider_duplicate_call_id: the provider issued tool call id {:?} more than once                  in one answer; the turn fails and no id is synthesised for the second use",
+                call.call_id
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Construct the one durable semantic answer for a completed provider turn.
@@ -321,26 +833,33 @@ pub fn normalize_provider_call_answer(
     message: &ProviderMessage,
     finish_reason: Option<&str>,
 ) -> anyhow::Result<ryeos_provider_contract::ProviderCallAnswer> {
-    let recorded_message = serde_json::from_value(serde_json::to_value(message)?)
-        .map_err(|error| anyhow::anyhow!("provider message is not record-safe: {error}"))?;
+    ensure_distinct_call_ids(message)?;
     let answer = ryeos_provider_contract::ProviderCallAnswer {
-        message: recorded_message,
+        message: message.clone(),
         finish_reason: finish_reason.map(str::to_string),
     };
     answer.validate()?;
     Ok(answer)
 }
 
+/// A value captured for one tool call by a signed `tool_call_field` rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCallArtefact {
+    pub capture_id: String,
+    pub value: Value,
+}
+
 #[derive(Debug, Clone)]
-#[allow(clippy::upper_case_acronyms)] // Usage is a domain term, not an acronym leak
 pub enum StreamEvent {
     /// Incremental assistant text.
     Delta(String),
     /// Incremental reasoning/thinking text. Emitted when the provider
     /// streams thinking separately (Anthropic extended thinking, Gemini
     /// thoughts, OpenAI o-series). Not all providers produce these.
-    #[allow(dead_code)] // Emitted by parser once reasoning extraction is wired
     ReasoningDelta(String),
+    /// One completed opaque reasoning block captured by a signed capture
+    /// rule. Meaningless to this crate beyond being stored and replayed.
+    ReasoningArtefact { capture_id: String, value: Value },
     /// Complete tool call ready to dispatch.
     ToolUse {
         id: Option<String>,
@@ -358,6 +877,9 @@ pub enum StreamEvent {
         /// `tool_use` braid event instead of surfacing a silent empty
         /// invocation the operator cannot connect to the upstream fault.
         malformed_args: Option<MalformedArgs>,
+        /// A value a signed capture rule collected for this call, to be
+        /// stored on the call's part and replayed by declared rule.
+        artefact: Option<ToolCallArtefact>,
     },
     /// Partial tool call argument JSON streamed mid-flight.
     ///
@@ -383,11 +905,9 @@ pub enum StreamEvent {
     },
     /// Cumulative usage update from the provider. Emitted mid-stream
     /// by providers that send incremental token counts.
-    #[allow(dead_code)] // Emitted by parser once usage extraction is wired
     Usage(UsageUpdate),
     /// Provider warning (safety, truncation, partial failure) that
     /// doesn't terminate the stream.
-    #[allow(dead_code)] // Emitted by parser once warning extraction is wired
     Warning { code: String, message: String },
     /// Stream is finished. Terminal event — runner stops consuming.
     /// Carries the normalized finish reason and the raw provider string.
@@ -457,14 +977,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_effect_answer_excludes_observation_texture() {
-        let message = ProviderMessage {
-            role: "assistant".to_string(),
-            content: Some(serde_json::json!("answer")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: Some("reasoning".to_string()),
+    fn an_assistant_message_keeps_reasoning_text_then_calls_in_order() {
+        let message = ProviderMessage::assistant(
+            Some("checking".to_string()),
+            vec![ToolCall {
+                id: Some("call_1".to_string()),
+                name: "inspect".to_string(),
+                arguments: serde_json::json!({"a": 1}),
+            }],
+            Some("thinking".to_string()),
+        );
+        let kinds: Vec<_> = message.parts.iter().map(|part| part.type_name()).collect();
+        assert_eq!(kinds, ["reasoning", "text", "tool_call"]);
+        assert_eq!(message.text().as_deref(), Some("checking"));
+        assert_eq!(message.reasoning_text().as_deref(), Some("thinking"));
+        assert_eq!(message.calls()[0].id.as_deref(), Some("call_1"));
+        assert_eq!(message.calls().len(), 1);
+        message.validate().unwrap();
+    }
+
+    #[test]
+    fn a_tool_message_reads_its_call_id_and_result_text() {
+        let message = ProviderMessage::tool_result("call_1", "4");
+        assert_eq!(message.role(), "tool");
+        assert_eq!(message.tool_call_id(), Some("call_1"));
+        assert_eq!(message.text().as_deref(), Some("4"));
+        message.validate().unwrap();
+    }
+
+    #[test]
+    fn a_duplicate_provider_call_id_fails_with_a_clear_message() {
+        let call = |name: &str| ToolCall {
+            id: Some("dup".to_string()),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
         };
+        let message = ProviderMessage::assistant(None, vec![call("a"), call("b")], None);
+        let error = ensure_distinct_call_ids(&message).unwrap_err().to_string();
+        assert!(error.contains("provider_duplicate_call_id"), "{error}");
+        assert!(error.contains("no id is synthesised"), "{error}");
+        assert!(normalize_provider_call_answer(&message, Some("tool_calls")).is_err());
+    }
+
+    #[test]
+    fn a_synthesised_call_id_is_a_function_of_turn_and_position() {
+        assert_eq!(synthesised_call_id(4, 0), "call_t4_0");
+        assert_eq!(synthesised_call_id(4, 2), "call_t4_2");
+    }
+
+    #[test]
+    fn provider_effect_answer_excludes_observation_texture() {
+        let message = ProviderMessage::assistant(
+            Some("answer".to_string()),
+            Vec::new(),
+            Some("reasoning".to_string()),
+        );
         let first = normalize_provider_call_answer(&message, Some("stop")).unwrap();
         let second = normalize_provider_call_answer(&message, Some("stop")).unwrap();
         assert_eq!(first, second);
@@ -477,16 +1044,9 @@ mod tests {
 
     #[test]
     fn provider_effect_answer_refuses_non_assistant_or_unsafe_finish_reason() {
-        let mut message = ProviderMessage {
-            role: "assistant".to_string(),
-            content: Some(serde_json::json!("answer")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        };
-        message.role = "tool".to_string();
-        assert!(normalize_provider_call_answer(&message, Some("stop")).is_err());
-        message.role = "assistant".to_string();
+        let tool_message = ProviderMessage::tool_result("c1", "answer");
+        assert!(normalize_provider_call_answer(&tool_message, Some("stop")).is_err());
+        let message = ProviderMessage::assistant_text("answer");
         assert!(normalize_provider_call_answer(&message, Some(" stop ")).is_err());
     }
 
@@ -501,7 +1061,7 @@ mod tests {
         assert_eq!(cfg.retries, 5, "explicit value is honored");
         assert_eq!(
             cfg.retry_status_codes,
-            vec![429, 500, 502, 503],
+            vec![429, 500, 502, 503, 504, 529],
             "omitted status codes default to the retryable set, not empty"
         );
         assert_eq!(
@@ -509,9 +1069,10 @@ mod tests {
             "omitted backoff defaults to 1s, not a 0ms hot loop"
         );
         assert!(
-            cfg.retry_mid_stream,
-            "omitted retry_mid_stream defaults ON — a dropped stream is transient"
+            cfg.unknown_outcome_retry.is_none(),
+            "an omitted unknown-outcome policy refuses such retries because a dropped stream has an uncertain provider outcome"
         );
+        assert_eq!(cfg.backoff_max_ms, 60_000);
         assert_eq!(
             cfg.max_provider_output_tokens_per_turn,
             default_max_provider_output_tokens_per_turn(),
@@ -546,7 +1107,8 @@ mod tests {
             parsed.max_provider_stream_frame_bytes,
             default.max_provider_stream_frame_bytes
         );
-        assert_eq!(parsed.retry_mid_stream, default.retry_mid_stream);
+        assert_eq!(parsed.unknown_outcome_retry, default.unknown_outcome_retry);
+        assert_eq!(parsed.backoff_max_ms, default.backoff_max_ms);
         assert_eq!(parsed.retries, 2);
     }
 
@@ -570,6 +1132,138 @@ mod tests {
         let error = serde_yaml::from_str::<ExecutionConfig>("max_output_tokens_per_turn: 10\n")
             .expect_err("removed key must not deserialize");
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn removed_outcome_uncertain_retry_booleans_are_rejected() {
+        for field in ["retry_on_timeout", "retry_mid_stream"] {
+            let error = serde_yaml::from_str::<ExecutionConfig>(&format!("{field}: false\n"))
+                .expect_err("removed key must not deserialize");
+            assert!(error.to_string().contains("unknown field"));
+        }
+    }
+
+    #[test]
+    fn tool_image_limits_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.tool_images, ToolImagesConfig::default());
+        let tight: ExecutionConfig = serde_yaml::from_str(
+            "tool_images:\n  max_images_per_result: 1\n  max_images_per_run: 2\n",
+        )
+        .unwrap();
+        tight.validate().unwrap();
+        assert_eq!(tight.tool_images.max_images_per_result, 1);
+        assert_eq!(
+            tight.tool_images.max_bytes_per_run,
+            default_tool_image_bytes_per_run()
+        );
+        let zero: ExecutionConfig =
+            serde_yaml::from_str("tool_images:\n  max_images_per_run: 0\n").unwrap();
+        assert!(zero.validate().is_err());
+        assert!(serde_yaml::from_str::<ExecutionConfig>("tool_images:\n  unknown: 1\n").is_err());
+    }
+
+    #[test]
+    fn tool_output_limits_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.tool_output, ToolOutputConfig::default());
+        defaults.validate().unwrap();
+        let tight: ExecutionConfig = serde_yaml::from_str(
+            "tool_output:\n  spill_threshold_bytes: 1000\n  preview_head_bytes: 400\n  preview_tail_bytes: 100\n  max_stored_bytes: 5000\n",
+        )
+        .unwrap();
+        tight.validate().unwrap();
+        // A preview that is not smaller than the threshold would not bound
+        // anything.
+        let wide: ExecutionConfig = serde_yaml::from_str(
+            "tool_output:\n  spill_threshold_bytes: 1000\n  preview_head_bytes: 900\n  preview_tail_bytes: 100\n",
+        )
+        .unwrap();
+        assert!(wide.validate().is_err());
+        let zero: ExecutionConfig =
+            serde_yaml::from_str("tool_output:\n  hard_cut_bytes: 0\n").unwrap();
+        assert!(zero.validate().is_err());
+        let small_store: ExecutionConfig =
+            serde_yaml::from_str("tool_output:\n  max_stored_bytes: 10\n").unwrap();
+        assert!(small_store.validate().is_err());
+        assert!(serde_yaml::from_str::<ExecutionConfig>("tool_output:\n  unknown: 1\n").is_err());
+    }
+
+    #[test]
+    fn loop_guards_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.loop_guards, LoopGuardsConfig::default());
+        defaults.validate().unwrap();
+        let off: ExecutionConfig =
+            serde_yaml::from_str("loop_guards:\n  enabled: false\n  repeat_threshold: 0\n")
+                .unwrap();
+        off.validate().unwrap();
+        for bad in [
+            "loop_guards:\n  repeat_threshold: 1\n",
+            "loop_guards:\n  grace_turns: 0\n",
+            "loop_guards:\n  idle_turns: 0\n",
+            "loop_guards:\n  window_turns: 4\n  repeat_threshold: 5\n",
+            "loop_guards:\n  window_turns: 8\n  pingpong_cycles: 4\n  pingpong_max_period: 4\n",
+        ] {
+            let cfg: ExecutionConfig = serde_yaml::from_str(bad).unwrap();
+            assert!(cfg.validate().is_err(), "{bad}");
+        }
+        assert!(serde_yaml::from_str::<ExecutionConfig>("loop_guards:\n  unknown: 1\n").is_err());
+    }
+
+    #[test]
+    fn unknown_outcome_retry_block_parses_and_validates() {
+        let cfg: ExecutionConfig = serde_yaml::from_str(
+            "retries: 4\nunknown_outcome_retry:\n  max_retries: 2\n  on: [timeout, mid_stream]\n",
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let policy = cfg.unknown_outcome_retry.as_ref().unwrap();
+        assert_eq!(policy.max_retries, 2);
+        assert_eq!(policy.on.len(), 2);
+
+        let empty: ExecutionConfig =
+            serde_yaml::from_str("unknown_outcome_retry:\n  max_retries: 1\n  on: []\n").unwrap();
+        assert!(empty.validate().is_err());
+
+        let unknown_class = serde_yaml::from_str::<ExecutionConfig>(
+            "unknown_outcome_retry:\n  max_retries: 1\n  on: [reset]\n",
+        );
+        assert!(unknown_class.is_err());
+
+        let over: ExecutionConfig = serde_yaml::from_str(
+            "retries: 1\nunknown_outcome_retry:\n  max_retries: 2\n  on: [timeout]\n",
+        )
+        .unwrap();
+        let error = over.validate().unwrap_err();
+        assert!(error.to_string().contains("must not exceed"));
+    }
+
+    #[test]
+    fn output_limit_policy_parses_and_validates_its_message() {
+        let cfg: ExecutionConfig = serde_yaml::from_str(
+            "on_output_limit:\n  max_consecutive: 2\n  message: \"Continue from where it stopped.\"\n",
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.on_output_limit.as_ref().unwrap().max_consecutive, 2);
+        assert!(ExecutionConfig::default().on_output_limit.is_none());
+
+        let blank: ExecutionConfig =
+            serde_yaml::from_str("on_output_limit:\n  max_consecutive: 1\n  message: \"  \"\n")
+                .unwrap();
+        assert!(blank.validate().is_err());
+        assert!(
+            serde_yaml::from_str::<ExecutionConfig>("on_output_limit:\n  max_consecutive: 1\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn backoff_cap_below_base_is_rejected() {
+        let cfg: ExecutionConfig =
+            serde_yaml::from_str("backoff_base_ms: 2000\nbackoff_max_ms: 1000\n").unwrap();
+        assert!(cfg.validate().is_err());
     }
 }
 

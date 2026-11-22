@@ -826,8 +826,8 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
 fn local_detail(tokens: &str, description: &str) -> String {
     let (usage, options) = match tokens {
         "init" => (
-            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME>]",
-            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--bind <ADDR>      persisted daemon TCP endpoint\n--uds-path <PATH>  persisted local lifecycle endpoint\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes",
+            "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME> --host-class <NAME>]",
+            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--bind <ADDR>      persisted daemon TCP endpoint\n--uds-path <PATH>  persisted local lifecycle endpoint\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes\n--host-class <NAME>   kind of host the node runs on (local, local_unconfined, hosted); local enforces the sandbox, local_unconfined is the explicit opt-out; required with --node-profile",
         ),
         "setup" => (
             "ryeos setup [--app-root <DIR>]",
@@ -853,6 +853,18 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
             "--confirm         confirm administrator-owned host-service provisioning\n--app-root <DIR>  existing initialized application root\n--bind <ADDR>      replace the stopped node's persisted TCP endpoint\n--uds-path <PATH>  replace the stopped node's persisted lifecycle endpoint",
         ),
+        "node host retire" => (
+            "ryeos node host retire --confirm [--app-root <DIR> | --orphaned]",
+            "--confirm         confirm removing the administrator-owned host association\n--app-root <DIR>  application root of the stopped node whose service to retire\n--orphaned        retire every node service whose app root no longer exists",
+        ),
+        "external-content product publish" => (
+            "ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>] [--json]",
+            "--activation <ref>   activate the recipe online first\n--from-thread <id>   resume from a completed producer thread\n--push-to <remote>   push the admitted product\n--json               emit the final result as JSON",
+        ),
+        "codex login device" => (
+            "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
+            "--create   create the profile first\n--trusted  open the login on an explicitly trusted process-group node\n--yes      confirm the observed account without asking\n--json     emit the final result as JSON",
+        ),
         "node doctor" => (
             "ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]",
             "--json            emit structured diagnostics\n--no-bundles      skip bundle diagnostics\n--app-root <DIR>  application root",
@@ -861,9 +873,17 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--schema-cut-from <EPOCH> --schema-cut-to <EPOCH>] [--app-root <DIR>]",
             "--dry-run               report without mutation\n--confirm               confirm execution-history retirement\n--include-project-heads also retire project HEADs\n--confirm-project-heads confirm project-HEAD retirement\n--schema-cut-from       exact predecessor epoch for an idempotent hosted cut\n--schema-cut-to         exact current epoch for an idempotent hosted cut\n--app-root <DIR>        application root",
         ),
+        "node reset execution-history-scratch" => (
+            "ryeos node reset execution-history-scratch [--dry-run | --confirm] [--app-root <DIR>]",
+            "--dry-run         report without mutation\n--confirm         confirm removal of reset scratch\n--app-root <DIR>  application root",
+        ),
         "node reset authorization" => (
             "ryeos node reset authorization --confirm [--app-root <DIR>]",
             "--confirm         confirm retirement of all grants\n--app-root <DIR>  application root",
+        ),
+        "node authorization revoke" => (
+            "ryeos node authorization revoke --fingerprint <FINGERPRINT> --reason <TEXT> [--keep-delegates] [--app-root <DIR>]",
+            "--fingerprint     grant to revoke\n--reason          why it is revoked\n--keep-delegates  leave the grants it granted\n--app-root <DIR>  application root",
         ),
         "node reset replay-indexes" => (
             "ryeos node reset replay-indexes --confirm [--app-root <DIR>]",
@@ -873,9 +893,25 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node reset external-content-bindings [--dry-run | --confirm] [--app-root <DIR>]",
             "--dry-run         report without mutation\n--confirm         confirm binding retirement\n--app-root <DIR>  application root",
         ),
+        "node large-objects purge-quarantine" => (
+            "ryeos node large-objects purge-quarantine [--dry-run | --confirm] [--app-root <DIR>]",
+            "--dry-run         report without mutation\n--confirm         confirm the quarantine is discarded\n--app-root <DIR>  application root",
+        ),
         "node reset policy-generation" => (
-            "ryeos node reset policy-generation --node-profile <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--app-root <DIR>]",
-            "--node-profile <NAME> trusted publisher profile\n--confirm             confirm complete policy replacement\n--source <DIR>        trusted packaged source root\n--trust-file <FILE>   additional publisher trust file; repeatable\n--app-root <DIR>      application root",
+            "ryeos node reset policy-generation --node-profile <NAME> --host-class <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--app-root <DIR>]",
+            "--node-profile <NAME> trusted publisher profile\n--host-class <NAME>   the node's host class\n--confirm             confirm complete policy replacement\n--source <DIR>        trusted packaged source root\n--trust-file <FILE>   additional publisher trust file; repeatable\n--app-root <DIR>      application root",
+        ),
+        "node host-access grant" => (
+            "ryeos node host-access grant <item_ref> --project <DIR> [--id <ID>] [--origin <ORIGIN>]... [--env <NAME>]... [--containment <MODE>] [--app-root <DIR>]",
+            "--project <DIR>      project the item resolves in\n--id <ID>            grant id (default: the bare id with / as -)\n--origin <ORIGIN>    direct, graph_child or schedule; repeatable (default direct)\n--env <NAME>         daemon boot-environment name to deliver; repeatable\n--containment <MODE> scope_required (default) or group_allowed\n--app-root <DIR>     application root",
+        ),
+        "node host-access revoke" => (
+            "ryeos node host-access revoke <id> [--app-root <DIR>]",
+            "--app-root <DIR>  application root",
+        ),
+        "node host-access list" => (
+            "ryeos node host-access list [--project <DIR>] [--app-root <DIR>]",
+            "--project <DIR>   compare each grant with the item's bytes in this project\n--app-root <DIR>  application root",
         ),
         "help" => (
             "ryeos help [<tokens>...] [--plain]",

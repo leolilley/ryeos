@@ -254,7 +254,7 @@ impl CompactAdmittedProductRecipeFact {
             binding_name: binding.binding_name.clone(),
             recipe_ref: binding.recipe_ref.clone(),
             recipe_raw_content_digest: binding.recipe_raw_content_digest.clone(),
-            purpose: binding.purpose.clone(),
+            purpose: binding.purpose,
             declarations: binding.declarations.clone(),
             declarations_hash: binding.declarations_hash.clone(),
             relationships: CompactProductRelationships {
@@ -659,7 +659,7 @@ mod tests {
             candidate.relationships.relationships[1].producer.parameters = json!({
                 "signed_manifest": "y".repeat(payload_bytes)
             });
-            if !candidate.validate().is_ok() {
+            if candidate.validate().is_err() {
                 continue;
             }
             let fact = CompactAdmittedProductRecipeFact::from_binding(&candidate).unwrap();

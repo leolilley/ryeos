@@ -14,9 +14,15 @@ test -x "$shellcheck"
 PATH="$tool_dir:$PATH" "$actionlint" -color
 
 "$shellcheck" --severity=warning \
+    scripts/ci/check-custody-tokens.sh \
+    scripts/ci/check-test-support-feature-leak.sh \
     scripts/ci/install-static-linters.sh \
     scripts/ci/lint-workflows-and-shell.sh \
+    scripts/ci/pack-bundle-state.sh \
+    scripts/ci/prepare-runner.sh \
+    scripts/ci/unpack-bundle-state.sh \
     scripts/ci/test-daemon-image-init-policy.sh \
+    scripts/ci/test-image-build-cache.sh \
     scripts/ci/test-publisher-trust-policy.sh \
     scripts/release/resolve-version.sh \
     scripts/release/test-resolve-version.sh \
@@ -24,6 +30,8 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/release/package-bundle-artifact.sh \
     scripts/release/test-package-bundle-artifact.sh \
     scripts/release/verify-bundle-artifact.sh \
+    scripts/release/materialize-release-bundles.sh \
+    scripts/release/test-materialize-release-bundles.sh \
     scripts/release/prepare-aur.sh \
     scripts/release/test-prepare-aur.sh \
     tests/e2e/container-image/qualify.sh \
@@ -34,9 +42,10 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/gate.sh \
     tests/e2e/configured-remote/qualify.sh \
     tests/e2e/configured-remote/test_qualification.sh \
-    scripts/dev-tui.sh \
-    scripts/dev-ui-assets.sh \
+    .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh \
+    .ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh \
     tests/e2e/execute-stream/smoke.sh \
     tests/e2e/installed-resume/smoke.sh \
+    tests/e2e/init-profiles/check.sh \
     scripts/populate-bundles.sh \
     deploy/entrypoint.sh

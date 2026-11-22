@@ -1,0 +1,16 @@
+# ryeos:signed:2026-10-22T05:34:02Z:e2d2b18f7379b3fb66ece7ff33ec3403489a3c04dcd62aa3258b508870a97596:mazanJpibn7TTKp1/qwbS5IYkVuwHmFUbkZAxIHNb4P8j8RB1aGHhiRt4NRDOU52vhhN0be3BEXwxDcNLTwHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: objects/stage-chunk
+path: /objects/stage-chunk
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1572864
+  # The final chunk verifies the whole file, so the budget covers a full-file hash.
+  timeout_ms: 600000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:objects/stage-chunk

@@ -8,7 +8,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItemRequest;
 use ryeos_executor::executor::ServiceAvailability;
 use serde_json::Value;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::{HandlerError, HandlerResult};
@@ -46,6 +46,7 @@ pub async fn handle(
     let effective = state
         .engine
         .effective_item(EffectiveItemRequest {
+            logical_project_root: None,
             item_ref,
             expected_kind: None,
             project_root: None,
@@ -58,10 +59,10 @@ pub async fn handle(
             .map_err(|error| HandlerError::Internal(error.to_string()))?;
     provider
         .validate(&format!(" for '{}'", req.provider_id))
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let setup = provider
         .setup_projection(&req.provider_id)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let validation = setup.validation.ok_or_else(|| {
         HandlerError::BadRequest(format!(
             "provider '{}' does not declare a validation operation",
@@ -89,30 +90,24 @@ pub async fn handle(
         .unwrap_or_else(|| provider.clone());
     runtime_provider
         .validate(&format!(" for '{}' validation", req.provider_id))
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let credential = match setup.credential {
-        Some(credential) => {
-            let mut secrets = state
-                .vault
-                .read_all(&ctx.fingerprint)
-                .map_err(|error| HandlerError::Internal(error.to_string()))?;
-            let selected = match secrets.remove(&credential.secret_name) {
-                Some(selected) => selected,
-                None => {
-                    for other in secrets.values_mut() {
-                        other.zeroize();
-                    }
-                    return Err(HandlerError::BadRequest(format!(
+        Some(credential) => Some({
+            // The credential leaves the vault for the validation request, so
+            // the caller must be a recipient of the name.
+            state
+                .vault_ceilings
+                .judge_receive(&credential.secret_name, &ctx.fingerprint, &ctx.scopes)
+                .map_err(|refusal| crate::handler_error::vault_name_handler_error(&refusal))?;
+            ryeos_app::vault::read_named_secret(state.vault.as_ref(), &credential.secret_name)
+                .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
+                .ok_or_else(|| {
+                    HandlerError::BadRequest(format!(
                         "provider '{}' credential '{}' is not configured",
                         req.provider_id, credential.secret_name
-                    )));
-                }
-            };
-            for other in secrets.values_mut() {
-                other.zeroize();
-            }
-            Some(Zeroizing::new(selected))
-        }
+                    ))
+                })?
+        }),
         None => None,
     };
     let model = req.model.as_deref().unwrap_or_default();

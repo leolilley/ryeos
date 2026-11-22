@@ -1,0 +1,21 @@
+# ryeos:signed:2026-11-19T07:00:15Z:7ba044b3326a9556f22d2a646280bc5643467d6262e2ce65aef09afb712f6614:FnBxI0sTEEzDZ/piCAUI3y8B42EnV+vlQfOpO+RaapuTxPu4vWtY6vTMo4vWWApZqD4uwzHrS5o5OtYqQV2LDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Bronze statue of Eros sleeping"
+date: "3rd–2nd century BCE"
+source_url: https://www.metmuseum.org/art/collection/search/254502
+licence: cc0
+derived_from:
+  - "Met object 254502, Bronze statue of Eros sleeping (https://www.metmuseum.org/art/collection/search/254502)"
+transform: "greyscale; sculpture cut out onto a grey gradient background (rough mask edges); re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "33e9bf08b130be34ef3de758ea6e38e24fd1f3e28bb8c06f2021bd34f0824042"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 86346
+  - role: card
+    sha256: "d024343c01c4f0de62c5b20418e21dafba8e3b010291abb2632f86ffaa9d08c5"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 7304

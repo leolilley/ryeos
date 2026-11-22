@@ -32,6 +32,23 @@ expect_version "12.34.56" workflow_dispatch "main" "12.34.56"
 expect_version "1.0.0-rc.1" workflow_dispatch "main" "1.0.0-rc.1"
 expect_version "1.0.0-alpha-2" workflow_dispatch "main" "1.0.0-alpha-2"
 
+expect_prerelease() {
+    local expected="$1"
+    shift
+    local actual
+    actual="$($RESOLVER "$@" --prerelease)"
+    if [[ "$actual" != "$expected" ]]; then
+        echo "expected prerelease '$expected', got '$actual': $*" >&2
+        exit 1
+    fi
+}
+
+expect_prerelease false push "v0.5.0" ""
+expect_prerelease true workflow_dispatch "main" "1.0.0-rc.1"
+expect_prerelease true workflow_dispatch "main" "1.0.0-alpha-2"
+expect_prerelease true push "v0.6.0-rc.2" ""
+expect_rejected workflow_dispatch "main" "1.0.0" --bogus
+
 expect_rejected push "main" ""
 expect_rejected workflow_dispatch "main" ""
 expect_rejected workflow_dispatch "main" "v1.2.3"

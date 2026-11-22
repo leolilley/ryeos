@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::TrustStore;
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,26 @@ pub struct ItemAuthorDecl {
     pub namespace: String,
 }
 
+/// Which namespaces a bundle may open under its node-owned state home.
+///
+/// `fixed` closes the list in the signed manifest. `launch_param` lets each
+/// launch name any valid segment through a declared parameter, for bundles
+/// whose partitions are open-ended; the caller's own `use` grant still bounds
+/// which segments that launch may reach.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StateHomeNamespaces {
+    Fixed { names: Vec<String> },
+    LaunchParam,
+}
+
+/// The manifest's declaration of a node-owned bundle state home.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StateHomeDecl {
+    pub namespaces: StateHomeNamespaces,
+}
+
 /// The single manifest-declared runtime-authority surface: the closed set of
 /// daemon callback authority families a signed bundle manifest may grant its own
 /// running code. One field per family, each a typed declaration list that owns
@@ -77,6 +97,23 @@ pub struct RuntimeAuthorityDecls {
     pub item_authoring: Vec<ItemAuthorDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub project_snapshots: Vec<ProjectSnapshotOperation>,
+    /// Node-owned durable state this bundle's own code may open, one
+    /// namespace per launch. Absent means the bundle has no state home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_home: Option<StateHomeDecl>,
+    /// Upper bound for this bundle's handler routes: a route may run its
+    /// fixed handler with the node operator's vault exposed only when its own
+    /// signed route declares `authority.operator_vault: true` **and** this
+    /// signed manifest allows it. Nothing is granted by this flag alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub operator_vault: bool,
+    /// Upper bound for the authority this bundle's routes lend the principal
+    /// of a launch that has no human caller (an `auth: none` or `auth: hmac`
+    /// route). A route's signed `authority.capabilities` is honored only for
+    /// capabilities some pattern here covers. Nothing is granted by this list
+    /// alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_capabilities: Vec<String>,
 }
 
 /// One declared smoke execution: an item the bundle's author nominates as a
@@ -192,6 +229,17 @@ pub struct BundleManifestSource {
     /// most manifests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadows: Vec<String>,
+    /// Namespaces this bundle owns: bare-id prefixes a project may not
+    /// shadow. Item resolution refuses a project item inside one and only
+    /// bundle space supplies it. Signed data in the generated manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns_namespaces: Vec<String>,
+    /// Project `.ai` roots this bundle makes AI-only project sync carry,
+    /// as `{kind: <item kind>}` or `{root, shape}` declarations. Signed data
+    /// in the generated manifest; the node unions every installed bundle's
+    /// declarations into its `sync_include` table.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync_include: Vec<ryeos_state::project_sync::SyncIncludeDecl>,
     /// Privileged node isolation implementations shipped by this bundle.
     /// Presence never activates a backend; immutable node policy selects one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -230,6 +278,12 @@ pub struct BundleManifest {
     /// the generated (signed) manifest states the override intent too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadows: Vec<String>,
+    /// Owned namespaces, carried verbatim from the source manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns_namespaces: Vec<String>,
+    /// Sync-include declarations, carried verbatim from the source manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync_include: Vec<ryeos_state::project_sync::SyncIncludeDecl>,
     /// Signed privileged isolation declarations, carried verbatim from source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
@@ -360,6 +414,10 @@ pub fn materialize_manifest(
         .map_err(|e| anyhow::anyhow!("invalid `smoke` declaration: {e}"))?;
     validate_shadow_decls(&source.shadows)
         .map_err(|e| anyhow::anyhow!("invalid `shadows` declaration: {e}"))?;
+    ryeos_engine::item_resolution::validate_owned_namespaces(&source.owns_namespaces)
+        .map_err(|e| anyhow::anyhow!("invalid `owns_namespaces` declaration: {e}"))?;
+    ryeos_state::project_sync::validate_sync_include_decls(&source.sync_include)
+        .map_err(|e| anyhow::anyhow!("invalid `sync_include` declaration: {e:#}"))?;
     validate_isolation_backends(&source.isolation_backends)
         .map_err(|e| anyhow::anyhow!("invalid `isolation_backends` declaration: {e}"))?;
     validate_external_execution_declarations(
@@ -378,6 +436,8 @@ pub fn materialize_manifest(
         runtime_authority: source.runtime_authority,
         smoke: source.smoke,
         shadows: source.shadows,
+        owns_namespaces: source.owns_namespaces,
+        sync_include: source.sync_include,
         isolation_backends: source.isolation_backends,
         external_providers: source.external_providers,
         external_lifecycle_adapters: source.external_lifecycle_adapters,
@@ -389,6 +449,50 @@ pub struct VerifiedBundleManifest {
     pub manifest: BundleManifest,
     pub body_digest: String,
     pub signer_fingerprint: String,
+}
+
+/// Verify one historically admitted signed Bundle manifest from retained
+/// bytes. The supplied public key verifies old evidence only; this function
+/// does not consult or recreate a current trusted-publisher grant.
+pub fn verify_retained_manifest_bytes(
+    signed_bytes: &[u8],
+    expected_name: &str,
+    expected_signer: &str,
+    verifier: &lillux::crypto::VerifyingKey,
+) -> Result<VerifiedBundleManifest> {
+    let identity = ryeos_engine::plan_builder::verify_retained_signed_bundle_manifest_bytes(
+        signed_bytes,
+        expected_name,
+        expected_signer,
+        verifier,
+    )?;
+    let signed = std::str::from_utf8(signed_bytes)
+        .context("retained signed Bundle manifest is not UTF-8")?;
+    let (body, _) =
+        lillux::signature::strip_canonical_signature_with_envelope(signed, "#", None, false)?;
+    let manifest = parse_current_manifest_body(&body, Path::new("retained Bundle CAS"))?;
+    manifest
+        .runtime_authority
+        .validate()
+        .map_err(anyhow::Error::msg)?;
+    ryeos_engine::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces)
+        .map_err(anyhow::Error::msg)?;
+    ryeos_state::project_sync::validate_sync_include_decls(&manifest.sync_include)?;
+    validate_isolation_backends(&manifest.isolation_backends).map_err(anyhow::Error::msg)?;
+    validate_external_execution_declarations(
+        &manifest.external_providers,
+        &manifest.external_lifecycle_adapters,
+    )
+    .map_err(anyhow::Error::msg)?;
+    ensure!(
+        manifest.name == identity.name && expected_name == identity.name,
+        "retained Bundle manifest name differs from signed identity"
+    );
+    Ok(VerifiedBundleManifest {
+        manifest,
+        body_digest: identity.body_digest,
+        signer_fingerprint: identity.signer_fingerprint,
+    })
 }
 
 pub fn load_verified_manifest(
@@ -427,9 +531,14 @@ pub fn load_verified_manifest(
                  it must be generated by the publish pipeline"
             )
         })?;
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&raw, &sig_header, &envelope, trust_store)
-            .map_err(|e| anyhow::anyhow!("manifest.yaml signature verification failed: {e}"))?;
+    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
+        &raw,
+        &sig_header,
+        &envelope,
+        trust_store,
+        &ryeos_engine::trust::SignerContext::bundle("bundle_manifest"),
+    )
+    .map_err(|e| anyhow::anyhow!("manifest.yaml signature verification failed: {e}"))?;
     if trust_class != TrustClass::Trusted {
         bail!(
             "manifest.yaml signer {} is not trusted (trust_class: {:?})",
@@ -446,6 +555,22 @@ pub fn load_verified_manifest(
             manifest_path.display()
         )
     })?;
+    ryeos_engine::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "invalid `owns_namespaces` declaration in {}: {error}",
+                manifest_path.display()
+            )
+        },
+    )?;
+    ryeos_state::project_sync::validate_sync_include_decls(&manifest.sync_include).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "invalid `sync_include` declaration in {}: {error:#}",
+                manifest_path.display()
+            )
+        },
+    )?;
     validate_isolation_backends(&manifest.isolation_backends).map_err(|error| {
         anyhow::anyhow!(
             "invalid `isolation_backends` declaration in {}: {error}",
@@ -474,6 +599,94 @@ pub fn load_verified_manifest(
         body_digest: lillux::sha256_hex(body.as_bytes()),
         signer_fingerprint: sig_header.signer_fingerprint,
     })
+}
+
+/// The bundle name and owned namespaces of the signed manifest installed at
+/// `bundle_root`. The name is read from the manifest itself and then verified
+/// against its signature, so a root whose directory name differs from the
+/// bundle it holds still reports the right identity.
+pub fn verified_owned_namespaces(
+    bundle_root: &Path,
+    trust_store: &TrustStore,
+) -> Result<(String, Vec<String>)> {
+    let ai_dir = bundle_root.join(".ai");
+    let manifest_path = ai_dir.join("manifest.yaml");
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let value: serde_yaml::Value = serde_yaml::from_str(&body)
+        .with_context(|| format!("parse manifest {}", manifest_path.display()))?;
+    let name = value
+        .get("name")
+        .and_then(serde_yaml::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("{} names no bundle", manifest_path.display()))?
+        .to_owned();
+    let verified = load_verified_manifest(&ai_dir, &name, trust_store)?;
+    Ok((name, verified.manifest.owns_namespaces))
+}
+
+/// The bundle name and `sync_include` declarations of the signed manifest
+/// installed at `bundle_root`, verified against `trust_store` exactly as
+/// [`verified_owned_namespaces`] is.
+pub fn verified_sync_include(
+    bundle_root: &Path,
+    trust_store: &TrustStore,
+) -> Result<(String, Vec<ryeos_state::project_sync::SyncIncludeDecl>)> {
+    let ai_dir = bundle_root.join(".ai");
+    let manifest_path = ai_dir.join("manifest.yaml");
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let value: serde_yaml::Value = serde_yaml::from_str(&body)
+        .with_context(|| format!("parse manifest {}", manifest_path.display()))?;
+    let name = value
+        .get("name")
+        .and_then(serde_yaml::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("{} names no bundle", manifest_path.display()))?
+        .to_owned();
+    let verified = load_verified_manifest(&ai_dir, &name, trust_store)?;
+    Ok((name, verified.manifest.sync_include))
+}
+
+/// Compose the node's `sync_include` table from the signed manifests of the
+/// installed bundles at `bundle_roots`. Reads bundle roots only: a project
+/// tree has no say. `kinds` resolves `{kind}` declarations to their
+/// `location.directory`.
+pub fn compose_sync_include(
+    bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+    kinds: &ryeos_engine::kind_registry::KindRegistry,
+) -> Result<ryeos_state::project_sync::SyncInclude> {
+    let mut bundles = Vec::with_capacity(bundle_roots.len());
+    for root in bundle_roots {
+        bundles.push(
+            verified_sync_include(root, trust_store).with_context(|| {
+                format!("read sync_include of the bundle at {}", root.display())
+            })?,
+        );
+    }
+    ryeos_state::project_sync::SyncInclude::compose(&bundles, &|kind| {
+        kinds.directory(kind).map(str::to_owned)
+    })
+}
+
+/// As [`compose_sync_include`], loading the kind registry from the bundles'
+/// own signed kind schemas.
+pub fn compose_sync_include_for_roots(
+    bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+) -> Result<ryeos_state::project_sync::SyncInclude> {
+    let schema_roots = bundle_roots
+        .iter()
+        .map(|root| {
+            root.join(ryeos_engine::AI_DIR)
+                .join(ryeos_engine::KIND_SCHEMAS_DIR)
+        })
+        .filter(|dir| dir.is_dir())
+        .collect::<Vec<_>>();
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&schema_roots, trust_store)
+        .context("load kind schemas for sync_include")?;
+    compose_sync_include(bundle_roots, trust_store, &kinds)
 }
 
 fn yaml_signature_envelope() -> SignatureEnvelope {
@@ -522,6 +735,22 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManife
             manifest_path.display()
         )
     })?;
+    ryeos_engine::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "invalid `owns_namespaces` declaration in {}: {error}",
+                manifest_path.display()
+            )
+        },
+    )?;
+    ryeos_state::project_sync::validate_sync_include_decls(&manifest.sync_include).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "invalid `sync_include` declaration in {}: {error:#}",
+                manifest_path.display()
+            )
+        },
+    )?;
     validate_isolation_backends(&manifest.isolation_backends).map_err(|error| {
         anyhow::anyhow!(
             "invalid `isolation_backends` declaration in {}: {error}",
@@ -758,8 +987,48 @@ mod tests {
     use super::*;
     use ryeos_external_execution_contract::{
         ExternalLifecycleAdapterDeclaration, ExternalProviderDeclaration,
-        LIFECYCLE_ADAPTER_PROTOCOL, LifecycleCapability, PROVIDER_CONFIGURATION_PROTOCOL,
+        LIFECYCLE_ADAPTER_PROTOCOL, LifecycleCapability, PROVIDER_DECLARATION_PROTOCOL,
     };
+
+    #[test]
+    fn retained_manifest_verifies_historical_signature_without_live_bundle() {
+        let signer = lillux::crypto::SigningKey::from_bytes(&[29u8; 32]);
+        let fingerprint = lillux::crypto::fingerprint(&signer.verifying_key());
+        let signed = lillux::signature::sign_content_at(
+            "name: example\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n",
+            &signer,
+            "#",
+            None,
+            "2026-09-30T00:00:00Z",
+        );
+        let verified = verify_retained_manifest_bytes(
+            signed.as_bytes(),
+            "example",
+            &fingerprint,
+            &signer.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(verified.manifest.name, "example");
+        assert!(
+            verify_retained_manifest_bytes(
+                signed.as_bytes(),
+                "other",
+                &fingerprint,
+                &signer.verifying_key(),
+            )
+            .is_err()
+        );
+        let changed = signed.replace("version: 1.0.0", "version: 1.0.1");
+        assert!(
+            verify_retained_manifest_bytes(
+                changed.as_bytes(),
+                "example",
+                &fingerprint,
+                &signer.verifying_key(),
+            )
+            .is_err()
+        );
+    }
 
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -772,13 +1041,14 @@ mod tests {
     fn external_provider(id: &str) -> ExternalProviderDeclaration {
         ExternalProviderDeclaration {
             id: id.to_string(),
-            protocol: PROVIDER_CONFIGURATION_PROTOCOL.to_string(),
+            protocol: PROVIDER_DECLARATION_PROTOCOL.to_string(),
             targets: vec!["x86_64-unknown-linux-gnu".to_string()],
             connector: "provider-connector".to_string(),
-            connector_process_group:
-                ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::Inherited,
+            connector_descendants:
+                ryeos_external_execution_contract::ExternalProviderConnectorDescendants::InProcessGroup,
             configuration_adapter: "provider-configuration".to_string(),
             configuration_destination: "provider.json".to_string(),
+            qualification_request_binding_protocol: None,
         }
     }
 
@@ -800,6 +1070,7 @@ mod tests {
             capabilities: [LifecycleCapability::ExactAllocationReconciliation]
                 .into_iter()
                 .collect(),
+            relay_scope_setting: None,
         }
     }
 
@@ -894,62 +1165,65 @@ mod tests {
         assert!(mf.provides_kinds.contains(&"tool".to_string()));
         assert!(
             !mf.provides_kinds.contains(&"knowledge".to_string()),
-            "core must NOT provide knowledge after schema move to standard: {:?}",
+            "core must NOT provide knowledge: it lives in the knowledge bundle: {:?}",
             mf.provides_kinds
         );
         assert!(mf.requires_kinds.is_empty(), "core should have no requires");
     }
 
     #[test]
-    fn parse_manifest_reads_standard() {
-        let mf = parse_manifest(&workspace_root().join("bundles/standard"), "standard")
-            .expect("parse standard manifest");
-        assert_eq!(mf.name, "standard");
+    fn parse_manifest_reads_directive() {
+        let mf = parse_manifest(&workspace_root().join("bundles/directive"), "directive")
+            .expect("parse directive manifest");
+        assert_eq!(mf.name, "directive");
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
+        assert!(
+            mf.uses_kinds.contains(&"knowledge".to_string()),
+            "directive uses knowledge from its provider bundle"
+        );
+        for kind in ["config", "handler", "worker"] {
+            assert!(
+                mf.requires_kinds.contains(&kind.to_string()),
+                "directive requires {kind} from core"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_manifest_reads_graph() {
+        let mf = parse_manifest(&workspace_root().join("bundles/graph"), "graph")
+            .expect("parse graph manifest");
+        assert_eq!(mf.name, "graph");
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
         assert!(
-            mf.provides_kinds.contains(&"knowledge".to_string()),
-            "standard must provide knowledge after schema move from core"
-        );
-        assert!(
-            !mf.uses_kinds.contains(&"knowledge".to_string()),
-            "standard must not use knowledge externally since it now provides it"
-        );
-        assert!(
-            mf.requires_kinds.contains(&"config".to_string()),
-            "standard requires config from core"
-        );
-        assert!(
             mf.requires_kinds.contains(&"handler".to_string()),
-            "standard requires handler from core"
+            "graph requires handler from core"
         );
     }
 
     #[test]
-    fn parse_manifest_reads_hosted_node_generated_manifest() {
-        let root = workspace_root().join("bundles/hosted-node");
-        let mf = parse_manifest(&workspace_root().join("bundles/hosted-node"), "hosted-node")
-            .expect("parse hosted-node manifest");
-        assert_eq!(mf.name, "hosted-node");
-        assert_eq!(mf.version, "0.1.0");
-        assert!(mf.provides_kinds.is_empty());
-        assert_eq!(mf.requires_kinds, vec!["node".to_string()]);
+    fn parse_manifest_reads_knowledge() {
+        let mf = parse_manifest(&workspace_root().join("bundles/knowledge"), "knowledge")
+            .expect("parse knowledge manifest");
+        assert_eq!(mf.name, "knowledge");
+        assert!(mf.provides_kinds.contains(&"knowledge".to_string()));
         assert!(
-            mf.uses_kinds.is_empty(),
-            "hosted-node runtime bundle must stay core-only; docs belong outside .ai/"
+            !mf.uses_kinds.contains(&"knowledge".to_string()),
+            "knowledge must not use knowledge externally since it provides it"
         );
         assert!(
-            !root.join(".ai/config").exists(),
-            "hosted-node bundle must not contribute system configuration"
+            mf.requires_kinds.contains(&"config".to_string()),
+            "knowledge requires config from core"
         );
-        assert!(
-            !root.join(".ai/node/policies").exists(),
-            "node policy generations are node-owned state, not bundle content"
-        );
-        assert!(
-            !root.join(".ai/knowledge").exists(),
-            "hosted-node docs must stay outside .ai to avoid a standard/knowledge dependency"
-        );
+    }
+
+    #[test]
+    fn parse_manifest_reads_ryeos_docs() {
+        let mf = parse_manifest(&workspace_root().join("bundles/ryeos-docs"), "ryeos-docs")
+            .expect("parse ryeos-docs manifest");
+        assert_eq!(mf.name, "ryeos-docs");
+        assert!(mf.provides_kinds.is_empty(), "ryeos-docs provides no kind");
+        assert!(mf.requires_kinds.contains(&"knowledge".to_string()));
     }
 
     #[test]
@@ -971,29 +1245,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_dependencies_core_and_standard_ok() {
+    fn validate_dependencies_core_and_workflow_bundles_ok() {
         let root = workspace_root();
-        let bundles = vec![
-            ("core".to_string(), root.join("bundles/core")),
-            ("standard".to_string(), root.join("bundles/standard")),
-        ];
+        let bundles = ["core", "knowledge", "directive", "graph"]
+            .into_iter()
+            .map(|name| (name.to_string(), root.join("bundles").join(name)))
+            .collect::<Vec<_>>();
         assert!(
             validate_manifest_dependencies(&bundles).is_ok(),
-            "core + standard should satisfy all dependencies"
-        );
-    }
-
-    #[test]
-    fn validate_dependencies_core_and_hosted_node_without_standard_ok() {
-        let root = workspace_root();
-        let bundles = vec![
-            ("core".to_string(), root.join("bundles/core")),
-            ("hosted-node".to_string(), root.join("bundles/hosted-node")),
-        ];
-
-        assert!(
-            validate_manifest_dependencies(&bundles).is_ok(),
-            "hosted-node must install with core only, without standard"
+            "core + knowledge + directive + graph should satisfy all dependencies"
         );
     }
 
@@ -1195,30 +1455,30 @@ typo_field: oops
         );
         assert!(
             !kinds.contains(&"directive".to_string()),
-            "directive is a standard kind, not core: {kinds:?}"
+            "directive is a directive-bundle kind, not core: {kinds:?}"
         );
         assert!(
             !kinds.contains(&"knowledge".to_string()),
-            "core must NOT provide knowledge after schema move to standard: {kinds:?}"
+            "core must NOT provide knowledge: it lives in the knowledge bundle: {kinds:?}"
         );
     }
 
     #[test]
-    fn derive_provides_kinds_scans_standard_schemas() {
-        let ai_dir = workspace_root().join("bundles/standard/.ai");
-        let kinds = derive_provides_kinds(&ai_dir).expect("derive standard provides_kinds");
-        assert!(
-            kinds.contains(&"directive".to_string()),
-            "standard must provide directive: {kinds:?}"
-        );
-        assert!(
-            kinds.contains(&"graph".to_string()),
-            "standard must provide graph: {kinds:?}"
-        );
-        assert!(
-            kinds.contains(&"knowledge".to_string()),
-            "standard must provide knowledge after schema move from core: {kinds:?}"
-        );
+    fn derive_provides_kinds_scans_workflow_schemas() {
+        for (bundle, kind) in [
+            ("directive", "directive"),
+            ("graph", "graph"),
+            ("knowledge", "knowledge"),
+        ] {
+            let ai_dir = workspace_root().join("bundles").join(bundle).join(".ai");
+            let kinds = derive_provides_kinds(&ai_dir)
+                .unwrap_or_else(|error| panic!("derive {bundle} provides_kinds: {error}"));
+            assert_eq!(
+                kinds,
+                vec![kind.to_string()],
+                "{bundle} must provide exactly {kind}"
+            );
+        }
     }
 
     #[test]
@@ -1249,6 +1509,8 @@ typo_field: oops
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1256,6 +1518,66 @@ typo_field: oops
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
         assert_eq!(manifest.name, "test-bundle");
+    }
+
+    #[test]
+    fn overlapping_owned_namespaces_refuse_install() {
+        let claim = |bundle: &str, namespaces: &[&str]| {
+            (
+                bundle.to_owned(),
+                namespaces
+                    .iter()
+                    .map(|n| (*n).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        // Disjoint claims, and one bundle seen twice, are fine.
+        ryeos_engine::item_resolution::check_owned_namespace_claims(&[
+            claim("core", &["ryeos/core"]),
+            claim("other", &["acme/tools"]),
+            claim("other", &["acme/tools"]),
+        ])
+        .unwrap();
+        // Equal claims and a claim inside another bundle's claim are refused.
+        for rival in [
+            &["ryeos/core"][..],
+            &["ryeos/core/runtimes"][..],
+            &["ryeos"][..],
+        ] {
+            let error = ryeos_engine::item_resolution::check_owned_namespace_claims(&[
+                claim("core", &["ryeos/core"]),
+                claim("rival", rival),
+            ])
+            .unwrap_err();
+            assert!(error.contains("core") && error.contains("rival"), "{error}");
+        }
+
+        // A manifest cannot declare wildcard or self-overlapping claims.
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("claimant/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        for bad in [
+            vec!["ryeos/*".to_string()],
+            vec!["a".to_string(), "a/b".to_string()],
+        ] {
+            let source = BundleManifestSource {
+                name: "claimant".to_string(),
+                version: "0.1.0".to_string(),
+                description: String::new(),
+                requires_kinds: vec![],
+                uses_kinds: vec![],
+                runtime_authority: RuntimeAuthorityDecls::default(),
+                smoke: vec![],
+                shadows: vec![],
+                owns_namespaces: bad,
+                sync_include: vec![],
+                isolation_backends: vec![],
+                external_providers: vec![],
+                external_lifecycle_adapters: vec![],
+            };
+            let error = materialize_manifest(source, &ai_dir, "claimant").unwrap_err();
+            assert!(error.to_string().contains("owns_namespaces"), "{error}");
+        }
     }
 
     #[test]
@@ -1280,6 +1602,8 @@ typo_field: oops
             },
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1450,6 +1774,8 @@ smoke:
                 timeout_secs: None,
             }],
             shadows: vec![],
+            owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1524,6 +1850,8 @@ shadows:
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
             shadows: vec!["no-colon".to_string()],
+            owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1576,7 +1904,7 @@ name: isolation
 version: "1.0"
 isolation_backends:
   - id: linux
-    protocol: ryeos.isolation-adapter/v12
+    protocol: ryeos.isolation-adapter/v16
     targets: [x86_64-unknown-linux-gnu]
     adapter: adapter
     artifacts: {}
@@ -1601,11 +1929,113 @@ isolation_backends:
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![backend.clone()],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "isolation").unwrap();
         assert_eq!(manifest.isolation_backends, vec![backend]);
+    }
+
+    fn source_with_sync_include(
+        decls: Vec<ryeos_state::project_sync::SyncIncludeDecl>,
+    ) -> BundleManifestSource {
+        BundleManifestSource {
+            name: "claimant".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            requires_kinds: vec![],
+            uses_kinds: vec![],
+            runtime_authority: RuntimeAuthorityDecls::default(),
+            smoke: vec![],
+            shadows: vec![],
+            owns_namespaces: vec![],
+            sync_include: decls,
+            isolation_backends: vec![],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
+        }
+    }
+
+    #[test]
+    fn materialize_manifest_refuses_bad_sync_include_declarations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("claimant/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        for (label, yaml) in [
+            ("floor", "- root: .ai/node/vault\n  shape: directory\n"),
+            ("above a floor", "- root: .ai/node\n  shape: directory\n"),
+            ("outside .ai", "- root: src\n  shape: directory\n"),
+            (
+                "both forms",
+                "- kind: tool\n  root: .ai/tools\n  shape: directory\n",
+            ),
+            (
+                "overlap",
+                "- root: .ai/a\n  shape: directory\n- root: .ai/a/b\n  shape: file\n",
+            ),
+        ] {
+            let decls = serde_yaml::from_str(yaml).unwrap();
+            let error = materialize_manifest(source_with_sync_include(decls), &ai_dir, "claimant")
+                .expect_err(label);
+            assert!(
+                error.to_string().contains("sync_include"),
+                "{label}: {error}"
+            );
+        }
+        // A legal declaration is carried verbatim into the signed manifest.
+        let decls: Vec<ryeos_state::project_sync::SyncIncludeDecl> =
+            serde_yaml::from_str("- kind: tool\n- root: .ai/manifest.yaml\n  shape: file\n")
+                .unwrap();
+        let manifest =
+            materialize_manifest(source_with_sync_include(decls.clone()), &ai_dir, "claimant")
+                .unwrap();
+        assert_eq!(manifest.sync_include, decls);
+    }
+
+    /// The core bundle's signed manifest composes to exactly the test table,
+    /// and the source manifest and the generated one agree.
+    #[test]
+    fn core_manifest_declares_exactly_the_core_rows() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bundles/core/.ai");
+        let source: BundleManifestSource =
+            serde_yaml::from_str(&fs::read_to_string(root.join("manifest.source.yaml")).unwrap())
+                .unwrap();
+        let generated_raw = fs::read_to_string(root.join("manifest.yaml")).unwrap();
+        let generated = parse_current_manifest_body(
+            &lillux::signature::strip_signature_lines(&generated_raw),
+            &root.join("manifest.yaml"),
+        )
+        .unwrap();
+        assert_eq!(
+            source.sync_include, generated.sync_include,
+            "regenerate and re-sign bundles/core/.ai/manifest.yaml"
+        );
+
+        // `{kind}` declarations resolve through the kind schemas core ships.
+        let kind_directory = |kind: &str| -> Option<String> {
+            let path = root
+                .join("node/engine/kinds")
+                .join(kind)
+                .join(format!("{kind}.kind-schema.yaml"));
+            let value: serde_yaml::Value = serde_yaml::from_str(
+                &lillux::signature::strip_signature_lines(&fs::read_to_string(path).ok()?),
+            )
+            .ok()?;
+            value["location"]["directory"].as_str().map(str::to_owned)
+        };
+        let composed = ryeos_state::project_sync::SyncInclude::compose(
+            &[("core".to_owned(), generated.sync_include)],
+            &kind_directory,
+        )
+        .unwrap();
+        assert_eq!(
+            composed,
+            ryeos_state::project_sync::SyncInclude::for_tests(),
+            "the composed table must equal SyncInclude::for_tests"
+        );
+        assert_eq!(composed.entries().len(), 18);
     }
 }

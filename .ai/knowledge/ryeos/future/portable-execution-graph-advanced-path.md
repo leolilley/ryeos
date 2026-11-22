@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-27T04:21:36Z:a5cb1aea0a7298504d22b8290a3cd16214e5744846d249ab7cdd30e7924aca67:QUnC1oww6IUlCGCLU5NdRXcMDO7VGuJIbOwbocrjD/5T9Yiv6YCXgmwkt8IAgoFEMz+B5ThONV+Ca6wlirnGDQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:1fe548888603ea752c095a268592ccb861b707518b5e7376d972bb71942c41e2:/8hH8uv/t0nte8j6R0OhCFMLM9Ap2rCMK851v8jd5G0KgbDCC6tjv9B79TuoPYlFHTi2dtsZUMvx+rguEcH1DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, portable-execution, execution-graph, architecture, export]
 version: "0.4.0"
@@ -26,7 +26,7 @@ until "stable identity breadcrumbs" existed, and described a
 - `definition_hash` no longer exists. Executable identity is
   `effective_definition_digest`; `root_raw_content_digest` is source
   evidence; `admitted_launch_capsule_hash` is invocation authority. See
-  `bundles/standard/.ai/knowledge/ryeos/core/engine/effective-programs.md`.
+  `bundles/ryeos-docs/.ai/knowledge/ryeos/core/engine/effective-programs.md`.
 
 Portable hosted-worker environments, checkpoints, staged transfer, remote
 admission, and cross-site continuation now exist for one explicitly selected

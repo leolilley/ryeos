@@ -10,6 +10,7 @@ use ryeos_external_execution_contract::LifecycleCapability;
 use serde::{Deserialize, Serialize};
 
 use crate::external_content::products::composition::ResolvedExternalProductSelections;
+use crate::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram;
 use crate::objects::{
     AdmittedStructuredSessionProfile, EFFECTIVE_SOURCE_BINDING_SCHEMA,
     EXTERNAL_CONTENT_MANIFEST_KIND, EffectiveSourceClosureProjection, ExecutableSearchPathEntry,
@@ -30,6 +31,22 @@ pub const REQUIRED_CLAIMS: &[&str] = &[
 ];
 pub const QUALIFICATION_CONTEXT_SCHEMA: &str = "ryeos.external_candidate_qualification_context.v3";
 pub const QUALIFICATION_CONTEXT_PARAMETER: &str = "external_candidate_qualification_context";
+
+/// Refuses an environment that asks for a delivered secret. A secret is
+/// delivered from the vault of the node that runs the session; an external
+/// placement, qualification or guest transfer does not re-authorise delivery
+/// on the target, so the value would be absent or substituted there.
+pub fn ensure_no_delivered_secrets(
+    environment: &BTreeMap<String, SessionProcessEnvironmentValue>,
+) -> Result<()> {
+    let names = crate::objects::session_process_environment_delivered_secret_names(environment);
+    ensure!(
+        names.is_empty(),
+        "external execution cannot carry delivered secret(s) {}: a delivered secret does not travel to another node",
+        names.join(", ")
+    );
+    Ok(())
+}
 
 /// Domain-owned use context for an independently qualified runtime. A product
 /// witness proves exact bytes, while the verifier must also have exercised the
@@ -104,6 +121,7 @@ impl ExternalCandidateGuestEnvironment {
     ) -> Result<Self> {
         recipe.validate()?;
         crate::objects::validate_session_process_environment(process_environment)?;
+        ensure_no_delivered_secrets(process_environment)?;
         ensure!(
             executable_search.len() <= crate::objects::MAX_EXECUTABLE_SEARCH_PATH_ENTRIES,
             "external guest executable search exceeds its bound"
@@ -136,6 +154,11 @@ impl ExternalCandidateGuestEnvironment {
                         .to_str()
                         .context("external guest scratch destination is not UTF-8")?
                         .to_owned()
+                }
+                SessionProcessEnvironmentValue::DeliveredSecret { name: secret } => {
+                    anyhow::bail!(
+                        "external guest environment variable `{name}` names delivered secret `{secret}`, which does not travel to another node"
+                    )
                 }
             };
             ensure!(
@@ -175,6 +198,54 @@ impl ExternalCandidateGuestEnvironment {
 }
 
 impl ExternalCandidateQualificationUse {
+    /// Shared domain obligation for product and acquired-content testimony.
+    /// Source owners still authenticate policy, claims and the exact bytes.
+    pub fn require_qualified_use(&self, parameters: &serde_json::Value) -> Result<()> {
+        self.validate()?;
+        let context = parameters
+            .get(QUALIFICATION_CONTEXT_PARAMETER)
+            .context("external candidate qualification has no sealed use context")?;
+        let qualified = Self::from_value(context)?;
+        if qualified != *self {
+            let changed = [
+                (
+                    "requirement",
+                    &qualified.requirement_digest,
+                    &self.requirement_digest,
+                ),
+                ("profile", &qualified.profile_hash, &self.profile_hash),
+                (
+                    "source_binding",
+                    &qualified.source_binding_hash,
+                    &self.source_binding_hash,
+                ),
+                (
+                    "source_content",
+                    &qualified.source_content_manifest_hash,
+                    &self.source_content_manifest_hash,
+                ),
+                (
+                    "provider_executable",
+                    &qualified.provider_executable_manifest_hash,
+                    &self.provider_executable_manifest_hash,
+                ),
+                (
+                    "execution_environment",
+                    &qualified.execution_environment_digest,
+                    &self.execution_environment_digest,
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(name, actual, expected)| (actual != expected).then_some(name))
+            .collect::<Vec<_>>();
+            anyhow::bail!(
+                "external candidate qualification tested a different admitted use: {}",
+                changed.join(",")
+            );
+        }
+        Ok(())
+    }
+
     /// Exact guest-visible environment coordinate shared with an independent
     /// verifier. A verifier must derive it from selected/observed inputs, not
     /// accept a caller-supplied digest as evidence.
@@ -198,6 +269,7 @@ impl ExternalCandidateQualificationUse {
             );
         }
         crate::objects::validate_session_process_environment(process_environment)?;
+        ensure_no_delivered_secrets(process_environment)?;
         for value in process_environment.values() {
             if let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value {
                 ensure!(
@@ -488,6 +560,7 @@ pub struct ExternalCandidateRequirement {
     /// with the installed signed declaration before any contact.
     pub provider_configuration_destination: String,
     pub runtime_product_declaration_id: String,
+    pub runtime_authority: ExternalCandidateRuntimeAuthority,
     pub runtime_recipe: ExternalCandidateRuntimeRecipe,
 }
 
@@ -500,10 +573,19 @@ pub enum ExternalCandidateExecutionRoute {
     ConnectorOnly,
 }
 
+/// Signed choice of authority lane. Missing/unqualified product authority
+/// must never implicitly switch to acquired content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCandidateRuntimeAuthority {
+    CapturedProduct,
+    ActivatedContent,
+}
+
 impl ExternalCandidateRequirement {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 6
+            self.schema == 7
                 && self.protocol == PROTOCOL
                 && self.connector_protocol == CONNECTOR_PROTOCOL
                 && self.execution_route == ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -529,8 +611,14 @@ impl ExternalCandidateRequirement {
         &self,
         selections: Option<&ResolvedExternalProductSelections>,
         qualification_use: &ExternalCandidateQualificationUse,
+        placement: ExternalProgramPlacement,
     ) -> Result<AdmittedExternalCandidateProgram> {
         self.validate()?;
+        placement.validate()?;
+        ensure!(
+            self.runtime_authority == ExternalCandidateRuntimeAuthority::CapturedProduct,
+            "activated runtime requirement cannot resolve from product selections"
+        );
         qualification_use.validate()?;
         ensure!(
             qualification_use.requirement_digest == self.qualification_requirement_digest()?,
@@ -554,57 +642,13 @@ impl ExternalCandidateRequirement {
             .qualification
             .as_ref()
             .context("external candidate runtime has no admitted qualification")?;
-        let context = qualification
-            .evidence
-            .policy_source
-            .policy
-            .verifier_parameters
-            .get(QUALIFICATION_CONTEXT_PARAMETER)
-            .context("external candidate qualification has no sealed use context")?;
-        let qualified_use = ExternalCandidateQualificationUse::from_value(context)?;
-        if qualified_use != *qualification_use {
-            let mut changed = Vec::new();
-            for (name, qualified, current) in [
-                (
-                    "requirement",
-                    &qualified_use.requirement_digest,
-                    &qualification_use.requirement_digest,
-                ),
-                (
-                    "profile",
-                    &qualified_use.profile_hash,
-                    &qualification_use.profile_hash,
-                ),
-                (
-                    "source_binding",
-                    &qualified_use.source_binding_hash,
-                    &qualification_use.source_binding_hash,
-                ),
-                (
-                    "source_content",
-                    &qualified_use.source_content_manifest_hash,
-                    &qualification_use.source_content_manifest_hash,
-                ),
-                (
-                    "provider_executable",
-                    &qualified_use.provider_executable_manifest_hash,
-                    &qualification_use.provider_executable_manifest_hash,
-                ),
-                (
-                    "execution_environment",
-                    &qualified_use.execution_environment_digest,
-                    &qualification_use.execution_environment_digest,
-                ),
-            ] {
-                if qualified != current {
-                    changed.push(name);
-                }
-            }
-            anyhow::bail!(
-                "external candidate qualification tested a different admitted use: {}",
-                changed.join(",")
-            );
-        }
+        qualification_use.require_qualified_use(
+            &qualification
+                .evidence
+                .policy_source
+                .policy
+                .verifier_parameters,
+        )?;
         // Selection validation joins the proof to its exact policy and subject.
         // Require these claims in the signed relationship too: an incidental
         // verifier result cannot widen the consumer's qualification allowance.
@@ -622,17 +666,145 @@ impl ExternalCandidateRequirement {
             qualification_use: qualification_use.clone(),
             runtime_manifest_kind: runtime.manifest_kind.clone(),
             runtime_manifest_hash: runtime.manifest_hash.clone(),
-            runtime_witness_hash: runtime.witness_hash.clone(),
+            runtime_source: ExternalCandidateRuntimeSource::CapturedProduct {
+                witness_hash: runtime.witness_hash.clone(),
+            },
             qualification_attestation_hash: qualification.attestation_hash.clone(),
             selection_identity_digest: runtime.semantic_identity_digest()?,
             runtime_recipe_digest: self.runtime_recipe.digest()?,
+            placement,
         })
+    }
+
+    /// Resolve authenticated acquired bytes through the same admitted program.
+    /// This pure projection cannot authenticate the retained node testimony.
+    pub fn resolve_for_content(
+        &self,
+        content: &crate::objects::RetainedExternalRuntimeContentQualification,
+        qualification_use: &ExternalCandidateQualificationUse,
+        placement: ExternalProgramPlacement,
+    ) -> Result<AdmittedExternalCandidateProgram> {
+        content.validate()?;
+        self.resolve_for_content_evidence(
+            &content.activation_ref,
+            &content.coordinate_id,
+            &content.attestation_hash,
+            &content.evidence,
+            qualification_use,
+            placement,
+        )
+    }
+
+    /// Resolve the admitted program from published content qualification
+    /// evidence alone. No retained session record is needed, so a caller that
+    /// holds only the activation coordinate and the evidence derives exactly
+    /// the program a launch derives from the retained record.
+    pub fn resolve_for_content_evidence(
+        &self,
+        activation_ref: &str,
+        coordinate_id: &str,
+        attestation_hash: &str,
+        evidence: &crate::external_content::qualification_evidence::ContentQualificationEvidence,
+        qualification_use: &ExternalCandidateQualificationUse,
+        placement: ExternalProgramPlacement,
+    ) -> Result<AdmittedExternalCandidateProgram> {
+        self.validate()?;
+        placement.validate()?;
+        ensure!(
+            self.runtime_authority == ExternalCandidateRuntimeAuthority::ActivatedContent,
+            "product runtime requirement cannot resolve from acquired content"
+        );
+        super::hash(coordinate_id)?;
+        super::hash(attestation_hash)?;
+        crate::external_content::products::validate_canonical_unsuffixed_ref(
+            "content runtime activation ref",
+            activation_ref,
+        )?;
+        ensure!(
+            activation_ref.starts_with("config:"),
+            "content runtime requires an activation config ref"
+        );
+        evidence.validate()?;
+        ensure!(
+            crate::external_content::qualification_publication::coordinate_id(evidence)?
+                == coordinate_id,
+            "content runtime coordinate differs from its exact testimony"
+        );
+        qualification_use.validate()?;
+        ensure!(
+            qualification_use.requirement_digest == self.qualification_requirement_digest()?,
+            "content-backed qualification use differs from its requirement"
+        );
+        let crate::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content: subject } =
+            &evidence.purpose.subject else {
+                anyhow::bail!("content-backed runtime requires an activated source");
+            };
+        ensure!(
+            subject.declaration_id == self.runtime_product_declaration_id
+                && subject.realization.kind == ExternalContentKind::Tree,
+            "activated runtime declaration differs from admitted runtime slot"
+        );
+        let program = AdmittedExternalCandidateProgram {
+            requirement: self.clone(),
+            qualification_use: qualification_use.clone(),
+            runtime_manifest_kind: subject.manifest_kind.clone(),
+            runtime_manifest_hash: subject.manifest_hash.clone(),
+            runtime_source: ExternalCandidateRuntimeSource::ActivatedContent {
+                subject: subject.clone(),
+                qualification_coordinate_id: coordinate_id.to_owned(),
+            },
+            qualification_attestation_hash: attestation_hash.to_owned(),
+            selection_identity_digest: canonical_value_digest(&serde_json::json!({
+                "domain": "ryeos.external_candidate.content_selection.v1",
+                "activation_ref": activation_ref,
+                "purpose": evidence.purpose,
+                "coordinate": coordinate_id,
+            }))?,
+            runtime_recipe_digest: self.runtime_recipe.digest()?,
+            placement,
+        };
+        program.require_content_qualification(evidence)?;
+        Ok(program)
     }
 }
 
 /// Projection of already retained product authority. All CAS edges remain
 /// owned by the capsule's full product selections, which must be rejoined on
 /// validation. No occurrence, capsule hash or operator credential enters it.
+/// Source coordinate, not source authentication or publication authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalCandidateRuntimeSource {
+    CapturedProduct {
+        witness_hash: String,
+    },
+    ActivatedContent {
+        subject: crate::external_content::qualification_subject::ContentQualificationSubject,
+        qualification_coordinate_id: String,
+    },
+}
+
+impl ExternalCandidateRuntimeSource {
+    fn validate(&self, manifest_hash: &str) -> Result<()> {
+        match self {
+            Self::CapturedProduct { witness_hash } => super::hash(witness_hash),
+            Self::ActivatedContent {
+                subject,
+                qualification_coordinate_id,
+            } => {
+                subject.validate()?;
+                super::hash(qualification_coordinate_id)?;
+                ensure!(
+                    subject.manifest_hash == manifest_hash
+                        && subject.realization.kind == ExternalContentKind::Tree,
+                    "activated candidate runtime source has a different manifest"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedExternalCandidateProgram {
@@ -640,15 +812,142 @@ pub struct AdmittedExternalCandidateProgram {
     pub qualification_use: ExternalCandidateQualificationUse,
     pub runtime_manifest_kind: String,
     pub runtime_manifest_hash: String,
-    pub runtime_witness_hash: String,
+    pub runtime_source: ExternalCandidateRuntimeSource,
     pub qualification_attestation_hash: String,
     pub selection_identity_digest: String,
     pub runtime_recipe_digest: String,
+    /// What a lease for this exact program is judged with. Fixed where the
+    /// program is admitted, from the profile's `requires` and the Worker's
+    /// signed readiness budget; retained and recovered programs carry it whole
+    /// and never rebuild it.
+    pub placement: ExternalProgramPlacement,
+}
+
+/// The lease-relevant facts of one admitted program: its workload class, the
+/// lease and guest capability floors it requires, and the readiness budget its
+/// Worker declares. Empty `lease` and `guest` mean the program needs no lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalProgramPlacement {
+    pub workload_class: String,
+    pub lease: Vec<lillux::process_control::CapabilityRequirement>,
+    pub guest: Vec<lillux::process_control::CapabilityRequirement>,
+    pub ready_timeout_ms: u64,
+}
+
+impl ExternalProgramPlacement {
+    /// A program needs a lease exactly when its profile names lease or guest
+    /// requirements.
+    pub fn needs_lease(&self) -> bool {
+        !self.lease.is_empty() || !self.guest.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.workload_class.is_empty()
+                && self.workload_class.len() <= 128
+                && self.workload_class.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                }),
+            "external program workload class is not a bounded identifier"
+        );
+        ensure!(
+            (1..=24 * 60 * 60 * 1_000).contains(&self.ready_timeout_ms),
+            "external program readiness budget is outside its bound"
+        );
+        ensure!(
+            self.lease.len() <= 64 && self.guest.len() <= 64,
+            "external program placement requirement lists exceed their bound"
+        );
+        Ok(())
+    }
 }
 
 impl AdmittedExternalCandidateProgram {
+    /// Rejoin source-specific retained authority without converting acquired
+    /// bytes into a capture witness or changing the worker/session owner.
+    pub fn verify_runtime_authority(
+        &self,
+        selections: Option<&ResolvedExternalProductSelections>,
+        content: Option<&crate::objects::RetainedExternalRuntimeContentQualification>,
+    ) -> Result<()> {
+        match &self.runtime_source {
+            ExternalCandidateRuntimeSource::CapturedProduct { .. } => {
+                self.verify_selections(selections)
+            }
+            ExternalCandidateRuntimeSource::ActivatedContent { .. } => {
+                let content =
+                    content.context("activated runtime has no retained content authority")?;
+                if let Some(selections) = selections {
+                    selections.validate()?;
+                    ensure!(
+                        selections
+                            .get(&self.requirement.runtime_product_declaration_id)
+                            .is_none(),
+                        "activated runtime slot also carries product authority"
+                    );
+                }
+                ensure!(
+                    self.requirement.resolve_for_content(
+                        content,
+                        &self.qualification_use,
+                        self.placement.clone()
+                    )? == *self,
+                    "activated runtime program contradicts retained content authority"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Domain validation only: the app must independently authenticate this
+    /// acquired-source testimony and its current or retained authority.
+    pub fn require_content_qualification(
+        &self,
+        evidence: &crate::external_content::qualification_evidence::ContentQualificationEvidence,
+    ) -> Result<()> {
+        self.validate()?;
+        evidence.validate()?;
+        ensure!(
+            evidence.result.subject_manifest_hash == self.runtime_manifest_hash,
+            "external candidate content qualification has a different runtime subject"
+        );
+        self.qualification_use
+            .require_qualified_use(&evidence.purpose.policy_source.policy.verifier_parameters)?;
+        ensure!(
+            REQUIRED_CLAIMS.iter().all(|claim| evidence
+                .purpose
+                .required_claims
+                .iter()
+                .any(|required| required == claim)),
+            "external candidate content allowance omits required runtime claims"
+        );
+        evidence.result.validate_claims_for(
+            &evidence.purpose.policy_source.policy,
+            &REQUIRED_CLAIMS
+                .iter()
+                .map(|claim| (*claim).to_owned())
+                .collect::<Vec<_>>(),
+        )
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.requirement.validate()?;
+        ensure!(
+            matches!(
+                (&self.runtime_source, self.requirement.runtime_authority),
+                (
+                    ExternalCandidateRuntimeSource::CapturedProduct { .. },
+                    ExternalCandidateRuntimeAuthority::CapturedProduct
+                ) | (
+                    ExternalCandidateRuntimeSource::ActivatedContent { .. },
+                    ExternalCandidateRuntimeAuthority::ActivatedContent
+                )
+            ),
+            "candidate runtime source differs from signed authority lane"
+        );
         self.qualification_use.validate()?;
         ensure!(
             self.qualification_use.requirement_digest
@@ -665,12 +964,21 @@ impl AdmittedExternalCandidateProgram {
         );
         for hash in [
             &self.runtime_manifest_hash,
-            &self.runtime_witness_hash,
             &self.qualification_attestation_hash,
             &self.selection_identity_digest,
             &self.runtime_recipe_digest,
         ] {
             super::hash(hash)?;
+        }
+        self.placement.validate()?;
+        self.runtime_source.validate(&self.runtime_manifest_hash)?;
+        if let ExternalCandidateRuntimeSource::ActivatedContent { subject, .. } =
+            &self.runtime_source
+        {
+            ensure!(
+                subject.manifest_kind == self.runtime_manifest_kind,
+                "activated runtime manifest kind differs from admitted source"
+            );
         }
         ensure!(
             self.runtime_recipe_digest == self.requirement.runtime_recipe.digest()?,
@@ -685,9 +993,18 @@ impl AdmittedExternalCandidateProgram {
     ) -> Result<()> {
         self.validate()?;
         ensure!(
-            self.requirement
-                .resolve_for_use(selections, &self.qualification_use)?
-                == *self,
+            matches!(
+                self.runtime_source,
+                ExternalCandidateRuntimeSource::CapturedProduct { .. }
+            ),
+            "activated runtime requires retained content authority, not product selections"
+        );
+        ensure!(
+            self.requirement.resolve_for_use(
+                selections,
+                &self.qualification_use,
+                self.placement.clone()
+            )? == *self,
             "external candidate program contradicts retained product authority"
         );
         Ok(())
@@ -696,7 +1013,7 @@ impl AdmittedExternalCandidateProgram {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.external-candidate-program.v3",
+            "domain": "ryeos.external-candidate-program.v5",
             "program": self,
         }))
     }
@@ -713,6 +1030,7 @@ impl AdmittedExternalCandidateProgram {
 )]
 pub enum AdmittedExternalExecutionProgram {
     StructuredSession(AdmittedExternalCandidateProgram),
+    QualificationStructuredSession(AdmittedExternalQualificationSessionProgram),
     DirectCommand(AdmittedExternalDirectProgram),
 }
 
@@ -726,6 +1044,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::StructuredSession(program) => program.validate(),
+            Self::QualificationStructuredSession(program) => program.validate(),
             Self::DirectCommand(program) => program.validate(),
         }
     }
@@ -733,6 +1052,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn digest(&self) -> Result<String> {
         match self {
             Self::StructuredSession(program) => program.digest(),
+            Self::QualificationStructuredSession(program) => program.digest(),
             Self::DirectCommand(program) => program.digest(),
         }
     }
@@ -740,6 +1060,7 @@ impl AdmittedExternalExecutionProgram {
     pub fn runtime_manifest_hash(&self) -> Result<&str> {
         match self {
             Self::StructuredSession(program) => Ok(&program.runtime_manifest_hash),
+            Self::QualificationStructuredSession(program) => Ok(&program.runtime_manifest_hash),
             Self::DirectCommand(program) => program.runtime_manifest_hash(),
         }
     }
@@ -749,6 +1070,9 @@ impl AdmittedExternalExecutionProgram {
             Self::StructuredSession(_) => {
                 ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {}
             }
+            Self::QualificationStructuredSession(_) => {
+                ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {}
+            }
             Self::DirectCommand(program) => program.projection.execution_mode,
         }
     }
@@ -756,14 +1080,18 @@ impl AdmittedExternalExecutionProgram {
     pub fn worker(&self) -> Result<&AdmittedExternalCandidateProgram> {
         match self {
             Self::StructuredSession(program) => Ok(program),
-            Self::DirectCommand(_) => anyhow::bail!("external program is not a structured session"),
+            Self::QualificationStructuredSession(_) | Self::DirectCommand(_) => {
+                anyhow::bail!("external program is not an ordinary structured session")
+            }
         }
     }
 
     pub fn worker_mut(&mut self) -> Result<&mut AdmittedExternalCandidateProgram> {
         match self {
             Self::StructuredSession(program) => Ok(program),
-            Self::DirectCommand(_) => anyhow::bail!("external program is not a structured session"),
+            Self::QualificationStructuredSession(_) | Self::DirectCommand(_) => {
+                anyhow::bail!("external program is not an ordinary structured session")
+            }
         }
     }
 
@@ -775,6 +1103,7 @@ impl AdmittedExternalExecutionProgram {
         inputs.validate()?;
         match self {
             Self::StructuredSession(_) => Ok(()),
+            Self::QualificationStructuredSession(program) => program.validate_guest_inputs(inputs),
             Self::DirectCommand(program) => program.validate_guest_inputs(inputs),
         }
     }
@@ -861,6 +1190,59 @@ impl ExternalDirectNativeRequirements {
     }
 }
 
+/// Provider-neutral restrictions for the exact guest target. CPU is per
+/// process and address space is virtual memory, not aggregate allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalNativeProcessLimits {
+    pub max_open_files: Option<u64>,
+    pub max_address_space_bytes: Option<u64>,
+    pub max_cpu_seconds: Option<u64>,
+    /// Real-UID account limit; not a private process-tree counter.
+    pub max_processes: Option<u64>,
+    pub deny_process_creation: bool,
+}
+
+impl ExternalNativeProcessLimits {
+    pub fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("max_open_files", self.max_open_files),
+            ("max_address_space_bytes", self.max_address_space_bytes),
+            ("max_cpu_seconds", self.max_cpu_seconds),
+            ("max_processes", self.max_processes),
+        ] {
+            ensure!(
+                value != Some(0) && value != Some(u64::MAX),
+                "{name} must be positive and finite"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn to_native(self) -> Result<lillux::SubprocessLimits> {
+        self.validate()?;
+        Ok(lillux::SubprocessLimits {
+            max_open_files: self.max_open_files,
+            max_address_space_bytes: self.max_address_space_bytes,
+            max_cpu_seconds: self.max_cpu_seconds,
+            max_processes: self.max_processes,
+            deny_process_creation: self.deny_process_creation,
+            max_stdout_bytes: None,
+            max_stderr_bytes: None,
+        })
+    }
+}
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 pub const MAX_EXTERNAL_DIRECT_TIMEOUT_SECONDS: u64 = 3_600;
 
 /// Compiler output, not a second user-authored recipe. Only the trusted app
@@ -868,6 +1250,9 @@ pub const MAX_EXTERNAL_DIRECT_TIMEOUT_SECONDS: u64 = 3_600;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalDirectCommandProjection {
+    pub workspace_view: ryeos_external_execution_contract::GuestWorkspaceView,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_limits: Option<ExternalNativeProcessLimits>,
     pub argv0: String,
     pub arguments: Vec<String>,
     pub cwd: String,
@@ -882,6 +1267,9 @@ pub struct ExternalDirectCommandProjection {
 
 impl ExternalDirectCommandProjection {
     fn validate(&self) -> Result<()> {
+        if let Some(limits) = self.target_limits {
+            limits.validate()?;
+        }
         ensure!(
             !self.argv0.is_empty()
                 && self.argv0.len() <= 4096
@@ -1144,6 +1532,7 @@ impl AdmittedExternalDirectProgram {
         inputs.validate()?;
         ensure!(
             inputs.workspace_outputs.is_none()
+                && inputs.workspace_view == self.projection.workspace_view
                 && inputs.identity_digest()? == self.guest_input_identity
                 && inputs.environment == self.projection.environment,
             "external direct guest inputs changed their sealed read-only identity"
@@ -1171,8 +1560,19 @@ impl AdmittedExternalDirectProgram {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         canonical_value_digest(
-            &serde_json::json!({"domain":"ryeos.external-direct-program.v1","program":self}),
+            &serde_json::json!({"domain":"ryeos.external-direct-program.v3","program":self}),
         )
+    }
+}
+
+/// A placement for fixtures that admit a program without a lease.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_placement() -> ExternalProgramPlacement {
+    ExternalProgramPlacement {
+        workload_class: "fixture.workload".into(),
+        lease: Vec::new(),
+        guest: Vec::new(),
+        ready_timeout_ms: 60_000,
     }
 }
 
@@ -1201,7 +1601,7 @@ pub mod test_support {
 
     pub fn fixture_requirement() -> ExternalCandidateRequirement {
         ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: PROTOCOL.into(),
             connector_protocol: CONNECTOR_PROTOCOL.into(),
             execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -1209,6 +1609,7 @@ pub mod test_support {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "auxiliary".into(),
+            runtime_authority: crate::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe: ExternalCandidateRuntimeRecipe {
                 schema: 2,
                 runtime_mount_destination: "/runtime".into(),
@@ -1230,11 +1631,13 @@ pub mod test_support {
         requirement: &ExternalCandidateRequirement,
     ) -> anyhow::Result<AdmittedStructuredSessionProfile> {
         let contract = json!({
+            "schema_version": crate::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
             "external_candidate": requirement,
             "workload_client": null,
             "workload_realization_id": "codex",
             "auxiliary_configs": [],
             "runtime_configs": [],
+            "configuration_absence": {"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
         });
         Ok(AdmittedStructuredSessionProfile {
             profile_hash: canonical_value_digest(&contract)?,
@@ -1244,6 +1647,11 @@ pub mod test_support {
             baseline_destination: "config.conf".into(),
             auxiliary_configs: Vec::new(),
             runtime_configs: Vec::new(),
+            configuration_absence: crate::objects::ConfigurationAbsence {
+                absolute_paths: Vec::new(),
+                startup_ancestor_paths: Vec::new(),
+                route_ancestor_paths: Vec::new(),
+            },
         })
     }
 
@@ -1284,6 +1692,22 @@ pub mod test_support {
         )
     }
 
+    pub fn plan_bound_artifact_identity(
+        execution_plan: &serde_json::Value,
+    ) -> anyhow::Result<crate::objects::AdmittedLaunchArtifactIdentity> {
+        let mut artifact =
+            crate::external_content::products::qualification::test_support::launch_artifact_identity();
+        if let crate::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            execution_plan_hash,
+            ..
+        } = &mut artifact
+        {
+            *execution_plan_hash =
+                lillux::sha256_hex(lillux::canonical_json(execution_plan)?.as_bytes());
+        }
+        Ok(artifact)
+    }
+
     pub fn qualified_external_candidate_capsule(
         requirement: ExternalCandidateRequirement,
         runtime_manifest_hash: &str,
@@ -1305,13 +1729,17 @@ pub mod test_support {
             &requirement,
             &qualification_use,
         )?;
-        let program = requirement.resolve_for_use(Some(&selections), &qualification_use)?;
+        let program = requirement.resolve_for_use(
+            Some(&selections),
+            &qualification_use,
+            crate::external_execution::admission::fixture_placement(),
+        )?;
         let exact_program = json!({"resolution_output":{"composed":{"derived":{
             (EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY): selections.semantic_identity_value()?,
             (SOURCE_CLOSURE_DERIVED_KEY): source.to_value()?,
             (EXTERNAL_REALIZATIONS_DERIVED_KEY): realizations.to_value()?
         }}}});
-        let artifact = crate::external_content::products::qualification::test_support::launch_artifact_identity();
+        let artifact = plan_bound_artifact_identity(&json!({}))?;
         let executable_blob_hash = "6".repeat(64);
         let capsule = AdmittedPersistentSessionCapsule {
             schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
@@ -1321,6 +1749,7 @@ pub mod test_support {
             exact_program,
             retained_product_selections: Some(selections),
             retained_external_runtime_qualification: None,
+            retained_external_runtime_content_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,
@@ -1330,6 +1759,7 @@ pub mod test_support {
                 ready_timeout_ms: 10_000,
                 request_timeout_ms: 10_000,
                 idle_timeout_ms: 10_000,
+                max_lifetime_seconds_ceiling: 603_600,
             },
             wire: PersistentSessionWireContract {
                 channel_env: "RYEOS_SESSION_FD".into(),
@@ -1348,6 +1778,7 @@ pub mod test_support {
                         &executable_blob_hash,
                         std::path::Path::new("fixture"),
                     )?,
+                    host_origin: None,
                 },
                 admitted_project_root: None,
             },
@@ -1407,7 +1838,7 @@ pub mod test_support {
         runtime_manifest_hash: &str,
     ) -> anyhow::Result<super::AdmittedExternalCandidateProgram> {
         let requirement = ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: super::PROTOCOL.into(),
             connector_protocol: super::CONNECTOR_PROTOCOL.into(),
             execution_route: super::ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -1415,6 +1846,7 @@ pub mod test_support {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "auxiliary".into(),
+            runtime_authority: crate::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe,
         };
         let capsule = qualified_external_candidate_capsule(requirement, runtime_manifest_hash)?;
@@ -1422,11 +1854,179 @@ pub mod test_support {
             .external_candidate
             .expect("qualified fixture capsule retains its external program"))
     }
+
+    /// Synthetic state fixture only: these hashes are not signed testimony,
+    /// authenticated activation records or installed runtime qualification.
+    pub fn content_candidate_capsule(
+        runtime_manifest_hash: &str,
+    ) -> anyhow::Result<AdmittedPersistentSessionCapsule> {
+        use crate::external_content::qualification_evidence::{
+            CONTENT_QUALIFICATION_EVIDENCE_SCHEMA, ContentQualificationEvidence,
+        };
+        use crate::external_content::qualification_purpose::{
+            QUALIFICATION_LAUNCH_PURPOSE_SCHEMA, QualificationLaunchPurpose, QualificationSubject,
+        };
+        use crate::external_content::qualification_subject::{
+            CONTENT_QUALIFICATION_SUBJECT_SCHEMA, ContentQualificationSubject,
+        };
+        let mut requirement = fixture_requirement();
+        let mut capsule =
+            qualified_external_candidate_capsule(requirement.clone(), runtime_manifest_hash)?;
+        requirement.runtime_authority = super::ExternalCandidateRuntimeAuthority::ActivatedContent;
+        let profile = fixture_profile(&requirement)?;
+        let runtime = ExternalContentRealization {
+            id: requirement.runtime_product_declaration_id.clone(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: runtime_manifest_hash.into(),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "candidate-runtime".into(),
+        };
+        let mut entries = fixture_provider_realizations()?
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.push(runtime.clone());
+        let realizations = ExternalContentRealizationSet::new(entries)?;
+        let source = fixture_source_projection();
+        let use_context = ExternalCandidateQualificationUse::from_admitted_inputs(
+            &requirement,
+            &profile,
+            &source,
+            &realizations,
+            &[],
+            &BTreeMap::new(),
+        )?;
+        let selections = qualified_external_candidate_selections(
+            runtime_manifest_hash,
+            &requirement,
+            &use_context,
+        )?;
+        let product = &selections
+            .get(&requirement.runtime_product_declaration_id)
+            .ok_or_else(|| anyhow::anyhow!("synthetic runtime fixture is absent"))?
+            .qualification
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("synthetic proof is absent"))?
+            .evidence;
+        let evidence = ContentQualificationEvidence {
+            schema: CONTENT_QUALIFICATION_EVIDENCE_SCHEMA.into(),
+            purpose: QualificationLaunchPurpose {
+                schema: QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+                launch_id: format!("L-{}", "1".repeat(32)),
+                owner_fingerprint: product.product_coordinate.owner_principal.clone(),
+                subject: QualificationSubject::ActivatedContent {
+                    content: ContentQualificationSubject {
+                        schema: CONTENT_QUALIFICATION_SUBJECT_SCHEMA,
+                        activation_receipt_hash: "2".repeat(64),
+                        activation_program_digest: "3".repeat(64),
+                        binding_hash: "4".repeat(64),
+                        consumer_ref: "worker:fixtures/content-candidate".into(),
+                        declaration_id: requirement.runtime_product_declaration_id.clone(),
+                        manifest_hash: runtime_manifest_hash.into(),
+                        manifest_kind: crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into(),
+                        target_node_fingerprint: "5".repeat(64),
+                        realization: runtime,
+                    },
+                },
+                policy_source: product.policy_source.clone(),
+                consumer_definitions: None,
+                consumer_content: None,
+                consumer_invocation: None,
+                producer_recipe_sources: BTreeMap::new(),
+                remote_verifier_sources: BTreeMap::new(),
+                subject_declaration_id: product.verifier.subject_declaration_id.clone(),
+                subject_manifest_hash: runtime_manifest_hash.into(),
+                required_claims: super::REQUIRED_CLAIMS
+                    .iter()
+                    .map(|claim| (*claim).into())
+                    .collect(),
+                admitted_parameters_digest: product.verifier.admitted_parameters_digest.clone(),
+                verifier_ref: product.verifier.canonical_ref.clone(),
+                verifier_effective_definition_digest: product
+                    .verifier
+                    .effective_definition_digest
+                    .clone(),
+                verifier_realized_definition_digest: product
+                    .verifier
+                    .effective_definition_digest
+                    .clone(),
+            },
+            verifier: product.verifier.clone(),
+            execution_proof: product.execution_proof.clone(),
+            result: product.result.clone(),
+        };
+        evidence.validate()?;
+        let retained = crate::objects::RetainedExternalRuntimeContentQualification {
+            binding_hash: "6".repeat(64),
+            runtime_manifest_hash: runtime_manifest_hash.into(),
+            activation_ref: "config:fixtures/runtime-activation".into(),
+            coordinate_id: crate::external_content::qualification_publication::coordinate_id(
+                &evidence,
+            )?,
+            attestation_hash: "7".repeat(64),
+            evidence,
+            remote_testimony: None,
+            receiver_join: None,
+        };
+        capsule.external_candidate = Some(requirement.resolve_for_content(
+            &retained,
+            &use_context,
+            crate::external_execution::admission::fixture_placement(),
+        )?);
+        capsule.retained_external_runtime_content_qualification = Some(retained);
+        capsule.retained_product_selections = None;
+        capsule.structured_session_profile = Some(profile);
+        let derived = capsule
+            .exact_program
+            .pointer_mut("/resolution_output/composed/derived")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("synthetic capsule has no derived inventory"))?;
+        derived.remove(EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY);
+        derived.insert(
+            EXTERNAL_REALIZATIONS_DERIVED_KEY.into(),
+            realizations.to_value()?,
+        );
+        capsule.exact_program_hash = canonical_value_digest(&capsule.exact_program)?;
+        capsule.validate()?;
+        Ok(capsule)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_target_limits_are_closed_finite_and_required_nullable() {
+        let (_, _, projection, _) = direct_fixture();
+        let mut wire = serde_json::to_value(&projection).unwrap();
+        wire.as_object_mut().unwrap().remove("target_limits");
+        assert!(serde_json::from_value::<ExternalDirectCommandProjection>(wire).is_err());
+        let limits = ExternalNativeProcessLimits {
+            max_open_files: Some(64),
+            max_address_space_bytes: Some(134_217_728),
+            max_cpu_seconds: Some(3),
+            max_processes: None,
+            deny_process_creation: true,
+        };
+        limits.validate().unwrap();
+        for invalid in [0, u64::MAX] {
+            assert!(
+                ExternalNativeProcessLimits {
+                    max_cpu_seconds: Some(invalid),
+                    ..limits
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        let mut wire = serde_json::to_value(limits).unwrap();
+        wire["max_stdout_bytes"] = serde_json::json!(1024);
+        assert!(serde_json::from_value::<ExternalNativeProcessLimits>(wire).is_err());
+    }
 
     fn direct_fixture() -> (
         crate::objects::AdmittedExecutionClosure,
@@ -1477,6 +2077,7 @@ mod tests {
             admitted_project_root: Some(ADMITTED_DIRECT_PROJECT_ROOT.into()),
         };
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,
@@ -1507,6 +2108,8 @@ mod tests {
             environment: BTreeMap::new(),
         };
         let projection = ExternalDirectCommandProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
+            target_limits: None,
             argv0: "/ryeos/realizations/runtime/bin/evaluate".into(),
             arguments: vec!["--check".into()],
             cwd: "/workspace".into(),
@@ -1524,6 +2127,38 @@ mod tests {
             },
         };
         (closure, artifact, projection, inputs)
+    }
+
+    #[test]
+    fn direct_program_view_must_match_inputs_even_with_recomputed_identity() {
+        let (closure, artifact, projection, inputs) = direct_fixture();
+        let program = AdmittedExternalDirectProgram::from_compiled_closure(
+            &closure,
+            &artifact,
+            projection.clone(),
+            &inputs,
+        )
+        .unwrap();
+        let mut strict_inputs = inputs;
+        strict_inputs.workspace_view =
+            ryeos_external_execution_contract::GuestWorkspaceView::CapturedInputs;
+        let mut changed = program.clone();
+        changed.guest_input_identity = strict_inputs.identity_digest().unwrap();
+        assert!(changed.validate_guest_inputs(&strict_inputs).is_err());
+        let mut strict_projection = projection;
+        strict_projection.workspace_view = strict_inputs.workspace_view;
+        let strict = AdmittedExternalDirectProgram::from_compiled_closure(
+            &closure,
+            &artifact,
+            strict_projection,
+            &strict_inputs,
+        )
+        .unwrap();
+        strict.validate_guest_inputs(&strict_inputs).unwrap();
+        assert_ne!(program.digest().unwrap(), strict.digest().unwrap());
+        let mut wire = serde_json::to_value(strict.projection()).unwrap();
+        wire.as_object_mut().unwrap().remove("workspace_view");
+        assert!(serde_json::from_value::<ExternalDirectCommandProjection>(wire).is_err());
     }
 
     #[test]
@@ -1786,7 +2421,7 @@ mod tests {
 
     fn requirement() -> ExternalCandidateRequirement {
         ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: PROTOCOL.into(),
             connector_protocol: CONNECTOR_PROTOCOL.into(),
             execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -1794,6 +2429,7 @@ mod tests {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "auxiliary".into(),
+            runtime_authority: crate::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe: runtime_recipe(),
         }
     }
@@ -1825,12 +2461,139 @@ mod tests {
     }
 
     #[test]
+    fn activated_capsule_reconstructs_without_product_runtime_authority() {
+        let capsule = test_support::content_candidate_capsule(&"a".repeat(64)).unwrap();
+        capsule.validate().unwrap();
+        assert!(capsule.retained_product_selections.is_none());
+        let program = capsule.external_candidate.as_ref().unwrap();
+        assert!(matches!(
+            program.runtime_source,
+            ExternalCandidateRuntimeSource::ActivatedContent { .. }
+        ));
+        program
+            .verify_runtime_authority(
+                None,
+                capsule
+                    .retained_external_runtime_content_qualification
+                    .as_ref(),
+            )
+            .unwrap();
+        assert!(program.verify_selections(None).is_err());
+        let overlap_error = program
+            .verify_runtime_authority(
+                Some(&selections()),
+                capsule
+                    .retained_external_runtime_content_qualification
+                    .as_ref(),
+            )
+            .unwrap_err();
+        assert!(
+            overlap_error
+                .to_string()
+                .contains("also carries product authority")
+        );
+        let mut missing = capsule.clone();
+        missing.retained_external_runtime_content_qualification = None;
+        assert!(missing.validate().is_err());
+        let mut overlap = capsule.clone();
+        overlap.retained_product_selections = Some(selections());
+        assert!(overlap.validate().is_err());
+        let mut changed = capsule.clone();
+        changed
+            .retained_external_runtime_content_qualification
+            .as_mut()
+            .unwrap()
+            .evidence
+            .purpose
+            .verifier_realized_definition_digest = "b".repeat(64);
+        assert!(changed.validate().is_err());
+        let mut wrong_subject = capsule.clone();
+        wrong_subject
+            .external_candidate
+            .as_mut()
+            .unwrap()
+            .runtime_manifest_hash = "c".repeat(64);
+        assert!(wrong_subject.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_authority_lane_is_signed_explicit_and_has_no_fallback() {
+        let requirement = requirement();
+        let mut missing = serde_json::to_value(&requirement).unwrap();
+        missing.as_object_mut().unwrap().remove("runtime_authority");
+        assert!(serde_json::from_value::<ExternalCandidateRequirement>(missing).is_err());
+        let mut activated = requirement.clone();
+        activated.runtime_authority = ExternalCandidateRuntimeAuthority::ActivatedContent;
+        let use_context = test_support::fixture_qualification_use(&activated).unwrap();
+        let error = activated
+            .resolve_for_use(
+                Some(&selections()),
+                &use_context,
+                crate::external_execution::admission::fixture_placement(),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resolve from product selections")
+        );
+        let mut predecessor = requirement.clone();
+        predecessor.schema = 6;
+        assert!(predecessor.validate().is_err());
+        assert_ne!(
+            activated.qualification_requirement_digest().unwrap(),
+            requirement.qualification_requirement_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn runtime_source_coordinates_are_closed_and_not_interchangeable() {
+        let source = ExternalCandidateRuntimeSource::CapturedProduct {
+            witness_hash: "a".repeat(64),
+        };
+        let value = serde_json::to_value(&source).unwrap();
+        source.validate(&"b".repeat(64)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ExternalCandidateRuntimeSource>(value.clone()).unwrap(),
+            source
+        );
+        for field in [
+            "subject",
+            "qualification_coordinate_id",
+            "activation_receipt_hash",
+        ] {
+            let mut mixed = value.clone();
+            mixed
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), serde_json::json!("c".repeat(64)));
+            assert!(serde_json::from_value::<ExternalCandidateRuntimeSource>(mixed).is_err());
+        }
+        assert!(
+            serde_json::from_value::<ExternalCandidateRuntimeSource>(serde_json::json!({
+                "kind":"activated_content", "witness_hash":"a".repeat(64)
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ExternalCandidateRuntimeSource>(serde_json::json!({
+                "witness_hash":"a".repeat(64)
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn external_program_requires_exact_qualified_runtime() {
         let requirement = requirement();
         let selections = selections();
         let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
         let program = requirement
-            .resolve_for_use(Some(&selections), &qualification_use)
+            .resolve_for_use(
+                Some(&selections),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
         assert_eq!(
             program.selection_identity_digest,
@@ -1841,23 +2604,57 @@ mod tests {
                 .unwrap()
         );
         program.verify_selections(Some(&selections)).unwrap();
+        // A bundle-owned relationship whose content changes under the same
+        // publisher moves the selection identity the installed placement
+        // binding compares at launch; no re-bind is needed to notice it.
+        let mut moved = selections.clone().into_inner();
+        let selection = moved
+            .get_mut(&requirement.runtime_product_declaration_id)
+            .unwrap();
+        assert!(!selection.relationship_project_dependent);
+        selection.relationship_raw_content_digest = "0".repeat(64);
+        let moved = ResolvedExternalProductSelections::new(moved).unwrap();
+        let moved_program = requirement
+            .resolve_for_use(
+                Some(&moved),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
+            .unwrap();
+        assert_ne!(
+            moved_program.selection_identity_digest,
+            program.selection_identity_digest
+        );
+        assert!(program.verify_selections(Some(&moved)).is_err());
         assert!(
             requirement
-                .resolve_for_use(None, &qualification_use)
+                .resolve_for_use(
+                    None,
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut missing = requirement.clone();
         missing.runtime_product_declaration_id = "absent".into();
         assert!(
             missing
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut unqualified = requirement.clone();
         unqualified.runtime_product_declaration_id = "runtime".into();
         assert!(
             unqualified
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut weaker = selections.clone().into_inner();
@@ -1871,20 +2668,28 @@ mod tests {
         let weaker = ResolvedExternalProductSelections::new(weaker).unwrap();
         assert!(
             requirement
-                .resolve_for_use(Some(&weaker), &qualification_use)
+                .resolve_for_use(
+                    Some(&weaker),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         for field in [
             "runtime_manifest_kind",
             "runtime_manifest_hash",
-            "runtime_witness_hash",
+            "runtime_source",
             "qualification_attestation_hash",
             "selection_identity_digest",
             "runtime_recipe_digest",
         ] {
             let mut wire = serde_json::to_value(&program).unwrap();
             wire[field] = serde_json::json!("0".repeat(64));
-            let changed: AdmittedExternalCandidateProgram = serde_json::from_value(wire).unwrap();
+            let Ok(changed) = serde_json::from_value::<AdmittedExternalCandidateProgram>(wire)
+            else {
+                assert_eq!(field, "runtime_source", "{field} must stay wire-decodable");
+                continue;
+            };
             assert!(
                 changed.verify_selections(Some(&selections)).is_err(),
                 "{field}"
@@ -1894,11 +2699,19 @@ mod tests {
         changed.runtime_recipe.arguments.push("--changed".into());
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut program = requirement
-            .resolve_for_use(Some(&selections), &qualification_use)
+            .resolve_for_use(
+                Some(&selections),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
         program.requirement = changed;
         assert!(program.validate().is_err());
@@ -1906,7 +2719,11 @@ mod tests {
         changed.runtime_recipe.cwd = "/workspace/changed".into();
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut changed = requirement.clone();
@@ -1916,7 +2733,11 @@ mod tests {
             .insert("SCENARIO".into(), "changed".into());
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut changed = requirement.clone();
@@ -1925,42 +2746,66 @@ mod tests {
         changed.runtime_recipe.nested_sandbox = false;
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.runtime_recipe.max_stdout_bytes += 1;
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.runtime_recipe.max_stderr_bytes += 1;
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.runtime_recipe.executable_relative_path = "bin/other".into();
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.provider_configuration_destination = "other-environments.toml".into();
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.provider_declaration_id = "other-provider".into();
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let mut without_context = selections.clone().into_inner();
@@ -1980,7 +2825,11 @@ mod tests {
         let without_context = ResolvedExternalProductSelections::new(without_context).unwrap();
         assert!(
             requirement
-                .resolve_for_use(Some(&without_context), &qualification_use)
+                .resolve_for_use(
+                    Some(&without_context),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         for invalid in [
@@ -1989,6 +2838,42 @@ mod tests {
             serde_json::json!({"schema":QUALIFICATION_CONTEXT_SCHEMA,"requirement_digest":"a".repeat(64),"extra":true}),
         ] {
             assert!(ExternalCandidateQualificationUse::from_value(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn shared_qualified_use_check_refuses_each_changed_coordinate() {
+        let expected = test_support::fixture_qualification_use(&requirement()).unwrap();
+        expected
+            .require_qualified_use(&expected.parameters().unwrap())
+            .unwrap();
+        assert!(
+            expected
+                .require_qualified_use(&serde_json::json!({}))
+                .is_err()
+        );
+        for field in [
+            "requirement_digest",
+            "profile_hash",
+            "source_binding_hash",
+            "source_content_manifest_hash",
+            "provider_executable_manifest_hash",
+            "execution_environment_digest",
+        ] {
+            let mut parameters = expected.parameters().unwrap();
+            let original = parameters[QUALIFICATION_CONTEXT_PARAMETER][field]
+                .as_str()
+                .unwrap();
+            let changed = if original == "f".repeat(64) {
+                "e".repeat(64)
+            } else {
+                "f".repeat(64)
+            };
+            parameters[QUALIFICATION_CONTEXT_PARAMETER][field] = serde_json::json!(changed);
+            assert!(
+                expected.require_qualified_use(&parameters).is_err(),
+                "{field}"
+            );
         }
     }
 
@@ -2009,7 +2894,11 @@ mod tests {
         .unwrap();
         let selections = selections();
         requirement
-            .resolve_for_use(Some(&selections), &original)
+            .resolve_for_use(
+                Some(&selections),
+                &original,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
 
         let mut changed_profile = profile.clone();
@@ -2026,7 +2915,11 @@ mod tests {
         .unwrap();
         assert_ne!(changed.profile_hash, original.profile_hash);
         let error = requirement
-            .resolve_for_use(Some(&selections), &changed)
+            .resolve_for_use(
+                Some(&selections),
+                &changed,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap_err();
         assert!(
             error
@@ -2053,7 +2946,11 @@ mod tests {
             assert_eq!(changed.profile_hash, original.profile_hash);
             assert!(
                 requirement
-                    .resolve_for_use(Some(&selections), &changed)
+                    .resolve_for_use(
+                        Some(&selections),
+                        &changed,
+                        crate::external_execution::admission::fixture_placement()
+                    )
                     .is_err()
             );
         }
@@ -2077,7 +2974,11 @@ mod tests {
         );
         assert!(
             requirement
-                .resolve_for_use(Some(&selections), &changed)
+                .resolve_for_use(
+                    Some(&selections),
+                    &changed,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
 
@@ -2175,7 +3076,11 @@ mod tests {
             );
             assert!(
                 requirement
-                    .resolve_for_use(Some(&selections()), &changed)
+                    .resolve_for_use(
+                        Some(&selections()),
+                        &changed,
+                        crate::external_execution::admission::fixture_placement()
+                    )
                     .is_err()
             );
         }
@@ -2311,7 +3216,11 @@ mod tests {
         let original = selections();
         let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
         let program = requirement
-            .resolve_for_use(Some(&original), &qualification_use)
+            .resolve_for_use(
+                Some(&original),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
         let mut changed = original.into_inner();
         changed
@@ -2323,7 +3232,11 @@ mod tests {
             .attestation_hash = "f".repeat(64);
         let changed = ResolvedExternalProductSelections::new(changed).unwrap();
         let replacement = requirement
-            .resolve_for_use(Some(&changed), &qualification_use)
+            .resolve_for_use(
+                Some(&changed),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
         assert_ne!(
             program.selection_identity_digest,
@@ -2378,7 +3291,11 @@ mod tests {
         let selections = selections();
         let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
         let program = requirement
-            .resolve_for_use(Some(&selections), &qualification_use)
+            .resolve_for_use(
+                Some(&selections),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
         let capsule = test_support::qualified_external_candidate_capsule(
             requirement.clone(),
@@ -2391,7 +3308,11 @@ mod tests {
             .insert(LifecycleCapability::ExactAllocationReconciliation);
         assert!(
             reconciled
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(
+                    Some(&selections),
+                    &qualification_use,
+                    crate::external_execution::admission::fixture_placement()
+                )
                 .is_err()
         );
         let reconciled_use = test_support::fixture_qualification_use(&reconciled).unwrap();
@@ -2402,7 +3323,11 @@ mod tests {
         )
         .unwrap();
         let reconciled_program = reconciled
-            .resolve_for_use(Some(&reconciled_selections), &reconciled_use)
+            .resolve_for_use(
+                Some(&reconciled_selections),
+                &reconciled_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
         let reconciled_capsule =
             test_support::qualified_external_candidate_capsule(reconciled, &"a".repeat(64))
@@ -2443,7 +3368,11 @@ mod tests {
         let ordinary = selections();
         let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
         let ordinary_program = requirement
-            .resolve_for_use(Some(&ordinary), &qualification_use)
+            .resolve_for_use(
+                Some(&ordinary),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
         let mut large = ordinary.into_inner();
         let runtime = large.get_mut("auxiliary").unwrap();
@@ -2452,7 +3381,11 @@ mod tests {
         runtime.manifest_kind = crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into();
         let large = ResolvedExternalProductSelections::new(large).unwrap();
         let large_program = requirement
-            .resolve_for_use(Some(&large), &qualification_use)
+            .resolve_for_use(
+                Some(&large),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
             .unwrap();
         assert_eq!(
             large_program.runtime_manifest_kind,
@@ -2555,19 +3488,24 @@ mod tests {
             (SOURCE_CLOSURE_DERIVED_KEY):source.to_value().unwrap(),
             (EXTERNAL_REALIZATIONS_DERIVED_KEY):realizations.to_value().unwrap()
         }}}});
-        let artifact = crate::external_content::products::qualification::tests::artifact_identity();
+        let artifact = test_support::plan_bound_artifact_identity(&json!({})).unwrap();
         let capsule = AdmittedPersistentSessionCapsule {
             schema: PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
             kind: PERSISTENT_SESSION_CAPSULE_KIND.into(),
             external_candidate: Some(
                 requirement
-                    .resolve_for_use(Some(&selections), &qualification_use)
+                    .resolve_for_use(
+                        Some(&selections),
+                        &qualification_use,
+                        crate::external_execution::admission::fixture_placement(),
+                    )
                     .unwrap(),
             ),
             exact_program_hash: canonical_value_digest(&exact_program).unwrap(),
             exact_program,
             retained_product_selections: Some(selections),
             retained_external_runtime_qualification: None,
+            retained_external_runtime_content_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,
@@ -2577,6 +3515,7 @@ mod tests {
                 ready_timeout_ms: 1,
                 request_timeout_ms: 1,
                 idle_timeout_ms: 1,
+                max_lifetime_seconds_ceiling: 603_600,
             },
             wire: PersistentSessionWireContract {
                 channel_env: "RYEOS_SESSION_FD".into(),
@@ -2596,6 +3535,7 @@ mod tests {
                         std::path::Path::new("fixture"),
                     )
                     .unwrap(),
+                    host_origin: None,
                 },
                 admitted_project_root: None,
             },
@@ -2690,6 +3630,59 @@ mod tests {
     }
 
     #[test]
+    fn content_evidence_resolution_matches_the_retained_resolution() {
+        let capsule = test_support::content_candidate_capsule(&"a".repeat(64)).unwrap();
+        let program = capsule.external_candidate.as_ref().unwrap();
+        let retained = capsule
+            .retained_external_runtime_content_qualification
+            .as_ref()
+            .unwrap();
+        let direct = program
+            .requirement
+            .resolve_for_content_evidence(
+                &retained.activation_ref,
+                &retained.coordinate_id,
+                &retained.attestation_hash,
+                &retained.evidence,
+                &program.qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
+            .unwrap();
+        let through_retained = program
+            .requirement
+            .resolve_for_content(
+                retained,
+                &program.qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
+            .unwrap();
+        assert_eq!(direct, through_retained);
+        assert_eq!(&direct, program);
+    }
+
+    #[test]
+    fn content_evidence_resolution_refuses_a_different_coordinate() {
+        let capsule = test_support::content_candidate_capsule(&"a".repeat(64)).unwrap();
+        let program = capsule.external_candidate.as_ref().unwrap();
+        let retained = capsule
+            .retained_external_runtime_content_qualification
+            .as_ref()
+            .unwrap();
+        let error = program
+            .requirement
+            .resolve_for_content_evidence(
+                &retained.activation_ref,
+                &"9".repeat(64),
+                &retained.attestation_hash,
+                &retained.evidence,
+                &program.qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("coordinate differs"));
+    }
+
+    #[test]
     fn composed_test_support_builds_a_valid_qualified_capsule() {
         let capsule =
             test_support::qualified_external_candidate_capsule(requirement(), &"a".repeat(64))
@@ -2735,6 +3728,50 @@ mod tests {
             let mut wire = serde_json::to_value(requirement()).unwrap();
             wire[field] = serde_json::json!("unexpected");
             assert!(serde_json::from_value::<ExternalCandidateRequirement>(wire).is_err());
+        }
+    }
+    #[test]
+    fn external_program_requires_each_of_the_five_relationship_claims() {
+        assert_eq!(REQUIRED_CLAIMS.len(), 5);
+        assert!(REQUIRED_CLAIMS.windows(2).all(|pair| pair[0] < pair[1]));
+        let requirement = requirement();
+        let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
+        let exact = selections();
+        let carried: Vec<String> = exact
+            .get(&requirement.runtime_product_declaration_id)
+            .unwrap()
+            .relationship
+            .qualification
+            .required_claims
+            .clone();
+        assert_eq!(carried, REQUIRED_CLAIMS);
+        requirement
+            .resolve_for_use(
+                Some(&exact),
+                &qualification_use,
+                crate::external_execution::admission::fixture_placement(),
+            )
+            .unwrap();
+        for (omitted, omitted_claim) in REQUIRED_CLAIMS.iter().enumerate() {
+            let mut fewer = exact.clone().into_inner();
+            fewer
+                .get_mut(&requirement.runtime_product_declaration_id)
+                .unwrap()
+                .relationship
+                .qualification
+                .required_claims
+                .remove(omitted);
+            let fewer = ResolvedExternalProductSelections::new(fewer).unwrap();
+            assert!(
+                requirement
+                    .resolve_for_use(
+                        Some(&fewer),
+                        &qualification_use,
+                        crate::external_execution::admission::fixture_placement()
+                    )
+                    .is_err(),
+                "relationship without {omitted_claim} was admitted"
+            );
         }
     }
 }

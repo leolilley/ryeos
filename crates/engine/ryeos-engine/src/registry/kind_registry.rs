@@ -1,6 +1,8 @@
 //! Unified kind registry — one validated `KindSchema` per kind.
 //!
-//! Loaded from `*.kind-schema.yaml` files across the 3-tier space.
+//! Loaded from `*.kind-schema.yaml` files under each bundle root's
+//! `.ai/node/engine/kinds/`. Kind schemas are node-tier items; there is
+//! no project overlay.
 //! This is the single source of truth for kind metadata: directory name,
 //! default executor, file extensions, parsers, signature envelopes, and
 //! daemon resolution pipeline steps.
@@ -25,6 +27,7 @@ use crate::error::EngineError;
 use crate::resolution::decl::ResolutionStepDecl;
 use crate::trust::TrustStore;
 
+pub mod launch_trust;
 mod loading;
 
 /// Apply extraction rules to a parser-produced `Value`, populating an
@@ -471,14 +474,33 @@ pub struct RuntimeSpec {
 /// value path and a closed allowlist of signed protocol refs. Engine code
 /// resolves the data but never assigns kind- or product-specific meaning to
 /// the selected protocol.
+///
+/// A selected declaration may also name a second composed path holding a
+/// list of admissible protocol refs. An item then states its protocol either
+/// as the single value at `from_composed` or as the list at `from_composed_set`,
+/// never both; with a list the running node picks the one protocol whose
+/// declared holding it meets.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum SubprocessProtocolDecl {
     Static(String),
     Selected {
         from_composed: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_composed_set: Option<Vec<String>>,
         allowed: Vec<String>,
     },
+}
+
+/// Most protocols one item may list as admissible.
+const MAX_PROTOCOL_CANDIDATES: usize = 8;
+
+fn composed_path<'a>(composed: &'a Value, path: &[String]) -> Option<&'a Value> {
+    let mut value = composed;
+    for part in path {
+        value = value.get(part)?;
+    }
+    Some(value)
 }
 
 impl SubprocessProtocolDecl {
@@ -498,13 +520,20 @@ impl SubprocessProtocolDecl {
             }
             Self::Selected {
                 from_composed,
+                from_composed_set,
                 allowed,
             } => {
-                if from_composed.is_empty()
-                    || from_composed.len() > 16
-                    || from_composed
-                        .iter()
-                        .any(|part| part.trim().is_empty() || part.contains('.'))
+                let bad_path = |path: &[String]| {
+                    path.is_empty()
+                        || path.len() > 16
+                        || path
+                            .iter()
+                            .any(|part| part.trim().is_empty() || part.contains('.'))
+                };
+                if bad_path(from_composed.as_slice())
+                    || from_composed_set
+                        .as_deref()
+                        .is_some_and(|path| bad_path(path) || path == from_composed.as_slice())
                     || allowed.is_empty()
                     || allowed.len() > 32
                     || allowed.iter().any(|value| !valid_ref(value))
@@ -541,14 +570,26 @@ impl SubprocessProtocolDecl {
         }
     }
 
+    /// The single protocol an item states as a scalar. An item that lists
+    /// several admissible protocols has no single protocol to resolve; it goes
+    /// through `candidates` and a node selection instead.
     pub fn resolve(&self, composed: &Value) -> Result<String, String> {
         self.validate()?;
         match self {
             Self::Static(protocol_ref) => Ok(protocol_ref.clone()),
             Self::Selected {
                 from_composed,
+                from_composed_set,
                 allowed,
             } => {
+                if let Some(path) = from_composed_set
+                    && composed_path(composed, path).is_some()
+                {
+                    return Err(format!(
+                        "subprocess protocol `{}` lists several admissible protocols; it cannot be resolved to one without node selection",
+                        path.join(".")
+                    ));
+                }
                 let mut selected = composed;
                 for part in from_composed {
                     selected = selected.get(part).ok_or_else(|| {
@@ -572,6 +613,100 @@ impl SubprocessProtocolDecl {
                 Ok(selected.to_owned())
             }
         }
+    }
+
+    /// Whether the item states its protocols as a list. Only a selected
+    /// declaration with a list path can; a static one never does.
+    pub fn selects_from_set(&self, composed: &Value) -> bool {
+        match self {
+            Self::Static(_) => false,
+            Self::Selected {
+                from_composed_set, ..
+            } => from_composed_set
+                .as_deref()
+                .is_some_and(|path| composed_path(composed, path).is_some()),
+        }
+    }
+
+    /// Every protocol ref the item admits: the one scalar value, or each entry
+    /// of the list. Exactly one of the two forms must be present; each ref must
+    /// be in the signed allowlist, and a list is non-empty, bounded and free of
+    /// duplicates.
+    pub fn candidates(&self, composed: &Value) -> Result<Vec<String>, String> {
+        self.validate()?;
+        let Self::Selected {
+            from_composed,
+            from_composed_set,
+            allowed,
+        } = self
+        else {
+            return self
+                .resolve(composed)
+                .map(|protocol_ref| vec![protocol_ref]);
+        };
+        let Some(set_path) = from_composed_set else {
+            return self
+                .resolve(composed)
+                .map(|protocol_ref| vec![protocol_ref]);
+        };
+        let scalar = composed_path(composed, from_composed);
+        let list = composed_path(composed, set_path);
+        let list = match (scalar, list) {
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "subprocess protocol must be declared by exactly one of `{}` and `{}`, found both",
+                    from_composed.join("."),
+                    set_path.join(".")
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "subprocess protocol must be declared by exactly one of `{}` and `{}`, found neither",
+                    from_composed.join("."),
+                    set_path.join(".")
+                ));
+            }
+            (Some(_), None) => {
+                return self
+                    .resolve(composed)
+                    .map(|protocol_ref| vec![protocol_ref]);
+            }
+            (None, Some(list)) => list,
+        };
+        let entries = list.as_array().ok_or_else(|| {
+            format!(
+                "subprocess protocol list `{}` must be a sequence",
+                set_path.join(".")
+            )
+        })?;
+        if entries.is_empty() || entries.len() > MAX_PROTOCOL_CANDIDATES {
+            return Err(format!(
+                "subprocess protocol list `{}` must hold between 1 and {MAX_PROTOCOL_CANDIDATES} entries",
+                set_path.join(".")
+            ));
+        }
+        let mut refs: Vec<String> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let protocol_ref = entry.as_str().ok_or_else(|| {
+                format!(
+                    "subprocess protocol list `{}` must hold only strings",
+                    set_path.join(".")
+                )
+            })?;
+            if !allowed.iter().any(|candidate| candidate == protocol_ref) {
+                return Err(format!(
+                    "subprocess protocol `{protocol_ref}` is not in the signed selector allowlist"
+                ));
+            }
+            if refs.iter().any(|existing| existing == protocol_ref) {
+                return Err(format!(
+                    "subprocess protocol list `{}` names `{protocol_ref}` more than once",
+                    set_path.join(".")
+                ));
+            }
+            refs.push(protocol_ref.to_owned());
+        }
+        Ok(refs)
     }
 }
 
@@ -875,6 +1010,11 @@ pub struct ThreadProfileDecl {
     /// machine-only kinds opt out.
     #[serde(default = "default_true")]
     pub supports_operator_followup: bool,
+    /// Whether terminal chains of this kind retire through a fenced
+    /// retained-evidence manifest instead of immediate removal. Defaults
+    /// `false`; only a kind that declares it is fenced.
+    #[serde(default)]
+    pub retirement_fence: bool,
 }
 
 fn default_true() -> bool {
@@ -1005,6 +1145,13 @@ pub struct EffectiveValidatorDecl {
 #[serde(deny_unknown_fields)]
 pub struct EffectClassCeilingDecl {
     pub path: Vec<String>,
+    /// The highest class this kind admits on the authored field alone. A
+    /// subject that projects above it keeps its authored ceiling, but a
+    /// request for a class above this cap is refused
+    /// (`durable_effect_sealed_unqualified`) until qualification evidence for
+    /// the subject exists. Absent, the projected class is admitted as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unproven_max: Option<ryeos_effect_contract::EffectClass>,
 }
 
 /// Workspace relationship selected by an exact signed child definition.
@@ -1029,6 +1176,20 @@ pub struct WorkspaceAccessDecl {
     pub path: Vec<String>,
 }
 
+/// Signed mechanical projection of whether a subject declares the
+/// pinned-snapshot project source, the one value `pinned_snapshot` at `path`.
+/// Generic dispatch follows only this kind-owned path; it never names a tool,
+/// worker, or authored field directly. Absence of the declaration or of the
+/// field means the subject does not declare it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushedHeadDeclarationDecl {
+    pub path: Vec<String>,
+}
+
+/// The only value a subject may author at a pushed-head declaration path.
+pub const PINNED_SNAPSHOT_PROJECT_LANE: &str = "pinned_snapshot";
+
 /// Signed mechanical projection of a subject's per-execution network ceiling.
 /// Generic plan compilation follows only this kind-owned composed-value path;
 /// it never names a tool, worker, provider, or authored field directly.
@@ -1052,9 +1213,88 @@ pub struct FilesystemAuthorityCeilingDecl {
     pub default: crate::isolation::IsolationFilesystemAuthorityCeiling,
 }
 
+/// Signed projection of an item's declared host authority.
+///
+/// An item that authors `host_authority: required` at `path` asks to run on
+/// the host, unconfined, as the daemon user. Declaring it grants nothing: the
+/// node's isolation lane must offer host-direct execution, the operator must
+/// have granted that exact item in the `host_access` node-policy section, and
+/// the caller must be the configured local operator. The remaining fields are
+/// the projections that cannot be true for such a process; an item combining
+/// them with host authority is refused when the posture is projected.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthorityDecl {
+    pub path: Vec<String>,
+    /// Composed paths whose presence contradicts host-direct execution.
+    pub incompatible: Vec<Vec<String>>,
+    /// Effect classes admitted with host authority, read through the kind's
+    /// effect-class projection. An absent effect class is live.
+    pub admitted_effects: Vec<String>,
+    /// Subprocess protocols admitted with host authority.
+    pub admitted_protocols: Vec<String>,
+    /// Thread profiles whose threads may launch a host-authority item as a
+    /// `graph_child` origin. Every other parent is a delegation and refused.
+    pub graph_parent_profiles: Vec<String>,
+}
+
+impl HostAuthorityDecl {
+    fn validate(&self, display: &str) -> Result<(), EngineError> {
+        let canonical = |path: &[String]| {
+            !path.is_empty()
+                && path.iter().all(|segment| {
+                    !segment.trim().is_empty()
+                        && segment.trim() == segment
+                        && !segment.contains('.')
+                })
+        };
+        if !canonical(&self.path) || !self.incompatible.iter().all(|path| canonical(path)) {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: execution.host_authority paths must contain canonical non-empty segments"
+                ),
+            });
+        }
+        if self.admitted_effects.is_empty()
+            || self.admitted_protocols.is_empty()
+            || self
+                .admitted_effects
+                .iter()
+                .chain(&self.admitted_protocols)
+                .chain(&self.graph_parent_profiles)
+                .any(|value| value.trim().is_empty() || value.trim() != value)
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: execution.host_authority must admit at least one effect class and protocol, all canonical"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Kind-owned path to signed native subprocess restrictions.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubprocessLimitsDecl {
+    pub path: Vec<String>,
+}
+
 /// Kind-owned location of a signed process target. Direct subprocesses and
 /// persistent workers use this one projection; session protocols retain only
 /// framing and lifecycle semantics.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ExecutionTargetRequestFormat {
+    #[serde(rename = "ryeos.execution_target.v1")]
+    CurrentV1,
+}
+fn deserialize_present_request_format<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ExecutionTargetRequestFormat>, D::Error> {
+    <ExecutionTargetRequestFormat as serde::Deserialize>::deserialize(d).map(Some)
+}
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionTargetDecl {
@@ -1062,6 +1302,12 @@ pub struct ExecutionTargetDecl {
     #[serde(default)]
     pub required: bool,
     pub limits: crate::contracts::ExecutionTargetLimits,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_request_format"
+    )]
+    pub request_format: Option<ExecutionTargetRequestFormat>,
 }
 
 /// Kind-owned location of signed process placement. The only omission default
@@ -1128,18 +1374,42 @@ pub struct PersistentSessionDecl {
     #[serde(default)]
     pub resource_overrides_path: Option<Vec<String>>,
     /// Kind-owned upper bound for a signed per-worker real-UID ceiling.
-    #[serde(default = "default_max_real_uid_process_limit")]
     pub max_real_uid_process_limit: u64,
+    /// Signed upper bounds for the per-worker overrides of the matching
+    /// defaults above. A worker may state a value up to its ceiling, never
+    /// above it, and the ceiling is never below the default.
+    pub max_address_space_bytes_ceiling: u64,
+    pub max_cpu_seconds_ceiling: u64,
+    pub request_timeout_ms_ceiling: u64,
+    pub idle_timeout_ms_ceiling: u64,
+    /// Signed upper bound for the lifetime a worker execution may state for
+    /// one admitted session, in seconds.
+    pub max_lifetime_seconds_ceiling: u64,
     pub ready_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub idle_timeout_ms: u64,
 }
 
-fn default_max_real_uid_process_limit() -> u64 {
-    // Backward-reading default for the immediately preceding worker schema.
-    // It preserves that schema's exact effective limit during bundle cutover;
-    // a higher cap exists only when a new kind schema signs it explicitly.
-    512
+/// Daemon sanity bound on every signed time ceiling of a persistent-session
+/// kind (seven days). The signed ceilings govern; this only stops a signed
+/// value that no node could honour.
+pub const PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+/// Each signed ceiling is at least its default and within the daemon sanity
+/// bound. The ceilings are what a worker's overrides are judged against.
+fn persistent_session_ceilings_are_valid(declaration: &PersistentSessionDecl) -> bool {
+    let sanity_ms = PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS * 1000;
+    declaration.max_address_space_bytes_ceiling >= declaration.max_address_space_bytes
+        && declaration.max_address_space_bytes_ceiling <= 1024 * 1024 * 1024 * 1024
+        && declaration.max_cpu_seconds_ceiling >= declaration.max_cpu_seconds
+        && declaration.max_cpu_seconds_ceiling <= PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS
+        && declaration.request_timeout_ms_ceiling >= declaration.request_timeout_ms
+        && declaration.request_timeout_ms_ceiling <= sanity_ms
+        && declaration.idle_timeout_ms_ceiling >= declaration.idle_timeout_ms
+        && declaration.idle_timeout_ms_ceiling <= sanity_ms
+        && declaration.max_lifetime_seconds_ceiling > 0
+        && declaration.max_lifetime_seconds_ceiling
+            <= PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS
 }
 
 /// Execution configuration for a kind (resolution pipeline + aliases).
@@ -1225,11 +1495,19 @@ pub struct ExecutionSchema {
     /// Absence means this kind cannot author a narrower per-execution ceiling.
     #[serde(default)]
     pub network_authority_ceiling: Option<NetworkAuthorityCeilingDecl>,
+    /// Optional signed path to the composed subject's declaration that it runs
+    /// against a pinned project snapshot (a pushed-head project source).
+    #[serde(default)]
+    pub pushed_head_declaration: Option<PushedHeadDeclarationDecl>,
     /// Optional signed projection of a per-execution filesystem ceiling.
     /// A kind without this projection cannot author additional narrowing;
     /// parent and node restrictions still apply independently.
     #[serde(default)]
     pub filesystem_authority_ceiling: Option<FilesystemAuthorityCeilingDecl>,
+    /// Optional signed projection of the item's declared host authority.
+    /// Absence means no item of this kind can ask for the host-direct posture.
+    #[serde(default)]
+    pub host_authority: Option<HostAuthorityDecl>,
     /// Shared signed platform/resource requirement for this process.
     #[serde(default)]
     pub target: Option<ExecutionTargetDecl>,
@@ -1239,6 +1517,8 @@ pub struct ExecutionSchema {
     pub endpoint: Option<ExecutionEndpointDecl>,
     #[serde(default)]
     pub resource_authority_ceiling: Option<ResourceAuthorityCeilingDecl>,
+    #[serde(default)]
+    pub subprocess_limits: Option<SubprocessLimitsDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
     /// the default method invoked when `/execute` omits `call.method`.
     /// Present iff `methods` is non-empty (enforced at load time).
@@ -1262,6 +1542,34 @@ pub struct ExecutionSchema {
 }
 
 impl ExecutionSchema {
+    pub fn project_subprocess_limits(
+        &self,
+        composed: &Value,
+    ) -> Result<Option<crate::contracts::ExecutionSubprocessLimits>, EngineError> {
+        let Some(declaration) = &self.subprocess_limits else {
+            return Ok(None);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(None);
+            };
+            value = next;
+        }
+        let limits: crate::contracts::ExecutionSubprocessLimits =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("invalid signed subprocess limits: {error}"),
+                }
+            })?;
+        limits
+            .validate()
+            .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!("{error:#}"),
+            })?;
+        Ok(Some(limits))
+    }
+
     pub fn project_endpoint_requirement(
         &self,
         composed: &Value,
@@ -1274,7 +1582,7 @@ impl ExecutionSchema {
         let invalid = |reason: String| EngineError::SchemaLoaderError { reason };
         declaration
             .validate()
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         let mut value = composed;
         for segment in &declaration.path {
             let object = value.as_object().ok_or_else(|| {
@@ -1290,7 +1598,7 @@ impl ExecutionSchema {
                 .map_err(|error| invalid(format!("invalid signed execution endpoint: {error}")))?;
         endpoint
             .validate()
-            .map_err(|error| invalid(error.to_string()))?;
+            .map_err(|error| invalid(format!("{error:#}")))?;
         Ok(endpoint)
     }
 
@@ -1320,8 +1628,27 @@ impl ExecutionSchema {
         &self,
         composed: &Value,
     ) -> Result<Option<crate::contracts::ExecutionTargetRequirement>, EngineError> {
+        let (ordinary, current) = self.project_target_data(composed)?;
+        if current.is_some() {
+            return Err(EngineError::SchemaLoaderError {
+                reason: "ordinary projection cannot discard current target request".into(),
+            });
+        }
+        Ok(ordinary)
+    }
+
+    pub fn project_target_data(
+        &self,
+        composed: &Value,
+    ) -> Result<
+        (
+            Option<crate::contracts::ExecutionTargetRequirement>,
+            Option<crate::contracts::CurrentExecutionTargetRequest>,
+        ),
+        EngineError,
+    > {
         let Some(declaration) = self.target.as_ref() else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let mut value = composed;
         for segment in &declaration.path {
@@ -1334,27 +1661,128 @@ impl ExecutionSchema {
                         ),
                     });
                 }
-                return Ok(None);
+                return Ok((None, None));
             };
             value = next;
         }
-        let target =
-            serde_json::from_value::<crate::contracts::ExecutionTargetRequirement>(value.clone())
+        let (target, current) = if declaration.request_format.is_some() {
+            crate::contracts::project_current_target_data(value).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("invalid signed current target: {error:#}"),
+                }
+            })?
+        } else {
+            (
+                serde_json::from_value::<crate::contracts::ExecutionTargetRequirement>(
+                    value.clone(),
+                )
                 .map_err(|error| EngineError::SchemaLoaderError {
-                reason: format!("invalid signed execution target: {error}"),
-            })?;
+                    reason: format!("invalid signed execution target: {error}"),
+                })?,
+                None,
+            )
+        };
         target
             .validate_against_limits(declaration.limits)
             .map_err(|error| EngineError::SchemaLoaderError {
-                reason: format!("invalid signed execution target: {error}"),
+                reason: format!("invalid signed execution target: {error:#}"),
             })?;
-        Ok(Some(target))
+        Ok((Some(target), current))
+    }
+
+    /// Project the execution posture the composed subject declares.
+    ///
+    /// `host_authority: required` projects `HostDirect`; absence projects
+    /// `Confined`. The projection is a claim, not a grant: dispatch admits a
+    /// host-direct posture only through the node lane, the operator's exact
+    /// grant and the configured local operator. A host-authority subject that
+    /// also authors a projection which cannot be true on the host, a durable
+    /// effect class or a callback protocol is refused here.
+    pub fn project_execution_posture(
+        &self,
+        composed: &Value,
+    ) -> Result<crate::contracts::ExecutionPosture, EngineError> {
+        let Some(declaration) = self.host_authority.as_ref() else {
+            return Ok(crate::contracts::ExecutionPosture::Confined);
+        };
+        let lookup = |path: &[String]| {
+            let mut value = composed;
+            for segment in path {
+                value = value.get(segment)?;
+            }
+            Some(value)
+        };
+        let Some(value) = lookup(&declaration.path) else {
+            return Ok(crate::contracts::ExecutionPosture::Confined);
+        };
+        let refused = |detail: String| EngineError::SchemaLoaderError {
+            reason: format!("host-authority declaration refused: {detail}"),
+        };
+        match value.as_str() {
+            Some(crate::contracts::HOST_AUTHORITY_REQUIRED) => {}
+            _ => {
+                return Err(refused(format!(
+                    "`{}` admits only `{}`, found {value}",
+                    declaration.path.join("."),
+                    crate::contracts::HOST_AUTHORITY_REQUIRED
+                )));
+            }
+        }
+        for path in &declaration.incompatible {
+            if lookup(path).is_some() {
+                return Err(refused(format!(
+                    "`{}` cannot be true for a process running on the host; remove it or remove `{}`",
+                    path.join("."),
+                    declaration.path.join(".")
+                )));
+            }
+        }
+        let effect = match self.effect_class_ceiling.as_ref() {
+            Some(effect) => lookup(&effect.path)
+                .map(|value| {
+                    value.as_str().map(str::to_owned).ok_or_else(|| {
+                        refused(format!(
+                            "effect class `{}` is not a string",
+                            effect.path.join(".")
+                        ))
+                    })
+                })
+                .transpose()?,
+            None => None,
+        };
+        if let Some(effect) = effect
+            && !declaration.admitted_effects.contains(&effect)
+        {
+            return Err(refused(format!(
+                "effect class `{effect}` is not admitted with host authority; admitted: {}",
+                declaration.admitted_effects.join(", ")
+            )));
+        }
+        if let Some(TerminatorDecl::Subprocess { protocol, .. }) = self.terminator.as_ref() {
+            let selected = protocol.resolve(composed).map_err(refused)?;
+            if !declaration.admitted_protocols.contains(&selected) {
+                return Err(refused(format!(
+                    "protocol `{selected}` is not admitted with host authority; admitted: {}",
+                    declaration.admitted_protocols.join(", ")
+                )));
+            }
+        }
+        Ok(crate::contracts::ExecutionPosture::HostDirect)
     }
 
     pub fn project_filesystem_authority_ceiling(
         &self,
         composed: &Value,
     ) -> Result<crate::isolation::IsolationFilesystemAuthorityCeiling, EngineError> {
+        // An item that lists several admissible protocols has no filesystem
+        // ceiling of its own to read; defaulting here would silently widen it.
+        if let Some(TerminatorDecl::Subprocess { protocol }) = self.terminator.as_ref()
+            && protocol.selects_from_set(composed)
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: "an item that lists several admissible protocols takes its filesystem authority from the node-selected protocol; use the selected projection".to_owned(),
+            });
+        }
         let Some(declaration) = self.filesystem_authority_ceiling.as_ref() else {
             return Ok(crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy);
         };
@@ -1371,6 +1799,39 @@ impl ExecutionSchema {
                 declaration.path.join(".")
             ),
         })
+    }
+
+    /// The filesystem ceiling for an item whose protocol was selected by the
+    /// node. A scalar-protocol item projects exactly as
+    /// `project_filesystem_authority_ceiling`. An item that lists several
+    /// admissible protocols takes the ceiling from the selected protocol's
+    /// holding and must not also state one itself, so the two cannot disagree.
+    pub fn project_filesystem_authority_ceiling_selected(
+        &self,
+        composed: &Value,
+        holding: Option<&crate::protocols::ProtocolHolding>,
+    ) -> Result<crate::isolation::IsolationFilesystemAuthorityCeiling, EngineError> {
+        let lists_protocols = match self.terminator.as_ref() {
+            Some(TerminatorDecl::Subprocess { protocol }) => protocol.selects_from_set(composed),
+            _ => false,
+        };
+        if !lists_protocols {
+            return self.project_filesystem_authority_ceiling(composed);
+        }
+        if let Some(declaration) = self.filesystem_authority_ceiling.as_ref()
+            && composed_path(composed, &declaration.path).is_some()
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "`{}` must be absent when the item lists several admissible protocols; the selected protocol's holding owns the filesystem authority",
+                    declaration.path.join(".")
+                ),
+            });
+        }
+        let holding = holding.ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: "an item that lists several admissible protocols needs a selected protocol holding to project its filesystem authority".to_owned(),
+        })?;
+        Ok(holding.filesystem_authority)
     }
 
     /// Resolve the signed shared-workspace contract, when this kind owns one.
@@ -1406,6 +1867,31 @@ impl ExecutionSchema {
             None => Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "signed workspace-access projection `{}` resolved to a non-string value",
+                    declaration.path.join(".")
+                ),
+            }),
+        }
+    }
+
+    /// Whether the composed subject declares the pinned-snapshot project
+    /// source. A kind without a declaration, or a subject that omits the
+    /// field, does not declare it; any other authored value is refused.
+    pub fn project_pushed_head_declaration(&self, composed: &Value) -> Result<bool, EngineError> {
+        let Some(declaration) = self.pushed_head_declaration.as_ref() else {
+            return Ok(false);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(false);
+            };
+            value = next;
+        }
+        match value.as_str() {
+            Some(PINNED_SNAPSHOT_PROJECT_LANE) => Ok(true),
+            _ => Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "signed pushed-head declaration `{}` must be `{PINNED_SNAPSHOT_PROJECT_LANE}`",
                     declaration.path.join(".")
                 ),
             }),
@@ -1498,6 +1984,12 @@ pub struct KindSchema {
     /// Execution configuration (dispatch, methods, aliases).
     /// `None` if this kind is not executable (e.g., config kind).
     pub execution: Option<ExecutionSchema>,
+    /// The thread profile of roots a daemon subsystem opens on items of a
+    /// non-executable kind (an operator seat presenting a surface). Never
+    /// root-executable, and only on a kind without `execution`, so that the
+    /// presence of `execution` stays the one statement of executability.
+    /// Executable kinds declare theirs under `execution.thread_profile`.
+    pub thread_profile: Option<ThreadProfileDecl>,
     /// Declared shape contract on the final composed `Value` for this
     /// kind. REQUIRED on every kind schema. Kinds with no field-level
     /// constraint must declare an explicit empty contract
@@ -1547,6 +2039,53 @@ pub struct KindSchema {
     /// these declarations generically; kind-specific capability and metadata
     /// names live only in the signed kind schema.
     pub inventory_policy: InventoryPolicy,
+    /// Which spaces and trust classes may supply a launch root of this kind.
+    /// Required on every root-executable kind; absent on kinds that are
+    /// never launched as a root.
+    pub launch_trust: Option<launch_trust::LaunchTrustPolicy>,
+    /// Whether a project item of this kind may take the ref of an item an
+    /// installed bundle supplies. Absent means it may: the project item wins
+    /// and the bundle item is recorded as shadowed.
+    pub project_shadowing: ProjectShadowing,
+    /// Whether a runtime may author or remove items of this kind through the
+    /// daemon-mediated authoring callback. Absent means it may.
+    pub runtime_authoring: RuntimeAuthoring,
+}
+
+/// The signed, kind-owned answer to whether a runtime callback may write items
+/// of the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAuthoring {
+    /// A run holding the authoring capability may write the kind.
+    #[default]
+    Allowed,
+    /// No run may write the kind through the callback, whatever it holds. The
+    /// kind's items are written only by the mechanism that owns them.
+    Refused,
+}
+
+/// The signed, kind-owned answer to a project item and an installed bundle
+/// item sharing one ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectShadowing {
+    /// The project item is the item; the bundle item is shadowed.
+    #[default]
+    Allow,
+    /// Neither item answers for the ref. Resolution refuses it, naming both
+    /// files, until the project file is renamed or removed.
+    Refuse,
+}
+
+impl KindSchema {
+    /// Whether an item of this kind may be the root of an execution.
+    pub fn is_root_executable(&self) -> bool {
+        self.execution
+            .as_ref()
+            .and_then(|execution| execution.thread_profile.as_ref())
+            .is_some_and(|profile| profile.root_executable)
+    }
 }
 
 /// Path-free retained evidence for the exact signed kind document that
@@ -1696,6 +2235,15 @@ impl KindSchema {
         self.execution.as_ref()
     }
 
+    /// The thread profile this kind declares: under `execution` for an
+    /// executable kind, at the top level for a non-executable one.
+    pub fn thread_profile(&self) -> Option<&ThreadProfileDecl> {
+        self.execution
+            .as_ref()
+            .and_then(|execution| execution.thread_profile.as_ref())
+            .or(self.thread_profile.as_ref())
+    }
+
     /// Resolve the one kind-owned external-content contract without coupling
     /// content authority to dispatchability.
     pub fn external_content_contract(&self) -> Option<&KindExternalContentDecl> {
@@ -1722,9 +2270,9 @@ impl KindSchema {
 
 /// Unified kind registry — maps kind strings to `KindSchema`.
 ///
-/// Built in two stages:
-///   1. Base registry from bundle roots at engine startup
-///   2. Project overlay per request after `ProjectContext` materialization
+/// Built once, from bundle roots at engine startup (`load_base`).
+/// There is no per-project overlay stage; the project overlay path was
+/// removed.
 ///
 /// The loader uses raw filesystem paths — it must NOT depend on
 /// normal item resolution to avoid a bootstrap cycle.
@@ -2073,6 +2621,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         serde_yaml::from_str(&clean_content).map_err(|e| EngineError::SchemaLoaderError {
             reason: format!("cannot parse YAML {display}: {e}"),
         })?;
+    refuse_unknown_kind_schema_keys(display, &data)?;
 
     let location = data
         .get("location")
@@ -2106,6 +2655,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     let resolution = parse_top_level_resolution(&data, display)?;
     let effective_trust = parse_effective_trust_policy(&data, display)?;
     let execution = parse_execution_schema(&data, display)?;
+    let thread_profile = parse_non_execution_thread_profile(&data, execution.is_some(), display)?;
     let content = parse_kind_content_schema(&data, display)?;
     if content.is_some()
         && execution
@@ -2248,7 +2798,62 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         _ => InventoryPolicy::default(),
     };
     validate_inventory_policy(&inventory_policy, display)?;
+    let launch_trust = match data.get("launch_trust") {
+        Some(value) if !value.is_null() => {
+            let policy = serde_yaml::from_value::<launch_trust::LaunchTrustPolicy>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!("{display}: invalid `launch_trust`: {error}"),
+            })?;
+            policy.validate(display)?;
+            Some(policy)
+        }
+        _ => None,
+    };
+    let project_shadowing = match data.get("project_shadowing") {
+        Some(value) if !value.is_null() => {
+            serde_yaml::from_value::<ProjectShadowing>(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid `project_shadowing`: {error}"),
+                }
+            })?
+        }
+        _ => ProjectShadowing::default(),
+    };
+    let runtime_authoring = match data.get("runtime_authoring") {
+        Some(value) if !value.is_null() => {
+            serde_yaml::from_value::<RuntimeAuthoring>(value.clone()).map_err(|error| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid `runtime_authoring`: {error}"),
+                }
+            })?
+        }
+        _ => RuntimeAuthoring::default(),
+    };
+    let root_executable = execution
+        .as_ref()
+        .and_then(|execution| execution.thread_profile.as_ref())
+        .is_some_and(|profile| profile.root_executable);
+    if root_executable && launch_trust.is_none() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: a root-executable kind must declare `launch_trust` \
+                 (allowed_spaces, allowed_trust, operator_may_admit)"
+            ),
+        });
+    }
 
+    if execution
+        .as_ref()
+        .and_then(|e| e.target.as_ref())
+        .is_some_and(|t| t.request_format.is_some())
+        && resolution
+            .iter()
+            .any(|step| matches!(step, ResolutionStepDecl::ResolveExtendsChain { .. }))
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!("{display}: current target request refuses inherited kind resolution"),
+        });
+    }
     Ok(KindSchema {
         directory,
         excluded_directories,
@@ -2258,6 +2863,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         effective_trust,
         content,
         execution,
+        thread_profile,
         composed_value_contract,
         composer,
         composer_config,
@@ -2265,7 +2871,104 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         inventory_kinds,
         inventory_schema_keys,
         inventory_policy,
+        launch_trust,
+        project_shadowing,
+        runtime_authoring,
     })
+}
+
+/// Parse a non-executable kind's top-level `thread_profile`. Refused on an
+/// executable kind (its profile lives under `execution`) and when it claims
+/// root execution, which only an `execution` block can route.
+fn parse_non_execution_thread_profile(
+    data: &serde_yaml::Value,
+    executable: bool,
+    display: &str,
+) -> Result<Option<ThreadProfileDecl>, EngineError> {
+    let Some(value) = data.get("thread_profile") else {
+        return Ok(None);
+    };
+    if executable {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: an executable kind declares its thread profile under \
+                 `execution.thread_profile`, not at the top level"
+            ),
+        });
+    }
+    if !value.is_mapping() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: `thread_profile` must be a mapping with explicit lifecycle flags"
+            ),
+        });
+    }
+    let profile = serde_yaml::from_value::<ThreadProfileDecl>(value.clone()).map_err(|e| {
+        EngineError::SchemaLoaderError {
+            reason: format!("{display}: invalid `thread_profile`: {e}"),
+        }
+    })?;
+    if profile.root_executable {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: a non-executable kind's `thread_profile` must declare \
+                 `root_executable: false`"
+            ),
+        });
+    }
+    Ok(Some(profile))
+}
+
+/// Every top-level key a kind schema may carry. A key outside this list is
+/// refused rather than ignored, so a daemon that predates a kind-schema field
+/// cannot load a schema whose meaning depends on it (for example a
+/// `launch_trust` floor) as if the field were absent.
+const KIND_SCHEMA_KEYS: &[&str] = &[
+    "category",
+    "version",
+    "location",
+    "formats",
+    "metadata",
+    "resolution",
+    "effective_trust",
+    "content",
+    "execution",
+    "composed_value_contract",
+    "composer",
+    "composer_config",
+    "runtime",
+    "inventory_kinds",
+    "inventory_schema_keys",
+    "inventory_policy",
+    "launch_trust",
+    "project_shadowing",
+    "runtime_authoring",
+    "thread_profile",
+];
+
+fn refuse_unknown_kind_schema_keys(
+    display: &str,
+    data: &serde_yaml::Value,
+) -> Result<(), EngineError> {
+    let mapping = data
+        .as_mapping()
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: a kind schema must be a mapping"),
+        })?;
+    for key in mapping.keys() {
+        let known = key
+            .as_str()
+            .is_some_and(|key| KIND_SCHEMA_KEYS.contains(&key));
+        if !known {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: unknown top-level key `{}`",
+                    key.as_str().unwrap_or("<non-string key>")
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_kind_content_schema(
@@ -2789,10 +3492,13 @@ fn parse_execution_schema(
         "effect_class_ceiling",
         "workspace_access",
         "network_authority_ceiling",
+        "pushed_head_declaration",
         "filesystem_authority_ceiling",
+        "host_authority",
         "target",
         "endpoint",
         "resource_authority_ceiling",
+        "subprocess_limits",
         "method_dispatch",
         "methods",
         "augmentation_methods",
@@ -2979,9 +3685,8 @@ fn parse_execution_schema(
                 || declaration.ready_timeout_ms == 0
                 || declaration.ready_timeout_ms > 10 * 60 * 1000
                 || declaration.request_timeout_ms == 0
-                || declaration.request_timeout_ms > 60 * 60 * 1000
                 || declaration.idle_timeout_ms == 0
-                || declaration.idle_timeout_ms > 24 * 60 * 60 * 1000
+                || !persistent_session_ceilings_are_valid(&declaration)
             {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
@@ -3091,6 +3796,30 @@ fn parse_execution_schema(
         None => None,
     };
 
+    let pushed_head_declaration = match execution_value.get("pushed_head_declaration") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<PushedHeadDeclarationDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.pushed_head_declaration declaration: {error}"
+                    ),
+                })?;
+            if declaration.path.is_empty()
+                || declaration.path.iter().any(|segment| {
+                    segment.trim().is_empty() || segment.trim() != segment || segment.contains('.')
+                })
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.pushed_head_declaration.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
     let filesystem_authority_ceiling = match execution_value.get("filesystem_authority_ceiling") {
         Some(value) => {
             let declaration = serde_yaml::from_value::<FilesystemAuthorityCeilingDecl>(
@@ -3109,6 +3838,43 @@ fn parse_execution_schema(
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
                         "{display}: execution.filesystem_authority_ceiling.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let host_authority =
+        match execution_value.get("host_authority") {
+            Some(value) => {
+                let declaration = serde_yaml::from_value::<HostAuthorityDecl>(value.clone())
+                    .map_err(|error| EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: invalid execution.host_authority declaration: {error}"
+                        ),
+                    })?;
+                declaration.validate(display)?;
+                Some(declaration)
+            }
+            None => None,
+        };
+
+    let subprocess_limits = match execution_value.get("subprocess_limits") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<SubprocessLimitsDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid execution.subprocess_limits: {error}"),
+                })?;
+            if declaration.path.is_empty()
+                || declaration.path.iter().any(|segment| {
+                    segment.trim().is_empty() || segment.trim() != segment || segment.contains('.')
+                })
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.subprocess_limits.path must contain canonical non-empty segments"
                     ),
                 });
             }
@@ -3141,7 +3907,7 @@ fn parse_execution_schema(
                 .limits
                 .validate()
                 .map_err(|error| EngineError::SchemaLoaderError {
-                    reason: format!("{display}: invalid execution.target limits: {error}"),
+                    reason: format!("{display}: invalid execution.target limits: {error:#}"),
                 })?;
             Some(declaration)
         }
@@ -3157,7 +3923,7 @@ fn parse_execution_schema(
             declaration
                 .validate()
                 .map_err(|error| EngineError::SchemaLoaderError {
-                    reason: format!("{display}: {error}"),
+                    reason: format!("{display}: {error:#}"),
                 })?;
             Some(declaration)
         }
@@ -3404,10 +4170,13 @@ fn parse_execution_schema(
         effect_class_ceiling,
         workspace_access,
         network_authority_ceiling,
+        pushed_head_declaration,
         filesystem_authority_ceiling,
+        host_authority,
         target,
         endpoint,
         resource_authority_ceiling,
+        subprocess_limits,
         method_dispatch,
         methods,
         augmentation_methods,
@@ -3864,15 +4633,70 @@ mod tests {
     use lillux::crypto::SigningKey;
     use std::fs;
 
-    #[test]
-    fn persistent_session_decl_reads_pre_override_schema_at_exact_old_limit() {
-        let declaration: PersistentSessionDecl = serde_yaml::from_str(
-            "max_processes: 1\nmax_inflight_per_process: 1\nmax_address_space_bytes: 17179869184\nmax_cpu_seconds: 3600\nreal_uid_process_limit: 512\nready_timeout_ms: 600000\nrequest_timeout_ms: 3600000\nidle_timeout_ms: 1800000\n",
+    fn persistent_session_decl_fixture() -> PersistentSessionDecl {
+        serde_yaml::from_str(
+            "max_processes: 1\nmax_inflight_per_process: 1\nmax_address_space_bytes: 17179869184\nmax_cpu_seconds: 3600\nreal_uid_process_limit: 512\nmax_real_uid_process_limit: 4096\nmax_address_space_bytes_ceiling: 34359738368\nmax_cpu_seconds_ceiling: 86400\nrequest_timeout_ms_ceiling: 28800000\nidle_timeout_ms_ceiling: 28800000\nmax_lifetime_seconds_ceiling: 603600\nready_timeout_ms: 600000\nrequest_timeout_ms: 3600000\nidle_timeout_ms: 1800000\n",
         )
-        .unwrap();
-        assert_eq!(declaration.real_uid_process_limit, 512);
-        assert_eq!(declaration.max_real_uid_process_limit, 512);
-        assert!(declaration.resource_overrides_path.is_none());
+        .unwrap()
+    }
+
+    #[test]
+    fn persistent_session_decl_requires_every_signed_ceiling() {
+        let declaration = persistent_session_decl_fixture();
+        assert_eq!(declaration.max_lifetime_seconds_ceiling, 603_600);
+        assert!(persistent_session_ceilings_are_valid(&declaration));
+        for field in [
+            "max_real_uid_process_limit",
+            "max_address_space_bytes_ceiling",
+            "max_cpu_seconds_ceiling",
+            "request_timeout_ms_ceiling",
+            "idle_timeout_ms_ceiling",
+            "max_lifetime_seconds_ceiling",
+        ] {
+            let mut value = serde_yaml::to_value(&declaration).unwrap();
+            value.as_mapping_mut().unwrap().remove(field);
+            assert!(
+                serde_yaml::from_value::<PersistentSessionDecl>(value).is_err(),
+                "{field} must be required"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_session_ceilings_are_bounded_below_by_defaults_and_above_by_sanity() {
+        let valid = persistent_session_decl_fixture();
+        let mutations: [fn(&mut PersistentSessionDecl); 11] = [
+            |d| d.max_address_space_bytes_ceiling = d.max_address_space_bytes - 1,
+            |d| d.max_address_space_bytes_ceiling = 1024 * 1024 * 1024 * 1024 + 1,
+            |d| d.max_cpu_seconds_ceiling = d.max_cpu_seconds - 1,
+            |d| d.max_cpu_seconds_ceiling = PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS + 1,
+            |d| d.request_timeout_ms_ceiling = d.request_timeout_ms - 1,
+            |d| {
+                d.request_timeout_ms_ceiling =
+                    PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS * 1000 + 1
+            },
+            |d| d.idle_timeout_ms_ceiling = d.idle_timeout_ms - 1,
+            |d| {
+                d.idle_timeout_ms_ceiling =
+                    PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS * 1000 + 1
+            },
+            |d| d.max_lifetime_seconds_ceiling = 0,
+            |d| d.max_lifetime_seconds_ceiling = PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS + 1,
+            |d| d.request_timeout_ms_ceiling = d.request_timeout_ms,
+        ];
+        for (index, mutate) in mutations.iter().enumerate() {
+            let mut declaration = valid.clone();
+            mutate(&mut declaration);
+            // The last mutation is the boundary case: a ceiling equal to its
+            // default is valid.
+            assert_eq!(
+                persistent_session_ceilings_are_valid(&declaration),
+                index == mutations.len() - 1,
+                "mutation {index}"
+            );
+        }
+        // A request ceiling above the former fixed one-hour cap is admitted.
+        assert!(valid.request_timeout_ms_ceiling > 60 * 60 * 1000);
     }
 
     #[test]
@@ -3969,6 +4793,9 @@ location:
 resolution:
   - step: resolve_extends_chain
   - step: resolve_references
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run
@@ -4507,6 +5334,98 @@ formats:
     }
 
     #[test]
+    fn root_executable_kind_declares_its_launch_trust() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "directive", SCHEMA_WITH_RESOLUTION, &sk);
+        let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        let schema = reg.get("directive").unwrap();
+        assert!(schema.is_root_executable());
+        let launch_trust = schema.launch_trust.as_ref().unwrap();
+        assert!(launch_trust.admits_space(crate::contracts::ItemSpace::Project));
+        assert!(!launch_trust.admits_space(crate::contracts::ItemSpace::Node));
+    }
+
+    #[test]
+    fn root_executable_kind_without_launch_trust_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let without = SCHEMA_WITH_RESOLUTION.replace(
+            "launch_trust:\n  allowed_spaces: [bundle, project]\n  allowed_trust: [trusted_bundle, trusted_project]\n",
+            "",
+        );
+        assert!(!without.contains("launch_trust"));
+        sign_and_write_schema(&tmp, "directive", &without, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error.to_string().contains("must declare `launch_trust`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn runtime_authoring_defaults_to_allowed_and_a_kind_can_refuse_it() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        sign_and_write_schema(&tmp, "directive", SCHEMA_WITH_RESOLUTION, &sk);
+        let refusing = "location:\n  directory: ledgers\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nruntime_authoring: refused\n";
+        sign_and_write_schema(&tmp, "ledger", refusing, &sk);
+        let registry = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        assert_eq!(
+            registry.get("directive").unwrap().runtime_authoring,
+            RuntimeAuthoring::Allowed
+        );
+        assert_eq!(
+            registry.get("ledger").unwrap().runtime_authoring,
+            RuntimeAuthoring::Refused
+        );
+    }
+
+    #[test]
+    fn runtime_authoring_with_an_unknown_value_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let bad = "location:\n  directory: ledgers\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\nruntime_authoring: sometimes\n";
+        sign_and_write_schema(&tmp, "ledger", bad, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(error.to_string().contains("runtime_authoring"), "{error}");
+    }
+
+    #[test]
+    fn unknown_top_level_key_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let extra = format!("{SCHEMA_WITH_RESOLUTION}launch_floor: strict\n");
+        sign_and_write_schema(&tmp, "directive", &extra, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown top-level key `launch_floor`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn launch_trust_admitting_unsigned_is_refused() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let unsigned = SCHEMA_WITH_RESOLUTION.replace(
+            "allowed_trust: [trusted_bundle, trusted_project]",
+            "allowed_trust: [trusted_bundle, unsigned]",
+        );
+        sign_and_write_schema(&tmp, "directive", &unsigned, &sk);
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(error.to_string().contains("launch_trust"), "{error}");
+    }
+
+    #[test]
     fn execution_history_policy_path_is_typed_and_kind_declared() {
         let tmp = tempdir();
         let sk = test_signing_key();
@@ -4791,6 +5710,9 @@ composed_value_contract:
     #[test]
     fn old_string_thread_profile_rejected() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile: directive_run
   delegate:
@@ -4809,6 +5731,9 @@ execution:
         // to `true` so conversation-shaped kinds (directive) keep operator
         // follow-up; only machine-only kinds (graph) opt out.
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run
@@ -4826,6 +5751,65 @@ execution:
     // Removed: `project_overlay_replaces_resolution` — kind schemas are
     // node-tier items, not project+bundle-resolved. There is no project
     // overlay path; `with_project_overlay` was deleted.
+
+    const DATA_KIND: &str = "\
+location:
+  directory: surfaces
+resolution: []
+effective_trust:
+  include_references: false
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+";
+
+    #[test]
+    fn a_non_executable_kind_declares_the_profile_of_the_roots_opened_on_it() {
+        let yaml = format!(
+            "{DATA_KIND}thread_profile:\n  name: seat_session\n  root_executable: false\n  \
+             supports_interrupt: false\n  supports_continuation: false\n  \
+             supports_operator_followup: false\n  retirement_fence: true\n"
+        );
+        let schema = parse_kind_schema_content("surface.yaml", &yaml).unwrap();
+        assert!(
+            schema.execution().is_none(),
+            "the kind stays non-executable"
+        );
+        let profile = schema.thread_profile().expect("declared profile");
+        assert_eq!(profile.name, "seat_session");
+        assert!(!profile.root_executable);
+        assert!(profile.retirement_fence);
+    }
+
+    #[test]
+    fn a_non_executable_profile_may_not_claim_root_execution() {
+        let yaml =
+            format!("{DATA_KIND}thread_profile:\n  name: seat_session\n  root_executable: true\n");
+        let error = parse_kind_schema_content("surface.yaml", &yaml).unwrap_err();
+        assert!(
+            error.to_string().contains("root_executable: false"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_executable_kind_keeps_its_profile_under_execution() {
+        let yaml = format!(
+            "{DATA_KIND}execution:\n  delegate:\n    via: runtime_registry\n\
+             thread_profile:\n  name: seat_session\n  root_executable: false\n"
+        );
+        let error = parse_kind_schema_content("surface.yaml", &yaml).unwrap_err();
+        assert!(
+            error.to_string().contains("execution.thread_profile"),
+            "{error}"
+        );
+    }
 
     fn parse_exec(yaml: &str) -> Result<Option<ExecutionSchema>, EngineError> {
         let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
@@ -4934,13 +5918,81 @@ execution:
     }
 
     #[test]
+    fn pushed_head_declaration_follows_only_the_signed_kind_path() {
+        let execution = parse_exec("execution:\n  pushed_head_declaration:\n    path: [project_lane]\n  delegate:\n    via: runtime_registry\n").unwrap().unwrap();
+        assert!(
+            !execution
+                .project_pushed_head_declaration(&serde_json::json!({}))
+                .unwrap()
+        );
+        assert!(
+            execution
+                .project_pushed_head_declaration(
+                    &serde_json::json!({"project_lane": "pinned_snapshot"})
+                )
+                .unwrap()
+        );
+        assert!(
+            execution
+                .project_pushed_head_declaration(&serde_json::json!({"project_lane": "live"}))
+                .is_err()
+        );
+        assert!(
+            execution
+                .project_pushed_head_declaration(&serde_json::json!({"project_lane": true}))
+                .is_err()
+        );
+        let unprojected = parse_exec("execution:\n  delegate: {via: runtime_registry}\n")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !unprojected
+                .project_pushed_head_declaration(
+                    &serde_json::json!({"project_lane": "pinned_snapshot"})
+                )
+                .unwrap()
+        );
+        assert!(parse_exec("execution:\n  pushed_head_declaration:\n    path: []\n  delegate: {via: runtime_registry}\n").is_err());
+    }
+
+    #[test]
+    fn subprocess_limits_follow_only_the_signed_kind_path() {
+        let execution = parse_exec("execution:\n  subprocess_limits:\n    path: [restrictions]\n  delegate:\n    via: runtime_registry\n").unwrap().unwrap();
+        assert!(
+            execution
+                .project_subprocess_limits(&serde_json::json!({}))
+                .unwrap()
+                .is_none()
+        );
+        let authored = serde_json::json!({"restrictions": {
+            "max_cpu_seconds":3, "deny_process_creation":true,
+            "max_stdout_bytes":32768, "max_stderr_bytes":8192
+        }});
+        assert_eq!(
+            execution
+                .project_subprocess_limits(&authored)
+                .unwrap()
+                .unwrap()
+                .max_cpu_seconds,
+            Some(3)
+        );
+        assert!(
+            execution
+                .project_subprocess_limits(&serde_json::json!({"restrictions": null}))
+                .is_err()
+        );
+        assert!(parse_exec("execution:\n  subprocess_limits:\n    path: []\n  delegate:\n    via: runtime_registry\n").is_err());
+    }
+
+    #[test]
     fn filesystem_projection_uses_only_signed_defaults_and_closed_values() {
         use crate::isolation::IsolationFilesystemAuthorityCeiling::{
-            CapturedExecution, NodePolicy,
+            CapturedExecution, CapturedInputs, NodePolicy,
         };
         for (default, expected) in [
             ("node_policy", NodePolicy),
             ("captured_execution", CapturedExecution),
+            ("captured_inputs", CapturedInputs),
         ] {
             let yaml = format!(
                 "execution:\n  filesystem_authority_ceiling:\n    path: [filesystem_authority]\n    default: {default}\n  delegate:\n    via: runtime_registry\n"
@@ -4960,6 +6012,14 @@ execution:
                     .unwrap(),
                 CapturedExecution
             );
+            assert_eq!(
+                execution
+                    .project_filesystem_authority_ceiling(&serde_json::json!({
+                        "filesystem_authority": "captured_inputs"
+                    }))
+                    .unwrap(),
+                CapturedInputs
+            );
             for invalid in [
                 serde_json::json!("host"),
                 serde_json::json!(null),
@@ -4975,6 +6035,118 @@ execution:
             }
             assert!(parse_exec(&yaml.replace(&format!("    default: {default}\n"), "")).is_err());
         }
+    }
+
+    const HOST_AUTHORITY_KIND: &str = "\
+execution:
+  effect_class_ceiling:
+    path: [effects]
+  host_authority:
+    path: [host_authority]
+    incompatible: [[network_authority], [workspace_access]]
+    admitted_effects: [live]
+    admitted_protocols: [protocol:ryeos/core/opaque]
+    graph_parent_profiles: [graph_run]
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      allowed: [protocol:ryeos/core/opaque, protocol:ryeos/core/tool_callback]
+";
+
+    #[test]
+    fn host_authority_kind_declares_host_direct_posture() {
+        use crate::contracts::ExecutionPosture;
+        let execution = parse_exec(HOST_AUTHORITY_KIND).unwrap().unwrap();
+        let opaque = serde_json::json!({"execution_protocol": "protocol:ryeos/core/opaque"});
+        assert_eq!(
+            execution.project_execution_posture(&opaque).unwrap(),
+            ExecutionPosture::Confined
+        );
+        let mut host = opaque.clone();
+        host["host_authority"] = "required".into();
+        assert_eq!(
+            execution.project_execution_posture(&host).unwrap(),
+            ExecutionPosture::HostDirect
+        );
+        let mut live = host.clone();
+        live["effects"] = "live".into();
+        assert_eq!(
+            execution.project_execution_posture(&live).unwrap(),
+            ExecutionPosture::HostDirect
+        );
+        // A kind without the projection never projects host-direct, whatever
+        // the item authors.
+        let plain = parse_exec(
+            "execution:\n  terminator:\n    kind: subprocess\n    protocol: protocol:ryeos/core/opaque\n",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            plain.project_execution_posture(&host).unwrap(),
+            ExecutionPosture::Confined
+        );
+    }
+
+    #[test]
+    fn host_authority_refuses_unknown_values_and_untrue_companions() {
+        let execution = parse_exec(HOST_AUTHORITY_KIND).unwrap().unwrap();
+        let host = serde_json::json!({
+            "execution_protocol": "protocol:ryeos/core/opaque",
+            "host_authority": "required",
+        });
+        for (key, value, needle) in [
+            (
+                "host_authority",
+                serde_json::json!("optional"),
+                "admits only `required`",
+            ),
+            (
+                "host_authority",
+                serde_json::json!(true),
+                "admits only `required`",
+            ),
+            (
+                "network_authority",
+                serde_json::json!("isolated"),
+                "`network_authority` cannot be true",
+            ),
+            (
+                "workspace_access",
+                serde_json::json!("shared_exclusive"),
+                "`workspace_access` cannot be true",
+            ),
+            (
+                "effects",
+                serde_json::json!("recorded"),
+                "effect class `recorded`",
+            ),
+            (
+                "execution_protocol",
+                serde_json::json!("protocol:ryeos/core/tool_callback"),
+                "protocol `protocol:ryeos/core/tool_callback`",
+            ),
+        ] {
+            let mut item = host.clone();
+            item[key] = value;
+            let error = execution
+                .project_execution_posture(&item)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(needle), "{key}: {error}");
+        }
+        assert!(
+            parse_exec(
+                &HOST_AUTHORITY_KIND.replace("admitted_effects: [live]", "admitted_effects: []")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_exec(
+                &HOST_AUTHORITY_KIND.replace("    graph_parent_profiles: [graph_run]\n", "")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -5069,6 +6241,343 @@ execution:
         );
     }
 
+    const LIST_PROTOCOL_KIND: &str = "\
+execution:
+  filesystem_authority_ceiling:
+    path: [filesystem_authority]
+    default: node_policy
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      from_composed_set: [execution_protocols]
+      allowed:
+        - protocol:example/first
+        - protocol:example/second
+        - protocol:example/other
+";
+
+    fn list_protocol_decl() -> SubprocessProtocolDecl {
+        let exec = parse_exec(LIST_PROTOCOL_KIND).unwrap().unwrap();
+        let Some(TerminatorDecl::Subprocess { protocol }) = exec.terminator else {
+            panic!("expected subprocess terminator");
+        };
+        protocol
+    }
+
+    #[test]
+    fn candidates_are_the_scalar_or_each_entry_of_the_list() {
+        let protocol = list_protocol_decl();
+        assert_eq!(
+            protocol
+                .candidates(&serde_json::json!({"execution_protocol": "protocol:example/first"}))
+                .unwrap(),
+            vec!["protocol:example/first".to_owned()]
+        );
+        let listed = serde_json::json!({
+            "execution_protocols": ["protocol:example/second", "protocol:example/first"],
+        });
+        assert!(protocol.selects_from_set(&listed));
+        assert_eq!(
+            protocol.candidates(&listed).unwrap(),
+            vec![
+                "protocol:example/second".to_owned(),
+                "protocol:example/first".to_owned()
+            ]
+        );
+        // A scalar item is not a list item.
+        assert!(!protocol.selects_from_set(&serde_json::json!({
+            "execution_protocol": "protocol:example/first",
+        })));
+    }
+
+    #[test]
+    fn exactly_one_of_the_scalar_and_list_forms_must_be_present() {
+        let protocol = list_protocol_decl();
+        let both = protocol
+            .candidates(&serde_json::json!({
+                "execution_protocol": "protocol:example/first",
+                "execution_protocols": ["protocol:example/second"],
+            }))
+            .unwrap_err();
+        assert!(
+            both.contains("exactly one") && both.contains("both"),
+            "{both}"
+        );
+        let neither = protocol.candidates(&serde_json::json!({})).unwrap_err();
+        assert!(
+            neither.contains("exactly one") && neither.contains("neither"),
+            "{neither}"
+        );
+    }
+
+    #[test]
+    fn a_protocol_list_is_a_bounded_allowed_sequence_without_duplicates() {
+        let protocol = list_protocol_decl();
+        let refused = |value: serde_json::Value| {
+            protocol
+                .candidates(&serde_json::json!({"execution_protocols": value}))
+                .is_err()
+        };
+        assert!(refused(serde_json::json!("protocol:example/first")));
+        assert!(refused(serde_json::json!([])));
+        assert!(refused(serde_json::json!([7])));
+        assert!(refused(serde_json::json!(["protocol:example/not_allowed"])));
+        assert!(refused(serde_json::json!([
+            "protocol:example/first",
+            "protocol:example/first"
+        ])));
+        assert!(refused(serde_json::json!(vec![
+            "protocol:example/first";
+            9
+        ])));
+    }
+
+    #[test]
+    fn resolve_refuses_an_item_that_lists_several_protocols() {
+        let protocol = list_protocol_decl();
+        let error = protocol
+            .resolve(&serde_json::json!({
+                "execution_protocols": ["protocol:example/first", "protocol:example/second"],
+            }))
+            .unwrap_err();
+        assert!(error.contains("execution_protocols"), "{error}");
+        assert_eq!(
+            protocol
+                .resolve(&serde_json::json!({"execution_protocol": "protocol:example/other"}))
+                .unwrap(),
+            "protocol:example/other"
+        );
+    }
+
+    #[test]
+    fn a_declaration_without_a_list_path_keeps_scalar_behaviour() {
+        let exec = parse_exec(
+            "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      allowed: [protocol:example/first]
+",
+        )
+        .unwrap()
+        .unwrap();
+        let Some(TerminatorDecl::Subprocess { protocol }) = exec.terminator else {
+            panic!("expected subprocess terminator");
+        };
+        let composed = serde_json::json!({
+            "execution_protocol": "protocol:example/first",
+            "execution_protocols": ["protocol:example/first"],
+        });
+        assert!(!protocol.selects_from_set(&composed));
+        assert_eq!(
+            protocol.candidates(&composed).unwrap(),
+            vec!["protocol:example/first".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_list_path_must_be_canonical_and_distinct_from_the_scalar_path() {
+        for set_path in ["[]", "[execution_protocol]", "[\"a.b\"]"] {
+            let yaml = format!(
+                "execution:\n  terminator:\n    kind: subprocess\n    protocol:\n      from_composed: [execution_protocol]\n      from_composed_set: {set_path}\n      allowed: [protocol:example/first]\n"
+            );
+            assert!(parse_exec(&yaml).is_err(), "{set_path}");
+        }
+    }
+
+    #[test]
+    fn a_selected_ceiling_comes_from_the_holding_for_a_list_and_is_unchanged_for_a_scalar() {
+        use crate::isolation::IsolationFilesystemAuthorityCeiling as Ceiling;
+        let exec = parse_exec(LIST_PROTOCOL_KIND).unwrap().unwrap();
+        let holding = |authority: &str| -> crate::protocols::ProtocolHolding {
+            serde_json::from_value(serde_json::json!({
+                "requires_guarantees": ["isolation:enforced"],
+                "filesystem_authority": authority,
+                "root_settlement": "containment_empty",
+            }))
+            .unwrap()
+        };
+        let listed = serde_json::json!({
+            "execution_protocols": ["protocol:example/first", "protocol:example/second"],
+        });
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(
+                &listed,
+                Some(&holding("captured_execution"))
+            )
+            .unwrap(),
+            Ceiling::CapturedExecution
+        );
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(
+                &listed,
+                Some(&holding("node_policy"))
+            )
+            .unwrap(),
+            Ceiling::NodePolicy
+        );
+        // A list needs the selected holding.
+        assert!(
+            exec.project_filesystem_authority_ceiling_selected(&listed, None)
+                .is_err()
+        );
+        // A list with its own filesystem authority would let two sources disagree.
+        let mut with_authority = listed.clone();
+        with_authority["filesystem_authority"] = "captured_execution".into();
+        let error = exec
+            .project_filesystem_authority_ceiling_selected(
+                &with_authority,
+                Some(&holding("captured_execution")),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("filesystem_authority"), "{error}");
+        // A scalar item projects as before, whatever holding is passed.
+        let scalar = serde_json::json!({
+            "execution_protocol": "protocol:example/first",
+            "filesystem_authority": "captured_execution",
+        });
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(&scalar, None)
+                .unwrap(),
+            exec.project_filesystem_authority_ceiling(&scalar).unwrap()
+        );
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(&scalar, None)
+                .unwrap(),
+            Ceiling::CapturedExecution
+        );
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(
+                &serde_json::json!({"execution_protocol": "protocol:example/first"}),
+                None
+            )
+            .unwrap(),
+            Ceiling::NodePolicy
+        );
+    }
+
+    fn contained_style_protocol(name: &str) -> crate::protocols::VerifiedProtocol {
+        let descriptor: crate::protocols::ProtocolDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "kind": "protocol",
+                "name": name,
+                "category": "example",
+                "abi_version": "v1",
+                "stdin": {"shape": "opaque"},
+                "stdout": {"shape": "opaque_bytes", "mode": "terminal"},
+                "capabilities": {
+                    "allows_pushed_head": false,
+                    "allows_target_site": false,
+                    "allows_detached": false,
+                },
+                "lifecycle": {"mode": "managed"},
+                "callback_channel": "none",
+                "holding": {
+                    "requires_guarantees": ["isolation:enforced"],
+                    "filesystem_authority": "captured_execution",
+                    "root_settlement": "containment_empty",
+                },
+            }))
+            .unwrap();
+        crate::protocols::VerifiedProtocol {
+            canonical_ref: format!("protocol:example/{name}"),
+            raw_content_digest: "0".repeat(64),
+            signer_fingerprint: "test".to_owned(),
+            descriptor,
+            trust_class: crate::resolution::TrustClass::TrustedBundle,
+            bundle_root: std::path::PathBuf::new(),
+            descriptor_path: std::path::PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn node_selection_passes_a_scalar_through_and_refuses_a_list_no_candidate_meets() {
+        let exec = parse_exec(LIST_PROTOCOL_KIND).unwrap().unwrap();
+        let registry = crate::protocols::ProtocolRegistry::from_verified(vec![
+            contained_style_protocol("first"),
+            contained_style_protocol("second"),
+        ]);
+        // A disabled node holds no enforced isolation.
+        let isolation = crate::isolation::IsolationRuntime::disabled_for_authoring();
+        let scalar = serde_json::json!({
+            "execution_protocol": "protocol:example/first",
+            "filesystem_authority": "captured_execution",
+        });
+        // A scalar item is not held to its protocol's guarantees here: it
+        // resolves to exactly the protocol it states and projects as before.
+        let selected =
+            crate::protocols::select_subprocess_protocol(&exec, &scalar, &registry, &isolation)
+                .unwrap()
+                .unwrap();
+        assert_eq!(selected.protocol.canonical_ref, "protocol:example/first");
+        assert!(
+            crate::protocols::select_listed_protocol(&exec, &scalar, &registry, &isolation)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            crate::protocols::project_node_filesystem_authority_ceiling(
+                &exec, &scalar, &registry, &isolation
+            )
+            .unwrap(),
+            crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+        );
+        // A list takes the selected holding's ceiling; this node meets none.
+        let listed = serde_json::json!({
+            "execution_protocols": ["protocol:example/first", "protocol:example/second"],
+        });
+        let error = crate::protocols::project_node_filesystem_authority_ceiling(
+            &exec, &listed, &registry, &isolation,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("protocol:example/first") && error.contains("protocol:example/second"),
+            "{error}"
+        );
+        // The scalar projection refuses a list rather than defaulting to node_policy.
+        assert!(exec.project_filesystem_authority_ceiling(&listed).is_err());
+    }
+
+    #[test]
+    fn host_authority_refuses_an_item_that_lists_several_protocols() {
+        let yaml = "\
+execution:
+  effect_class_ceiling:
+    path: [effects]
+  host_authority:
+    path: [host_authority]
+    incompatible: [[network_authority], [workspace_access]]
+    admitted_effects: [live]
+    admitted_protocols: [protocol:example/first]
+    graph_parent_profiles: [graph_run]
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      from_composed_set: [execution_protocols]
+      allowed: [protocol:example/first, protocol:example/second]
+";
+        let execution = parse_exec(yaml).unwrap().unwrap();
+        let listed = serde_json::json!({
+            "execution_protocols": ["protocol:example/first", "protocol:example/second"],
+            "host_authority": "required",
+            "effects": "live",
+        });
+        let error = execution
+            .project_execution_posture(&listed)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("lists several admissible protocols"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn execution_schema_terminator_field_optional() {
         // Terminator may be omitted when an alternative routing
@@ -5077,6 +6586,9 @@ execution:
         // the dispatcher used a silent fallback when only `thread_profile`
         // was declared; that path is removed.
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run
@@ -5100,6 +6612,9 @@ execution:
     #[test]
     fn execution_block_without_terminator_or_aliases_or_thread_profile_rejected_at_load() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   aliases: {}
   thread_profile:
@@ -5123,6 +6638,9 @@ execution:
     #[test]
     fn execution_schema_parses_delegate_runtime_registry() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: directive_run
@@ -5144,6 +6662,9 @@ execution:
     #[test]
     fn execution_schema_parses_delegate_with_serves_kind() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: graph_run
@@ -5159,6 +6680,61 @@ execution:
         match delegation.via {
             DelegationVia::RuntimeRegistry { serves_kind } => {
                 assert_eq!(serves_kind.as_deref(), Some("directive"));
+            }
+        }
+    }
+
+    #[test]
+    fn effect_class_ceiling_unproven_max_parses() {
+        let yaml = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+    unproven_max: recorded
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        let ceiling = exec.effect_class_ceiling.expect("ceiling declared");
+        assert_eq!(ceiling.path, vec!["effects".to_owned()]);
+        assert_eq!(
+            ceiling.unproven_max,
+            Some(ryeos_effect_contract::EffectClass::Recorded)
+        );
+
+        let without = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+";
+        let exec = parse_exec(without).unwrap().expect("execution present");
+        assert_eq!(exec.effect_class_ceiling.unwrap().unproven_max, None);
+    }
+
+    #[test]
+    fn effect_class_ceiling_unproven_max_rejects_unknown_class() {
+        for unknown in ["live", "proven", "\"\""] {
+            let yaml = format!(
+                "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+    unproven_max: {unknown}
+"
+            );
+            match parse_exec(&yaml).unwrap_err() {
+                EngineError::SchemaLoaderError { reason } => assert!(
+                    reason.contains("invalid execution.effect_class_ceiling declaration"),
+                    "{unknown}: {reason}"
+                ),
+                other => panic!("{unknown}: unexpected error {other:?}"),
             }
         }
     }
@@ -5254,6 +6830,9 @@ execution:
     #[test]
     fn methods_parsed_from_schema() {
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: knowledge_run
@@ -5416,6 +6995,9 @@ execution:
         // A kind with non-empty methods but no terminator/delegate/aliases
         // is executable.
         let yaml = "\
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   thread_profile:
     name: knowledge_run
@@ -6311,7 +7893,7 @@ metadata:
         // augmentation, with a bespoke payload, so it is intentionally not
         // generically dispatchable.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../bundles/standard/.ai/node/engine/kinds/knowledge/knowledge.kind-schema.yaml",
+            "../../../bundles/knowledge/.ai/node/engine/kinds/knowledge/knowledge.kind-schema.yaml",
         );
         let content = std::fs::read_to_string(&path).expect("read knowledge kind schema");
         let schema = parse_kind_schema_content("knowledge.kind-schema.yaml", &content)
@@ -6347,6 +7929,55 @@ metadata:
             );
         }
         assert_eq!(method("compose").scope, MethodScope::SingleRoot);
+    }
+
+    #[test]
+    fn bundle_provided_release_candidate_kind_loads_from_its_own_bundle_only() {
+        use crate::test_support::{
+            core_bundle_root, directive_bundle_root, graph_bundle_root, knowledge_bundle_root,
+            live_trust_store, workspace_root,
+        };
+        let kinds_of = |bundle: PathBuf| bundle.join(crate::AI_DIR).join(crate::KIND_SCHEMAS_DIR);
+        let release_root = kinds_of(workspace_root().join("bundles/bundle-release"));
+        let trust = live_trust_store();
+
+        // Core and the workflow bundles do not provide the kind.
+        let base = KindRegistry::load_base(
+            &[
+                kinds_of(core_bundle_root()),
+                kinds_of(knowledge_bundle_root()),
+                kinds_of(directive_bundle_root()),
+                kinds_of(graph_bundle_root()),
+            ],
+            &trust,
+        )
+        .expect("core and workflow kinds load");
+        assert!(!base.contains("release_candidate"));
+
+        // Adding the bundle-release root provides it, as an opaque signed
+        // document with its own directory and no execution block.
+        let registry = KindRegistry::load_base(
+            &[
+                kinds_of(core_bundle_root()),
+                kinds_of(knowledge_bundle_root()),
+                kinds_of(directive_bundle_root()),
+                kinds_of(graph_bundle_root()),
+                release_root.clone(),
+            ],
+            &trust,
+        )
+        .expect("bundle-provided kind schema must verify and load");
+        let schema = registry
+            .get("release_candidate")
+            .expect("release_candidate kind provided by bundle-release");
+        assert_eq!(schema.directory, "release-candidates");
+        assert!(schema.execution().is_none());
+        assert!(registry.contains("tool") && registry.contains("service"));
+
+        // An untrusted trust store refuses the whole load.
+        assert!(
+            KindRegistry::load_base(&[release_root], &TrustStore::from_signers(vec![])).is_err()
+        );
     }
 
     #[test]
@@ -6628,5 +8259,35 @@ metadata:
         ])
         .unwrap_err();
         assert!(incompatible.to_string().contains("incompatible"));
+    }
+}
+
+#[cfg(test)]
+mod current_target_declaration_controls {
+    use super::*;
+    #[test]
+    fn request_format_absence_null_unknown_and_exact_current_are_distinct() {
+        let ordinary = serde_json::json!({"path":["supported_target"],"required":true,
+            "limits":{"max_requirements":1,"max_resource_count":1,"max_facts_per_requirement":16}});
+        let decl: ExecutionTargetDecl = serde_json::from_value(ordinary.clone()).unwrap();
+        assert!(decl.request_format.is_none());
+        assert_eq!(serde_json::to_value(decl).unwrap(), ordinary);
+        for format in [
+            Value::Null,
+            Value::String("unknown".into()),
+            serde_json::json!({}),
+        ] {
+            let mut bad = ordinary.clone();
+            bad["request_format"] = format;
+            assert!(serde_json::from_value::<ExecutionTargetDecl>(bad).is_err());
+        }
+        let mut current = ordinary;
+        current["request_format"] = Value::String("ryeos.execution_target.v1".into());
+        assert!(
+            serde_json::from_value::<ExecutionTargetDecl>(current)
+                .unwrap()
+                .request_format
+                .is_some()
+        );
     }
 }

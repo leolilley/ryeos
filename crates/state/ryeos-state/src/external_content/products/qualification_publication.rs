@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::publication::{
     ProductWitnessLookup, load_product_attestation_value, lookup_product_witness_guarded,
-    product_attestation_byte_limit, publish_immutable_product_attestation,
+    product_attestation_byte_limit,
 };
 use super::qualification::ProductQualificationEvidence;
 use crate::object_closure::ObjectClosureLimits;
@@ -128,12 +128,11 @@ pub fn publish_qualification_witness(
     guard: &CasMutationGuard,
 ) -> anyhow::Result<QualificationWitnessPublication> {
     coordinate.validate()?;
-    let (witness, reused_existing) = publish_immutable_product_attestation(
+    let (witness, reused_existing) = crate::immutable_testimony::publish_immutable_attestation(
         authority,
         PRODUCT_QUALIFICATION_HEAD_NAMESPACE,
         &coordinate.coordinate_id()?,
         attestation,
-        limits,
         signer,
         guard,
         |attestation| {
@@ -145,6 +144,20 @@ pub fn publish_qualification_witness(
                 limits,
                 guard,
             )
+        },
+        |hash| {
+            let value = load_product_attestation_value(authority, hash, limits, guard)?
+                .context("product qualification head target is missing")?;
+            let retained = Attestation::from_value(&value)?;
+            let verified = verify_attestation(
+                authority,
+                coordinate,
+                &retained,
+                &signer.verifying_key(),
+                limits,
+                guard,
+            )?;
+            Ok((retained, verified))
         },
     )?;
     Ok(QualificationWitnessPublication {
@@ -334,6 +347,39 @@ pub fn verify_retained_verifier_realization(
     limits: ObjectClosureLimits,
     guard: &CasMutationGuard,
 ) -> anyhow::Result<()> {
+    evidence.validate()?;
+    let mut consumer_roots = Vec::new();
+    if let Some(consumer) = &evidence.consumer_content {
+        consumer_roots.push(consumer.worker_source.binding_hash.clone());
+        consumer_roots.extend(
+            consumer
+                .worker_literals
+                .iter()
+                .chain(consumer.environment_realizations.iter())
+                .map(|realized| realized.manifest_hash.clone()),
+        );
+    }
+    if let Some(hash) = &evidence.qualification_worker_transcript_manifest_hash {
+        consumer_roots.push(hash.clone());
+    }
+    verify_retained_execution_verifiers(
+        authority,
+        &evidence.execution_verifiers().collect::<Vec<_>>(),
+        &consumer_roots,
+        limits,
+        guard,
+    )
+}
+
+/// Shared immutable execution-material check. Source-specific testimony owners
+/// must validate their own evidence and authenticate its issuer separately.
+pub(crate) fn verify_retained_execution_verifiers(
+    authority: &PinnedStateAuthority,
+    verifiers: &[&super::qualification::ProductQualificationVerifier],
+    source_roots: &[String],
+    limits: ObjectClosureLimits,
+    guard: &CasMutationGuard,
+) -> anyhow::Result<()> {
     use crate::object_closure::{
         collect_object_closure_with_cas_and_limits, load_exact_cas_object_with_cas,
     };
@@ -343,21 +389,22 @@ pub fn verify_retained_verifier_realization(
         MAX_EXECUTION_REALIZATION_BYTES,
     };
     authority.ensure_guard(guard)?;
-    evidence.validate()?;
     let cas = authority.cas_store()?;
     // One aggregate closure budget covers root and probe together. Per-node
     // traversal would both repeat shared work and multiply the caller's bound.
     let closure = collect_object_closure_with_cas_and_limits(
         &cas,
-        evidence
-            .execution_verifiers()
-            .map(|verifier| verifier.execution_realization_hash.clone()),
+        source_roots.iter().cloned().chain(
+            verifiers
+                .iter()
+                .map(|verifier| verifier.execution_realization_hash.clone()),
+        ),
         limits,
     )?;
     if !closure.is_complete() {
-        bail!("qualification verifier execution realization closure is incomplete");
+        bail!("qualification retained source or execution closure is incomplete");
     }
-    for verifier in evidence.execution_verifiers() {
+    for verifier in verifiers {
         let value = load_exact_cas_object_with_cas(
             &cas,
             &verifier.execution_realization_hash,

@@ -1,3 +1,6 @@
+use ryeos_runtime::graph_result::{
+    ErrorRecord, GraphResult, GraphRunStatus, HookCostRecord, NodeCostRecord,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -26,6 +29,7 @@ mod execution;
 mod history;
 mod outcome;
 mod transitions;
+pub(crate) use transitions::retry_refused_note;
 
 use events::node_ref;
 
@@ -413,7 +417,7 @@ impl Walker {
     ///
     /// Mirrors `record_callback_warning` in the directive runner.
     /// Use after every event-emission attempt so event-store rejection
-    /// (event_type drift, storage_class drift, transient transport
+    /// (event_type drift, transient transport
     /// failures) lands in `RuntimeResult.warnings` instead of being
     /// silently discarded.
     ///
@@ -747,8 +751,8 @@ impl Walker {
         // GraphStarted and its hooks remain ordered before this checkpoint:
         // it retains their checked accounting but does not claim to protect
         // a crash inside those earlier hooks.
-        if !resumed {
-            if let CommitResult::Terminate(result) = self
+        if !resumed
+            && let CommitResult::Terminate(result) = self
                 .write_checkpoint_or_error(
                     &graph_run_id,
                     &current,
@@ -760,9 +764,8 @@ impl Walker {
                     &inputs,
                 )
                 .await
-            {
-                return Ok(*result);
-            }
+        {
+            return Ok(*result);
         }
 
         // ── F3 main loop: run_node_body → commit_step ───────────
@@ -1572,7 +1575,6 @@ impl Walker {
     // Execution plumbing: each argument is a distinct leg of the thread's
     // auth/provenance context, threaded verbatim — a struct would rename,
     // not simplify. Restructure with a compiler in the loop, not here.
-    #[allow(clippy::too_many_arguments)]
     async fn write_checkpoint_or_error(
         &self,
         graph_run_id: &str,

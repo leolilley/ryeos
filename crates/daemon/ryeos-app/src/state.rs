@@ -2,27 +2,21 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use tokio::sync::{RwLock, mpsc};
 
 use ryeos_engine::engine::Engine;
 use ryeos_engine::isolation::{IsolationMode, IsolationRuntime};
 use ryeos_runtime::CommandRegistry;
 use ryeos_runtime::authorizer::Authorizer;
-use ryeos_scheduler::ReloadSignal;
-use ryeos_scheduler::db::SchedulerDb;
 
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
-use crate::config::Config;
 use crate::engine_cache::EngineCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::extension_state::ExtensionState;
-use crate::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
-use crate::node_policy::NodePolicySnapshot;
 use crate::projection_health::ThreadProjectionHealthSnapshot;
 use crate::resolution_cache::ResolutionCache;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
@@ -30,6 +24,9 @@ use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadLifecycleService;
 use crate::vault::NodeVault;
 use crate::write_barrier::WriteBarrier;
+use ryeos_node_runtime::config::Config;
+use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::node_policy::NodePolicySnapshot;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogHealth {
@@ -83,7 +80,7 @@ pub struct AppState {
     /// admitted by this controller may retain it while a blocking host call
     /// settles, preventing a replacement controller from overlapping the old
     /// generation.
-    pub controller_lifetime: Arc<crate::state_lock::StateLockLease>,
+    pub controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
     /// Generic extension state bag for composition-root state that
     /// doesn't belong in core (e.g., UI state). Populated by the
     /// daemon composition root. Use `extensions.get::<T>()` to
@@ -121,12 +118,18 @@ pub struct AppState {
         Arc<crate::external_candidate_import::ExternalCandidateImportPool>,
     /// Exact atomic node-owned semantic policy generation loaded at startup.
     pub node_policy: Arc<NodePolicySnapshot>,
-    /// Operator-secret store. Read at request-build time and merged
-    /// into the spawned subprocess env via the `vault_bindings`
-    /// pipeline (see `thread_lifecycle::spawn_item`). The daemon stays
-    /// vendor-agnostic — this trait moves opaque `String -> String`
-    /// pairs and never enumerates provider names.
+    /// Operator-secret store. Delivering launches read it only through
+    /// `vault::authorize_secret_delivery` after admission verification. The
+    /// daemon stays vendor-agnostic — this trait moves opaque
+    /// `String -> String` pairs and never enumerates provider names.
     pub vault: Arc<dyn NodeVault>,
+    /// Provider-delivered environment values taken once at daemon startup
+    /// for exactly the names the node policy declares. Read only through
+    /// authorized secret delivery, alongside the vault.
+    pub provider_env: Arc<crate::vault::ProviderEnvironment>,
+    /// Per-name receive and write ceilings of the shared sealed vault, from
+    /// the node's signed policy, bound to the configured local operator.
+    pub vault_ceilings: Arc<crate::vault::VaultCeilings>,
     /// Command registry for token routing. Built once at startup
     /// from node-config command YAMLs.
     pub command_registry: Arc<CommandRegistry>,
@@ -134,17 +137,12 @@ pub struct AppState {
     /// All enforcement sites use this shared instance instead of constructing
     /// per-request.
     pub authorizer: Arc<Authorizer>,
-    /// Scheduler projection DB (SQLite, in-memory for tests, file-backed in prod).
-    pub scheduler_db: Arc<SchedulerDb>,
-    /// Runtime gate shared by scheduler mutation paths and the timer.
-    /// Writers hold it across project/schedule mutations; the timer only
-    /// dispatches while it can acquire a read guard.
-    pub scheduler_runtime_gate: Arc<RwLock<()>>,
-    /// Channel to request scheduler reload after register/deregister/pause/resume.
-    /// `None` when the scheduler is not running (e.g. in unit tests).
-    pub scheduler_reload_tx: Option<mpsc::Sender<ReloadSignal>>,
     /// Ingest ignore matcher compiled from the retained node-policy snapshot.
     pub ignore_matcher: Arc<IgnoreMatcher>,
+    /// The `.ai` roots AI-only project sync admits and produces, composed once
+    /// at startup. Consulted only where a tree is admitted or captured; code
+    /// that re-reads an already-admitted tree checks the floors alone.
+    pub sync_include: Arc<ryeos_state::project_sync::SyncInclude>,
     /// Vault X25519 public key fingerprint. `None` when using
     /// `EmptyVault` or when the vault public key file doesn't exist.
     /// Populated at startup from `<system>/.ai/node/vault/public_key.pem`.
@@ -168,6 +166,11 @@ pub struct AppState {
     /// Empty after restart; callbacks cannot reconstruct process ownership.
     pub scoped_producer_processes:
         Arc<crate::scoped_producer_process::ScopedProducerProcessRegistry>,
+    /// Original Q workspace and pinned state-root guards retained across
+    /// fallible local start/pool binding in this daemon generation. Empty on
+    /// restart; a durable row alone cannot recreate the backend view owner.
+    pub qualification_workspace_custody:
+        Arc<crate::qualification_workspace_custody::QualificationWorkspaceCustodyRegistry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -189,6 +192,8 @@ pub struct IsolationStatus {
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
+    /// Identity of the node serving this response, not a selected remote node.
+    pub node_id: String,
     pub version: String,
     /// Git revision the binary was built from. Injected at build time
     /// (`RYEOS_VCS_REF`) or derived from the local git short SHA; `"unknown"`
@@ -224,6 +229,59 @@ pub struct AccountingStatus {
 }
 
 impl AppState {
+    /// Every secret source an authorized delivery may read.
+    pub fn secret_sources(&self) -> crate::vault::SecretSources<'_> {
+        crate::vault::SecretSources {
+            vault: self.vault.as_ref(),
+            provider_env: self.provider_env.as_ref(),
+            ceilings: self.vault_ceilings.as_ref(),
+        }
+    }
+
+    /// The same one-shot participant used by durable lifecycle observations.
+    pub fn scheduler(&self) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        self.threads.scheduler_participant()
+    }
+
+    /// Install exactly once during composition, before recovery or readiness.
+    pub fn install_scheduler_participant(
+        &self,
+        participant: Arc<dyn crate::scheduler_boundary::SchedulerParticipant>,
+    ) -> anyhow::Result<()> {
+        self.threads.install_scheduler_participant(participant)
+    }
+
+    /// Register a composition part that may hold durable thread references.
+    /// Allowed only before [`Self::seal_thread_pin_sources`].
+    pub fn register_thread_pin_source(
+        &self,
+        source: Arc<dyn crate::retention_exclusion::ThreadPinSource>,
+    ) -> anyhow::Result<()> {
+        self.threads.retention().register(source)
+    }
+
+    /// Close the pin-source set exactly once, before any recovery and before
+    /// readiness. A composition with no pin holders seals an empty set.
+    pub fn seal_thread_pin_sources(&self) -> anyhow::Result<()> {
+        self.threads.retention().seal()
+    }
+
+    /// Take the retention gate; complete it with the sealed sources' pins.
+    pub async fn acquire_retention_gate(
+        &self,
+        mode: crate::retention_exclusion::ExclusionMode,
+    ) -> anyhow::Result<crate::retention_exclusion::RetentionGate> {
+        self.threads.retention().acquire_retention_gate(mode).await
+    }
+
+    /// Withdraw the same participant after request and scheduler-task drain.
+    /// This is part of native shutdown custody, not ordinary capability removal.
+    pub fn take_scheduler_participant_for_shutdown(
+        &self,
+    ) -> Option<Arc<dyn crate::scheduler_boundary::SchedulerParticipant>> {
+        self.threads.take_scheduler_participant_for_shutdown()
+    }
+
     pub fn node_history_policy(
         &self,
     ) -> anyhow::Result<&ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy> {
@@ -246,6 +304,7 @@ impl AppState {
             .projection_health()
             .observe_pending_transitions(pending_head_transitions.pending);
         Ok(StatusResponse {
+            node_id: self.identity.fingerprint().to_owned(),
             version: self.daemon_build.version.to_string(),
             revision: self.daemon_build.revision.to_string(),
             build_date: self.daemon_build.build_date.to_string(),
@@ -298,6 +357,11 @@ impl AppState {
 /// caller owns the directory lifetime. No API handlers, placement binding, or
 /// vault authority is preinstalled; composed tests must add only the exact
 /// production boundary they exercise.
+///
+/// The Store opens through the native test gate. Its owner comes first in the
+/// returned pair so that `let (store_owner, state) = build(..)` drops the
+/// application, and every Store `Arc` it holds, before the owner closes the
+/// Store. The owner stays on the opening thread.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::sync::Arc;
@@ -305,36 +369,148 @@ pub mod test_support {
     use anyhow::Result;
 
     use super::{AppState, CatalogHealth};
+    use crate::state_store::BundleAdmissionTrust;
+    use crate::state_store::test_native::TestStateStore;
 
-    pub fn build(root: &std::path::Path) -> Result<AppState> {
-        let runtime_state_dir = root.join(".ai/state");
-        let runtime_db_path = root.join("runtime.sqlite3");
-        let key_path = root.join("identity/node-key.pem");
-        let config = crate::config::Config {
-            bind: "127.0.0.1:0".parse()?,
-            db_path: runtime_db_path.clone(),
-            uds_path: root.join("test.sock"),
-            app_root: root.to_path_buf(),
-            node_signing_key_path: key_path.clone(),
-            operator_signing_key_path: root.join("identity/operator-key.pem"),
-            authorized_keys_dir: root.join("auth"),
-        };
-        let identity = crate::identity::NodeIdentity::create(&key_path)?;
-        crate::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
+    /// The live platform and dev publisher signers plus `extra`, as one
+    /// in-memory trust store.
+    pub fn live_trust_store_with(
+        extra: Vec<ryeos_engine::trust::TrustedSigner>,
+    ) -> ryeos_engine::trust::TrustStore {
+        let mut signers = Vec::new();
+        for verifying_key in [
+            ryeos_engine::test_support::platform_author_verifying_key(),
+            ryeos_engine::test_support::dev_publisher_verifying_key(),
+        ] {
+            signers.push(ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+                verifying_key,
+                label: Some("test-support live signer".into()),
+            });
+        }
+        signers.extend(extra);
+        ryeos_engine::trust::TrustStore::from_signers(signers)
+    }
+
+    pub fn build(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        build_with_bundle_admission(root, |_| BundleAdmissionTrust::unbound())
+    }
+
+    /// [`build`] with the Store bound to the Bundle admission trust a node
+    /// binds: the live platform signers plus this node's own identity, which
+    /// is what the composed test Engine admits Bundles with.
+    pub fn build_bound(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        build_bound_trusting(root, None)
+    }
+
+    /// [`build_bound`] that also admits Bundles signed by one fixed
+    /// `publisher`, as separate nodes do when they install the same signed
+    /// release from one publisher.
+    pub fn build_bound_trusting(
+        root: &std::path::Path,
+        publisher: Option<ryeos_engine::trust::TrustedSigner>,
+    ) -> Result<(TestStateStore, AppState)> {
+        build_with_bundle_admission(root, |identity| {
+            let mut signers = vec![ryeos_engine::trust::TrustedSigner {
+                fingerprint: identity.fingerprint().to_owned(),
+                verifying_key: *identity.verifying_key(),
+                label: Some("test node identity".into()),
+            }];
+            signers.extend(publisher);
+            let node_trust = live_trust_store_with(signers);
+            BundleAdmissionTrust::bound(node_trust)
+        })
+    }
+
+    fn build_with_bundle_admission(
+        root: &std::path::Path,
+        admission: impl FnOnce(&ryeos_node_runtime::identity::NodeIdentity) -> BundleAdmissionTrust,
+    ) -> Result<(TestStateStore, AppState)> {
+        let (config, identity) = test_identity(root)?;
+        let bundle_admission_trust = admission(&identity);
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
         let write_barrier = crate::write_barrier::WriteBarrier::new();
-        let state_store = Arc::new(crate::state_store::StateStore::new_with_head_trust(
-            root.to_path_buf(),
-            runtime_state_dir,
-            runtime_db_path,
+        let store_owner = TestStateStore::open_with_bundle_admission_trust(
+            root,
             signer,
             write_barrier.clone(),
             Arc::new(head_trust),
-        )?);
+            bundle_admission_trust,
+        )?;
+        let state_store = Arc::clone(store_owner.store());
+        // The owner already holds this App root's operator lock; a second
+        // acquisition would conflict with it.
+        let controller_lifetime = store_owner.controller_lifetime();
+        let state = compose(
+            config,
+            identity,
+            state_store,
+            write_barrier,
+            controller_lifetime,
+        )?;
+        Ok((store_owner, state))
+    }
+
+    /// Compose an application over a Store the caller already holds, without
+    /// opening another. A thread holds one test Store at a time, so a test
+    /// that needs an application over an existing Store uses this. `root`
+    /// receives the application's own identity keys and configuration.
+    pub fn build_with_store(
+        root: &std::path::Path,
+        state_store: Arc<crate::state_store::StateStore>,
+        controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+    ) -> Result<AppState> {
+        let (config, identity) = test_identity(root)?;
+        compose(
+            config,
+            identity,
+            state_store,
+            crate::write_barrier::WriteBarrier::new(),
+            controller_lifetime,
+        )
+    }
+
+    fn test_identity(
+        root: &std::path::Path,
+    ) -> Result<(
+        ryeos_node_runtime::config::Config,
+        ryeos_node_runtime::identity::NodeIdentity,
+    )> {
+        let runtime_db_path = TestStateStore::runtime_state_dir(root).join("runtime.sqlite3");
+        let key_path = root.join("identity/node-key.pem");
+        let config = ryeos_node_runtime::config::Config {
+            bind: "127.0.0.1:0".parse()?,
+            db_path: runtime_db_path,
+            uds_path: root.join("test.sock"),
+            app_root: root.to_path_buf(),
+            node_signing_key_path: key_path.clone(),
+            authorized_keys_dir: root.join("auth"),
+        };
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)?;
+        identity.write_public_identity(&ryeos_engine::trust::node_public_identity_path(root))?;
+        ryeos_node_runtime::operator_identity::test_support::install_operator(root, &identity);
+        // `runtime.author_item` signs with the node's authoring key, which
+        // `ryeos init` creates; a composed test node holds one too.
+        // A root composed twice keeps the key it already has.
+        let authoring_key =
+            ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf()).authoring_signing_key_path();
+        if !authoring_key.exists() {
+            ryeos_node_runtime::identity::NodeIdentity::create(&authoring_key)?;
+        }
+        Ok((config, identity))
+    }
+
+    fn compose(
+        config: ryeos_node_runtime::config::Config,
+        identity: ryeos_node_runtime::identity::NodeIdentity,
+        state_store: Arc<crate::state_store::StateStore>,
+        write_barrier: crate::write_barrier::WriteBarrier,
+        controller_lifetime: Arc<ryeos_node_runtime::state_lock::StateLockLease>,
+    ) -> Result<AppState> {
         let engine = Arc::new(ryeos_engine::engine::Engine::new(
             ryeos_engine::kind_registry::KindRegistry::empty(),
             ryeos_engine::parsers::ParserDispatcher::new(
@@ -363,7 +539,6 @@ pub mod test_support {
             kind_profiles,
             events.clone(),
         ));
-        let controller_lifetime = crate::state_lock::test_controller_lifetime(root)?;
         Ok(AppState {
             config: Arc::new(config),
             daemon_build: crate::build_info::get(),
@@ -396,8 +571,10 @@ pub mod test_support {
             services: Arc::new(crate::service_registry::ServiceRegistry::new()),
             service_descriptors: &[],
             node_config: Arc::new(crate::node_config::NodeConfigSnapshot {
+                stale_bindings: Vec::new(),
                 external_execution: Vec::new(),
                 runtime_snapshot_production: Vec::new(),
+                guest_runtime_materialization: Vec::new(),
                 runtime_snapshot_qualification: Vec::new(),
                 bundles: Vec::new(),
                 routes: Vec::new(),
@@ -407,23 +584,30 @@ pub mod test_support {
             external_candidate_connectors: Arc::new(Default::default()),
             external_provider_configurations: Arc::new(Default::default()),
             external_candidate_imports: Arc::new(Default::default()),
-            node_policy: Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
-                Vec::new(),
-            )),
+            node_policy: Arc::new(
+                ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                    ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                    ryeos_node_runtime::node_policy::default_authorization_record(),
+                    ryeos_node_runtime::node_policy::shipped_event_storage_record(),
+                    ryeos_node_runtime::node_policy::shipped_thread_attachments_record(),
+                ]),
+            ),
             vault: Arc::new(crate::vault::EmptyVault),
+            provider_env: Arc::new(crate::vault::ProviderEnvironment::none()),
+            vault_ceilings: Arc::new(crate::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(
                 &[],
                 &Default::default(),
             )?),
             authorizer: Arc::new(ryeos_runtime::authorizer::Authorizer::new()),
-            scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory()?),
-            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
-            scheduler_reload_tx: None,
             ignore_matcher: Arc::new(crate::ignore::IgnoreMatcher::from_config(
                 &crate::ignore::IgnoreConfig {
                     patterns: Vec::new(),
                 },
             )?),
+            sync_include: Arc::new(ryeos_state::project_sync::SyncInclude::for_tests()),
             vault_fingerprint: None,
             accounting: None,
             persistent_sessions: Arc::new(crate::persistent_session::PersistentSessionPool::new()),
@@ -432,6 +616,7 @@ pub mod test_support {
             ),
             scoped_producer_authorities: Arc::new(Default::default()),
             scoped_producer_processes: Arc::new(Default::default()),
+            qualification_workspace_custody: Arc::new(Default::default()),
         })
     }
 }
@@ -444,5 +629,21 @@ pub struct PinnedCasRead {
 impl PinnedCasRead {
     pub fn cas(&self) -> &lillux::CasStore {
         &self.cas
+    }
+}
+
+#[cfg(test)]
+mod status_identity_tests {
+    #[test]
+    fn status_names_the_serving_node_not_its_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = super::test_support::build(root.path()).unwrap();
+        let status = state.status().unwrap();
+        assert_eq!(status.node_id, state.identity.fingerprint());
+        assert_ne!(status.node_id, state.config.bind.to_string());
+        assert_eq!(
+            serde_json::to_value(status).unwrap()["node_id"],
+            state.identity.fingerprint()
+        );
     }
 }

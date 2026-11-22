@@ -50,11 +50,7 @@ support, signing, installation, or provider qualification.
 
 The current controller source also has a signed operator snapshot-production
 service and a durable one-attempt journal. A complete create response binds a
-locator, never runtime contents. The credential-free runtime probe now
-requires that locator in its schema-2 evidence; controller admission compares
-it with the retained bound attempt and product witness before this adapter
-compares its snapshot ID with the signed placement. This offline join is
-tested, but it is not a live restored-Sandbox verifier. The availability
+locator, never runtime contents. The availability
 response parser exists without a provider-contacting readiness operation. The
 durable locator now retains the bounded, adapter-validated creation projection
 (`requestedAt` and `expiresAt`) under the same operation identity so a later
@@ -71,20 +67,22 @@ service and command definitions are signed; their presence does not prove
 admission on the installed controller generation. Installed admission and the
 restored-content qualification still need verification before this path can
 authorize worker activation.
-The schema-5 snapshot probe carries only the retained snapshot locator,
-restored-verifier observation, provider terminal observation, and exact
-product/placement coordinates. It rejects the older unjoined hashes for
-lost-stream survival, authenticated Ready, and writer exclusion. Those are
-separate execution/settlement claims, not properties established by a
-point-in-time restored-content measurement or a provider terminal status.
 Therefore the Render activation gate remains closed.
 
 ## Implemented control-plane behavior
 
 - Creates a Sandbox through `POST /v1/sandboxes`, placing `ownerId` in the JSON
   body as required by the pinned generated client. It also takes plan,
-  region, immutable `snapshotId`, the reserved maximum lifetime, and `deny-all`
-  network policy from the admitted settings/request inputs. `snapshotId`
+  region, immutable `snapshotId`, the reserved maximum lifetime, and a network
+  policy from the admitted settings/request inputs. The network policy is
+  `{"type": "deny-all"}`, or, for a remote Codex lease handed its admitted
+  lease request on `RYEOS_LIFECYCLE_LEASE_ADMISSION_FD` with a non-empty
+  egress list, `{"type": "allow-list", "rules": [{"domain": <host>,
+  "protocol": "https"}, ...]}` with the rules in ascending host order. The
+  deprecated `default` alias is never sent. A lease egress list the signed
+  spec cannot create fails the operation before any credential or network
+  input is read; it never falls back to `deny-all` or `allow-all`.
+  `snapshotId`
   selects a reusable Render runtime image, while the reservation's distinct
   RyeOS base snapshot B is transferred and verified during guest activation.
   Both identities are included separately in the allocation observation
@@ -93,7 +91,12 @@ Therefore the Render activation gate remains closed.
   independent provider attestation of its contents or the guest base B.
 - A valid `201 application/json` response must match the pinned Sandbox shape,
   including the requested plan, region, lifetime and network policy, before
-  its provider ID is returned as an occurrence. Render's current
+  its provider ID is returned as an occurrence. The echoed `networkPolicy.type`
+  must equal the requested type, the deprecated `default`, when present, must
+  equal `type`, and the echoed `rules` must equal the requested rules exactly
+  (same hosts, `https` protocol, same order, none missing or extra); `rules`
+  must be absent for `deny-all`. Any mismatch leaves the create pending, never
+  bound. The allocation observation digest also binds the requested policy. Render's current
   [Python SDK reference](https://render.com/docs/sandboxes-sdk-python) says
   early-access `plan` and `region` request parameters have no effect (all
   Sandboxes currently run in Oregon with fixed resources). That does not tell
@@ -115,8 +118,8 @@ Therefore the Render activation gate remains closed.
   state remains unknown and requires operator quarantine or review.
 - Termination uses `POST /v1/sandboxes/{id}/terminate?ownerId=...` once, then
   requires an exact `GET /v1/sandboxes/{id}?ownerId=...` response with matching
-  ID, the protected plan and region, `deny-all` network policy,
-  `status: terminated`, and a valid `terminatedAt` before returning terminal
+  ID, the protected plan and region, the exact network policy the lease was
+  created with (checked as for the create echo), `status: terminated`, and a valid `terminatedAt` before returning terminal
   evidence. The termination request does not carry the allocation lifetime,
   so this GET cannot independently recheck `timeoutSeconds` against it. The evidence
   digest binds the operation, binding, allocation request, occurrence,
@@ -126,10 +129,14 @@ Therefore the Render activation gate remains closed.
 - Allocation reconciliation without a retained provider ID is always pending.
   The adapter does not treat list absence or a GET 404 as proof of no
   occurrence.
-- Activation and activation reconciliation always return `supervisor_pending`;
-  even a successful proxy run is not authenticated supervisor `Ready`. The
-  currently signed provider spec advertises no
-  `supervisor_activation` lifecycle capability. RyeOS requires that capability
+- The currently signed profile refuses first activation before reading the
+  guest package, captured network inputs, or credentials. An explicitly
+  selected one-shot profile can make one contact but still returns
+  `supervisor_pending`; reconciliation is observation-only and returns pending.
+  Even a successful proxy run is not authenticated supervisor `Ready`. The
+  signed provider spec yields `supervisor_activation` only when one-shot
+  activation and the journal-claimed file relay are both selected; that admits
+  startup and attests no `Ready`. RyeOS requires that capability
   at offline placement admission, before Sandbox allocation or other provider
   contact; this incomplete adapter cannot strand a paid occurrence merely to
   discover that startup is unavailable. The capability must be derived from
@@ -158,15 +165,19 @@ Therefore the Render activation gate remains closed.
 `src/proxy_route.rs` now supplies a dormant fail-closed destination check for
 the CLI's example proxy routes. It accepts only the exact bound Sandbox ID and
 region under `<sandbox-id>.<region>.sandbox.onrender.com`, `PUT /files/upload`
-with the exact reserved path, or `POST /runs/stream`. It rejects arbitrary
+or `GET /files/download` with the exact reserved path, or `POST /runs/stream`. It rejects arbitrary
 returned origins, methods, queries, fragments, credentials, ports and alternate
 encodings before a future bearer token could be forwarded. This is local
 policy/test evidence, **not** evidence that Render always returns that shape or
 that a proxy operation has been safely implemented.
 It also constructs only the pinned CLI's exact API token-mint routes for the
 same Sandbox and owner: file upload/download with a validated path, or run
-stream. The constructor does not mint a token. A lost mint response must not
-cause a second mint or upload/run attempt under the same activation claim.
+stream. The constructor does not mint a token. The signed provider profile now
+fixes separate upload and download token routes in strict schema 5, and its
+relay-file operation remains `unsupported_pending`. A durable relay owner must
+authorize each transfer and reconcile ambiguous contact before that route is
+used. A lost mint response must not cause a second mint or upload/run attempt
+under the same activation claim.
 The same dormant boundary now parses a bounded connect response directly into
 a zeroizing bearer, rejects duplicates, unknown fields and trailing data,
 checks expiry and execution identity, and binds the returned method and URI to
@@ -223,18 +234,20 @@ and checks its current owner, `0400` mode, exact length, and payload digest
 before any provider contact. This is a point check, not exclusion of concurrent
 writers; the eventual upload must stream the same registered inode under
 Lillux's stable-reader check while the producer retains private-generation
-custody. The adapter cannot authenticate the controller root or establish
-guest trust. A qualified guest runtime must independently pin the controller
-root and its own runtime manifest hash, verify the assignment first, and then
-verify the import under the delegated occurrence-owner key. The final
+custody. The adapter does not establish guest trust. The signed assignment names the controller public key it verifies
+under; the adapter checks that signature before any provider contact, and the
+guest verifies it again, checks its own measured runtime manifest hash, and
+then verifies the import under the delegated occurrence-owner key. The runtime
+product carries no controller key, so one qualified product serves any
+controller. The final
 assignment cannot be placed in Sandbox create-time environment: its occurrence
 ID and activation digest do not exist until after allocation. A future
 one-shot owner launch must carry it as bounded post-allocation input, and an
 ambiguous launch response must not cause another launch.
-The generic guest verifier can now observe the exact installed runtime tree,
-read its pinned controller-root file, and recheck the full tree immediately
-before import admission. This is a point measurement only: the Render snapshot
-must still be independently qualified against that manifest/root, and the
+The generic guest verifier can now observe the exact installed runtime tree
+and recheck the full tree immediately before import admission. This is a point
+measurement only: the Render snapshot must still be independently qualified
+against that manifest, and the
 owner must exclude writers through descriptor adoption and execution.
 `ryeos-external-execution::guest_staging::stage_uploaded_guest_package` already
 imports an exact pinned regular inode into a private generation and verifies
@@ -339,7 +352,7 @@ is negative architecture evidence, not installed Render qualification.
 | Create Sandbox | W2 supplies the retained operation ID, binding hash, allocation request digest, and reservation before invoking this adapter. The provider request has no create-correlation or idempotency token. | Only this request's complete, valid `201` response can bind its returned Sandbox ID after the configured fields match. | A lost/malformed response or any failure after request transmission stays pending. No retry or list search is allowed. `NoRequestSent` is locally authoritative. The three typed snapshot rejection shapes remain pending until provider-authoritative semantics are established. An uncertain create may exist and consume capacity/spend, so its original reservation remains quarantined. |
 | Allocation observation | The original allocation identity remains the coordinate; no Sandbox ID is invented. | Allocation reconciliation is unsupported without a retained provider ID. This adapter does not list or guess. | A list miss or `404` is not a negative proof. Unresolved occurrence and spend remain unknown under the original reservation. |
 | Bootstrap and readiness | W2's activation request identity remains authoritative; the current signed profile refuses the one-shot activation branch. | An explicitly signed, qualified-runtime one-shot profile may mint/upload/run once, but still emits only pending; authenticated supervisor `Ready` comes from the existing channel, never the proxy response. Reconciliation never repeats contact. | A lost token-mint or run-stream response leaves the original activation pending. The adapter does not retry, infer success from an execution list, or mint during reconciliation. |
-| Terminate | W2 supplies the retained operation ID, bound occurrence ID, and termination request digest before invocation. | One termination `POST` is followed by a `GET` for that exact ID. Only a matching ID, protected plan/region, `deny-all` policy, `status: terminated`, and a valid `terminatedAt` are terminal observation; allocation lifetime parity is not rechecked. Recovery is GET-only. | A lost POST response is reconciled by exact-ID GET; the POST is not repeated. A timeout, `404`, malformed response, or missing terminal fields remains pending. Until exact terminal observation, remaining capacity/spend is unknown. |
+| Terminate | W2 supplies the retained operation ID, bound occurrence ID, and termination request digest before invocation. | One termination `POST` is followed by a `GET` for that exact ID. Only a matching ID, protected plan/region, the lease's exact network policy echo, `status: terminated`, and a valid `terminatedAt` are terminal observation; allocation lifetime parity is not rechecked. Recovery is GET-only. | A lost POST response is reconciled by exact-ID GET; the POST is not repeated. A timeout, `404`, malformed response, or missing terminal fields remains pending. Until exact terminal observation, remaining capacity/spend is unknown. |
 | Provider Sandbox death and writer exclusion | Bound to the exact Sandbox occurrence, but distinct from the termination request coordinate. | The current adapter does not establish guest descendant settlement, writer exclusion, or a frozen export. | Provider `terminated` status is not installed qualification or proof of RyeOS guest-writer death. No candidate execution or export is enabled by this adapter. |
 
 The dormant proxy URL check still needs a live provider-shape qualification;
@@ -357,29 +370,24 @@ the guest import path are qualified.
 The signed placement binding's `guest_runtime_manifest_hash` is an expected
 content identity; Render settings' `snapshot_id` is an opaque provider locator.
 Neither is evidence that the provider restored those bytes. These two
-coordinates and the controller public root must meet in one independently
-verified qualification before a new Sandbox can be allocated for RyeOS work.
+coordinates must meet in one independently verified qualification before a new Sandbox can be allocated for RyeOS work.
 
 The source product should be authored through an ordinary retained-output
-recipe. Its producer needs the exact owner executable as a **data input**, the
-node's public assignment-verification root, and a signed owner profile. It
+recipe. Its producer needs the exact owner executable as a **data input** and
+a signed owner profile; it takes no parameters and names no controller. It
 writes a fresh credential-free tree; RyeOS captures that tree as a product
 and checks its manifest against the guest's `ObservedGuestRuntime` algorithm.
 The signed Tool now declares `bundle_binary: bin:ryeos-external-guest-occurrence-owner`
 under the narrow `bundle_binary:own` kind grant. Admission captures the
 declaring Bundle's signature-verified executable into a sealed descriptor and
 then into an exact retained file realization; the producer never opens the
-installed `.ai/bin` path. The signed production graph reads the current node's
-public identity through `service:identity/public_key` and passes it to the
-producer. No credential or submission authority enters that workspace.
-The separate signed `graph:codex/guest-owner-runtime-production-for-controller`
-requires an explicit target controller public key. It retains the same product
-recipe and captured-execution Tool, so an enforced-isolation authoring node
-can produce bytes for a distinct Render controller without pretending that
-the Render controller itself can run the captured producer. The target
-controller must still import the exact witnessed product and independently
-verify that its own public root is present in the manifest; accepting a
-caller key or graph result alone would not do so. A disposable
+installed `.ai/bin` path. No credential or submission authority enters that
+workspace. Because the product is independent of any controller, an
+enforced-isolation authoring node can produce and qualify the exact bytes a
+distinct Render controller later runs, without pretending that the Render
+controller itself can run the captured producer. The Render controller still
+imports the exact witnessed product; its own key reaches the guest only inside
+the occurrence assignment it signs. A disposable
 `hosted-workflow` node on 2026-09-28 admitted the seven-bundle set but refused
 the local producer at the correct boundary:
 `captured execution requires enforced isolation before admission`. It made
@@ -403,7 +411,10 @@ also ran a bounded fail-closed argument probe in a disposable Render Sandbox.
 These are source-production and native-execution observations, not an installed
 Render snapshot or runtime qualification. The product witness must be carried
 through an admitted product-to-provider staging path; the artifact-blob export
-command does not export external-content manifests. The existing
+command does not export external-content manifests, so the path is
+`service:external-content/push-product`, which offers the origin-admitted
+closure to the pinned remote and streams blobs and large objects in bounded
+chunks before the remote publishes its own acceptance. The existing
 producer app root remains at `/tmp/ryeos-owner-node.7nCdlW/app-root`, but this
 particular witness is rooted in that node's public key
 `ed25519:jVDJyGjQ2xYH57FLBUHFzYXZYkxnZQ1lh6966CHWLO8=` and operator
@@ -474,24 +485,9 @@ signed binding generation. Its independently admitted verifier must observe
 the restored tree and root *inside that snapshot*, upload modes, owner
 survival after losing the run stream, authenticated supervisor `Ready`, and
 whole-guest termination plus writer exclusion. The generic product
-qualification machinery can retain a signed verifier result and bounded
-probe evidence. A Render-specific typed interpretation now exists, but its
-authenticated join to the placement binding is still missing. A self-described `qualified` field, a
+qualification machinery can retain a signed verifier result. A self-described `qualified` field, a
 matching create response, or a signed expectation alone must not grant
 startup capability.
-
-`src/snapshot_qualification.rs` now defines the bounded Render-specific probe
-shape and exact comparison against those expected coordinates. It rejects
-unknown fields, changed snapshot/root/manifest, weak or noncanonical controller
-keys, changed file modes, and missing provider-terminal evidence identities.
-Placement admission now rejoins both the independently admitted verifier's
-retained observation and the exact restored occurrence's daemon-retained
-provider-terminal observation to the same qualification operation. The old
-probe-provided terminal hash is no longer accepted as free-standing evidence.
-This remains only a provider-terminal join: the verifier and termination have
-not yet run as an installed Render qualification, and a provider `terminated`
-response does not prove guest-writer exclusion. The signed provider spec still
-refuses activation.
 
 The separate `ryeos-external-guest-restoration-verifier` now measures the
 restored owner tree under a fresh challenge. This adapter has an offline,
@@ -517,61 +513,38 @@ while reusing the signed lifecycle profile and transport primitives. Adding a
 fake Worker owner or bypassing current runtime qualification to use that journal
 would create an authority cycle.
 
-Binding schema 14 now carries a required-nullable `runtime_qualification`
+Binding schema 15 carries a required-nullable `runtime_qualification`
 object with the exact attestation hash, product-owner principal, policy ref,
 and required claims. The node Config signer is not assumed to be the product
 owner. A non-null object is only an exact coordinate:
 fresh placement refuses it until the published witness, current
-policy, independent execution evidence, and Render probe can all be joined.
+policy, and independent execution evidence can all be joined.
 This is distinct from the Codex candidate-runtime product selection retained
 in the Worker capsule. Cleanup of an already contacted occurrence does not
 reapply this startup gate.
+
+Schema 15 also requires an explicit nullable `runtime_content_qualification`
+slot. This selects acquired structured-session runtime compatibility by exact
+activation ref, publication coordinate/hash, operator owner and finite required
+claims. Its subject is `workload.runtime_manifest_hash`, never the guest-owner
+runtime manifest above. Direct workloads refuse this slot. Fresh structured
+session admission refuses missing testimony and rechecks its owning signed
+head, expiry, current source allowance/policy/recipes and verifier artifact.
+Retaining it
+in the admitted session and authenticating it during historical recovery are
+still open integration gates; this source cut is not installed qualification.
 
 The fresh read-only check now resolves the named owner through its current
 node-signed operator grant, loads the exact published qualification and
 product witness under CAS guard, and rechecks current policy, verifier
 definition/artifact, required claims, and execution evidence. It runs before
 credential access on fresh placement paths. That authenticates the product
-proof but does not yet compare its provider-specific probe; the backend registry
+proof; the backend registry
 still refuses a non-null qualification for new contact. The exact proof and
 product owner are now CAS-owned by the schema-18 persistent-session capsule,
 separately from the Codex executable selection. No synthetic verified request
 context is constructed.
 
-The lifecycle backend now has a credential-free, provider-neutral runtime-probe
-interpretation hook. Fresh admission and retained placement call it only after
-RyeOS authenticates the corresponding proof. The hook defaults to refusal; the
-exact Render adapter now implements a sealed offline invocation with no
-credential or network descriptors. It compares source-derived owner, tree and
-controller-root identities with the bounded independent probe and returns a
-request-digest-bound response. The separate allocation gate still refuses
-qualified bindings: neither this interpretation nor a successful probe parse
-alone is an activation claim.
-
-The remaining provider-probe join has two separate owners. RyeOS authenticates the binding's exact
-qualification attestation from current published CAS, its product witness,
-current signed policy, admitted verifier definition, and execution evidence;
-the session capsule retains that result with the exact signed binding generation
-before first contact, and start/channel recovery authenticates it without
-selecting a new product head.
-The Render adapter interprets the bounded `probe_evidence` against the same
-binding's owner/account/snapshot/plan/region, controller public root, owner
-executable and runtime manifest. Neither a caller-provided JSON probe nor a
-synthetic `HandlerContext` may stand in for RyeOS's authenticated witness.
-The exact product-witness hash is the source-lineage join: its authenticated
-capture evidence already retains the producer and root-producer admissions,
-including effective definition, project snapshot and launch authority. The
-removed `bundle_generation_hash` probe field had no independent installed
-observation or signed-binding source; copying it from `probe_evidence` into its
-own expectation would have proved nothing.
-RyeOS now re-verifies the retained product witness and its complete content
-closure, then derives the expected owner executable digest and controller-root
-file digest from the exact ordinary product manifest under the node's current public
-key. The large-content tier has a different manifest identity and is rejected. The
-credential-free adapter hook receives these source-derived values; the Render
-executable's sealed offline invocation now compares them with the probe. It
-still cannot authorize allocation while the signed provider spec declares
-activation `unsupported_pending` and joined installed qualification is absent.
 The proof must be rechecked at the fresh reservation/contact cut, while
 recovery of an already contacted occurrence uses its retained exact proof and
 does not select a newer witness. The existing `guest-runtime` Worker slot
@@ -588,11 +561,138 @@ the adapter. Retained cleanup must remain available even if a later startup
 qualification is absent. A read-only Render inventory on 2026-09-27 returned
 no snapshots (`[]`), so none of the installed claims above has been made.
 
-The declared capabilities are exactly `authoritative_no_occurrence` and
-`exact_terminal_observation`. The first capability is limited to W1's
+The capabilities the signed bundle spec yields are exactly
+`authoritative_no_occurrence`, `controller_file_relay`,
+`exact_terminal_observation` and `supervisor_activation`.
+`controller_file_relay` is derived when the journal-claimed file relay is
+selected, and a binding may select the controller file relay transport only
+over an adapter that declares it. `supervisor_activation` is derived only
+when both one-shot activation and the file relay are selected; it admits
+startup and does not attest `Ready`, which the channel owner still verifies. The first
+capability is limited to W1's
 `NoRequestSent` result; provider response errors do not currently establish it.
 The adapter does not declare `idempotent_termination` because it follows the
 one-Terminate policy.
+
+## Remote Codex exec-server leases
+
+The workload is a durable controller that keeps the Codex App Server and its
+credential profile, with each Sandbox leased only to run `codex exec-server`.
+The provider-neutral `ryeos-remote-lease-core` crate
+(`crates/host-adapters/remote-lease-core`) implements its admission,
+authenticated Ready and the two lease operations; `src/lease.rs` answers the
+core's `LeaseProviderFacts` from the signed Render spec (evidence provider
+`render_sandbox_v1`, the 24 h lifetime, attested guarantee names, guest
+channel, egress policy and its evidence basis, and the `sbx-` id form). The
+adapter never contacts the guest: the controller relays the guest's first
+frames to it on an inherited descriptor.
+
+- Requirements are Lillux capability floor entries (`CapabilityRequirement`)
+  judged by Lillux `satisfies`. A bare name needs a measured proof, so an entry
+  that accepts the provider's word says `"accept": ["provider_attested"]`, may
+  narrow `providers`, and may list `any_of` alternatives. Admission reports
+  which name, grade and provider met each entry.
+- `admit-lease` is offline stage-one admission. It refuses by name every
+  credential, network, settings and activation descriptor it receives
+  (including the guest package, supervisor and launcher descriptors), and
+  the relay upload, lease admission and qualification request binding
+  descriptors, since its request arrives on the request descriptor. It reads
+  the signed provider spec and a canonical request (schema 3) carrying the
+  workload's lease entries, its guest entries, its guest egress allow-list,
+  its lifetime and activation deadline. The guest's Ready time is its own
+  testimony and is not compared with the controller's clock; the controller
+  judges Ready against the activation deadline on its own clock. The
+  evidence is `provider_attested` by `render_sandbox_v1` and derived from
+  implemented operation kinds only (`lease.create_bound`,
+  `lease.lifetime_bound`, `lease.network_policy`, `lease.terminate_observed`,
+  and `guest.ready_authenticated` once a guest channel exists). It returns
+  `admitted` with `met_by`, the exact `network_policy` the create will request,
+  its `network_policy_evidence` and the spec's `budget_weight`, or `refused`
+  with every unmet entry and a plain reason. A lifetime above Render's 24 h
+  limit is also refused.
+- `budget_weight` is a required field of the signed provider spec: how many
+  node lease-budget seconds one second of a Render lease costs, an integer
+  from 1 to 1000. A spec without it, or with a value outside that range, is
+  refused when parsed; there is no default. The authored bundle spec declares
+  1. The controller never parses the spec: it reads the weight from the
+  admitted verdict, which names the spec's digest, and charges its node lease
+  budget the lease's lifetime times that weight.
+- Guest egress is data on the lease request: `guest_network_allow` lists the
+  hosts the guest may reach over HTTPS. A remote Codex lease names exactly its
+  controller's hostname, so the guest can dial one authenticated WebSocket
+  back to it and model-directed commands reach nothing else over TCP. Each
+  host is an exact lowercase DNS name with no scheme, port, path or trailing
+  dot, and a `*.` wildcard is allowed only as the leftmost label. An empty
+  list means `deny-all`. The signed spec's `network_policy` declares what the
+  adapter may create: `creatable_types` is `["deny-all"]`, or
+  `["deny-all", "allow-list"]` together with `allow_list` bounds
+  (`rule_protocol: "https"`, `max_rules` up to 32, and `host_syntax`
+  `exact_dns_name` or `exact_dns_name_or_leftmost_wildcard`). The authored
+  bundle spec declares allow-list creation of at most 4 exact hostnames.
+  A non-empty list is admitted only when the spec declares allow-list
+  creation and every host fits its bounds; otherwise `lease.network_policy`
+  is refused by name, whether or not the workload lists it.
+- `lease.network_policy` evidence is `provider_attested` by
+  `render_sandbox_v1`, and its basis names the policy type and the exact rule
+  set. It also states what Render measurement (2026-10-14) established: under
+  `allow-list` only listed hosts are reachable, over HTTPS only (plain HTTP and
+  subdomains are blocked), matched by exact hostname with TLS end to end, and
+  streaming and WebSocket work; the residual is that DNS resolution of
+  unlisted names is not filtered, so data can leave in DNS queries. Under
+  `deny-all`, guest DNS resolution fails.
+- `await-lease-ready` is the post-activation stage and holds no contact
+  authority either: it refuses the same descriptors by name, and it is the
+  only lease operation that may hold `RYEOS_LIFECYCLE_GUEST_FRAMES_FD`
+  (`admit-lease` refuses that descriptor by name too). Its request carries the stage-one request and its digest;
+  the adapter re-admits that exact request against the captured spec, and
+  takes the guest entries from it. The guest channel is the external-execution
+  channel: the controller's `ExecutionChannelBinding` names the lease as its
+  occurrence and the per-lease guest key as its supervisor key. Ready is the
+  channel's first supervisor frame and carries the guest `boot_id`, the
+  activation, signed import and package digests the guest verified, and a
+  ready time leading the controller's clock by no more than the declared
+  skew. Ready must arrive, by the controller's clock, before the activation
+  deadline. The next frame must be the guest's `capability_report` from the
+  same boot, continuing the channel's sequence and predecessor digest. The
+  admitted response returns the chain state (`chain`: `next_sequence`,
+  `previous_frame_digest`) with the retained stage-two result
+  (`guest_report`: `report_frame_digest`, `met_by`), and a later admission of
+  the same lease must pass it back as `resume`, so the chain never restarts.
+  A changed `boot_id`, a second Ready, a replayed or off-chain frame or an
+  unmet entry yields `terminate` with the reason. It never yields an admitted
+  weaker guest.
+- The capability report is trusted only because it precedes any workload
+  code. The per-lease supervisor key lives in the guest next to the
+  model-directed commands, so after they run the guest can sign a weakened
+  report. A resumed admission therefore reads no frame: it checks that the
+  retained `met_by` still meets the admitted guest entries and repeats it.
+  A capability report arriving on the chain after the first terminates the
+  lease. A resumed admission needs no `RYEOS_LIFECYCLE_GUEST_FRAMES_FD`; one
+  handed that descriptor is a malformed controller request, refused by name
+  as an error with no verdict, so the healthy lease is not terminated.
+- `operate` reads the admitted lease request, when handed it on
+  `RYEOS_LIFECYCLE_LEASE_ADMISSION_FD`, for the lease's egress list:
+  allocation creates that policy, and termination and its reconciliation
+  require the GET echo to repeat it. The descriptor's adapter and provider
+  spec digest must match the captured ones. An operation without it serves
+  no lease and expects `deny-all`. The file relay moves only mailbox files
+  (its path derives from the sealed bootstrap, upload bytes arrive on their
+  own sealed descriptor), so it refuses that descriptor by name.
+- The signed spec slot `operations.guest_channel` (provider spec schema 8)
+  accepts `unsupported_pending` or `controller_relayed_guest_frames`, the
+  latter only together with one-shot activation. The authored bundle spec
+  selects `controller_relayed_guest_frames`: the guest dials one WebSocket to
+  its controller under the allow-list policy above, and the controller relays
+  the guest's frames to `await-lease-ready` on the inherited
+  `RYEOS_LIFECYCLE_GUEST_FRAMES_FD`, a connected byte stream carrying one
+  length-prefixed message per frame (4-byte big-endian length, at most
+  64 KiB). The adapter reads exactly Ready and the capability report, each
+  bounded and before the admission's receive deadline, and nothing after
+  them. A message cut short by end of stream, a length above the bound, the
+  deadline passing, end of stream before a frame, or a missing descriptor
+  each yields `terminate` with that reason on a first admission. Under `unsupported_pending`,
+  `open_guest_channel` refuses, so stage one refuses every workload that needs
+  `guest.ready_authenticated` or any guest-reported entry.
 
 ## Explicit settings
 
@@ -678,3 +778,20 @@ followed this correction. Before use, the integration must
 establish provider-authoritative lifecycle evidence, proxy validation, RyeOS
 bootstrap and network-route semantics, and joined cancellation behavior. Any
 authenticated Render call requires separate approval.
+
+## Provider inventory (`list-provider-resources`)
+
+A read-only invocation lists what one Render owner scope holds, for the node's
+`ryeos node external-execution inventory`. It receives the binding's sealed
+settings (only `owner_id` and `tls_roots_der_base64` are read), credential,
+network inputs and provider spec, runs with process creation denied like the
+relay, and issues GETs only: `GET /v1/sandboxes?ownerId=…&limit=100[&cursor=…]`
+and `GET /v1/sandbox-snapshots?ownerId=…&limit=100[&cursor=…]`, at most 16
+pages each and 256 rows in all. A listing cut by either bound is reported
+`complete: false`. A row that names another owner refuses the whole listing.
+Each row is `{kind: sandbox|snapshot, provider_id, state, created_at}`; the
+adapter attaches no meaning to them and never deletes anything. The page shape
+(`[{sandbox|snapshot: {...}, cursor}]`) follows the terminated-sandbox list the
+bootstrap cleanup reads; the snapshot list path is not in the signed provider
+spec and neither list has been exercised against the live API yet. The unit
+tests use recorded fixture pages only.

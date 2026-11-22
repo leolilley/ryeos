@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-23T08:19:54Z:851a9ba2b8bc96b141b14859e7f375b0dbd5fd30e5b9b15f8169270fd697373a:FP1DS6IfwTShnR8dtnYePaNxcVXhK7omQbgLjn2cqXgzp707tAJsYiTCa7HwvG31CJoST8rGloGQxtFnR+6WDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:d642264343153509c0a4f79688b81283dce57ddc4aa79a2997909391dbdec814:AWeqYQOPe/QG8nwvLm/fo8Rwusf0NYNHkTT1y7sz7pd4H3MRqCRlRFD0ypcNEWk7k+xuCiiWZ62q2JzTRxLRDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Qualify one canonical receipt-only captured substrate release product."""
 import json
 import os

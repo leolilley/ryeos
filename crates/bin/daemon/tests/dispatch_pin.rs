@@ -18,13 +18,13 @@
 //! so the mapping back to the historical V5.2 inline branches stays
 //! grep-able.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 
 use base64::Engine;
 use common::DaemonHarness;
-use common::fast_fixture::register_standard_bundle;
+use common::fast_fixture::register_workflow_bundles;
 use lillux::crypto::Signer as _;
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -37,37 +37,8 @@ fn pin_test_signing_key() -> lillux::crypto::SigningKey {
     lillux::crypto::SigningKey::from_bytes(&[0x5Au8; 32])
 }
 
-/// Write a trusted-signer TOML for `vk` into
-/// `<user_space>/.ai/config/keys/trusted/<fp>.toml`. Mirrors the
-/// `bootstrap::write_self_trust` format so the engine's `TrustStore`
-/// loader picks it up alongside the fixture trusted signers.
-fn write_trusted_signer(
-    user_space: &Path,
-    vk: &lillux::crypto::VerifyingKey,
-) -> anyhow::Result<()> {
-    use base64::engine::Engine as _;
-
-    let fp = lillux::signature::compute_fingerprint(vk);
-    let trust_dir = user_space.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trust_dir)?;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let toml = format!(
-        r#"version = "1.0.0"
-fingerprint = "{fp}"
-owner = "self"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-    std::fs::write(trust_dir.join(format!("{fp}.toml")), toml)?;
-    Ok(())
-}
-
-/// Pre-init hook used by the three native-runtime pin tests: writes a
-/// trust entry for `pin_test_signing_key()` into the app root's
-/// operator trust dir, then synthesizes a minimal registered
+/// Pre-init hook used by the three native-runtime pin tests: pins
+/// `pin_test_signing_key()` in the app root's signer registry, then synthesizes a minimal registered
 /// `pin-fixture` bundle under `<app_root>/.ai/bundles/pin-fixture`
 /// carrying `.ai/runtimes/pin-fake-runtime.yaml` (`kind: runtime`,
 /// `serves: pin_fake_kind`, `binary_ref: bin/<triple>/pin-fake-runtime`)
@@ -88,7 +59,12 @@ fn install_pin_runtime(
 ) -> anyhow::Result<()> {
     let sk = pin_test_signing_key();
     let vk = sk.verifying_key();
-    write_trusted_signer(state_path, &vk)?;
+    common::pin_signer(
+        state_path,
+        &vk,
+        ryeos_engine::trust::SignerRole::Publisher,
+        ryeos_engine::trust::SignerScope::everywhere(),
+    );
 
     let bundle_root = state_path.join(".ai/bundles/pin-fixture");
     std::fs::create_dir_all(&bundle_root)?;
@@ -104,6 +80,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   delegate:
     via: runtime_registry
@@ -148,12 +127,36 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {{}}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {{}}
   financial_authority:
+    kind: none
+  external_effect_authority:
     kind: none
 description: "synth runtime for V5.3 dispatch_pin capability tests"
 "#
@@ -173,14 +176,9 @@ async fn post_execute_with_extras(
     extras: serde_json::Value,
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let project_path = (project_path != ".").then_some(project_path);
-    let ref_bindings = if item_ref.starts_with("directive:") {
-        serde_json::json!({ "model": item_ref })
-    } else {
-        serde_json::json!({})
-    };
     let mut body = serde_json::json!({
         "item_ref": item_ref,
-        "ref_bindings": ref_bindings,
+        "ref_bindings": {},
         "project_path": project_path,
         "parameters": parameters,
         "execution_policy": if project_path.is_some() {
@@ -254,6 +252,7 @@ async fn synth_tool_request(
 #   category: hello_pin
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "V5.3 dispatch_pin tool"
 
 import sys
@@ -262,7 +261,16 @@ sys.exit(0)
 "#;
     let tool_dir = tools_dir.join("hello_pin");
     std::fs::create_dir_all(&tool_dir).expect("mkdir tool dir");
-    std::fs::write(tool_dir.join("hello_pin.py"), body).expect("write tool");
+    // Source-owning project items must carry a verified signer; the fixture
+    // publisher is pinned in the node trust store.
+    let signed = lillux::signature::sign_content_at(
+        body,
+        &common::fast_fixture::publisher_signing_key(),
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(tool_dir.join("hello_pin.py"), signed).expect("write tool");
     let (status, value) = post_execute_with_extras(
         h,
         "tool:hello_pin/hello_pin",
@@ -283,7 +291,7 @@ async fn native_synth_request(
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let (h, _fixture) = DaemonHarness::start_fast_with(
         |state_path, _user_space, fixture| {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             install_pin_runtime(state_path, fixture)
         },
         |_| {},

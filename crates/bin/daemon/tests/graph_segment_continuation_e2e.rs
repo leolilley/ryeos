@@ -17,13 +17,13 @@
 //!      covered at the walker boundary where a retryable callback failure can
 //!      be injected deterministically.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_workflow_bundles};
 use common::{DaemonHarness, build_signed_headers_for_bytes};
 use lillux::crypto::SigningKey;
 use serde_json::{Value, json};
@@ -111,38 +111,6 @@ config:
     Ok(())
 }
 
-/// Every persisted event across ALL threads: `(thread_id, event_type, payload)`
-/// ordered by chain sequence. Segment successors are distinct threads, so the
-/// whole run must be read across threads, not filtered to one.
-fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
-    let db_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
-    };
-    let conn = match rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let mut stmt = match conn
-        .prepare("SELECT thread_id, event_type, payload FROM events ORDER BY chain_seq ASC")
-    {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map([], |row| {
-        let thread_id: String = row.get(0)?;
-        let event_type: String = row.get(1)?;
-        let payload_blob: Vec<u8> = row.get(2)?;
-        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-        Ok((thread_id, event_type, payload))
-    })
-    .and_then(|m| m.collect::<Result<Vec<_>, _>>())
-    .unwrap_or_default()
-}
-
 fn count_event(events: &[(String, String, Value)], event_type: &str) -> usize {
     events.iter().filter(|(_, ty, _)| ty == event_type).count()
 }
@@ -195,12 +163,13 @@ fn spawn_execute(
 }
 
 async fn poll_until_completed(
-    state_path: &Path,
     deadline: Instant,
     h: &mut DaemonHarness,
 ) -> Vec<(String, String, Value)> {
     loop {
-        let events = all_events(state_path);
+        // Segment successors are distinct threads, so the whole run is read
+        // across every chain this principal owns, not filtered to one thread.
+        let events = h.principal_events().await;
         if count_event(&events, "thread_completed") >= 1 {
             return events;
         }
@@ -218,7 +187,7 @@ async fn poll_until_completed(
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_segment_cuts_resume_across_multiple_continuations() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -230,7 +199,7 @@ async fn graph_segment_cuts_resume_across_multiple_continuations() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_segment_chain_graph(project.path(), &fixture.publisher).expect("plant segment chain");
@@ -238,8 +207,7 @@ async fn graph_segment_cuts_resume_across_multiple_continuations() {
     let exec = spawn_execute(&h, project.path(), "graph:segment_chain");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let state_path = h.state_path.clone();
-    let events = poll_until_completed(&state_path, deadline, &mut h).await;
+    let events = poll_until_completed(deadline, &mut h).await;
     exec.abort();
 
     // The chain reached a clean terminal.
@@ -282,7 +250,7 @@ async fn graph_segment_cuts_resume_across_multiple_continuations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_nonretryable_failure_does_not_consume_retry_budget_across_segment_cut() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -294,7 +262,7 @@ async fn graph_nonretryable_failure_does_not_consume_retry_budget_across_segment
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_retry_segment_graph(project.path(), &fixture.publisher)
@@ -303,8 +271,7 @@ async fn graph_nonretryable_failure_does_not_consume_retry_budget_across_segment
     let exec = spawn_execute(&h, project.path(), "graph:retry_segment");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let state_path = h.state_path.clone();
-    let events = poll_until_completed(&state_path, deadline, &mut h).await;
+    let events = poll_until_completed(deadline, &mut h).await;
     exec.abort();
 
     // The run terminated (the exhausted retry routed to the recover return node).
@@ -319,5 +286,95 @@ async fn graph_nonretryable_failure_does_not_consume_retry_budget_across_segment
     assert_eq!(
         retries, 0,
         "a non-retryable dispatch rejection must not emit graph_node_retry; events={events:#?}"
+    );
+}
+
+/// Every segment of a same-node continuation chain stops under one policy: the
+/// one its first segment recorded from this node's signed execution config.
+///
+/// Stop-and-publish made every managed launch record its stop policy at attach
+/// (before, a directive or graph recorded none and was stopped under a hidden
+/// 3 s grace). A continuation successor is seeded with its source's recorded
+/// policy and `attach_stop_policy` keeps it; only a cross-node handoff
+/// successor, whose seed carries none, re-resolves on the target. This pins the
+/// same-node half: the chain launches end to end (the exact attach merge and the
+/// prepared-successor policy check accept the seed) and every segment records
+/// the same, non-null policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn segment_successors_keep_the_stop_policy_their_source_recorded() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_cmd| {})
+        .await
+        .expect("start daemon with the workflow bundles");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_segment_chain_graph(project.path(), &fixture.publisher).expect("plant segment chain");
+    let exec = spawn_execute(&h, project.path(), "graph:segment_chain");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let events = poll_until_completed(deadline, &mut h).await;
+    exec.abort();
+    let chain: HashSet<String> = events
+        .iter()
+        .filter(|(_, ty, _)| ty == "graph_step_started")
+        .map(|(thread_id, _, _)| thread_id.clone())
+        .collect();
+    assert!(
+        chain.len() >= 3,
+        "the walk must cross >=3 segments, got {chain:?}"
+    );
+
+    // Settled rows keep their launch metadata; read them from the stopped
+    // node's Runtime store through the native test gate.
+    h.stop_gracefully()
+        .await
+        .expect("stop daemon before reading its Runtime store");
+    let runtime_db = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state/runtime.sqlite3");
+    let rows: Vec<(String, Option<String>)> =
+        ryeos_app::test_support::read_existing_runtime(&runtime_db, |connection| {
+            let mut statement =
+                connection.prepare("SELECT thread_id, launch_metadata FROM thread_runtime")?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        });
+    let policies: Vec<(String, Value)> = rows
+        .into_iter()
+        .filter(|(thread_id, _)| chain.contains(thread_id))
+        .map(|(thread_id, metadata)| {
+            let metadata: Value = serde_json::from_str(
+                metadata
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("segment {thread_id} has no launch metadata")),
+            )
+            .expect("decode launch metadata");
+            let policy = metadata
+                .get("cancellation_mode")
+                .cloned()
+                .unwrap_or(Value::Null);
+            (thread_id, policy)
+        })
+        .collect();
+    eprintln!("segment stop policies: {policies:#?}");
+    assert_eq!(
+        policies.len(),
+        chain.len(),
+        "every segment keeps a runtime row: {policies:#?}"
+    );
+    let first = &policies[0].1;
+    assert!(
+        !first.is_null(),
+        "a managed graph segment records its stop policy: {policies:#?}"
+    );
+    assert!(
+        policies.iter().all(|(_, policy)| policy == first),
+        "every successor keeps its source's stop policy: {policies:#?}"
     );
 }

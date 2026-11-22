@@ -1,0 +1,576 @@
+//! The lease admission request a lifecycle adapter judges before spend, and
+//! the verdict it returns.
+//!
+//! Workload: a placed session whose structured-session profile declares
+//! what a remote lease provider and its guest must attest. The controller
+//! asks the binding's lifecycle adapter, offline, whether its signed
+//! provider spec can meet those entries before it reserves or creates
+//! anything. The adapter owns the comparison; this module only assembles the
+//! adapter's request from typed controller inputs and reads back the
+//! verdict's identity fields, plain refusal reason and, on an admitted
+//! verdict, the budget weight its signed provider spec declares. The
+//! controller never parses the provider spec itself: the adapter reads the
+//! captured spec, and its verdict names that spec's digest, so the weight the
+//! controller charges is the one the exact pinned spec signs. The admitted
+//! request bytes are then retained verbatim on the allocation and handed back
+//! to the adapter on every later lifecycle contact, so the controller never
+//! reinterprets them.
+//!
+//! One requirement is the node's own, not the workload's: the lease budget
+//! charges at most the reserved lifetime, which is honest only when the
+//! provider bounds the lease to it. Every request therefore carries
+//! `lease.lifetime_bound` at `provider_attested`, and a verdict that does not
+//! meet it is refused with [`LeaseLifetimeUnattested`].
+
+use std::collections::BTreeSet;
+
+use anyhow::{Context as _, Result, bail, ensure};
+use lillux::process_control::CapabilityRequirement;
+use serde::Serialize;
+
+/// The adapter's lease request schema this controller writes.
+pub(crate) const LEASE_ADMISSION_SCHEMA: u32 = 3;
+/// The longest refusal reason surfaced to the caller.
+const MAX_REFUSAL_REASON_BYTES: usize = 4096;
+/// The guarantee every lease must carry, whatever the workload lists.
+pub(crate) const LEASE_LIFETIME_BOUND: &str = "lease.lifetime_bound";
+
+/// A lease whose provider does not attest that it ends within the reserved
+/// lifetime. The node's lease budget charges at most that lifetime, so such a
+/// lease could spend more than the budget records; it is refused before any
+/// provider contact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeaseLifetimeUnattested {
+    pub(crate) adapter_id: String,
+    pub(crate) provider_spec_sha256: String,
+    pub(crate) reason: String,
+}
+
+impl std::fmt::Display for LeaseLifetimeUnattested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "lease refused: provider spec {} judged by lifecycle adapter `{}` does not attest \
+             `{LEASE_LIFETIME_BOUND}`, which every lease on this node requires so its budget \
+             charge bounds real spend: {}",
+            self.provider_spec_sha256, self.adapter_id, self.reason
+        )
+    }
+}
+
+impl std::error::Error for LeaseLifetimeUnattested {}
+
+/// The workload's before-spend list with the node's own lifetime floor. A
+/// workload entry already labelled `lease.lifetime_bound` stands as written
+/// (labels are unique in a request); the verdict must still meet it.
+fn requires_before_spend_with_node_floor(
+    workload: &[CapabilityRequirement],
+) -> Result<Vec<CapabilityRequirement>> {
+    let mut entries = workload.to_vec();
+    if !entries
+        .iter()
+        .any(|entry| entry.label() == LEASE_LIFETIME_BOUND)
+    {
+        entries.push(serde_json::from_value(serde_json::json!({
+            "name": LEASE_LIFETIME_BOUND,
+            "accept": ["provider_attested"],
+        }))?);
+    }
+    Ok(entries)
+}
+
+/// What the controller supplies for one lease, all from signed data: the
+/// workload's requirement lists from its admitted profile, the host the
+/// guest must reach from the binding's controller transport, the lifetime
+/// from the binding's execution timeout (already checked against the node
+/// policy's lease lifetime ceiling) and the activation deadline from the
+/// admitted session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeaseAdmissionInputs {
+    pub(crate) workload: String,
+    pub(crate) requires_before_spend: Vec<CapabilityRequirement>,
+    pub(crate) requires_from_guest: Vec<CapabilityRequirement>,
+    pub(crate) controller_host: String,
+    pub(crate) maximum_lifetime_seconds: u32,
+    pub(crate) activation_deadline_seconds: u32,
+}
+
+impl LeaseAdmissionInputs {
+    /// The host part of the binding's HTTPS controller origin, the one host
+    /// a lease guest may reach. A controller named by an IP address is
+    /// refused: a provider egress allow-list names DNS hosts.
+    pub(crate) fn controller_host_of(https_origin: &str) -> Result<String> {
+        let origin = url::Url::parse(https_origin)
+            .context("lease admission: the binding's controller origin is not a URL")?;
+        match origin.host() {
+            Some(url::Host::Domain(host)) if origin.scheme() == "https" => {
+                Ok(host.to_ascii_lowercase())
+            }
+            _ => bail!(
+                "lease admission refused: the binding's controller origin {https_origin} names \
+                 no HTTPS DNS host for the lease guest's egress allow-list"
+            ),
+        }
+    }
+}
+
+/// The adapter's request shape. Field names and their order match the
+/// adapter's strict reader, which re-serializes what it reads in its own
+/// field order and refuses any request whose bytes differ from that form. No
+/// clock skew is declared, so the adapter's default applies.
+#[derive(Serialize)]
+struct LeaseAdmissionRequest<'a> {
+    schema: u32,
+    adapter_id: &'a str,
+    provider_spec_sha256: &'a str,
+    workload: &'a str,
+    requires_before_spend: &'a [CapabilityRequirement],
+    requires_from_guest: &'a [CapabilityRequirement],
+    guest_network_allow: BTreeSet<&'a str>,
+    maximum_lifetime_seconds: u32,
+    activation_deadline_seconds: u32,
+}
+
+/// Canonical request bytes for one lease, bound to the exact adapter and
+/// captured provider spec that will judge it.
+pub(crate) fn canonical_request(
+    adapter_id: &str,
+    provider_spec_sha256: &str,
+    inputs: &LeaseAdmissionInputs,
+) -> Result<Vec<u8>> {
+    ensure!(
+        inputs.maximum_lifetime_seconds > 0 && inputs.activation_deadline_seconds > 0,
+        "lease admission lifetime or activation deadline is zero"
+    );
+    let requires_before_spend =
+        requires_before_spend_with_node_floor(&inputs.requires_before_spend)?;
+    let request = LeaseAdmissionRequest {
+        schema: LEASE_ADMISSION_SCHEMA,
+        adapter_id,
+        provider_spec_sha256,
+        workload: &inputs.workload,
+        requires_before_spend: &requires_before_spend,
+        requires_from_guest: &inputs.requires_from_guest,
+        guest_network_allow: BTreeSet::from([inputs.controller_host.as_str()]),
+        maximum_lifetime_seconds: inputs.maximum_lifetime_seconds,
+        activation_deadline_seconds: inputs.activation_deadline_seconds,
+    };
+    let bytes = ryeos_external_execution_contract::canonical_json(&request)?;
+    ensure!(
+        bytes.len() <= ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES,
+        "lease admission request exceeds its bound"
+    );
+    Ok(bytes)
+}
+
+/// A lease the adapter admitted: the exact request bytes it judged, and the
+/// node lease-budget seconds one second of the lease costs under the signed
+/// provider spec that judged it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdmittedLease {
+    pub(crate) request: Vec<u8>,
+    pub(crate) budget_weight: u32,
+}
+
+/// Accept the adapter's verdict on exactly `request`, or refuse with its
+/// plain reason. A verdict about another request or another provider spec is
+/// no verdict. An admitted verdict must carry the budget weight of its
+/// provider spec within the contract's bound; one without it is refused, never
+/// given a default. It must also meet `lease.lifetime_bound`, and a refusal
+/// over that guarantee is typed as [`LeaseLifetimeUnattested`]. Returns the
+/// weight.
+pub(crate) fn require_admitted(
+    response: &[u8],
+    request: &[u8],
+    provider_spec_sha256: &str,
+    adapter_id: &str,
+) -> Result<u32> {
+    let verdict: serde_json::Value = ryeos_external_execution_contract::from_json_slice_strict(
+        response,
+        ryeos_external_execution_contract::MAX_LIFECYCLE_RESPONSE_BYTES,
+    )
+    .with_context(|| format!("lifecycle adapter `{adapter_id}` returned no lease verdict"))?;
+    let field = |name: &str| verdict.get(name).and_then(serde_json::Value::as_str);
+    ensure!(
+        field("request_sha256") == Some(lillux::sha256_hex(request).as_str())
+            && field("provider_spec_sha256") == Some(provider_spec_sha256)
+            && verdict.get("schema").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(LEASE_ADMISSION_SCHEMA)),
+        "lifecycle adapter `{adapter_id}` answered lease admission for a different request"
+    );
+    let lifetime_unattested = |reason: String| -> anyhow::Error {
+        LeaseLifetimeUnattested {
+            adapter_id: adapter_id.to_owned(),
+            provider_spec_sha256: provider_spec_sha256.to_owned(),
+            reason: plain_reason(&reason),
+        }
+        .into()
+    };
+    match field("verdict") {
+        Some("admitted") => {
+            if verdict
+                .get("met_by")
+                .and_then(|met_by| met_by.get(LEASE_LIFETIME_BOUND))
+                .is_none()
+            {
+                return Err(lifetime_unattested(
+                    "the adapter admitted the lease without meeting it".to_owned(),
+                ));
+            }
+            let weight = verdict
+                .get("budget_weight")
+                .and_then(serde_json::Value::as_u64)
+                .with_context(|| {
+                    format!(
+                        "lease refused: lifecycle adapter `{adapter_id}` admitted the lease \
+                         without the budget_weight of provider spec {provider_spec_sha256}, so \
+                         the node budget cannot charge it"
+                    )
+                })?;
+            match u32::try_from(weight) {
+                Ok(weight)
+                    if ryeos_external_execution_contract::valid_lease_budget_weight(weight) =>
+                {
+                    Ok(weight)
+                }
+                _ => bail!(
+                    "lease refused: lifecycle adapter `{adapter_id}` admitted the lease at \
+                     budget_weight {weight} from provider spec {provider_spec_sha256}, outside \
+                     1..={}",
+                    ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT
+                ),
+            }
+        }
+        Some("refused") => {
+            if let Some(reason) = verdict
+                .get("unmet")
+                .and_then(|unmet| unmet.get(LEASE_LIFETIME_BOUND))
+            {
+                return Err(lifetime_unattested(
+                    reason.as_str().unwrap_or("unmet").to_owned(),
+                ));
+            }
+            bail!(
+                "lease admission refused before any provider contact by lifecycle adapter \
+             `{adapter_id}`: {}",
+                plain_reason(field("reason").unwrap_or("no reason given"))
+            )
+        }
+        _ => bail!("lifecycle adapter `{adapter_id}` returned an unknown lease verdict"),
+    }
+}
+
+/// The adapter holds no credential while it judges a lease, but its reason
+/// still reaches operators verbatim; keep it printable and bounded.
+fn plain_reason(reason: &str) -> String {
+    let mut plain = String::new();
+    for character in reason.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if plain.len() + character.len_utf8() > MAX_REFUSAL_REASON_BYTES {
+            plain.push('…');
+            break;
+        }
+        plain.push(character);
+    }
+    plain
+}
+
+#[cfg(test)]
+#[path = "lease_admission_adapter_tests.rs"]
+mod adapter_judged_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPEC: &str = "5f1e1b0f6b5a4c3d2e1f00112233445566778899aabbccddeeff001122334455";
+
+    fn requirement(value: serde_json::Value) -> CapabilityRequirement {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn inputs() -> LeaseAdmissionInputs {
+        LeaseAdmissionInputs {
+            workload: "codex.authoring.remote".into(),
+            requires_before_spend: vec![
+                requirement(serde_json::json!({
+                    "name": "lease.network_policy", "accept": ["provider_attested"]
+                })),
+                requirement(serde_json::json!("time")),
+            ],
+            requires_from_guest: vec![requirement(serde_json::json!({
+                "name": "guest.exec_route_closed", "accept": ["provider_attested"]
+            }))],
+            controller_host: "controller.example.com".into(),
+            maximum_lifetime_seconds: 14_400,
+            activation_deadline_seconds: 300,
+        }
+    }
+
+    #[test]
+    fn request_is_the_adapters_exact_canonical_shape() {
+        let bytes = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
+        // The adapter re-serializes the request as RyeOS canonical JSON (keys
+        // sorted at every level) and must get these exact bytes back.
+        let expected = format!(
+            "{{\"activation_deadline_seconds\":300,\"adapter_id\":\"test-adapter\",\"guest_network_allow\":[\"controller.example.com\"],\"maximum_lifetime_seconds\":14400,\"provider_spec_sha256\":\"{SPEC}\",\"requires_before_spend\":[{{\"accept\":[\"provider_attested\"],\"name\":\"lease.network_policy\"}},\"time\",{{\"accept\":[\"provider_attested\"],\"name\":\"lease.lifetime_bound\"}}],\"requires_from_guest\":[{{\"accept\":[\"provider_attested\"],\"name\":\"guest.exec_route_closed\"}}],\"schema\":3,\"workload\":\"codex.authoring.remote\"}}"
+        );
+        assert_eq!(String::from_utf8(bytes.clone()).unwrap(), expected);
+        assert_eq!(
+            canonical_request("test-adapter", SPEC, &inputs()).unwrap(),
+            bytes,
+            "the same inputs always yield the same retained bytes"
+        );
+    }
+
+    #[test]
+    fn the_guest_may_reach_only_the_bindings_controller_host() {
+        assert_eq!(
+            LeaseAdmissionInputs::controller_host_of("https://Controller.Example.com").unwrap(),
+            "controller.example.com"
+        );
+        assert_eq!(
+            LeaseAdmissionInputs::controller_host_of("https://controller.example:7443").unwrap(),
+            "controller.example"
+        );
+        for refused in [
+            "https://192.0.2.1",
+            "http://controller.example.com",
+            "relay",
+        ] {
+            assert!(
+                LeaseAdmissionInputs::controller_host_of(refused).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    /// The `met_by` of an adapter that met the node's lifetime floor.
+    fn met() -> serde_json::Value {
+        serde_json::json!({
+            "lease.lifetime_bound": {
+                "name": "lease.lifetime_bound",
+                "source": "provider_attested",
+                "provider": "test_profile_v1",
+            }
+        })
+    }
+
+    #[test]
+    fn every_request_carries_the_nodes_lifetime_floor_once() {
+        let request: serde_json::Value =
+            serde_json::from_slice(&canonical_request("test-adapter", SPEC, &inputs()).unwrap())
+                .unwrap();
+        let labels = |request: &serde_json::Value| {
+            request["requires_before_spend"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    serde_json::from_value::<CapabilityRequirement>(entry.clone())
+                        .unwrap()
+                        .label()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(&request),
+            ["lease.network_policy", "time", "lease.lifetime_bound"]
+        );
+        assert!(
+            inputs()
+                .requires_before_spend
+                .iter()
+                .all(|entry| entry.label() != LEASE_LIFETIME_BOUND),
+            "the workload fixture leaves the floor to the node"
+        );
+
+        let mut listed = inputs();
+        listed
+            .requires_before_spend
+            .push(requirement(serde_json::json!({
+                "name": "lease.lifetime_bound", "accept": ["provider_attested"]
+            })));
+        let request: serde_json::Value =
+            serde_json::from_slice(&canonical_request("test-adapter", SPEC, &listed).unwrap())
+                .unwrap();
+        assert_eq!(
+            labels(&request)
+                .iter()
+                .filter(|label| *label == LEASE_LIFETIME_BOUND)
+                .count(),
+            1,
+            "a workload that lists the floor itself is not given a duplicate label"
+        );
+    }
+
+    #[test]
+    fn lease_without_attested_lifetime_bound_is_refused_even_when_workload_omits_it() {
+        let request = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
+        let unmet = verdict(
+            &request,
+            "admitted",
+            serde_json::json!({"met_by": {}, "budget_weight": 1}),
+        );
+        let error = require_admitted(&unmet, &request, SPEC, "test-adapter").unwrap_err();
+        let typed = error
+            .downcast_ref::<LeaseLifetimeUnattested>()
+            .unwrap_or_else(|| panic!("untyped refusal: {error:#}"));
+        assert_eq!(typed.adapter_id, "test-adapter");
+        assert_eq!(typed.provider_spec_sha256, SPEC);
+        assert!(
+            error.to_string().contains("lease.lifetime_bound"),
+            "{error}"
+        );
+
+        let refused = verdict(
+            &request,
+            "refused",
+            serde_json::json!({
+                "unmet": {"lease.lifetime_bound": "provider spec test_profile_v1 does not attest it"},
+                "reason": "`codex.authoring.remote` requires `lease.lifetime_bound`: provider spec \
+                           test_profile_v1 does not attest it"
+            }),
+        );
+        let error = require_admitted(&refused, &request, SPEC, "test-adapter").unwrap_err();
+        let typed = error
+            .downcast_ref::<LeaseLifetimeUnattested>()
+            .unwrap_or_else(|| panic!("untyped refusal: {error:#}"));
+        assert_eq!(
+            typed.reason,
+            "provider spec test_profile_v1 does not attest it"
+        );
+    }
+
+    fn verdict(request: &[u8], verdict: &str, extra: serde_json::Value) -> Vec<u8> {
+        let mut value = serde_json::json!({
+            "verdict": verdict,
+            "schema": 3,
+            "workload": "codex.authoring.remote",
+            "request_sha256": lillux::sha256_hex(request),
+            "provider_spec_sha256": SPEC,
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[test]
+    fn an_admitted_verdict_must_name_the_exact_request_and_spec() {
+        let request = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
+        let admitted = verdict(
+            &request,
+            "admitted",
+            serde_json::json!({"met_by": met(), "budget_weight": 1}),
+        );
+        assert_eq!(
+            require_admitted(&admitted, &request, SPEC, "test-adapter").unwrap(),
+            1
+        );
+
+        let other = canonical_request(
+            "test-adapter",
+            SPEC,
+            &LeaseAdmissionInputs {
+                activation_deadline_seconds: 301,
+                ..inputs()
+            },
+        )
+        .unwrap();
+        let error = require_admitted(&admitted, &other, SPEC, "test-adapter").unwrap_err();
+        assert!(error.to_string().contains("different request"), "{error:#}");
+        let other_spec = "0".repeat(64);
+        assert!(require_admitted(&admitted, &request, &other_spec, "test-adapter").is_err());
+        assert!(require_admitted(b"not json", &request, SPEC, "test-adapter").is_err());
+        let unknown = verdict(&request, "maybe", serde_json::json!({}));
+        assert!(require_admitted(&unknown, &request, SPEC, "test-adapter").is_err());
+    }
+
+    #[test]
+    fn an_admitted_verdict_names_its_specs_budget_weight_within_bound() {
+        let request = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
+        let max = ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT;
+        for weight in [1, 50, max] {
+            let admitted = verdict(
+                &request,
+                "admitted",
+                serde_json::json!({"met_by": met(), "budget_weight": weight}),
+            );
+            assert_eq!(
+                require_admitted(&admitted, &request, SPEC, "test-adapter").unwrap(),
+                weight
+            );
+        }
+        let missing = verdict(&request, "admitted", serde_json::json!({"met_by": met()}));
+        let text = require_admitted(&missing, &request, SPEC, "test-adapter")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            text.contains(&format!(
+                "lease refused: lifecycle adapter `test-adapter` admitted the lease without \
+                 the budget_weight of provider spec {SPEC}"
+            )),
+            "{text}"
+        );
+        for refused in [
+            serde_json::json!(0),
+            serde_json::json!(max + 1),
+            serde_json::json!(u64::MAX),
+        ] {
+            let admitted = verdict(
+                &request,
+                "admitted",
+                serde_json::json!({"met_by": met(), "budget_weight": refused}),
+            );
+            let text = require_admitted(&admitted, &request, SPEC, "test-adapter")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                text.contains(&format!("admitted the lease at budget_weight {refused}"))
+                    && text.contains(&format!("outside 1..={max}")),
+                "{text}"
+            );
+        }
+        for malformed in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+        ] {
+            let admitted = verdict(
+                &request,
+                "admitted",
+                serde_json::json!({"met_by": met(), "budget_weight": malformed}),
+            );
+            assert!(require_admitted(&admitted, &request, SPEC, "test-adapter").is_err());
+        }
+    }
+
+    #[test]
+    fn a_stage_one_refusal_is_plain_and_names_its_adapter() {
+        let request = canonical_request("test-adapter", SPEC, &inputs()).unwrap();
+        let refused = verdict(
+            &request,
+            "refused",
+            serde_json::json!({
+                "unmet": {"guest.ready_authenticated": "unattested"},
+                "reason": "`codex.authoring.remote` requires `guest.ready_authenticated`:\n\
+                           provider spec test_profile_v1 declares guest_channel \
+                           unsupported_pending"
+            }),
+        );
+        let text = require_admitted(&refused, &request, SPEC, "test-adapter")
+            .unwrap_err()
+            .to_string();
+        assert!(text.starts_with("lease admission refused before any provider contact"));
+        assert!(text.contains("`test-adapter`"), "{text}");
+        assert!(text.contains("guest_channel unsupported_pending"), "{text}");
+        assert!(!text.contains('\n'), "{text}");
+        assert!(plain_reason(&"x".repeat(MAX_REFUSAL_REASON_BYTES * 2)).len() < 4100);
+    }
+}

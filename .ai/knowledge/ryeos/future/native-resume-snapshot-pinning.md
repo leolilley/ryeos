@@ -1,14 +1,20 @@
-<!-- ryeos:signed:2026-07-21T00:24:56Z:4ede43df85b84b63ed214b7af8ca79d2c3cdd716d702a555773231295a4ed6be:1x+aFX0n5OvfpiWWsjGA9XKzr9Jlt2SVpKF25+F2LQtKPDqXV7kCWTLsHiAd6MC99KqmbI0jsV1hgyQpBYxAAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:eb80bf8b46db87a667ccefcc948e5f536a80441b9581025d4e6d7d5a1cf6b70f:lpM0Uj5Yp6/yRMoL7xfSDYPPxSvquQ7kcSEQ3eL4RDbFYs0r7qiH7mypBxRHDi6kMuQFKsIva7jP8asl6QphCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-resume-snapshot-pinning
 title: Native Resume Snapshot Pinning
 description: Deferred extensions to snapshot-pinned native resume semantics
 entry_type: design
-version: "1.0.0"
+version: "1.0.1"
 ```
 
 # Native Resume Snapshot Pinning
+
+This note concerns native runtime-specific resume extensions. Existing hosted
+worker checkpoint transfer and explicit cold placement have their own contracts;
+the deferred cross-node item below does not defer or generalize those supported
+paths. Follow the [platform direction](platform-direction-and-delivery.md) for
+overall priorities and the selected runtime contract for actual support.
 
 ## Status
 
@@ -32,8 +38,10 @@ Advanced resume work may include:
 4. stronger handling for changed bundle/runtime binaries between spawn and
    resume;
 5. cancellation/resume interaction rules;
-6. cross-node resume once source snapshots and execution leases are modeled as
-   first-class RyeOS objects.
+6. native-runtime-specific cross-node resume when that runtime supplies the
+   exact snapshot, resource, target-admission and continuation contracts; reuse
+   supported hosted mechanisms where appropriate without promising arbitrary
+   live-process migration.
 
 Do not expand this until a runtime needs stronger semantics than the current
 snapshot-pinned local resume path.

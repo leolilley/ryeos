@@ -11,7 +11,7 @@
 //! These are engine-level e2e tests (resolve → verify → build_plan →
 //! execute_plan), mirroring `hello_world_python.rs`; each launches a real
 //! `python3`. The full contract is documented in
-//! `bundles/standard/.ai/knowledge/ryeos/core/runtimes/python-runtime-contract.md`.
+//! `bundles/ryeos-docs/.ai/knowledge/ryeos/core/runtimes/python-runtime-contract.md`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,19 +28,25 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::item_resolution::RegisteredBundleRoot;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-use ryeos_engine::trust::TrustStore;
 use serde_json::Value;
 
 fn isolation_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
     let fixtures = root.join(".ai/test-fixtures");
     fs::create_dir_all(&fixtures).unwrap();
-    fs::write(fixtures.join("isolation-policy.yaml"), "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
+    // A disabled (non-enforcing) policy in the current schema, narrowed to
+    // the verified code and project roots these tests exercise.
+    let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+    policy.filesystem.readable = vec!["{verified_code}".to_string()];
+    policy.filesystem.writable = vec!["{project}".to_string()];
+    policy.network.mode = ryeos_engine::isolation::IsolationNetworkMode::Isolated;
+    policy.limits.open_files = Some(128);
+    fs::write(
+        fixtures.join("isolation-policy.yaml"),
+        serde_yaml::to_string(&policy).unwrap(),
+    )
+    .unwrap();
     root
-}
-
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 fn workspace_root() -> PathBuf {
@@ -48,8 +54,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn build_engine_against_bundle() -> Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
@@ -71,6 +76,7 @@ fn build_engine_against_bundle() -> Engine {
         .with_node_trust_store(trust_store)
         .with_composers(composers)
         .with_registered_bundle_roots(vec![RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }])
@@ -125,6 +131,7 @@ fn run_tool_with_hints(
     let engine = build_engine_against_bundle();
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
@@ -153,6 +160,7 @@ fn run_tool_with_hints(
             &plan_ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan walks to subprocess terminal");
 
@@ -163,6 +171,7 @@ fn run_tool_with_hints(
     );
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -178,11 +187,12 @@ fn run_tool_with_hints(
             },
         ),
         isolation_state_root: None,
+        isolation_bundle_state_home: None,
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
@@ -208,6 +218,7 @@ fn run_tool_with_hints(
             path: project_dir.to_path_buf(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     engine
@@ -301,11 +312,11 @@ fn cwd_is_project_root() {
 
 #[test]
 fn function_receives_project_path_as_arg_and_in_params() {
-    // The function runtime gets `project_path` BOTH as the 2nd arg of
-    // `execute(params, project_path)` AND injected into the params object
-    // — the injection only fires when params is a JSON object (it does
-    // `params.as_object_mut().entry("project_path").or_insert(...)`), so
-    // we pass `{}` here, which is the normal CLI/dispatch shape.
+    // The function runtime always gets the admitted project root as the 2nd
+    // arg of `execute(params, project_path)`. Project context is never
+    // injected into tool input implicitly: params without `project_path`
+    // reach the tool unchanged, while an explicit caller-supplied
+    // `project_path` key is rebound to the admitted project root.
     let project_dir = unique_project_dir("pp");
     write_python_tool(
         &project_dir,
@@ -314,22 +325,39 @@ fn function_receives_project_path_as_arg_and_in_params() {
         "def execute(params, project_path):\n\
          \x20   return {\"arg\": project_path, \"in_params\": params.get(\"project_path\")}\n",
     );
-
-    let completion = run_tool(&project_dir, "tool:probe/pp", serde_json::json!({}));
-    assert_eq!(
-        completion.status,
-        ThreadTerminalStatus::Completed,
-        "{completion:?}"
-    );
-    let result = completion.result.expect("captured stdout");
-    // Canonicalize while the project dir still exists, then clean up.
     let expected = fs::canonicalize(&project_dir).unwrap();
-    let arg = fs::canonicalize(result["arg"].as_str().expect("arg string")).unwrap();
+
+    let implicit = run_tool(&project_dir, "tool:probe/pp", serde_json::json!({}));
+    assert_eq!(
+        implicit.status,
+        ThreadTerminalStatus::Completed,
+        "{implicit:?}"
+    );
+    let implicit = implicit.result.expect("captured stdout");
+    let arg = fs::canonicalize(implicit["arg"].as_str().expect("arg string")).unwrap();
+    assert_eq!(arg, expected);
+    assert_eq!(
+        implicit["in_params"],
+        Value::Null,
+        "project context must not be injected into tool input"
+    );
+
+    let explicit = run_tool(
+        &project_dir,
+        "tool:probe/pp",
+        serde_json::json!({"project_path": "/caller-controlled"}),
+    );
+    assert_eq!(
+        explicit.status,
+        ThreadTerminalStatus::Completed,
+        "{explicit:?}"
+    );
+    let explicit = explicit.result.expect("captured stdout");
+    let arg = fs::canonicalize(explicit["arg"].as_str().expect("arg string")).unwrap();
     let in_params =
-        fs::canonicalize(result["in_params"].as_str().expect("in_params string")).unwrap();
+        fs::canonicalize(explicit["in_params"].as_str().expect("in_params string")).unwrap();
     let _ = fs::remove_dir_all(&project_dir);
 
-    // Both point at the project root.
     assert_eq!(arg, expected);
     assert_eq!(in_params, expected);
 }

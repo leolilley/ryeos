@@ -95,12 +95,12 @@ pub(crate) fn discover_verified_providers(app_root: &Path) -> Result<ProviderCat
             }
         };
         if let Err(error) = provider.validate(&format!(" for '{id}'")) {
-            warnings.push(error.to_string());
+            warnings.push(format!("{error:#}"));
             continue;
         }
         match provider.setup_projection(&id) {
             Ok(projection) => providers.push(projection),
-            Err(error) => warnings.push(error.to_string()),
+            Err(error) => warnings.push(format!("{error:#}")),
         }
     }
     providers.sort_by(|left, right| {

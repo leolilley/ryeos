@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-22T00:31:25Z:dc38ecdc59a65ccd376abea72b3b7076a6492d7f5be9101aa3b9e93ff0d6dd70:VLhq2dE7kJ1QgSMZnlXxusJNaGldvhO1gPJcc4271lvwr/0qThXn8b0+R3wJgNxUisMZ2/lGg0ncEvBHhGIcBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:05:03Z:83b5c37cbe30b0cffe6eb4f0a842733a82b3c52ca4082182933644c8fe0998cd:z1egbFIa5XYbN8g3WTLXG+DVTTYTJEDO6nEGxl10NAFsOuZHIYGko16xf/JBq2uOMbFwzq5T5RLO4IgsyugNAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -30,7 +30,8 @@ full design document.
 | Daemon | `crates/bin/daemon/` | HTTP/UDS server and execution API |
 | API services | `crates/daemon/ryeos-api/` | service handlers, route dispatch, remote sync, project deploy reconciliation |
 | Scheduler | `crates/state/ryeos-scheduler/` | schedule projection, planning, timer dispatch, fire history rebuild |
-| Handler bins | `crates/tools/handler-bins/` | parser/composer subprocesses |
+| Handler bins | `crates/tools/handler-bins/` | composer, launch-preparer and evidence subprocesses |
+| Parser bins | `crates/tools/parser-bins/` | document parser subprocesses, built without the engine |
 | Runtimes | `crates/runtimes/{directive,graph,knowledge}/` | bundled execution runtimes |
 | TUI model | `crates/clients/base/` | platform-agnostic UI state/update/views |
 | TUI terminal | `crates/clients/terminal/` | `ryeos-tui` binary |
@@ -44,7 +45,10 @@ Bundles are signed content trees. Derived bundle state (`.ai/bin`, `.ai/objects`
 | Bundle | Path | Contains |
 |---|---|---|
 | Core | `bundles/core/` | kind schemas, parsers, handlers, protocols, services, core tools, routes, CLI aliases/verbs |
-| Standard | `bundles/standard/` | directive/graph/knowledge runtimes, model provider config, user-facing clients/tools/directives |
+| Knowledge | `bundles/knowledge/` | knowledge kind, knowledge runtime, context composition |
+| Graph | `bundles/graph/` | graph kind, graph runtime, graph validation and launch handlers |
+| Directive | `bundles/directive/` | directive kind, directive runtime, model provider config and routing, directives |
+| RyeOS docs | `bundles/ryeos-docs/` | reference knowledge (data only) |
 | Local inference | `bundles/local-inference/` | optional local-model workers, provider routes, activation fixtures, and acceptance probes |
 
 Important bundle subdirs:
@@ -118,7 +122,10 @@ enforced as a **scope-independent structural floor** — they apply to
 `full_project` sync as well as `ai_only` and are not ignore policy:
 
 - `NEVER_DEPLOY_SECRETS` — credentials: `.ai/node/identity`, `.ai/node/auth`,
-  `.ai/node/vault`, `.ai/config/keys/signing`.
+  `.ai/node/vault`.
+- Live-execution-only denials (a run may not read or write them, but the
+  snapshot floor does not list them): `.ai/node/trust`,
+  `.ai/node/operator`, `.ai/node/authoring`, `.ai/node/remotes`.
 - `NODE_OWNED` — node runtime state and transaction anchors: `.ai/state`,
   `.ai/cache`, `.ai/.bundles.lock`, `.ai/node/schedules`, `.ai/node/routes`,
   `.ai/node/bundles`.
@@ -128,7 +135,7 @@ deployable → unknown/non-ai`, so an ignored file inside a deployable surface
 (e.g. `.ai/tools/x/__pycache__/y.pyc`) is dropped, not shipped. The ingest
 ignore policy (`.ai/node/policies/ingest_ignore.yaml`) is the complete source of
 conventional ignore patterns; the engine contributes no hidden defaults. It
-supports **path-anchored** patterns (e.g. `/.ai/config/remotes/`, which shipped
+supports **path-anchored** patterns (e.g. `/.ai/node/remotes/`, which shipped
 profiles select because a project's remotes config is environment-specific and
 must not travel). It is a member of the complete node-signed policy generation
 and is changed through the stopped-node policy workflow, not edited in place.

@@ -1,14 +1,13 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:b758ff57f64ffdff35d95bb5617c16af6f9d52b3fba37a2870e9400c37cfa017:/b2PQ+CpT/o+9kWczmxwMoPilZjvMa23ubv5/KJJWzkn8FRr2ZfFJ7mxwAn6y0IpivfMt5BwBGfLqetrrCdlAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
-<!-- rye:signed:2026-06-03T03:31:14Z:d8bc3e01059956ee65f4c4e3e6fe2329a995792ab4d81955f9459cf9d5d7e909:h0V2gxpPl3HFlLr_vgOtzBB-bAnN9gtJLvcSrlFRUA5MkNJJbAgSMihAyN7kMul5JBOh-TDDVFWroT2twWkhAg:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:3439cb25f97fc5d7d67ea126812255b1ce64bba0b86ffbe802c83a99a18efee6:24CWnU8A/VaGOavTbQerisvQFxkDoznuVTYpyarDAne65ZO7JRrXY8NC3yNN5MFagVLJ7/UunNJ/i34CADUhAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future/creative-code-spaces
 name: threejs-to-simulation-path
 title: From Three.js Dimensions to Simulation Frames
 entry_type: concept-note
-version: "0.2.0"
+version: "0.2.1"
 author: amp
 created_at: 2026-05-28T00:00:00Z
-updated_at: 2026-06-03T00:00:00Z
+updated_at: 2026-10-06T00:00:00Z
 description: Staged future path from a Three.js dimension over signed scene state toward behavior primitives, frame-specific simulation, directive inhabitants, replayable graph time, and constrained executable hooks.
 tags:
   - creative-code-spaces
@@ -21,6 +20,17 @@ tags:
 ```
 
 # From Three.js Dimensions to Simulation Frames
+
+## Place in the platform direction
+
+This is a deferred application-family proposal under the
+[platform direction and delivery](../platform-direction-and-delivery.md).
+Its examples, object names and sequencing are prospective domain designs, not
+new core kinds, current API guarantees or the project-wide delivery order.
+Choose a concrete creative application before scheduling this branch; begin
+with one persisted object, an admitted action, a view and a reusable application
+edit. Richer simulation, open frame authoring and federation follow their own
+requirements. Re-audit the historical baseline below against current owners.
 
 ## Purpose
 

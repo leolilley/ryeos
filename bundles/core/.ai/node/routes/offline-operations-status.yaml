@@ -1,0 +1,9 @@
+# ryeos:signed:2026-10-28T22:38:56Z:9d4cd426a58e775efe6baccbe8cda11baceecf92db9021dd661ab0faaca3fd8b:Dpxj9MaLBdriESJTHyc7hC7tMeM8dvZuFN0iG6e5+1g3MlmfghQpSGJ0F2jU1R9srWwOi2xVS4iBgueXygxXDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: core/offline-operations-status
+path: /offline-operations
+methods:
+  - GET
+auth: ryeos_signed
+response:
+  mode: json
+  source: service:offline-operations/status

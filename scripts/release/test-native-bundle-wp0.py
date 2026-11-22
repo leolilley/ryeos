@@ -39,6 +39,7 @@ class NativeBundleWp0Tests(unittest.TestCase):
     def test_payload_ownership_is_unique_and_references_known_bundles(self):
         fixture = json.loads((FIXTURES / "bundle-sets.json").read_text())
         known = set().union(*map(set, fixture["sets"].values()))
+        known |= set(shell_lines("ryeos_bundle_set_names release-artifacts"))
         seen = set()
         result = subprocess.run([str(OWNERSHIP), "--repository-root", str(ROOT)],
                                 text=True, capture_output=True, check=True)
@@ -46,6 +47,20 @@ class NativeBundleWp0Tests(unittest.TestCase):
             bundle, binary = record["bundle"], record["binary"]
             self.assertIn(bundle, known)
             self.assertTrue(record["cargo_package"])
+            self.assertIsInstance(record["required_features"], list)
+            if binary.startswith("rye-parser-"):
+                self.assertEqual(record["cargo_package"], "ryeos-parser-bins", (bundle, binary))
+                self.assertEqual(record["required_features"], [], (bundle, binary))
+            if record["cargo_package"] == "ryeos-handler-bins":
+                if binary == "rye-composer-extends-chain":
+                    expected = ["extends-composer"]
+                elif binary == "ryeos-directive-launch-preparer":
+                    expected = ["directive-handlers"]
+                elif binary.startswith("ryeos-graph-"):
+                    expected = ["graph-handlers"]
+                else:
+                    expected = ["core-handlers"]
+                self.assertEqual(record["required_features"], expected, (bundle, binary))
             self.assertIn(record["build_class"], {"release", "static"})
             self.assertNotIn((bundle, binary), seen)
             seen.add((bundle, binary))

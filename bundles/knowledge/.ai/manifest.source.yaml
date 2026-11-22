@@ -1,0 +1,13 @@
+name: knowledge
+version: "0.5.0"
+description: "Knowledge kind, knowledge runtime, and context composition"
+requires_kinds:
+  - config
+  - handler
+  - node
+  - parser
+  - protocol
+  - runtime
+  - service
+  - tool
+uses_kinds: []

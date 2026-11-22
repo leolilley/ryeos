@@ -1,6 +1,6 @@
 # Native authoring runtime qualification fixture
 
-The existing standard Bundle supplies one independent qualification policy and
+The existing environment-qualification Bundle supplies one independent qualification policy and
 direct Tool verifier for the retained `runtime` product of
 `graph:ryeos/development/authoring-environment-production`. It uses RyeOS's
 generic product composition and qualification owners; it adds no publication,
@@ -51,7 +51,7 @@ python3 -B tests/e2e/environment-products/native-authoring/check-fixture.py
 python3 -B -m unittest discover -s tests/e2e/authoring-environment -p 'test_*.py'
 ```
 
-For a real disposable acceptance, publish the changed standard and development
+For a real disposable acceptance, publish the changed environment-qualification and development
 Bundle sources through their normal signing/population owners. Then use only
 the current CLI owners and returned coordinates:
 

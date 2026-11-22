@@ -19,14 +19,42 @@ const MAX_LIFECYCLE_ADAPTER_OPEN_FILES: u64 = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleAdapterInvocation {
     Inspect,
-    VerifyRuntimeProbe,
     Operate,
+    /// Stage-one lease admission: an offline verdict on whether the signed
+    /// provider spec can meet a workload's lease requirements, given only
+    /// the request and the captured spec, before any provider contact.
+    ///
+    /// Offline is a property of the contract, not of the enclosure: the
+    /// controller hands this invocation no placement credential and no
+    /// network or channel descriptor, so the adapter holds nothing with
+    /// which to authenticate to a provider. The enclosure denies process
+    /// creation here but does not deny network access.
+    AdmitLease,
+    /// Lease readiness judgement: the adapter receives the guest's first two
+    /// authenticated frames over an inherited length-prefixed duplex
+    /// descriptor and returns a verdict (admitted, or terminate). Like lease
+    /// admission it is handed no placement credential and never contacts the
+    /// provider or the network itself; the enclosure denies process creation.
+    AwaitLeaseReady,
+    RelayFile,
     ProduceSnapshot,
+    ProduceSnapshotUpload,
+    ProduceSnapshotCreate,
+    BootstrapSourceCreate,
+    BootstrapSourceReadiness,
+    BootstrapSourceTerminate,
+    BootstrapSourceObserveTermination,
     ObserveSnapshotReadiness,
     QualifySnapshotCreate,
     QualifySnapshotVerify,
+    /// Read-only observation of a restored qualification occurrence before
+    /// its one verifier attempt is claimed.
+    QualifySnapshotObserve,
     QualifySnapshotTerminate,
     ObserveSnapshotTermination,
+    /// Read-only listing of the resources one provider owner scope holds.
+    /// It mutates nothing, so process creation is denied as for the relay.
+    ListProviderResources,
 }
 
 /// Complete bounded protocol observation, not permission to continue startup.
@@ -38,18 +66,52 @@ pub struct LifecycleAdapterOutput {
 }
 
 impl LifecycleAdapterInvocation {
+    fn maximum_response_bytes(self) -> usize {
+        if self == Self::RelayFile {
+            ryeos_external_execution_contract::relay_file::MAX_RELAY_RESPONSE_BYTES
+        } else if self == Self::QualifySnapshotVerify {
+            ryeos_external_execution_contract::restored_runtime_measurement::MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES
+        } else {
+            MAX_LIFECYCLE_RESPONSE_BYTES
+        }
+    }
+
     fn argument(self) -> &'static str {
         match self {
             Self::Inspect => "inspect",
-            Self::VerifyRuntimeProbe => "verify-runtime-probe",
             Self::Operate => "operate",
+            Self::AdmitLease => "admit-lease",
+            Self::AwaitLeaseReady => "await-lease-ready",
+            Self::RelayFile => "relay-file",
             Self::ProduceSnapshot => "produce-snapshot",
+            Self::ProduceSnapshotUpload => "produce-snapshot-upload",
+            Self::ProduceSnapshotCreate => "produce-snapshot-create",
+            Self::BootstrapSourceCreate => "bootstrap-source-create",
+            Self::BootstrapSourceReadiness => "bootstrap-source-readiness",
+            Self::BootstrapSourceTerminate => "bootstrap-source-terminate",
+            Self::BootstrapSourceObserveTermination => "bootstrap-source-observe-termination",
             Self::ObserveSnapshotReadiness => "observe-snapshot-readiness",
             Self::QualifySnapshotCreate => "qualify-snapshot-create",
             Self::QualifySnapshotVerify => "qualify-snapshot-verify",
+            Self::QualifySnapshotObserve => "qualify-snapshot-observe",
             Self::QualifySnapshotTerminate => "qualify-snapshot-terminate",
             Self::ObserveSnapshotTermination => "observe-snapshot-termination",
+            Self::ListProviderResources => "list-provider-resources",
         }
+    }
+
+    fn requires_no_process_creation(self) -> bool {
+        matches!(
+            self,
+            Self::ProduceSnapshot
+                | Self::ProduceSnapshotUpload
+                | Self::ProduceSnapshotCreate
+                | Self::RelayFile
+                | Self::QualifySnapshotObserve
+                | Self::AdmitLease
+                | Self::AwaitLeaseReady
+                | Self::ListProviderResources
+        )
     }
 }
 
@@ -91,8 +153,9 @@ pub fn run_lifecycle_adapter(
         timeout: deadline.remaining().as_secs_f64(),
         limits: Some(lillux::SubprocessLimits {
             max_open_files: Some(MAX_LIFECYCLE_ADAPTER_OPEN_FILES),
-            max_stdout_bytes: Some(MAX_LIFECYCLE_RESPONSE_BYTES as u64),
+            max_stdout_bytes: Some(invocation.maximum_response_bytes() as u64),
             max_stderr_bytes: Some(MAX_LIFECYCLE_ADAPTER_STDERR_BYTES),
+            deny_process_creation: invocation.requires_no_process_creation(),
             ..lillux::SubprocessLimits::default()
         }),
         inherited_fds: inherited,
@@ -138,8 +201,10 @@ fn lifecycle_adapter_output(
         "unsuccessful_exit"
     };
     // This private runner uses direct spawn_until: no process scope or
-    // supervised attachment is admitted. A complete late exit may be read
-    // only as protocol observation, never upgraded to timely host success.
+    // supervised attachment is admitted. Snapshot production uses Lillux's
+    // fail-closed no-process-creation limit, which excludes local descendants
+    // but does not settle remote provider work. A complete late
+    // exit is protocol observation, never timely host success.
     let complete = result.exit_code == 0
         && result.output_limit_exceeded.is_none()
         && !result.stdout_truncated
@@ -147,7 +212,7 @@ fn lifecycle_adapter_output(
         && result.launcher_refusal.is_none()
         && result.aborted_before_attachment.is_none()
         && !result.stdout.is_empty()
-        && result.stdout.len() <= MAX_LIFECYCLE_RESPONSE_BYTES;
+        && result.stdout.len() <= invocation.maximum_response_bytes();
     ensure!(
         complete
             && ((result.success && !result.timed_out)
@@ -155,7 +220,13 @@ fn lifecycle_adapter_output(
                     && matches!(
                         invocation,
                         LifecycleAdapterInvocation::Operate
+                            | LifecycleAdapterInvocation::RelayFile
                             | LifecycleAdapterInvocation::ProduceSnapshot
+                            | LifecycleAdapterInvocation::ProduceSnapshotUpload
+                            | LifecycleAdapterInvocation::ProduceSnapshotCreate
+                            | LifecycleAdapterInvocation::BootstrapSourceCreate
+                            | LifecycleAdapterInvocation::BootstrapSourceTerminate
+                            | LifecycleAdapterInvocation::BootstrapSourceObserveTermination
                             | LifecycleAdapterInvocation::ObserveSnapshotReadiness
                             | LifecycleAdapterInvocation::QualifySnapshotCreate
                             | LifecycleAdapterInvocation::QualifySnapshotVerify
@@ -175,6 +246,93 @@ fn lifecycle_adapter_output(
 mod tests {
     use super::*;
 
+    #[test]
+    fn inventory_runs_without_process_creation() {
+        let invocation = LifecycleAdapterInvocation::ListProviderResources;
+        assert!(invocation.requires_no_process_creation());
+        assert_eq!(invocation.argument(), "list-provider-resources");
+        assert_eq!(
+            invocation.maximum_response_bytes(),
+            MAX_LIFECYCLE_RESPONSE_BYTES
+        );
+    }
+
+    #[test]
+    fn only_verifier_observation_has_the_larger_evidence_envelope() {
+        assert!(
+            LifecycleAdapterInvocation::QualifySnapshotVerify.maximum_response_bytes()
+                > MAX_LIFECYCLE_RESPONSE_BYTES
+        );
+        for invocation in [
+            LifecycleAdapterInvocation::Inspect,
+            LifecycleAdapterInvocation::Operate,
+            LifecycleAdapterInvocation::QualifySnapshotCreate,
+            LifecycleAdapterInvocation::QualifySnapshotTerminate,
+        ] {
+            assert_eq!(
+                invocation.maximum_response_bytes(),
+                MAX_LIFECYCLE_RESPONSE_BYTES
+            );
+        }
+    }
+
+    #[test]
+    fn lease_admission_is_a_bounded_offline_verdict() {
+        let invocation = LifecycleAdapterInvocation::AdmitLease;
+        assert_eq!(invocation.argument(), "admit-lease");
+        assert_eq!(
+            invocation.maximum_response_bytes(),
+            MAX_LIFECYCLE_RESPONSE_BYTES
+        );
+        assert!(invocation.requires_no_process_creation());
+        // A verdict that arrives after its deadline is not a verdict.
+        assert!(lifecycle_adapter_output(invocation, late_result()).is_err());
+        let mut timely = late_result();
+        timely.timed_out = false;
+        timely.success = true;
+        assert_eq!(
+            lifecycle_adapter_output(invocation, timely).unwrap().bytes,
+            b"{\"observation\":true}"
+        );
+    }
+
+    #[test]
+    fn lease_readiness_is_a_bounded_timely_verdict_without_process_creation() {
+        let invocation = LifecycleAdapterInvocation::AwaitLeaseReady;
+        assert_eq!(invocation.argument(), "await-lease-ready");
+        assert_eq!(
+            invocation.maximum_response_bytes(),
+            MAX_LIFECYCLE_RESPONSE_BYTES
+        );
+        assert!(invocation.requires_no_process_creation());
+        // A readiness verdict that arrives after its deadline is not a verdict.
+        assert!(lifecycle_adapter_output(invocation, late_result()).is_err());
+        let mut timely = late_result();
+        timely.timed_out = false;
+        timely.success = true;
+        assert_eq!(
+            lifecycle_adapter_output(invocation, timely).unwrap().bytes,
+            b"{\"observation\":true}"
+        );
+    }
+
+    #[test]
+    fn no_process_creation_is_scoped_to_snapshot_mutations() {
+        assert!(LifecycleAdapterInvocation::ProduceSnapshot.requires_no_process_creation());
+        assert!(LifecycleAdapterInvocation::ProduceSnapshotUpload.requires_no_process_creation());
+        assert!(LifecycleAdapterInvocation::ProduceSnapshotCreate.requires_no_process_creation());
+        for invocation in [
+            LifecycleAdapterInvocation::Operate,
+            LifecycleAdapterInvocation::BootstrapSourceCreate,
+            LifecycleAdapterInvocation::BootstrapSourceTerminate,
+            LifecycleAdapterInvocation::QualifySnapshotCreate,
+            LifecycleAdapterInvocation::QualifySnapshotTerminate,
+            LifecycleAdapterInvocation::ObserveSnapshotReadiness,
+        ] {
+            assert!(!invocation.requires_no_process_creation());
+        }
+    }
+
     fn late_result() -> lillux::SubprocessResult {
         lillux::SubprocessResult {
             success: false,
@@ -189,6 +347,7 @@ mod tests {
             output_limit_exceeded: None,
             stdout_truncated: false,
             stderr_truncated: false,
+            process_creation_busy: None,
         }
     }
 
@@ -269,6 +428,7 @@ mod tests {
                 output_limit_exceeded: None,
                 stdout_truncated: false,
                 stderr_truncated: false,
+                process_creation_busy: None,
             };
             let error = lifecycle_adapter_output(LifecycleAdapterInvocation::Operate, result)
                 .err()

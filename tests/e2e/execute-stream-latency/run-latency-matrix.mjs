@@ -18,7 +18,7 @@ const PROJECT_PATH =
 const RYEOSD_URL = process.env.RYEOSD_URL ?? "http://127.0.0.1:7400";
 const KEY_PATH =
   process.env.RYEOS_CLI_KEY_PATH ??
-  path.join(APP_ROOT, ".ai/config/keys/signing/private_key.pem");
+  path.join(APP_ROOT, ".ai/node/operator/signing/private_key.pem");
 const DAEMON_LOG = path.join(
   APP_ROOT,
   ".ai/state/ryeosd-start.stderr.log",
@@ -264,6 +264,16 @@ function unwrapPayload(value) {
   return value;
 }
 
+// The joined text parts of a completed turn's `parts` array.
+function partsText(value) {
+  const payload = unwrapPayload(value);
+  if (!payload || !Array.isArray(payload.parts)) return null;
+  const texts = payload.parts
+    .filter((part) => part && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text);
+  return texts.length > 0 ? texts.join("") : null;
+}
+
 function stringField(value, ...keys) {
   const payload = unwrapPayload(value);
   if (!payload || typeof payload !== "object") return null;
@@ -491,7 +501,7 @@ async function runProbe({
           threadId ??= stringField(event.parsed, "thread_id");
         } else if (event.event === "cognition_out") {
           const delta = stringField(event.parsed, "delta");
-          const content = stringField(event.parsed, "content", "text");
+          const content = partsText(event.parsed);
           if (typeof delta === "string") streamedCognitionText += delta;
           else if (typeof content === "string") completedCognitionText += content;
           if (

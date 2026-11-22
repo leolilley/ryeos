@@ -53,6 +53,7 @@ const MAX_LAUNCH_EVIDENCE_ATTACHMENT_BYTES: u64 = ryeos_state::objects::MAX_BUND
 const MAX_LAUNCH_ENVIRONMENT_CONTRIBUTIONS: usize = 8;
 const MAX_LAUNCH_ENVIRONMENT_TARGETS: usize = 8;
 const MAX_LAUNCH_ENVIRONMENT_VARIABLES: usize = 32;
+const MAX_LAUNCH_ENVIRONMENT_DELIVERED_SECRETS: usize = 8;
 const MAX_LAUNCH_SECRET_NAMES: usize = 32;
 /// Maximum retained size of any one launch runtime fact. Fact producers must
 /// use this ceiling rather than declaring a larger, independently valid wire payload.
@@ -123,6 +124,21 @@ pub struct RuntimeYaml {
         deserialize_with = "deserialize_native_resume"
     )]
     pub native_resume: Option<NativeResumeSpec>,
+    /// `true` => a machine continuation successor of this runtime rebuilds its
+    /// state by replaying the retained chain events, so it neither copies a
+    /// predecessor checkpoint nor receives `RYEOS_RESUME=1` (which means
+    /// same-thread crash recovery). `native_resume` still gives the runtime a
+    /// checkpoint dir and daemon-restart respawn. Default `false`: the
+    /// runtime writes a native checkpoint and the successor resumes from it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_continuation: bool,
+    /// `true` => this runtime writes its own `child_thread_spawned` lineage
+    /// events for the children it dispatches, so the daemon does not write a
+    /// generic one for them. Default `false`: the daemon records the
+    /// parent->child lineage of each child created through the runtime's
+    /// action callback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub writes_child_lineage: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -226,6 +242,9 @@ pub struct LaunchEnvironmentContributionPolicy {
     pub max_contributions: u16,
     pub max_targets_per_contribution: u16,
     pub max_variables_per_contribution: u16,
+    /// Distinct `delivered_secret` names the preparer may select across all
+    /// contributions. Zero refuses the kind.
+    pub max_delivered_secrets: u16,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -299,17 +318,39 @@ pub struct RefBindingDecl {
     pub allowed_kinds: Vec<String>,
     pub allowed_spaces: Vec<LaunchItemSpace>,
     pub allowed_trust: Vec<TrustClass>,
+    /// Who may replace this binding on a continuation of an admitted thread.
+    #[serde(default)]
+    pub continuation_rebind: ContinuationRebind,
+}
+
+/// Whether a continuation may bind a different item at a ref-binding name.
+///
+/// `never` keeps the binding sealed at first admission for the whole chain.
+/// `operator` lets an operator continuation name a different item; the
+/// replacement is still parsed, authorized, resolved and trust-checked as a
+/// binding, and every other part of the admitted program stays fixed. An
+/// absent field is `never`, so a runtime opts in by signing the word.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationRebind {
+    #[default]
+    Never,
+    Operator,
 }
 
 /// Signed owner of a managed runtime's ref-binding coordinate.
 ///
-/// `caller` preserves explicit invocation input. `primary_field` projects one
-/// exact string from the already verified composed primary, avoiding a second
-/// caller-authored copy while leaving resolution and authorization unchanged.
+/// `caller` preserves explicit invocation input. `caller_or_primary_ref` takes
+/// explicit invocation input when given and otherwise binds the verified
+/// primary's own canonical ref. `primary_field` projects one exact string from
+/// the already verified composed primary, avoiding a second caller-authored
+/// copy. No source grants authority: every resulting coordinate is still
+/// parsed, authorized, resolved and trust-checked as a binding.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RefBindingSource {
     Caller,
+    CallerOrPrimaryRef,
     PrimaryField { path: Vec<String> },
 }
 
@@ -383,6 +424,19 @@ pub struct RuntimeFactDecl {
     pub kind: RuntimeFactKind,
     /// Maximum length of the fact's canonical JSON representation, in bytes.
     pub max_bytes: u32,
+    /// Smallest value of this integer fact a continuation that rebinds a ref
+    /// binding may be prepared with; a rebind whose launch preparation yields
+    /// a smaller value, or no value, is refused. The runtime that signs the
+    /// number owns its meaning. It is consulted for no other launch, so an
+    /// absent field leaves every admission as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebind_minimum: Option<u64>,
+    /// Whether the durable record of a rebind carries this fact's value
+    /// before and after. Facts are not recorded unless the runtime signs
+    /// this, so a fact that names an endpoint or a configuration source
+    /// stays out of the thread's events.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rebind_record: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -950,7 +1004,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
         "launch_contract.primary_allowed_spaces",
         &contract.primary_allowed_spaces,
     )?;
-    validate_non_empty_unique(
+    validate_trust_list(
         yaml_path,
         "launch_contract.primary_allowed_trust",
         &contract.primary_allowed_trust,
@@ -1023,7 +1077,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             &format!("launch_contract.ref_bindings.{name}.allowed_spaces"),
             &binding.allowed_spaces,
         )?;
-        validate_non_empty_unique(
+        validate_trust_list(
             yaml_path,
             &format!("launch_contract.ref_bindings.{name}.allowed_trust"),
             &binding.allowed_trust,
@@ -1093,7 +1147,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             &format!("launch_contract.config_inputs.{name}.allowed_spaces"),
             allowed_spaces,
         )?;
-        validate_non_empty_unique(
+        validate_trust_list(
             yaml_path,
             &format!("launch_contract.config_inputs.{name}.allowed_trust"),
             allowed_trust,
@@ -1176,6 +1230,14 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
                 ),
             );
         }
+        if fact.rebind_minimum.is_some() && fact.kind != RuntimeFactKind::Integer {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "launch_contract.runtime_facts.{name}.rebind_minimum requires an integer fact"
+                ),
+            );
+        }
     }
 
     let dependency_policy = &contract.execution_dependencies;
@@ -1212,7 +1274,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             "launch_contract.execution_dependencies.allowed_spaces",
             &dependency_policy.allowed_spaces,
         )?;
-        validate_non_empty_unique(
+        validate_trust_list(
             yaml_path,
             "launch_contract.execution_dependencies.allowed_trust",
             &dependency_policy.allowed_trust,
@@ -1381,7 +1443,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             |error| EngineError::RuntimeYamlInvalid {
                 path: yaml_path.to_owned(),
                 reason: format!(
-                    "launch_contract.evidence_attachments.destination_prefix is invalid: {error}"
+                    "launch_contract.evidence_attachments.destination_prefix is invalid: {error:#}"
                 ),
             },
         )?;
@@ -1399,6 +1461,8 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             > MAX_LAUNCH_ENVIRONMENT_TARGETS
         || usize::from(environment_policy.max_variables_per_contribution)
             > MAX_LAUNCH_ENVIRONMENT_VARIABLES
+        || usize::from(environment_policy.max_delivered_secrets)
+            > MAX_LAUNCH_ENVIRONMENT_DELIVERED_SECRETS
     {
         return runtime_yaml_error(
             yaml_path,
@@ -1408,7 +1472,8 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
     let environment_disabled = environment_policy.max_contributions == 0;
     if environment_disabled
         != (environment_policy.max_targets_per_contribution == 0
-            && environment_policy.max_variables_per_contribution == 0)
+            && environment_policy.max_variables_per_contribution == 0
+            && environment_policy.max_delivered_secrets == 0)
     {
         return runtime_yaml_error(
             yaml_path,
@@ -1503,6 +1568,20 @@ fn validate_launch_contract_kinds(
                 ),
             );
         }
+    }
+    Ok(())
+}
+
+/// A declared trust list: non-empty, unique, and never admitting unsigned
+/// work. Unsigned items are refused at every launch whatever a contract says.
+fn validate_trust_list(
+    yaml_path: &Path,
+    field: &str,
+    values: &[TrustClass],
+) -> Result<(), EngineError> {
+    validate_non_empty_unique(yaml_path, field, values)?;
+    if values.contains(&TrustClass::Unsigned) {
+        return runtime_yaml_error(yaml_path, format!("{field} may not admit `unsigned`"));
     }
     Ok(())
 }
@@ -1626,10 +1705,26 @@ mod tests {
         assert!(checked > 0, "no bundled runtime descriptors were checked");
     }
 
+    #[test]
+    fn child_lineage_ownership_is_declared_on_the_descriptor() {
+        let bundles = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../bundles");
+        let declared = |bundle: &str, name: &str| {
+            let path = bundles.join(bundle).join(".ai/runtimes").join(name);
+            let body = std::fs::read_to_string(&path).unwrap();
+            parse_runtime_yaml(&path, &body)
+                .unwrap()
+                .writes_child_lineage
+        };
+        assert!(declared("graph", "graph-runtime.yaml"));
+        assert!(!declared("directive", "directive-runtime.yaml"));
+    }
+
     fn minimal_yaml() -> RuntimeYaml {
         RuntimeYaml {
             kind: "runtime".to_owned(),
             serves: "test_kind".to_owned(),
+            replay_continuation: false,
+            writes_child_lineage: false,
             default: None,
             binary_ref: "bin/x86_64-unknown-linux-gnu/test-runtime".to_owned(),
             abi_version: SUPPORTED_RUNTIME_ABI_VERSION.to_owned(),
@@ -1671,6 +1766,7 @@ mod tests {
                     max_contributions: 0,
                     max_targets_per_contribution: 0,
                     max_variables_per_contribution: 0,
+                    max_delivered_secrets: 0,
                 },
                 financial_authority: FinancialAuthorityDecl::None,
                 external_effect_authority: ExternalEffectAuthorityDecl::None,
@@ -1727,6 +1823,7 @@ mod tests {
         "    max_contributions: 0\n",
         "    max_targets_per_contribution: 0\n",
         "    max_variables_per_contribution: 0\n",
+        "    max_delivered_secrets: 0\n",
         "  financial_authority:\n",
         "    kind: none\n",
         "  external_effect_authority:\n",
@@ -1985,6 +2082,59 @@ mod tests {
     }
 
     #[test]
+    fn runtime_fact_rebind_minimum_is_optional_and_integer_only() {
+        let fact = |body: &str| serde_yaml::from_str::<RuntimeFactDecl>(body);
+
+        let plain = fact("{required: true, kind: integer, max_bytes: 32}").unwrap();
+        assert_eq!(plain.rebind_minimum, None);
+        // The absent field is not serialized, so the contract's canonical
+        // form is unchanged for every runtime that does not sign one.
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("rebind_minimum")
+                .is_none()
+        );
+
+        let floored =
+            fact("{required: true, kind: integer, max_bytes: 32, rebind_minimum: 16000}").unwrap();
+        assert_eq!(floored.rebind_minimum, Some(16_000));
+        assert!(!floored.rebind_record);
+        let recorded =
+            fact("{required: true, kind: string, max_bytes: 32, rebind_record: true}").unwrap();
+        assert!(recorded.rebind_record);
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("rebind_record")
+                .is_none()
+        );
+        assert!(
+            fact("{required: true, kind: integer, max_bytes: 32, rebind_minimum: -1}").is_err()
+        );
+
+        // A minimum is a comparison of integers; no other fact kind signs one.
+        for kind in ["string", "json", "bool"] {
+            let mut yaml = minimal_yaml();
+            yaml.launch_contract.runtime_facts.insert(
+                "window".to_string(),
+                fact(&format!(
+                    "{{required: true, kind: {kind}, max_bytes: 32, rebind_minimum: 16000}}"
+                ))
+                .unwrap(),
+            );
+            let error = validate_runtime_yaml(&test_path(), &yaml)
+                .expect_err("only an integer fact may sign a rebind minimum");
+            assert!(
+                error
+                    .to_string()
+                    .contains("rebind_minimum requires an integer fact"),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_config_only_node_authority_for_ref_bindings() {
         let mut yaml = minimal_yaml();
         yaml.launch_contract.ref_bindings.insert(
@@ -1996,6 +2146,7 @@ mod tests {
                 allowed_kinds: vec!["test_kind".to_string()],
                 allowed_spaces: vec![LaunchItemSpace::Node],
                 allowed_trust: vec![TrustClass::TrustedNode],
+                continuation_rebind: ContinuationRebind::Never,
             },
         );
         let error = validate_runtime_yaml(&test_path(), &yaml)

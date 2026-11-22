@@ -1,0 +1,301 @@
+{
+  "accepted_initial_effects": [],
+  "view_model": {
+    "chrome": {
+      "health_label": "connected",
+      "health_tone": "good",
+      "subtitle": "/fixture/project",
+      "title": "RyeOS"
+    },
+    "dialogs": [],
+    "generation": 2,
+    "notices": [],
+    "now_ms": 0,
+    "overlay": {
+      "key_hints": [
+        {
+          "keys": "↑/↓",
+          "word": "move"
+        },
+        {
+          "keys": "enter",
+          "word": "open"
+        },
+        {
+          "keys": "a",
+          "word": "acknowledge"
+        },
+        {
+          "keys": "esc",
+          "word": "close"
+        }
+      ],
+      "needs_you": [],
+      "needs_you_count": null,
+      "open": false,
+      "running": [],
+      "running_count": null,
+      "selected": null
+    },
+    "presentation": {
+      "chrome": {
+        "border": "thin",
+        "status_bar": {
+          "edge": "bottom",
+          "energy": 0.0,
+          "first_run": false,
+          "key_hints": [
+            {
+              "keys": "ctrl+k",
+              "word": "open"
+            },
+            {
+              "keys": "alt+o",
+              "word": "overlay"
+            },
+            {
+              "keys": "alt+t/b",
+              "word": "bars"
+            },
+            {
+              "keys": "ctrl+←/→",
+              "word": "tab"
+            },
+            {
+              "keys": "ctrl+↑/↓",
+              "word": "move"
+            },
+            {
+              "keys": "alt+r",
+              "word": "rename"
+            }
+          ],
+          "segments": [],
+          "visible": true
+        },
+        "switcher": {
+          "edge": "left"
+        },
+        "title": "Rye OS",
+        "top_bar": {
+          "add_tab": true,
+          "tabs": [
+            {
+              "active": true,
+              "number": 1,
+              "tile_count": 1,
+              "title": "cutover-golden",
+              "view_set_id": 1
+            }
+          ],
+          "visible": false
+        },
+        "version_label": "RYE OS - unqualified"
+      },
+      "frame": {
+        "corners": {
+          "tone": "accent",
+          "visible": true
+        }
+      },
+      "metrics": {
+        "active_thread_count": 0,
+        "activity_level": 0.11999999731779099,
+        "project_count": 0,
+        "schedule_count": 0,
+        "service_count": 0,
+        "thread_count": 0,
+        "tile_count": 1
+      },
+      "motion": [],
+      "schema_version": "ryeos.ui.presentation.v1",
+      "theme": {
+        "id": "system",
+        "tone": "accent"
+      }
+    },
+    "schema_version": "ryeos.ui.vm.v3",
+    "session": {
+      "posture": "observation_only",
+      "project_path": null,
+      "root_ref": "config:fixture/cutover",
+      "session_id": "cutover-session",
+      "surface_ordinal": 1,
+      "surfaces": [
+        {
+          "active": true,
+          "chip": {
+            "authored_in_project": false,
+            "mark": "initial"
+          },
+          "close_intent": null,
+          "ordinal": 1,
+          "rename_intent": {
+            "binding": {
+              "binding_attachment_id": "cutover-golden-attachment",
+              "binding_digest": "cutover-golden-binding",
+              "binding_generation": 1
+            },
+            "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+            "title": "Cutover",
+            "type": "rename_surface"
+          },
+          "select_intent": {
+            "binding": {
+              "binding_attachment_id": "cutover-golden-attachment",
+              "binding_digest": "cutover-golden-binding",
+              "binding_generation": 1
+            },
+            "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+            "type": "select_surface"
+          },
+          "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+          "title": "Cutover"
+        }
+      ],
+      "title": "Cutover",
+      "user_principal_id": null
+    },
+    "transport": {
+      "channels": [
+        {
+          "channel": "session",
+          "freshness": "current"
+        }
+      ],
+      "freshness": "current"
+    },
+    "view_set": {
+      "center_is_empty": false,
+      "focused_tile": "2",
+      "layout_guard": "317eed5a0a787a7e0614ed276195baa21c2ef3ac9d4e8469ced533eea1d7bf4b",
+      "lens_trail": [],
+      "root": {
+        "attachment_label": null,
+        "background_transparent": false,
+        "chrome_hidden": false,
+        "current": true,
+        "focused": true,
+        "group_id": "3",
+        "instance_key": "seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
+        "intents": [
+          {
+            "intent": {
+              "instance_key": "seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
+              "type": "pin_view_selection"
+            },
+            "label": "Pin this selection",
+            "title": "Keep this view on the captured selection; later selections do not retarget it"
+          },
+          {
+            "intent": {
+              "instance_key": "seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
+              "type": "open_pinned_view_alongside"
+            },
+            "label": "Open pinned alongside",
+            "title": "Open another instance fixed to this view's exact current selection"
+          },
+          {
+            "intent": {
+              "tile_id": "2",
+              "type": "close_tile"
+            },
+            "label": "Close view",
+            "title": "Close this view; its running work is unaffected"
+          }
+        ],
+        "maximized": false,
+        "tabs": [
+          {
+            "active": true,
+            "tile_id": "2",
+            "title": "Overview"
+          }
+        ],
+        "tile_id": "2",
+        "title": "Overview",
+        "type": "tile",
+        "view": {
+          "sections": [
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:29ab040fa3417214398806ad5fafbe79a587635ecdc4292bfcf47065720454a9",
+              "rows": [],
+              "source_status": {
+                "message": "Source subject or required context is unresolved",
+                "stale": false,
+                "state": "unresolved"
+              },
+              "title": "Work"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:92169c13f08c8d3d9cbc9945d700669169f9705cd859d2365ae7899d144a598b",
+              "rows": [],
+              "source_status": {
+                "message": "Source subject or required context is unresolved",
+                "stale": false,
+                "state": "unresolved"
+              },
+              "title": "Project"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:3c8ba68679e8125c91ebc564c8dc8bad1a6d15c04c829a0a90f2281f6b2b8cca",
+              "rows": [],
+              "source_status": {
+                "message": "Source subject or required context is unresolved",
+                "stale": false,
+                "state": "unresolved"
+              },
+              "title": "Placement"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:3af21fd0bcf1d7b583528ba3a11d9dce761ff9335454571b1709be61697586ed",
+              "rows": [],
+              "source_status": {
+                "message": "Source subject or required context is unresolved",
+                "stale": false,
+                "state": "unresolved"
+              },
+              "title": "Evidence coverage"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:fdf3e7b2973d6f11899cc0b0b11e1460e15dabc16699b75292075e0c6ec50fb5",
+              "rows": [],
+              "source_status": {
+                "message": "Source subject or required context is unresolved",
+                "stale": false,
+                "state": "unresolved"
+              },
+              "title": "Outcome"
+            }
+          ],
+          "title": "Overview",
+          "type": "sections"
+        }
+      },
+      "split_max_ratio": 0.8999999761581421,
+      "split_min_ratio": 0.10000000149011612,
+      "tile_count": 1,
+      "view_set_id": 1
+    }
+  }
+}

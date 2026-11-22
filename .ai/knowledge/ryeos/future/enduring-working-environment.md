@@ -4,11 +4,16 @@ name: enduring-working-environment
 title: Enduring Working Environment — Vision and Open Questions
 description: Discussion synthesis connecting the papers, principal-centered UI, portable execution, model leverage and unresolved product boundaries.
 entry_type: design
-version: "0.1.0"
+version: "0.1.1"
 status: discussion
 ---
 
 # Enduring working environment — vision and open questions
+
+Overall product direction and delivery milestones now belong to
+[Platform direction and delivery](platform-direction-and-delivery.md). This note
+preserves the principal-continuity vision, research interpretation and open
+questions. Its dated conversation choices are not current project-wide orders.
 
 Discussion recorded: 2026-09-07. Unsigned working note, not an implementation authorization, release claim or proof of the research programme. Its purpose is to resume the reasoning without reconstructing the conversation.
 

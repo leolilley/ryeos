@@ -8,7 +8,6 @@
 //! `item.inspect` — resolve one canonical item and return raw + effective.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,10 +21,12 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::ItemSpace;
-use ryeos_engine::item_resolution::{enumerate_kind_refs, resolve_item_full};
 use ryeos_executor::executor::ServiceAvailability;
 
-use super::ui_graph_topology::{classify_trust, label_for_bare_id, namespace_for_bare_id};
+use super::item_titles::{ItemTitleConfig, is_trusted};
+use super::signed_item_topology::{
+    classify_trust_of_source, label_for_bare_id, namespace_for_bare_id,
+};
 
 // ── items.list types ───────────────────────────────────────────────
 
@@ -78,13 +79,19 @@ pub struct ItemSummary {
     pub item_kind: String,
     pub bare_id: String,
     pub label: String,
+    /// Display name: authored, a heading, or the derived leaf of the id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `authored`, `heading` or `derived`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     pub space: String,
     pub source_path: String,
     pub executable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub trust: Option<super::ui_graph_topology::TrustSummary>,
+    pub trust: Option<super::signed_item_topology::TrustSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed: Vec<ShadowedSummary>,
 }
@@ -134,9 +141,15 @@ pub struct InspectedItem {
     pub bare_id: String,
     pub source_path: String,
     pub space: String,
+    /// Display name, from the same rules and bytes as `items/list`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Where `title` came from: "authored", "heading" or "derived".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<String>,
     pub executable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub trust: Option<super::ui_graph_topology::TrustSummary>,
+    pub trust: Option<super::signed_item_topology::TrustSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed: Vec<ShadowedSummary>,
 }
@@ -189,14 +202,24 @@ pub async fn handle_items_list(
             .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?
     };
 
-    let response = build_items_list(&state, project_path.as_ref(), &request);
+    // One signed config per request; a missing or untrusted file refuses.
+    let titles = ItemTitleConfig::load(&state)?;
+    let response = build_items_list(
+        &state,
+        &titles,
+        project_path.as_ref(),
+        project_access.as_ref(),
+        &request,
+    );
 
     serde_json::to_value(response).map_err(Into::into)
 }
 
 fn build_items_list(
     state: &AppState,
+    titles: &ItemTitleConfig,
     project_path: Option<&PathBuf>,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemsListRequest,
 ) -> ItemsListResponse {
     let roots = state.engine.resolution_roots(project_path.cloned());
@@ -222,13 +245,23 @@ fn build_items_list(
             continue;
         };
 
-        let kind_refs = enumerate_kind_refs(&roots, schema, kind_name);
+        let kind_refs = crate::seat_auth::enumerate_kind_refs_for_access(
+            &roots,
+            schema,
+            kind_name,
+            project_access,
+        );
         let executable = schema.is_executable();
 
         for item_ref in &kind_refs {
             let canonical = item_ref.to_string();
 
-            let resolution = match resolve_item_full(&roots, schema, item_ref) {
+            let resolution = match crate::seat_auth::resolve_item_for_access(
+                &roots,
+                schema,
+                item_ref,
+                project_access,
+            ) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -255,13 +288,15 @@ fn build_items_list(
             *by_kind.entry(kind_name.to_string()).or_insert(0) += 1;
             *by_space.entry(space_str.clone()).or_insert(0) += 1;
 
-            // Trust classification
-            let trust = classify_trust(
-                &resolution.winner_path,
-                schema
-                    .spec_for(&resolution.matched_ext)
-                    .map(|spec| &spec.signature),
-                &state.engine.trust_store,
+            let (trust, title, title_source) = trust_and_title(
+                state,
+                titles,
+                schema,
+                &resolution,
+                kind_name,
+                &item_ref.bare_id,
+                project_access,
+                project_path,
             );
 
             // Shadowed candidates
@@ -285,6 +320,8 @@ fn build_items_list(
                 item_kind: kind_name.to_string(),
                 bare_id: item_ref.bare_id.clone(),
                 label: label_for_bare_id(&item_ref.bare_id),
+                title: Some(title),
+                title_source: Some(title_source.to_string()),
                 namespace: namespace_for_bare_id(&item_ref.bare_id),
                 space: space_str,
                 source_path: resolution.winner_path.display().to_string(),
@@ -308,6 +345,59 @@ fn build_items_list(
         counts: ItemsCounts { by_kind, by_space },
         items,
     }
+}
+
+/// An item's trust class and display name, both from one read of its source:
+/// the title is only ever taken from the bytes whose signature was verified.
+#[allow(clippy::too_many_arguments)]
+fn trust_and_title(
+    state: &AppState,
+    titles: &ItemTitleConfig,
+    schema: &ryeos_engine::kind_registry::KindSchema,
+    resolution: &ryeos_engine::item_resolution::ResolutionResult,
+    kind: &str,
+    bare_id: &str,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
+    project_path: Option<&PathBuf>,
+) -> (
+    Option<super::signed_item_topology::TrustSummary>,
+    String,
+    &'static str,
+) {
+    let spec = schema.spec_for(&resolution.matched_ext);
+    let envelope = spec.map(|spec| &spec.signature);
+    let raw = crate::seat_auth::read_whole_item_source(&resolution.winner_path, project_access);
+    let trust = raw.as_deref().and_then(|raw| {
+        classify_trust_of_source(
+            raw,
+            envelope,
+            &state.engine.trust_store,
+            resolution.winner_space,
+            kind,
+            project_path.map(PathBuf::as_path),
+        )
+    });
+    let (title, source) = titles.title(
+        kind,
+        bare_id,
+        is_trusted(trust.as_ref()),
+        envelope,
+        || raw,
+        |content| {
+            let spec = spec?;
+            state
+                .engine
+                .parser_dispatcher
+                .dispatch(
+                    &spec.parser,
+                    content,
+                    Some(resolution.winner_path.as_path()),
+                    &spec.signature,
+                )
+                .ok()
+        },
+    );
+    (trust, title, source)
 }
 
 fn parse_space_filter(s: &str) -> impl Fn(&ItemSpace) -> bool + '_ {
@@ -341,14 +431,23 @@ pub async fn handle_item_inspect(
     let req: ItemInspectRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let response = build_item_inspect(&state, project_path.as_ref(), &req)?;
+    let titles = ItemTitleConfig::load(&state)?;
+    let response = build_item_inspect(
+        &state,
+        &titles,
+        project_path.as_ref(),
+        project_access.as_ref(),
+        &req,
+    )?;
 
     serde_json::to_value(response).map_err(Into::into)
 }
 
 fn build_item_inspect(
     state: &AppState,
+    titles: &ItemTitleConfig,
     project_path: Option<&PathBuf>,
+    project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemInspectRequest,
 ) -> Result<ItemInspectResponse> {
     let item_ref = CanonicalRef::parse(&req.canonical_ref).map_err(|e| {
@@ -365,18 +464,21 @@ fn build_item_inspect(
     };
 
     let resolution =
-        resolve_item_full(&roots, schema, &item_ref).map_err(|_| HandlerError::NotFound)?;
+        crate::seat_auth::resolve_item_for_access(&roots, schema, &item_ref, project_access)
+            .map_err(|_| HandlerError::NotFound)?;
 
     let space_str = resolution.winner_space.as_str().to_string();
     let executable = schema.is_executable();
 
-    // Trust classification
-    let trust = classify_trust(
-        &resolution.winner_path,
-        schema
-            .spec_for(&resolution.matched_ext)
-            .map(|spec| &spec.signature),
-        &state.engine.trust_store,
+    let (trust, title, title_source) = trust_and_title(
+        state,
+        titles,
+        schema,
+        &resolution,
+        &item_ref.kind,
+        &item_ref.bare_id,
+        project_access,
+        project_path,
     );
 
     // Shadowed
@@ -392,7 +494,7 @@ fn build_item_inspect(
 
     // Raw content
     let raw = if req.include_raw {
-        read_raw_content(&resolution.winner_path)
+        read_raw_content(&resolution.winner_path, project_access)
     } else {
         None
     };
@@ -400,6 +502,7 @@ fn build_item_inspect(
     // Effective content
     let effective = if req.include_effective {
         let effective_req = ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: item_ref.clone(),
             expected_kind: None,
             project_root: project_path.cloned(),
@@ -408,11 +511,19 @@ fn build_item_inspect(
                     project_path.map(std::path::PathBuf::as_path),
                 ),
         };
-        state
-            .engine
-            .effective_item(effective_req)
-            .ok()
-            .and_then(|eff| serde_json::to_value(eff).ok())
+        // A retained project is composed through its directory owner; its
+        // descriptor pathname is never walked.
+        match project_access {
+            Some(access) => state.engine.with_checked_bundle_generation(|generation| {
+                generation.effective_item_under_project_authority(
+                    effective_req,
+                    access.content_authority(),
+                )
+            }),
+            None => state.engine.effective_item(effective_req),
+        }
+        .ok()
+        .and_then(|eff| serde_json::to_value(eff).ok())
     } else {
         None
     };
@@ -425,6 +536,8 @@ fn build_item_inspect(
             bare_id: item_ref.bare_id.clone(),
             source_path: resolution.winner_path.display().to_string(),
             space: space_str,
+            title: Some(title),
+            title_source: Some(title_source.to_string()),
             executable,
             trust,
             shadowed,
@@ -434,20 +547,18 @@ fn build_item_inspect(
     })
 }
 
-fn read_raw_content(path: &std::path::Path) -> Option<RawContent> {
-    let actual_bytes = std::fs::metadata(path).ok().map(|m| m.len() as usize);
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Vec::with_capacity(MAX_RAW_BYTES.saturating_add(1));
-    file.take(MAX_RAW_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-
+fn read_raw_content(
+    path: &std::path::Path,
+    access: Option<&crate::seat_auth::RetainedProjectAccess>,
+) -> Option<RawContent> {
+    let (mut bytes, size) =
+        crate::seat_auth::read_item_source(path, access, MAX_RAW_BYTES.saturating_add(1))?;
     let observed_bytes = bytes.len();
-    let total_bytes = actual_bytes.unwrap_or(observed_bytes);
-    let truncated = total_bytes > MAX_RAW_BYTES || observed_bytes > MAX_RAW_BYTES;
-    if bytes.len() > MAX_RAW_BYTES {
-        bytes.truncate(MAX_RAW_BYTES);
-    }
+    let total_bytes = usize::try_from(size)
+        .unwrap_or(usize::MAX)
+        .max(observed_bytes);
+    let truncated = total_bytes > MAX_RAW_BYTES;
+    bytes.truncate(MAX_RAW_BYTES);
 
     Some(RawContent {
         content: String::from_utf8_lossy(&bytes).into_owned(),
@@ -477,3 +588,53 @@ pub const ITEM_INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         Box::pin(async move { handle_item_inspect(params, ctx, state).await })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::signed_item_topology::TrustSummary;
+
+    fn row(space: &str, trust: Option<TrustSummary>, title: Option<&str>) -> Value {
+        serde_json::to_value(ItemSummary {
+            domain: "item",
+            canonical_ref: "tool:a/b".into(),
+            item_kind: "tool".into(),
+            bare_id: "a/b".into(),
+            label: "b".into(),
+            title: title.map(str::to_string),
+            title_source: title.map(|_| "authored".to_string()),
+            namespace: Some("a".into()),
+            space: space.into(),
+            source_path: "/p".into(),
+            executable: true,
+            trust,
+            shadowed: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn project_row_carries_title_space_and_trust_class_together() {
+        let value = row(
+            "project",
+            Some(TrustSummary {
+                class: "trusted".into(),
+                signer: Some("fp".into()),
+            }),
+            Some("Mine"),
+        );
+        assert_eq!(value["title"], "Mine");
+        assert_eq!(value["title_source"], "authored");
+        assert_eq!(value["space"], "project");
+        assert_eq!(value["trust"]["class"], "trusted");
+        assert_eq!(value["label"], "b");
+    }
+
+    #[test]
+    fn row_without_a_title_serialises_as_before() {
+        let value = row("bundle", None, None);
+        let object = value.as_object().unwrap();
+        assert!(!object.contains_key("title"));
+        assert!(!object.contains_key("title_source"));
+    }
+}

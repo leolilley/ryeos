@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-15T01:11:43Z:60b0dc82e4d8be5d9146cdff955d19c46e959df9c4678bf232e6c0288ab8c08e:SCFQLWi6QCN5DPjR0UkrKlsF0uC/CbCSWmH5PRbpyPiVEU5sFXt/cnjLWRADu/kwBmHIPzjfwtPnf4VpiU+zCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:59:57Z:08a308d2149b1e7b9da182e2afa93b42181f0e536979d1f552a2f4dea26d2f5b:O506EdwfAUnOFQ3O8FTr8MPj0IkTUIyAOPlctC0f+VPBTLQg3ivc1hGL6S0THQF6ffa1EOZndZn1sVRV/L7zBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-review
 title: Review
 version: "1.0.0"
-description: Exact principal-scoped attention awaiting an operator decision
+description: The principal's attention queue, every item that needs the operator in one shape
 
 widget: table
 sources:
@@ -14,63 +14,81 @@ sources:
 projections:
   columns:
     - { label: kind, field: kind, present: words }
-    - { label: operation, field: operation_class, present: words }
+    - { label: item, field: title }
+    - { label: detail, field: detail.summary, present: words }
     - { label: state, field: state, present: words }
     - { label: expires, field: expires_at_ms }
   expand:
-    fields: [chain_root_id, placement_thread_id, approval_id, worker_boot_epoch, request_digest, requested_authority, created_at_ms]
+    fields: [subject.chain_root_id, subject.thread_id, since_ms, detail, actions]
   tone:
-    field: state
-    map: { pending: warn }
+    field: tone
+    map: { warn: warn, danger: danger }
     default: neutral
 
 affordances:
   - id: inspect_work
     label: Open work
+    category: Open
     producer: selection
+    visible_when: { field: actions.open, equals: true }
     invoke:
       plane: ui
       facet: selection
       merge:
         work:
-          thread: "{record.placement_thread_id}"
-          chain_root: "{record.chain_root_id}"
+          thread: "{record.subject.thread_id}"
+          chain_root: "{record.subject.chain_root_id}"
       open_view: view:ryeos/work/overview
       drill: true
   - id: accept
     label: Approve
+    category: Decide
     producer: selection
     visible_when:
       all:
-        - { field: kind, equals: worker_approval }
+        - { field: kind, equals: approval }
         - { field: state, equals: pending }
-    enabled_when: { field: requested_authority.accept_allowed, equals: true }
+    enabled_when: { field: actions.accept, equals: true }
     disabled_reason: This approval request cannot be accepted; decline it or inspect its authority.
     invoke:
       plane: rye
       ref: service:worker-executions/resolve-approval
       args:
-        chain_root_id: "{record.chain_root_id}"
-        approval_id: "{record.approval_id}"
-        request_digest: "{record.request_digest}"
+        chain_root_id: "{record.subject.chain_root_id}"
+        approval_id: "{record.detail.approval_id}"
+        request_digest: "{record.detail.request_digest}"
         accept: true
       notice: Approval accepted
   - id: decline
     label: Decline
+    category: Decide
     producer: selection
     visible_when:
       all:
-        - { field: kind, equals: worker_approval }
+        - { field: kind, equals: approval }
         - { field: state, equals: pending }
+    enabled_when: { field: actions.decline, equals: true }
     invoke:
       plane: rye
       ref: service:worker-executions/resolve-approval
       args:
-        chain_root_id: "{record.chain_root_id}"
-        approval_id: "{record.approval_id}"
-        request_digest: "{record.request_digest}"
+        chain_root_id: "{record.subject.chain_root_id}"
+        approval_id: "{record.detail.approval_id}"
+        request_digest: "{record.detail.request_digest}"
         accept: false
       notice: Approval declined
+  - id: acknowledge
+    label: Acknowledge
+    category: Triage
+    producer: selection
+    visible_when: { field: actions.acknowledge, equals: true }
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/work/acknowledge
+      args:
+        item_id: "{record.id}"
+      notice: Acknowledged. It returns if it has new activity.
 
 refresh:
   on_hint: [thread, activity]
+  after_invoke: true

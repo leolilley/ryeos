@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-20T01:41:50Z:2f894441ff36ec12dda87b8053ffc3a970045c5a4dc1a09980229ccb9bd283ba:0SAwIQcv0+Iu0CrQrI9vdvSNWULX+1JD17gtmRk57WbsGiCkiPGG5KEnpU+Yf8LzlK77Vekt3fNlX9kmBxvNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: trust.show
+availability: both
+state_access: read_only_existing
+record_thread: false
+required_caps: ["ryeos.execute.service.trust/show"]
+schema:
+  fingerprint: string
+description: "Show one pinned signer's record (with the time it was first pinned) and the key events that produced it, each with its signing time"

@@ -1,0 +1,5 @@
+# ryeos:signed:2026-10-28T22:38:56Z:6435ae472e45c7ab35cdfa26c84c13f2a237f2cf5f294f9a5c8dff8940cc32da:EEUu3IwVVlu0JQgyoNga6mheJSAU/HmCClpdPagU0UWUTE2G+89lvceAE4sGydxEPRhsT2Uqw4uc6pWvQ/J8Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: offline-operations.status
+required_caps: ["ryeos.execute.service.offline-operations/status"]
+description: "The offline-operation ledger tip, the requests queued in the inbox, the newest receipts and the refusals on record"

@@ -12,7 +12,6 @@ use ryeos_state::objects::{
 };
 use std::collections::BTreeMap;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_output_delta(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
@@ -58,7 +57,9 @@ pub(crate) fn apply_output_delta(
                 // Ancestor replacement hides the whole lower output. Only an
                 // exact directory mutation establishes the reserved root itself.
                 match mutation.kind {
-                    Mutation::UpsertRegular | Mutation::UpsertSymlink => {
+                    Mutation::UpsertRegular
+                    | Mutation::UpsertSymlink
+                    | Mutation::Unrepresentable { .. } => {
                         bail!(
                             "workspace output root or ancestor is no longer a directory: {}",
                             mutation.path
@@ -85,6 +86,13 @@ pub(crate) fn apply_output_delta(
                 .context("non-UTF-8 output mutation path")?;
             if capture_policy.excludes_subtree_path(relative)? {
                 continue;
+            }
+            if let Mutation::Unrepresentable { reason } = mutation.kind {
+                return Err(super::super::workspace::UnrepresentableWorkspaceEntry {
+                    path: mutation.path.clone(),
+                    reason,
+                }
+                .into());
             }
             if !exists {
                 bail!(
@@ -136,6 +144,9 @@ pub(crate) fn apply_output_delta(
                     let mut entry = empty_entry(relative, Kind::Symlink);
                     entry.target = Some(target.clone());
                     entries.insert(relative.to_owned(), entry);
+                }
+                Mutation::Unrepresentable { .. } => {
+                    bail!("unfiltered unrepresentable output entry: {}", mutation.path);
                 }
                 Mutation::UpsertRegular => {
                     remove_subtree(&mut entries, relative);
@@ -361,8 +372,7 @@ fn ingest_file(
         let captured = authority.large_object_store()?.ingest_open_regular(
             file.try_clone()?,
             ryeos_state::PinnedLargeObjectSourceIdentity {
-                containing_device: before.device(),
-                inode: before.inode(),
+                file: lillux::pinned_regular_file_identity(&file)?,
                 size,
             },
             &mutation.path,

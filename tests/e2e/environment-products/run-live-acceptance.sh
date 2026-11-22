@@ -196,7 +196,7 @@ run_selected_worker_acceptance() {
   local session_observation_request session_fence session_termination
   local session_status_request candidate_snapshot discard_request
 
-  selection_json=$(python3 -c 'import json,sys; source={"kind":"local_capture"}; print(json.dumps([{"target":{"kind":"content_dependency","binding":"environment"},"selection":{"declaration_id":"distribution","witness_hash":sys.argv[1],"witness_source":source,"qualification_hash":None}},{"target":{"kind":"content_dependency","binding":"environment"},"selection":{"declaration_id":"runtime","witness_hash":sys.argv[2],"witness_source":source,"qualification_hash":sys.argv[3]}}],separators=(",",":")))' \
+  selection_json=$(python3 -c 'import json,sys; source={"kind":"local_capture"}; print(json.dumps([{"target":{"kind":"content_dependency","binding":"environment"},"selection":{"declaration_id":"distribution","witness_hash":sys.argv[1],"witness_source":source,"qualification_hash":None,"remote_testimony":None}},{"target":{"kind":"content_dependency","binding":"environment"},"selection":{"declaration_id":"runtime","witness_hash":sys.argv[2],"witness_source":source,"qualification_hash":sys.argv[3],"remote_testimony":None}}],separators=(",",":")))' \
     "$distribution_witness" "$runtime_witness" "$qualification_hash")
   login_parameters=$(python3 -c 'import json,sys; print(json.dumps({"credential_profile_id":sys.argv[1]},separators=(",",":")))' \
     "$credential_profile")
@@ -283,7 +283,7 @@ if [[ -n $continue_selected_worker_from ]]; then
   confirmed_profile=$(python3 "$assert_response" confirmed-profile \
     "$profile_source" "$credential_profile")
   mapfile -t confirmed_profile_coordinate <<<"$confirmed_profile"
-  profile_request=$(python3 -c 'import json,sys; print(json.dumps({"profile_id":sys.argv[1]},separators=(",",":")))' \
+  profile_request=$(python3 -c 'import json,sys; print(json.dumps({"profile_id":sys.argv[1],"activation":{"kind":"ceremony"}},separators=(",",":")))' \
     "$credential_profile")
   run_json "$evidence_dir/19a-current-credential-profile.json" --no-project execute \
     service:credential-profiles/get --no-stream --input "$profile_request"
@@ -403,7 +403,7 @@ qualification_coordinate_id=${qualification_coordinate[1]}
 # Compose the complete selection batch against the caller-supplied exact pinned
 # consumer generation. The command has no ambient project contract: its closed
 # request carries the snapshot authority explicitly and no filesystem path.
-compose_request=$(python3 -c 'import json,sys; source={"kind":"local_capture"}; print(json.dumps({"consumer_ref":"config:test/runtime-consumer","project_context":{"snapshot_hash":sys.argv[1]},"selections":[{"declaration_id":"distribution","witness_hash":sys.argv[2],"witness_source":source,"qualification_hash":None},{"declaration_id":"runtime","witness_hash":sys.argv[3],"witness_source":source,"qualification_hash":sys.argv[4]}],"maximum_bytes":32768},separators=(",",":")))' \
+compose_request=$(python3 -c 'import json,sys; source={"kind":"local_capture"}; print(json.dumps({"consumer_ref":"config:test/runtime-consumer","project_context":{"snapshot_hash":sys.argv[1]},"selections":[{"declaration_id":"distribution","witness_hash":sys.argv[2],"witness_source":source,"qualification_hash":None,"remote_testimony":None},{"declaration_id":"runtime","witness_hash":sys.argv[3],"witness_source":source,"qualification_hash":sys.argv[4],"remote_testimony":None}],"maximum_bytes":32768},separators=(",",":")))' \
   "$consumer_snapshot" "$distribution_witness" "$runtime_witness" "$qualification_hash")
 run_json "$evidence_dir/10-composition.json" \
   external-content compose-product "$compose_request"
@@ -432,7 +432,7 @@ run_json "$evidence_dir/12-enrollment-worker-binding.json" --no-project \
 python3 "$assert_response" bind "$evidence_dir/12-enrollment-worker-binding.json" \
   "$expected_manifest" worker:fixture/enrollment
 
-profile_request=$(python3 -c 'import json,sys; print(json.dumps({"profile_id":sys.argv[1]},separators=(",",":")))' \
+profile_request=$(python3 -c 'import json,sys; print(json.dumps({"profile_id":sys.argv[1],"activation":{"kind":"ceremony"}},separators=(",",":")))' \
   "$credential_profile")
 run_json "$evidence_dir/13-credential-profile-create.json" --no-project execute \
   service:credential-profiles/create --no-stream --input "$profile_request"

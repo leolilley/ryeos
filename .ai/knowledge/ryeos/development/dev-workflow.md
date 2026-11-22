@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-01T20:42:16Z:cdbe689fda8273ace4e676e285019581983e873db68aa4b08a6359e21d021328:0LNhXf0eWhzNEHwhpYM8JeL44pu3kDHbOO98Rw9t4hmM3s5IdaH71KaDziyvx8cnTVIgYZMetjzc0vMjwirMDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-18T01:26:29Z:21da2077333a93b7dd5a70a932d0858c8a952059acbaaf083f8f39ea42826f76:zLtE1SGLf8HFm1mcAb+/+Chtwi66weCVYB0YEccgIW0p27o7rXBZkPpSgcpjk7TlJTZuONncjtKSteS9ynWaBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "dev-workflow"
@@ -13,7 +13,7 @@ version: "1.3.2"
 This directory is repository-contributor knowledge: it exists to help people
 and coding agents change, test, sign, review, and release the RyeOS project.
 Installed product architecture and operator runbooks belong in bundle knowledge,
-normally under `bundles/standard/.ai/knowledge/`.
+normally under `bundles/ryeos-docs/.ai/knowledge/`.
 
 Use this when an agent needs orientation before changing code. For exact build,
 signing, and install commands, prefer `development/build-and-test.md`.
@@ -80,7 +80,8 @@ Full confidence:
 | TUI shared model | `crates/clients/base/src/` |
 | TUI terminal client | `crates/clients/terminal/src/` |
 | Core bundle | `bundles/core/.ai/` |
-| Standard bundle | `bundles/standard/.ai/` |
+| Workflow bundles | `bundles/{knowledge,directive,graph}/.ai/` |
+| Documentation bundle | `bundles/ryeos-docs/.ai/` |
 | Dev publisher key | `.dev-keys/PUBLISHER_DEV.pem` |
 | Main runbook | `.ai/knowledge/ryeos/development/build-and-test.md` |
 
@@ -88,15 +89,15 @@ Full confidence:
 
 Derived and safe to regenerate:
 
-- `bundles/{core,standard}/.ai/bin/`
-- `bundles/{core,standard}/.ai/objects/`
-- `bundles/{core,standard}/.ai/refs/`
+- `bundles/{core,knowledge,directive,graph}/.ai/bin/`
+- `bundles/{core,knowledge,directive,graph}/.ai/objects/`
+- `bundles/{core,knowledge,directive,graph}/.ai/refs/`
 - `target/`
 
 Committed and meaningful:
 
-- `bundles/{core,standard}/PUBLISHER_TRUST.toml`
-- signed YAML under `bundles/{core,standard}/.ai/`
+- `bundles/{core,knowledge,directive,graph}/PUBLISHER_TRUST.toml`
+- signed YAML under `bundles/{core,knowledge,directive,graph}/.ai/`
 - Rust source and scripts
 
 ## Guardrails for agents

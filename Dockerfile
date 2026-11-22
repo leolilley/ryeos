@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Local full daemon + bundles composition image. Release publication uses the
+# Local standard daemon + bundles composition image. Release publication uses the
 # explicitly scoped Dockerfile.standard and Dockerfile.central-host images.
 
 # ── Stage 1: Build all binaries + publish bundles ──
@@ -61,11 +61,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 python3-venv python3-pip tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 
 WORKDIR /app
+
+# Node account. The daemon, `ryeos init` and every operator command in this
+# image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
+# root as the recorded actor of `ryeos node allow-restart` and
+# `ryeos node capacity reissue`, so a node running as root could never have
+# its restart inhibition cleared from inside its own container. The
+# entrypoint script is pid 1 and starts as root only to hand /data (a
+# platform volume, mounted root-owned) to this account, then replaces itself
+# with tini running as ryeos, so the init and the daemon share one uid and
+# the init needs no capability to forward the stop signal. The script runs
+# again under tini before any ryeos command.
+RUN groupadd --gid 10000 ryeos && \
+    useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
+      --shell /bin/bash ryeos && \
+    install -d -o ryeos -g ryeos -m 0750 /data /data/app
+
+# Platform shells (a host's SSH and dashboard shell) attach as root, after
+# checking that the service's running user has a login shell: the entrypoint
+# drops root to the node account before the daemon starts, so that account
+# carries bash above (a nologin shell makes the gateway close every session
+# right after it authenticates the operator). The shell grants the account
+# nothing: no password, no_new_privs, and ownership of the app root only.
+# Root keeps a ~/.ssh directory with mode 0700 and a set, random, discarded
+# password; the base image ships root locked, which the gateway refuses.
+RUN install -d -m 0700 /root/.ssh && \
+    usermod -p "$(openssl rand -base64 48 | openssl passwd -6 -stdin)" root
 
 # Daemon + ops CLI + core tools (authorize-client, sign, identity, etc.).
 COPY --from=builder /build/target/release/ryeosd             /usr/local/bin/ryeosd
@@ -75,25 +102,26 @@ COPY --from=builder /build/target/release/ryeos-core-tools   /usr/local/bin/ryeo
 # Bundles with rebuilt CAS, baked into /opt (read-only template).
 COPY --from=builder /build/bundles/.ai       /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core      /opt/ryeos/core
-COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
-COPY --from=builder /build/bundles/standard  /opt/ryeos/standard
+COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=builder /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=builder /build/bundles/directive /opt/ryeos/directive
+COPY --from=builder /build/bundles/graph /opt/ryeos/graph
+COPY --from=builder /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=builder /build/bundles/web       /opt/ryeos/web
 COPY --from=builder /build/bundles/browser   /opt/ryeos/browser
 COPY --from=builder /build/bundles/ryeos-ui  /opt/ryeos/ryeos-ui
-COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 COPY --from=builder /build/bundles/codex     /opt/ryeos/codex
-COPY --from=builder /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=builder /build/bundles/opencode  /opt/ryeos/opencode
-COPY --from=builder /build/bundles/local-inference /opt/ryeos/local-inference
 
 # Entrypoint runs ryeos init --non-interactive every boot (idempotent) then starts daemon.
 # /data/app persists across redeploys.
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
-ENV RYEOS_INIT_NODE_PROFILE=full
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+ENV RYEOS_INIT_NODE_PROFILE=standard
 EXPOSE 8000
 
 # Re-declared here: build-stage ARGs do not carry across FROM boundaries.
@@ -111,4 +139,4 @@ LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

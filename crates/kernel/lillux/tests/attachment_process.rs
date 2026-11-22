@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use lillux::{
-    ExactExclusiveFileLock, SubprocessLimits, SubprocessRequest, is_alive,
-    retain_fork_sensitive_descriptors, spawn, spawn_awaiting_attachment,
-    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
+    ExactExclusiveFileLock, SubprocessLimits, SubprocessRequest, is_alive, spawn,
+    spawn_awaiting_attachment, supervised_launcher_attachment_status_pipe,
+    supervised_launcher_status_pipe, try_retain_fork_sensitive_descriptors,
 };
 
 fn shell(script: String) -> SubprocessRequest {
@@ -176,7 +176,7 @@ fn supervised_target_uses_the_same_typed_attachment_transition() {
         .inherited_descriptor()
         .unwrap();
     let script = format!(
-        "(/bin/dd bs=1 count=1 <&{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\"",
+        "(/bin/dd bs=1 count=1 < /proc/self/fd/{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" > /proc/self/fd/{status_fd}; wait \"$target\"",
         marker.display()
     );
     let mut request = shell(script);
@@ -239,7 +239,7 @@ fn held_launcher_setup_failures_return_exact_cleanup_proof() {
         let pipe = supervised_launcher_attachment_status_pipe().unwrap();
         let status_fd = pipe.writer_descriptor().unwrap();
         let report = response.map_or_else(String::new, |document| {
-            format!("printf '%s\\n' '{document}' >&{status_fd};")
+            format!("printf '%s\\n' '{document}' > /proc/self/fd/{status_fd};")
         });
         let mut request = shell(format!(
             "{report} /bin/sleep 30; printf unexpected > {}",
@@ -367,7 +367,7 @@ fn concurrent_attachment_boundaries_release_only_their_own_targets() {
 
 #[test]
 fn direct_fork_waits_for_fork_sensitive_descriptor_scopes() {
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let pending = spawn_awaiting_attachment(shell("exit 0".to_string()))
@@ -390,7 +390,7 @@ fn direct_fork_waits_for_fork_sensitive_descriptor_scopes() {
 
 #[test]
 fn direct_fork_fails_loudly_for_same_thread_descriptor_scope() {
-    let lease = retain_fork_sensitive_descriptors();
+    let lease = try_retain_fork_sensitive_descriptors().unwrap();
     let error = match spawn_awaiting_attachment(shell("exit 0".to_string())) {
         Ok(pending) => {
             pending.abort_and_reap().expect("abort unexpected process");
@@ -494,7 +494,7 @@ fn supervised_output_overflow_before_release_fails_closed() {
         .inherited_descriptor()
         .unwrap();
     let script = format!(
-        "(/bin/dd bs=1 count=1 <&{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; /bin/dd if=/dev/zero bs=1024 count=4 2>/dev/null; wait \"$target\"",
+        "(/bin/dd bs=1 count=1 < /proc/self/fd/{release_reader} >/dev/null 2>&1; printf executed > {}) & target=$!; printf '{{\"child-pid\":%s}}\\n' \"$target\" > /proc/self/fd/{status_fd}; /bin/dd if=/dev/zero bs=1024 count=4 2>/dev/null; wait \"$target\"",
         marker.display()
     );
     let mut request = shell(script);

@@ -10,13 +10,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
-use ryeos_app::node_document;
 use ryeos_app::state::AppState;
+use ryeos_engine::scheduled_fire_context::ScheduleFireLimits;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_scheduler::crontab;
+use ryeos_node_runtime::node_document;
 use ryeos_scheduler::projection;
-use ryeos_scheduler::types::{
-    ScheduleExecution, ScheduleExecutionAuthority, ScheduleManagedBy, ScheduleSourceRecord,
+use ryeos_scheduler::types::{ScheduleManagedBy, ScheduleSourceRecord};
+use ryeos_scheduler_contract::{
+    ScheduleAutoPauseReason, ScheduleExecution, ScheduleExecutionAuthority, parse_iso_ts,
+    parse_misfire_policy, parse_overlap_policy, validate_expression, validate_schedule_bounds,
+    validate_schedule_id, validate_timezone,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -37,6 +40,15 @@ pub struct Request {
     #[serde(default)]
     pub project_root: Option<String>,
     pub execution_policy: ryeos_engine::execution_contract::ExecutionPolicy,
+    /// Per-fire ceiling, clamped into each fire under the item and node caps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ScheduleFireLimits>,
+    /// Lifetime bound: at most this many boundaries from registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fires: Option<u32>,
+    /// Lifetime bound: no boundary at or after this RFC 3339 instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 pub async fn handle(
@@ -46,21 +58,23 @@ pub async fn handle(
 ) -> Result<Value> {
     // Caller identity is used for execution authority — must be verified.
     ctx.require_verified().map_err(|e| anyhow::anyhow!(e))?;
-    let _mutation_guard = state.scheduler_runtime_gate.clone().write_owned().await;
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())?;
+    let _mutation_guard = scheduler.acquire_mutation().await?;
+    let scheduler_db = scheduler.scheduler_db();
 
     // Validate
-    crontab::validate_schedule_id(&req.schedule_id)?;
+    validate_schedule_id(&req.schedule_id)?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
         .with_context(|| format!("invalid item_ref: {}", req.item_ref))?;
     ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)?;
-    crontab::validate_expression(&req.schedule_type, &req.expression)?;
+    validate_expression(&req.schedule_type, &req.expression)?;
 
-    crontab::validate_timezone(&req.timezone)?;
+    validate_timezone(&req.timezone)?;
 
     // All overlap policies ship day 1: allow, skip, cancel_previous.
-    ryeos_scheduler::overlap::parse_overlap_policy(&req.overlap_policy)?;
+    parse_overlap_policy(&req.overlap_policy)?;
     // All misfire policies ship day 1: skip, fire_once_now, catch_up_bounded:N, catch_up_within_secs:S.
-    ryeos_scheduler::misfire::parse_misfire_policy(&req.misfire_policy)?;
+    parse_misfire_policy(&req.misfire_policy)?;
     if req.lateness_grace_secs <= 0 {
         bail!(
             "lateness_grace_secs must be positive, got: {}",
@@ -79,13 +93,26 @@ pub async fn handle(
     }
 
     if req.schedule_type == "at"
-        && crontab::is_at_past(&req.expression, lillux::time::timestamp_millis())
+        && ryeos_scheduler::crontab::is_at_past(&req.expression, lillux::time::timestamp_millis())
     {
         bail!("at schedule timestamp is in the past");
     }
+    validate_schedule_bounds(
+        req.limits.as_ref(),
+        req.max_fires,
+        req.expires_at.as_deref(),
+    )?;
+    if req
+        .expires_at
+        .as_deref()
+        .and_then(parse_iso_ts)
+        .is_some_and(|expires_at| expires_at <= lillux::time::timestamp_millis())
+    {
+        bail!("expires_at is in the past");
+    }
 
     // Check if schedule already exists (for preserving registered_at on update)
-    let existing_spec = state.scheduler_db.get_spec(&req.schedule_id)?;
+    let existing_spec = scheduler_db.get_spec(&req.schedule_id)?;
 
     // Ownership check on update: the caller must be the existing
     // requester. On create, no ownership check needed —
@@ -126,7 +153,7 @@ pub async fn handle(
     }
 
     let source_mutation = ScheduleSourceMutation::acquire(
-        state.as_ref(),
+        scheduler.as_ref(),
         &req.schedule_id,
         existing_spec.as_ref().map(|spec| spec.spec_hash.as_str()),
     )?;
@@ -170,7 +197,14 @@ pub async fn handle(
     capabilities.sort();
     capabilities.dedup();
     if capabilities.is_empty() || capabilities != requested_capabilities {
-        bail!("scheduler capabilities must be a non-empty sorted unique capability subset");
+        return Err(structured_refusal(
+            400,
+            SCHEDULER_CAPABILITIES_NOT_CANONICAL,
+            "scheduler capabilities must be a non-empty list that is sorted and has no \
+             duplicates; send the capabilities the schedule needs, sorted and unique"
+                .to_owned(),
+            serde_json::json!({ "capabilities": requested_capabilities }),
+        ));
     }
     let authorizer = ryeos_runtime::authorizer::Authorizer::new();
     for capability in &capabilities {
@@ -183,6 +217,8 @@ pub async fn handle(
                 "scheduler capability {capability:?} is not covered by the authenticated caller grant"
             ))?;
     }
+
+    refuse_uncovered_item_declarations(state.as_ref(), &req, &ctx.fingerprint, &capabilities)?;
 
     // On update the authenticated owner explicitly replaces the policy,
     // capability ceiling, and stable grant generation. Nothing is inherited
@@ -212,27 +248,31 @@ pub async fn handle(
             authority,
             capabilities,
             policy: req.execution_policy.clone(),
+            limits: req.limits.clone(),
+            max_fires: req.max_fires,
+            expires_at: req.expires_at.clone(),
         },
         managed_by: None,
+        paused_reason: None,
     };
     source_record.validate(Some(&req.schedule_id))?;
+    refuse_authority_that_cannot_hold_at_fire(
+        &ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts::from_state(
+            state.as_ref(),
+        ),
+        &source_record.execution,
+    )?;
     let body = serde_json::to_value(&source_record)?;
 
     // Write signed YAML through the same pinned source transaction used for
     // the verified existing-source read.
-    let (spec_path, verified) = source_mutation.publish(&body, &state.identity)?;
+    let (spec_path, verified) = source_mutation.publish(&body, scheduler.identity())?;
     let rec = verified.to_spec_record()?;
     let was_existing = existing_spec.is_some();
-    state.scheduler_db.upsert_spec(&rec)?;
+    scheduler_db.upsert_spec(&rec)?;
 
     // Ping timer loop
-    if let Some(ref tx) = state.scheduler_reload_tx
-        && let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
-            schedule_id: Some(req.schedule_id.clone()),
-        })
-    {
-        tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
-    }
+    scheduler.notify_reload(Some(req.schedule_id.clone()));
 
     Ok(serde_json::json!({
         "schedule_id": req.schedule_id,
@@ -245,9 +285,108 @@ pub async fn handle(
         "overlap_policy": req.overlap_policy,
         "lateness_grace_secs": req.lateness_grace_secs,
         "enabled": req.enabled,
+        "limits": req.limits,
+        "max_fires": req.max_fires,
+        "expires_at": req.expires_at,
         "spec_path": spec_path.display().to_string(),
         "created": !was_existing,
     }))
+}
+
+/// Code of the 400 for a capability list the scheduler cannot accept as is.
+pub const SCHEDULER_CAPABILITIES_NOT_CANONICAL: &str = "scheduler_capabilities_not_canonical";
+use crate::schedule_admission::{refuse_authority_that_cannot_hold_at_fire, structured_refusal};
+
+/// Refuse at registration a schedule whose capabilities do not cover what its
+/// item declares. A fire runs with exactly the schedule's registered
+/// capabilities as its caller, so a schedule that cannot cover the item would
+/// register and then be refused on every fire; this reports it once, now, with
+/// the same typed `caller_capability_not_covered` code.
+///
+/// The item is read from the node's engine under the schedule's project
+/// policy: projectless, or live-direct with the registered `project_root`. A
+/// pinned-project schedule resolves its item from a snapshot that exists only
+/// at fire time, and an item that does not resolve yet (a project item synced
+/// later) has no declaration to judge; both stay judged at fire time.
+fn refuse_uncovered_item_declarations(
+    state: &AppState,
+    req: &Request,
+    principal: &str,
+    capabilities: &[String],
+) -> Result<()> {
+    use ryeos_engine::contracts::{
+        EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
+        SubjectResolutionAuthority,
+    };
+    use ryeos_engine::execution_contract::ProjectExecutionPolicy;
+
+    let (project_context, authority, project_root) = match &req.execution_policy.project {
+        ProjectExecutionPolicy::Projectless => (
+            ProjectContext::None,
+            SubjectResolutionAuthority::Projectless,
+            None,
+        ),
+        ProjectExecutionPolicy::LiveDirect { .. } => {
+            let Some(root) = req.project_root.as_deref() else {
+                return Ok(());
+            };
+            let root = PathBuf::from(root);
+            (
+                ProjectContext::LocalPath { path: root.clone() },
+                SubjectResolutionAuthority::LiveFs,
+                Some(root),
+            )
+        }
+        ProjectExecutionPolicy::Pinned { .. } => return Ok(()),
+    };
+    let site_id = state.threads.site_id().to_owned();
+    let plan_context = PlanContext {
+        // Live and projectless: the live project is its own logical root.
+        logical_project_root: None,
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: principal.to_owned(),
+            scopes: capabilities.to_vec(),
+        }),
+        project_context,
+        subject_resolution_authority: authority,
+        current_site_id: site_id.clone(),
+        origin_site_id: site_id,
+        execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
+        validate_only: true,
+    };
+    let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
+        .with_context(|| format!("invalid item_ref: {}", req.item_ref))?;
+    let declared = match ryeos_executor::execution::launch::composed_declared_caps(
+        &state.engine,
+        &plan_context,
+        &item_ref,
+        project_root,
+    ) {
+        Ok(declared) => declared,
+        Err(error) => {
+            tracing::debug!(
+                schedule_id = %req.schedule_id,
+                item_ref = %req.item_ref,
+                error = %error,
+                "schedule item does not resolve at registration; its declarations are judged at fire time"
+            );
+            return Ok(());
+        }
+    };
+    ryeos_executor::execution::launch::require_declared_caps_covered(
+        declared,
+        capabilities,
+        principal,
+        &req.item_ref,
+    )
+    .map_err(|error| {
+        anyhow::Error::new(ryeos_app::handler_error::HandlerError::Structured {
+            code: error.code().to_string(),
+            status: error.http_status().as_u16(),
+            body: ryeos_executor::structured_error::dispatch_error_value(&error),
+        })
+    })
 }
 
 pub(crate) fn authenticated_schedule_authority(
@@ -255,29 +394,18 @@ pub(crate) fn authenticated_schedule_authority(
     state: &AppState,
     registration_request_hash: String,
 ) -> Result<ScheduleExecutionAuthority> {
-    ctx.require_verified()
-        .map_err(|error| anyhow::anyhow!(error))?;
-    let principal_class = ctx
-        .authorized_key_class
-        .context("schedule registration requires a RyeOS authorized-key principal class")?;
-    let grant_authority = ctx.authenticated_grant_authority.clone().context(
-        "schedule registration requires stable authorized-key grant-generation evidence",
-    )?;
-    let origin_site_id = ctx.execution_origin(state.threads.site_id());
-    Ok(ScheduleExecutionAuthority::Authenticated {
-        principal_id: ctx.fingerprint.clone(),
-        principal_class,
-        effective_origin_site_id: origin_site_id,
-        grant_authority,
+    crate::project_deploy::authenticated_schedule_authority_for_site(
+        ctx,
+        state.threads.site_id(),
         registration_request_hash,
-    })
+    )
 }
 
 pub(super) fn canonical_schedule_source_path(
     app_root: &Path,
     schedule_id: &str,
 ) -> Result<PathBuf> {
-    crontab::validate_schedule_id(schedule_id)?;
+    validate_schedule_id(schedule_id)?;
     let schedules_dir = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
@@ -287,11 +415,11 @@ pub(super) fn canonical_schedule_source_path(
 }
 
 pub(super) fn load_existing_schedule_source(
-    state: &AppState,
+    scheduler: &ryeos_scheduler_service::SchedulerService,
     schedule_id: &str,
     expected_spec_hash: Option<&str>,
 ) -> Result<Option<projection::VerifiedScheduleSource>> {
-    let source = canonical_schedule_source_path(&state.config.app_root, schedule_id)?;
+    let source = canonical_schedule_source_path(scheduler.app_root(), schedule_id)?;
     match std::fs::symlink_metadata(&source) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -300,7 +428,11 @@ pub(super) fn load_existing_schedule_source(
                 .with_context(|| format!("inspect schedule source {}", source.display()));
         }
     }
-    let verified = projection::load_verified_schedule_source(&source, &state.engine.trust_store)?;
+    let verified = projection::load_verified_schedule_source(
+        &source,
+        scheduler.trust_store(),
+        scheduler.identity().fingerprint(),
+    )?;
     if let Some(expected) = expected_spec_hash
         && verified.spec_hash != expected
     {
@@ -329,16 +461,12 @@ struct ScheduleSourceMutation<'a> {
 
 impl<'a> ScheduleSourceMutation<'a> {
     fn acquire(
-        state: &'a AppState,
+        scheduler: &'a ryeos_scheduler_service::SchedulerService,
         schedule_id: &str,
         expected_spec_hash: Option<&str>,
     ) -> Result<Self> {
-        crontab::validate_schedule_id(schedule_id)?;
-        let node_path = state
-            .config
-            .app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("node");
+        validate_schedule_id(schedule_id)?;
+        let node_path = scheduler.app_root().join(ryeos_engine::AI_DIR).join("node");
         let node_directory = lillux::PinnedDirectory::open_or_create(&node_path)?;
         let directory =
             node_directory.open_or_create_child(std::ffi::OsStr::new("schedules"), 0o777)?;
@@ -352,7 +480,8 @@ impl<'a> ScheduleSourceMutation<'a> {
             Some(projection::verify_schedule_source_content(
                 &path,
                 &content,
-                &state.engine.trust_store,
+                scheduler.trust_store(),
+                scheduler.identity().fingerprint(),
             )?)
         } else {
             None
@@ -376,14 +505,14 @@ impl<'a> ScheduleSourceMutation<'a> {
             name,
             current_file,
             verified,
-            trust_store: &state.engine.trust_store,
+            trust_store: scheduler.trust_store(),
         })
     }
 
     fn publish(
         &self,
         body: &Value,
-        identity: &ryeos_app::identity::NodeIdentity,
+        identity: &ryeos_node_runtime::identity::NodeIdentity,
     ) -> Result<(PathBuf, projection::VerifiedScheduleSource)> {
         let schedule_id = self
             .path
@@ -396,10 +525,15 @@ impl<'a> ScheduleSourceMutation<'a> {
             self.current_file.as_ref(),
             &bytes,
             0o600,
+            crate::API_TEMP_PURPOSE,
         )?;
         let content = String::from_utf8(bytes).context("signed schedule source is not UTF-8")?;
-        let verified =
-            projection::verify_schedule_source_content(&self.path, &content, self.trust_store)?;
+        let verified = projection::verify_schedule_source_content(
+            &self.path,
+            &content,
+            self.trust_store,
+            identity.fingerprint(),
+        )?;
         Ok((self.path.clone(), verified))
     }
 }
@@ -412,18 +546,18 @@ fn is_project_managed_schedule(record: &ScheduleSourceRecord) -> bool {
 }
 
 pub(super) fn verify_schedule_enabled(
-    state: &AppState,
+    scheduler: &ryeos_scheduler_service::SchedulerService,
     current: &ryeos_scheduler::types::ScheduleSpecRecord,
     enabled: bool,
 ) -> Result<()> {
     let source =
-        load_existing_schedule_source(state, &current.schedule_id, Some(&current.spec_hash))?
+        load_existing_schedule_source(scheduler, &current.schedule_id, Some(&current.spec_hash))?
             .with_context(|| {
-                format!(
-                    "schedule projection {} has no trusted source",
-                    current.schedule_id
-                )
-            })?;
+            format!(
+                "schedule projection {} has no trusted source",
+                current.schedule_id
+            )
+        })?;
     if source.record.enabled != enabled {
         bail!(
             "schedule {} source enabled state diverges from its projection",
@@ -433,13 +567,17 @@ pub(super) fn verify_schedule_enabled(
     Ok(())
 }
 
+/// The one signed pause/resume write. `paused_reason` names why the scheduler
+/// paused the schedule by itself; an operator pause passes `None`, and enabling
+/// always clears it.
 pub(super) fn rewrite_schedule_enabled(
-    state: &AppState,
+    scheduler: &ryeos_scheduler_service::SchedulerService,
     current: &ryeos_scheduler::types::ScheduleSpecRecord,
     enabled: bool,
+    paused_reason: Option<ScheduleAutoPauseReason>,
 ) -> Result<ryeos_scheduler::types::ScheduleSpecRecord> {
     let mutation =
-        ScheduleSourceMutation::acquire(state, &current.schedule_id, Some(&current.spec_hash))?;
+        ScheduleSourceMutation::acquire(scheduler, &current.schedule_id, Some(&current.spec_hash))?;
     let source = mutation.verified.as_ref().with_context(|| {
         format!(
             "schedule projection {} has no trusted source",
@@ -448,10 +586,11 @@ pub(super) fn rewrite_schedule_enabled(
     })?;
     let mut record = source.record.clone();
     record.enabled = enabled;
+    record.paused_reason = if enabled { None } else { paused_reason };
     record.validate(Some(&current.schedule_id))?;
 
     let body = serde_json::to_value(&record)?;
-    let (_path, verified) = mutation.publish(&body, &state.identity)?;
+    let (_path, verified) = mutation.publish(&body, scheduler.identity())?;
     if verified.record.enabled != enabled {
         bail!(
             "rewritten schedule {} did not retain requested enabled state",
@@ -459,6 +598,80 @@ pub(super) fn rewrite_schedule_enabled(
         );
     }
     verified.to_spec_record()
+}
+
+/// Re-pin a schedule's signed source to `authority`, keeping every other
+/// field, including `registered_at`, the enabled state and any
+/// `paused_reason`. The caller has proven `authority` is the owner's current
+/// grant and still covers the schedule; this write only seals it.
+pub(super) fn rewrite_schedule_authority(
+    scheduler: &ryeos_scheduler_service::SchedulerService,
+    current: &ryeos_scheduler::types::ScheduleSpecRecord,
+    authority: ScheduleExecutionAuthority,
+) -> Result<ryeos_scheduler::types::ScheduleSpecRecord> {
+    let mutation =
+        ScheduleSourceMutation::acquire(scheduler, &current.schedule_id, Some(&current.spec_hash))?;
+    let source = mutation.verified.as_ref().with_context(|| {
+        format!(
+            "schedule projection {} has no trusted source",
+            current.schedule_id
+        )
+    })?;
+    let mut record = source.record.clone();
+    if record.execution.principal_id() != authority.principal_id() {
+        bail!(
+            "schedule {} authority cannot change principal on reauthorization",
+            current.schedule_id
+        );
+    }
+    record.execution.authority = authority;
+    record.validate(Some(&current.schedule_id))?;
+
+    let body = serde_json::to_value(&record)?;
+    let (_path, verified) = mutation.publish(&body, scheduler.identity())?;
+    verified.to_spec_record()
+}
+
+/// Pause a schedule on the scheduler's own judgement, through the same
+/// signed write `scheduler.pause` uses, under the scheduler mutation gate.
+///
+/// Returns `false` without writing when the schedule is gone, already paused,
+/// or no longer the exact generation `expected_spec_hash` names.
+pub async fn auto_pause_schedule(
+    scheduler: &ryeos_scheduler_service::SchedulerService,
+    schedule_id: &str,
+    expected_spec_hash: &str,
+    reason: ScheduleAutoPauseReason,
+) -> Result<bool> {
+    let _mutation_guard = scheduler.acquire_mutation().await?;
+    let scheduler_db = scheduler.scheduler_db();
+    let Some(spec) = scheduler_db.get_spec(schedule_id)? else {
+        return Ok(false);
+    };
+    if spec.spec_hash != expected_spec_hash || !spec.enabled {
+        return Ok(false);
+    }
+    let rec = rewrite_schedule_enabled(scheduler, &spec, false, Some(reason))?;
+    scheduler_db.upsert_spec(&rec)?;
+    scheduler.notify_reload(Some(schedule_id.to_owned()));
+    Ok(true)
+}
+
+/// The signed reason the scheduler recorded when it paused this schedule by
+/// itself, read from the trusted source of the exact projected generation.
+pub(super) fn schedule_paused_reason(
+    scheduler: &ryeos_scheduler_service::SchedulerService,
+    current: &ryeos_scheduler::types::ScheduleSpecRecord,
+) -> Result<Option<ScheduleAutoPauseReason>> {
+    let source =
+        load_existing_schedule_source(scheduler, &current.schedule_id, Some(&current.spec_hash))?
+            .with_context(|| {
+            format!(
+                "schedule projection {} has no trusted source",
+                current.schedule_id
+            )
+        })?;
+    Ok(source.record.paused_reason)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

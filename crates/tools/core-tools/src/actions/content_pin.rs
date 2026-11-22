@@ -1,12 +1,12 @@
 //! Complete signed external-content pins from current project bytes.
 //!
-//! The daemon-owned path is the only public authoring transaction. It observes
-//! production manifests but owns no CAS, thread, scheduler, or runtime handle.
+//! The operator's own process is the only authoring transaction: the daemon
+//! holds no operator key. It observes production manifests but owns no CAS,
+//! thread, scheduler, or runtime handle.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use ryeos_engine::external_content::{
@@ -53,34 +53,40 @@ struct AuthoringContext {
     kinds: KindRegistry,
     parsers: ParserDispatcher,
     trust_store: TrustStore,
-    project_trust: Arc<PinnedProjectTrustContent>,
     ignore_matcher: ryeos_state::ignore::IgnoreMatcher,
     signing_key: lillux::crypto::SigningKey,
 }
 
-/// Run the content-pin transaction under daemon-owned authority.
+/// Run the content-pin transaction in the operator's own process.
 ///
-/// Authentication and command/service admission stay in the daemon handler.
-/// This function consumes only the exact already-admitted engine, ignore
-/// policy, and operator signing key; it never opens node state or takes the
-/// process-wide offline state lock.
-pub fn run_content_pin_online(
+/// It loads the node's registered engine generation and the operator signing
+/// key from `app_root`, observes the project's production manifests and
+/// rewrites the pinned item. It owns no CAS, thread, scheduler, or runtime
+/// handle and never opens node state.
+pub fn run_content_pin(
+    app_root: &Path,
     item_ref: &str,
     project_path: &Path,
     options: &ContentPinOptions,
-    engine: &ryeos_engine::engine::Engine,
-    ignore_matcher: &ryeos_state::ignore::IgnoreMatcher,
-    signing_key: &lillux::crypto::SigningKey,
 ) -> Result<ContentPinReport> {
     let project_root = lillux::PinnedDirectory::open(project_path)?
         .ok_or_else(|| anyhow!("project root is unavailable"))?;
     let _project_lock = project_root.lock_exclusive()?;
-    let context = AuthoringContext::from_daemon(
-        &project_root,
-        engine,
-        ignore_matcher.clone(),
-        signing_key.clone(),
-    )?;
+    let authoring = sign::load_offline_authoring(app_root)?;
+    let context = AuthoringContext {
+        kinds: authoring.kinds,
+        parsers: authoring.parsers,
+        trust_store: authoring.node_trust_store,
+        // The offline path has no admitted node-policy snapshot. Pinning the
+        // complete durable-capture-safe unit is the conservative superset of
+        // every node-specific ignored view.
+        ignore_matcher: ryeos_state::ignore::IgnoreMatcher::from_config(
+            &ryeos_state::ignore::IgnoreConfig {
+                patterns: Vec::new(),
+            },
+        )?,
+        signing_key: authoring.signing_key,
+    };
     run_content_pin_prepared(item_ref, project_path, options, project_root, context)
 }
 
@@ -111,7 +117,7 @@ fn run_content_pin_prepared(
     if schema.excludes_relative_path(Path::new(&target.bare_id)) {
         bail!("project item is beneath a kind-excluded auxiliary directory");
     }
-    let (item_parent, item_name, item_relative, source_format, mut original_file) =
+    let (item_parent, item_name, item_relative, source_format, original_file) =
         open_item_source(&project_root, schema, &target.bare_id)?;
     let ai_root = project_path.join(ryeos_engine::AI_DIR);
     if crate::actions::runtime_owned::is_runtime_owned_file(
@@ -132,7 +138,7 @@ fn run_content_pin_prepared(
     }
     let original_mode = original_observation.permission_mode()?;
     let original = lillux::read_open_regular_file_stable_bounded(
-        &mut original_file,
+        &original_file,
         &original_observation,
         ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
     )
@@ -249,24 +255,20 @@ fn run_content_pin_prepared(
         bail!("external content changed during pin authoring; item was not modified");
     }
     let current_original = lillux::read_open_regular_file_stable_bounded(
-        &mut original_file,
+        &original_file,
         &original_observation,
         ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
     )?;
     if current_original != original {
         bail!("project item changed during pin authoring; item was not modified");
     }
-    context
-        .project_trust
-        .ensure_unchanged()
-        .context("project trust changed during pin authoring; item was not modified")?;
 
     let signature_is_current = existing_signature.as_ref().is_some_and(|header| {
         lillux::signature::is_valid_signature_for(
             &header.content_hash,
             &header.signature_b64,
             &header.signer_fingerprint,
-            lillux::signature::content_to_sign(&body, envelope.after_shebang),
+            &body,
             &signing_key.verifying_key(),
             &signer_fingerprint,
         )
@@ -300,9 +302,9 @@ fn run_content_pin_prepared(
                 if !observed.matches_quarantined_incumbent(&expected_observation) {
                     bail!("project item metadata changed before publication");
                 }
-                let mut incumbent = incumbent.try_clone()?;
+                let incumbent = incumbent.try_clone()?;
                 let bytes = lillux::read_open_regular_file_stable_bounded(
-                    &mut incumbent,
+                    &incumbent,
                     &observed,
                     ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
                 )?;
@@ -367,262 +369,6 @@ fn run_content_pin_prepared(
         durability_uncertain,
         declarations: declaration_reports,
     })
-}
-
-impl AuthoringContext {
-    fn from_daemon(
-        project_root: &lillux::PinnedDirectory,
-        engine: &ryeos_engine::engine::Engine,
-        ignore_matcher: ryeos_state::ignore::IgnoreMatcher,
-        signing_key: lillux::crypto::SigningKey,
-    ) -> Result<Self> {
-        let project_trust = Arc::new(PinnedProjectTrustContent::new(project_root.try_clone()?));
-        let trust_store = engine
-            .node_trust_store
-            .with_project_keys_from_content(project_trust.as_ref())
-            .context("load project trust")?;
-        Ok(Self {
-            kinds: engine.kinds.clone(),
-            parsers: engine.parser_dispatcher.clone(),
-            trust_store,
-            project_trust,
-            ignore_matcher,
-            signing_key,
-        })
-    }
-}
-
-/// Exact project-trust view used during one content-pin authoring transaction.
-/// Path traversal and descriptor identity remain owned by Lillux; this layer
-/// only adapts those facts to the engine's generic project-content contract.
-struct PinnedProjectTrustContent {
-    root: lillux::PinnedDirectory,
-    observed: Mutex<BTreeMap<PathBuf, String>>,
-}
-
-impl PinnedProjectTrustContent {
-    fn new(root: lillux::PinnedDirectory) -> Self {
-        Self {
-            root,
-            observed: Mutex::new(BTreeMap::new()),
-        }
-    }
-
-    fn engine_error(error: impl std::fmt::Display) -> ryeos_engine::error::EngineError {
-        ryeos_engine::error::EngineError::Internal(error.to_string())
-    }
-
-    fn open_parent<'a>(&self, relative: &'a Path) -> Result<(lillux::PinnedDirectory, &'a OsStr)> {
-        let name = relative
-            .file_name()
-            .ok_or_else(|| anyhow!("project trust path has no file name"))?;
-        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-        let parent = if parent.as_os_str().is_empty() {
-            self.root.try_clone()?
-        } else {
-            open_directory_relative(
-                &self.root,
-                parent
-                    .to_str()
-                    .ok_or_else(|| anyhow!("project trust path is not UTF-8"))?,
-            )?
-        };
-        Ok((parent, name))
-    }
-
-    fn ensure_unchanged(&self) -> Result<()> {
-        let expected = self
-            .observed
-            .lock()
-            .map_err(|_| anyhow!("project trust observation lock was poisoned"))?
-            .clone();
-        let prefix = Path::new(ryeos_engine::AI_DIR).join(ryeos_engine::TRUST_KEYS_DIR);
-        let Some(directory) = open_directory_relative_optional(
-            &self.root,
-            prefix
-                .to_str()
-                .ok_or_else(|| anyhow!("project trust prefix is not UTF-8"))?,
-        )?
-        else {
-            if expected.is_empty() {
-                self.root.ensure_path_binding()?;
-                return Ok(());
-            }
-            bail!("project trust directory disappeared");
-        };
-        let files = directory.regular_files_bounded(ryeos_engine::trust::MAX_TRUST_DOCUMENTS)?;
-        let mut current = BTreeMap::new();
-        let mut total_bytes = 0_u64;
-        for file in files {
-            let relative = prefix.join(file.name());
-            if !ryeos_engine::trust::is_project_trust_document(Path::new(file.name())) {
-                continue;
-            }
-            let observation = file.observation()?;
-            if observation.size() > ryeos_engine::trust::MAX_TRUST_DOCUMENT_BYTES {
-                bail!("project trust document exceeds its byte bound");
-            }
-            total_bytes = total_bytes
-                .checked_add(observation.size())
-                .ok_or_else(|| anyhow!("project trust byte count overflow"))?;
-            if total_bytes > ryeos_engine::trust::MAX_TRUST_DIRECTORY_BYTES {
-                bail!("project trust documents exceed their aggregate byte bound");
-            }
-            let digest = file.digest_stable_exact(&observation)?;
-            current.insert(relative, digest);
-        }
-        directory.ensure_path_binding()?;
-        self.root.ensure_path_binding()?;
-        if current != expected {
-            bail!("project trust documents changed during authoring");
-        }
-        Ok(())
-    }
-}
-
-impl ryeos_engine::project_content::AuthoritativeProjectContent for PinnedProjectTrustContent {
-    fn list_files(
-        &self,
-        prefix: &Path,
-        recursive: bool,
-        max_entries: usize,
-    ) -> std::result::Result<
-        Vec<ryeos_engine::project_content::ProjectContentEntry>,
-        ryeos_engine::error::EngineError,
-    > {
-        if recursive {
-            return Err(Self::engine_error(
-                "project trust enumeration must be non-recursive",
-            ));
-        }
-        let Some(directory) = open_directory_relative_optional(
-            &self.root,
-            prefix
-                .to_str()
-                .ok_or_else(|| Self::engine_error("project trust prefix is not UTF-8"))?,
-        )
-        .map_err(Self::engine_error)?
-        else {
-            return Ok(Vec::new());
-        };
-        let files = directory
-            .regular_files_bounded(max_entries)
-            .map_err(Self::engine_error)?;
-        let mut observed = self.observed.lock().map_err(Self::engine_error)?;
-        let mut entries = Vec::with_capacity(files.len());
-        let mut total_bytes = 0_u64;
-        for file in files {
-            let relative_path = PathBuf::from(file.name());
-            if !ryeos_engine::trust::is_project_trust_document(&relative_path) {
-                continue;
-            }
-            let observation = file.observation().map_err(Self::engine_error)?;
-            if observation.size() > ryeos_engine::trust::MAX_TRUST_DOCUMENT_BYTES {
-                return Err(Self::engine_error(
-                    "project trust document exceeds its byte bound",
-                ));
-            }
-            total_bytes = total_bytes
-                .checked_add(observation.size())
-                .ok_or_else(|| Self::engine_error("project trust byte count overflow"))?;
-            if total_bytes > ryeos_engine::trust::MAX_TRUST_DIRECTORY_BYTES {
-                return Err(Self::engine_error(
-                    "project trust documents exceed their aggregate byte bound",
-                ));
-            }
-            let content_hash = file
-                .digest_stable_exact(&observation)
-                .map_err(Self::engine_error)?;
-            observed.insert(prefix.join(&relative_path), content_hash.clone());
-            entries.push(ryeos_engine::project_content::ProjectContentEntry {
-                relative_path,
-                content_hash,
-                size: observation.size(),
-                normalized_mode: observation.portable_mode().map_err(Self::engine_error)?,
-            });
-        }
-        directory
-            .ensure_path_binding()
-            .map_err(Self::engine_error)?;
-        Ok(entries)
-    }
-
-    fn read_file(
-        &self,
-        relative_path: &Path,
-        max_bytes: u64,
-    ) -> std::result::Result<Option<Vec<u8>>, ryeos_engine::error::EngineError> {
-        let (parent, name) = self
-            .open_parent(relative_path)
-            .map_err(Self::engine_error)?;
-        let Some(mut file) = parent
-            .open_regular(name, false)
-            .map_err(Self::engine_error)?
-        else {
-            return Ok(None);
-        };
-        let observation = lillux::observe_open_regular_file(&file).map_err(Self::engine_error)?;
-        let bytes =
-            lillux::read_open_regular_file_stable_bounded(&mut file, &observation, max_bytes)
-                .map_err(Self::engine_error)?;
-        let digest = lillux::sha256_hex(&bytes);
-        if self
-            .observed
-            .lock()
-            .map_err(Self::engine_error)?
-            .get(relative_path)
-            .is_some_and(|expected| expected != &digest)
-        {
-            return Err(Self::engine_error(
-                "project trust key changed during authoring",
-            ));
-        }
-        parent.ensure_path_binding().map_err(Self::engine_error)?;
-        Ok(Some(bytes))
-    }
-
-    fn validates_file(
-        &self,
-        relative_path: &Path,
-        content_hash: &str,
-    ) -> std::result::Result<bool, ryeos_engine::error::EngineError> {
-        let (parent, name) = self
-            .open_parent(relative_path)
-            .map_err(Self::engine_error)?;
-        let Some(file) = parent
-            .open_regular(name, false)
-            .map_err(Self::engine_error)?
-        else {
-            return Ok(false);
-        };
-        let observation = lillux::observe_open_regular_file(&file).map_err(Self::engine_error)?;
-        if observation.size() > ryeos_engine::trust::MAX_TRUST_DOCUMENT_BYTES {
-            return Err(Self::engine_error(
-                "project trust document exceeds its byte bound",
-            ));
-        }
-        let mut descriptor = file.try_clone().map_err(Self::engine_error)?;
-        let (digest, _) =
-            lillux::digest_open_regular_file_stable_exact(&mut descriptor, observation.size())
-                .map_err(Self::engine_error)?;
-        parent.ensure_path_binding().map_err(Self::engine_error)?;
-        Ok(digest == content_hash)
-    }
-
-    fn validates_absence(
-        &self,
-        relative_path: &Path,
-    ) -> std::result::Result<bool, ryeos_engine::error::EngineError> {
-        let (parent, name) = self
-            .open_parent(relative_path)
-            .map_err(Self::engine_error)?;
-        let absent = parent
-            .entry_no_follow(name)
-            .map_err(Self::engine_error)?
-            .is_none();
-        parent.ensure_path_binding().map_err(Self::engine_error)?;
-        Ok(absent)
-    }
 }
 
 fn open_item_source<'a>(
@@ -899,6 +645,7 @@ mod tests {
             digest: digest.map(str::to_owned),
             exclude: Vec::new(),
             metadata_hint: None,
+            qualification_allowance: None,
             mount_root: ryeos_engine::external_content::ExternalContentMountRoot::Project,
             mount: format!("vendor/{id}"),
         }
@@ -1064,45 +811,6 @@ mod tests {
                 },
             )
             .is_ok()
-        );
-    }
-
-    #[test]
-    fn project_trust_catalog_filters_and_bounds_before_hashing_bytes() {
-        use ryeos_engine::project_content::AuthoritativeProjectContent as _;
-
-        let root = tempfile::tempdir().unwrap();
-        let trust = root.path().join(".ai/config/keys/trusted");
-        std::fs::create_dir_all(&trust).unwrap();
-        let ignored = std::fs::File::create(trust.join("huge.unsupported")).unwrap();
-        ignored
-            .set_len(ryeos_engine::trust::MAX_TRUST_DOCUMENT_BYTES + 1)
-            .unwrap();
-        std::fs::write(trust.join("valid.pub"), b"small").unwrap();
-        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
-        let content = PinnedProjectTrustContent::new(pinned);
-        let entries = content
-            .list_files(
-                Path::new(".ai/config/keys/trusted"),
-                false,
-                ryeos_engine::trust::MAX_TRUST_DOCUMENTS,
-            )
-            .unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].relative_path, PathBuf::from("valid.pub"));
-
-        let oversized = std::fs::File::create(trust.join("oversized.key")).unwrap();
-        oversized
-            .set_len(ryeos_engine::trust::MAX_TRUST_DOCUMENT_BYTES + 1)
-            .unwrap();
-        assert!(
-            content
-                .list_files(
-                    Path::new(".ai/config/keys/trusted"),
-                    false,
-                    ryeos_engine::trust::MAX_TRUST_DOCUMENTS,
-                )
-                .is_err()
         );
     }
 }

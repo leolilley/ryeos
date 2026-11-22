@@ -14,7 +14,7 @@
 //! behavioral loop is validated by the post-deploy smoke test (it needs a live
 //! provider + a running-window, which isn't deterministically reproducible here).
 
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::live_input_queue::EnqueueOutcome;
@@ -75,7 +75,10 @@ fn cognition_in_batch(content: &str) -> Vec<NewEventRecord> {
     vec![NewEventRecord {
         event_type: "cognition_in".to_string(),
         storage_class: "indexed".to_string(),
-        payload: serde_json::json!({ "content": content }),
+        payload: ryeos_runtime::cognition::to_payload(&ryeos_runtime::CognitionInput::text(
+            "operator", content,
+        ))
+        .expect("operator input payload"),
     }]
 }
 
@@ -88,17 +91,13 @@ fn cognition_in_contents(state: &AppState, thread_id: &str) -> Vec<String> {
             thread_id: Some(thread_id.to_string()),
             after_chain_seq: None,
             limit: 200,
+            event_types: None,
         })
         .expect("replay");
     res.events
         .into_iter()
         .filter(|e| e.event_type == "cognition_in")
-        .filter_map(|e| {
-            e.payload
-                .get("content")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
+        .filter_map(|e| e.payload["parts"][0]["text"].as_str().map(String::from))
         .collect()
 }
 
@@ -134,7 +133,7 @@ fn poll_and_persist(state: &AppState, thread_id: &str) -> bool {
 
 #[tokio::test]
 async fn live_input_persists_into_running_thread_then_finalize_closes_the_queue() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     // The composition root wires this in production; do it here so finalize can
     // close the thread's queue.
     state.threads.set_live_input_queue(state.live_input.clone());
@@ -193,7 +192,7 @@ async fn poll_before_terminal_persists_but_after_terminal_discards() {
     // The enqueue/finalize race, resolved deterministically: an input still
     // queued when the thread finalizes is dropped (queue closed), and the
     // running-guard means it could never have been appended post-terminal anyway.
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     state.threads.set_live_input_queue(state.live_input.clone());
 
     let tid = "T-live-2";

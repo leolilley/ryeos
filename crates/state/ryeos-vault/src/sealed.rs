@@ -68,6 +68,12 @@ pub fn with_store_lock<T>(store_path: &Path, operation: impl FnOnce() -> Result<
         .with_context(|| format!("lock sealed store {}", store_path.display()))
 }
 
+/// Whether an interrupted rewrap left its journal behind, so the next locked
+/// open of the store would first recover it. Reads only.
+pub fn rewrap_pending(store_path: &Path) -> bool {
+    rewrap_journal_path(store_path).exists()
+}
+
 /// Recover an interrupted key/store rotation while the caller holds the store
 /// lock. A readable current key/store pair is committed; otherwise the complete
 /// previous generation is restored from durable backups.
@@ -193,9 +199,10 @@ pub fn write_sealed_secrets(
 
     let mut sorted: Vec<(&String, &String)> = secrets.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
-    let mut plaintext_toml = String::new();
+    // Every plaintext staging buffer is zeroized on drop, including refusals.
+    let mut plaintext_toml = zeroize::Zeroizing::new(String::new());
     for (k, v) in &sorted {
-        let line = format!("{k} = {}\n", toml_quote(v));
+        let line = zeroize::Zeroizing::new(format!("{k} = {}\n", toml_quote(v).as_str()));
         let next_len = plaintext_toml
             .len()
             .checked_add(line.len())
@@ -219,8 +226,31 @@ pub fn write_sealed_secrets(
         );
     }
 
+    ensure_private_store_directory(store_path)?;
     lillux::atomic_write_private(store_path, envelope_toml.as_bytes())
         .map_err(|e| anyhow!("vault: write sealed store {}: {e:#}", store_path.display()))
+}
+
+/// The store's directory holds the sealed store and the protected artifacts
+/// written beside it, which are admitted only from an exactly owner-private
+/// directory. Create it that way, and tighten one that a plain directory
+/// creation left wider.
+fn ensure_private_store_directory(store_path: &Path) -> Result<()> {
+    let directory = store_path
+        .parent()
+        .context("vault store has no parent directory")?;
+    let name = directory
+        .file_name()
+        .context("vault store directory has no name")?;
+    let parent = directory
+        .parent()
+        .context("vault store directory has no parent")?;
+    let parent = lillux::PinnedDirectory::open(parent)?
+        .with_context(|| format!("vault store parent {} is absent", parent.display()))?;
+    parent
+        .open_or_create_child(name, 0o700)?
+        .tighten_owner_private_directory()
+        .with_context(|| format!("protect vault store directory {}", directory.display()))
 }
 
 pub fn read_sealed_secrets(
@@ -233,8 +263,9 @@ pub fn read_sealed_secrets(
     let raw = read_bounded_envelope(store_path)?;
     let envelope: lillux::vault::SealedEnvelope = toml::from_str(&raw)
         .with_context(|| format!("parse envelope TOML at {}", store_path.display()))?;
-    let plaintext =
-        lillux::vault::open(sk, &envelope).map_err(|e| anyhow!("open envelope: {e:#}"))?;
+    let plaintext = zeroize::Zeroizing::new(
+        lillux::vault::open(sk, &envelope).map_err(|e| anyhow!("open envelope: {e:#}"))?,
+    );
     if plaintext.len() > MAX_VAULT_PLAINTEXT_BYTES {
         anyhow::bail!(
             "vault: decrypted plaintext is {} bytes; maximum is {MAX_VAULT_PLAINTEXT_BYTES}",
@@ -243,9 +274,15 @@ pub fn read_sealed_secrets(
     }
     let plaintext_str =
         std::str::from_utf8(&plaintext).context("decrypted plaintext is not UTF-8")?;
-    let map: HashMap<String, String> =
+    let mut map: HashMap<String, String> =
         toml::from_str(plaintext_str).context("decrypted plaintext is not a TOML map")?;
-    validate_decrypted_keys(&map, store_path)?;
+    if let Err(error) = validate_decrypted_keys(&map, store_path) {
+        use zeroize::Zeroize as _;
+        for value in map.values_mut() {
+            value.zeroize();
+        }
+        return Err(error);
+    }
     Ok(map)
 }
 
@@ -289,20 +326,23 @@ pub fn read_bounded_file(path: &Path, maximum: u64, label: &str) -> Result<Vec<u
     Ok(bytes)
 }
 
-fn toml_quote(s: &str) -> String {
+fn toml_quote(s: &str) -> zeroize::Zeroizing<String> {
     if s.bytes()
         .all(|b| b.is_ascii() && b != b'"' && b != b'\\' && !b.is_ascii_control())
     {
-        format!("\"{s}\"")
+        zeroize::Zeroizing::new(format!("\"{s}\""))
     } else {
         let mut tmp = std::collections::BTreeMap::new();
         tmp.insert("v", s);
-        let serialized = toml::to_string(&tmp).unwrap_or_else(|_| format!("\"{s}\""));
-        serialized
-            .trim()
-            .strip_prefix("v = ")
-            .unwrap_or(&serialized)
-            .to_string()
+        let serialized =
+            zeroize::Zeroizing::new(toml::to_string(&tmp).unwrap_or_else(|_| format!("\"{s}\"")));
+        zeroize::Zeroizing::new(
+            serialized
+                .trim()
+                .strip_prefix("v = ")
+                .unwrap_or(&serialized)
+                .to_string(),
+        )
     }
 }
 
@@ -316,6 +356,43 @@ mod tests {
         secrets.insert("API_TOKEN".to_string(), "hunter2".to_string());
         secrets.insert("DB_PASSWORD".to_string(), "p@ss word".to_string());
         secrets
+    }
+
+    /// The store directory is created owner-private, and one left wider by
+    /// an earlier plain directory creation is tightened on the next write.
+    #[test]
+    fn write_keeps_the_store_directory_owner_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let key = VaultSecretKey::generate();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mode =
+            |directory: &Path| std::fs::metadata(directory).unwrap().permissions().mode() & 0o7777;
+
+        let fresh = tmp.path().join("secrets");
+        write_sealed_secrets(
+            &fresh.join("store.enc"),
+            &key.public_key(),
+            &sample_secrets(),
+        )
+        .unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+
+        let wide = tmp.path().join("wide");
+        std::fs::create_dir(&wide).unwrap();
+        std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(mode(&wide), 0o755);
+        write_sealed_secrets(
+            &wide.join("store.enc"),
+            &key.public_key(),
+            &sample_secrets(),
+        )
+        .unwrap();
+        assert_eq!(mode(&wide), 0o700);
+        assert_eq!(
+            read_sealed_secrets(&wide.join("store.enc"), &key).unwrap(),
+            sample_secrets()
+        );
     }
 
     /// An envelope sealed to vault key A must not open with vault key

@@ -41,13 +41,23 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::item_resolution::RegisteredBundleRoot;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-use ryeos_engine::trust::TrustStore;
 
 fn isolation_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
     let fixtures = root.join(".ai/test-fixtures");
     fs::create_dir_all(&fixtures).unwrap();
-    fs::write(fixtures.join("isolation-policy.yaml"), "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
+    // A disabled (non-enforcing) policy in the current schema, narrowed to
+    // the verified code and project roots these tests exercise.
+    let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+    policy.filesystem.readable = vec!["{verified_code}".to_string()];
+    policy.filesystem.writable = vec!["{project}".to_string()];
+    policy.network.mode = ryeos_engine::isolation::IsolationNetworkMode::Isolated;
+    policy.limits.open_files = Some(128);
+    fs::write(
+        fixtures.join("isolation-policy.yaml"),
+        serde_yaml::to_string(&policy).unwrap(),
+    )
+    .unwrap();
     root
 }
 
@@ -55,10 +65,6 @@ fn isolation_app_root() -> PathBuf {
 const HANDLER_REF: &str = "tool:agent-kiwi/oauth/callback";
 /// Bundle-qualified subject of the handler ref (everything after `tool:`).
 const HANDLER_SUBJECT: &str = "agent-kiwi/oauth/callback";
-
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 fn workspace_root() -> PathBuf {
     ryeos_engine::test_support::workspace_root()
@@ -117,8 +123,7 @@ sys.exit(0)
 }
 
 fn build_engine_against_bundle() -> Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
@@ -140,6 +145,7 @@ fn build_engine_against_bundle() -> Engine {
         .with_node_trust_store(trust_store)
         .with_composers(composers)
         .with_registered_bundle_roots(vec![RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }])
@@ -147,6 +153,7 @@ fn build_engine_against_bundle() -> Engine {
 
 fn plan_ctx(project_dir: &Path, scopes: Vec<String>) -> PlanContext {
     PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "route-handler:agent-kiwi:agent-kiwi/google-callback".into(),
             scopes,
@@ -185,6 +192,7 @@ fn anonymous_route_principal_is_denied_at_build_plan() {
         &ctx.execution_hints,
         None,
         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        None,
     );
 
     let _ = fs::remove_dir_all(&project_dir);
@@ -232,6 +240,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             &ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan must succeed under fixed route-handler authority");
 
@@ -242,6 +251,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
     );
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -257,11 +267,12 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             },
         ),
         isolation_state_root: None,
+        isolation_bundle_state_home: None,
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
@@ -287,6 +298,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             path: project_dir.clone(),
         },
         launch_mode: LaunchMode::Wait,
+        secret_env: None,
     };
 
     let completion = engine

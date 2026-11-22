@@ -1,0 +1,33 @@
+# Controller image built from the officially signed release bundles. Replace
+# <DIGEST> in both places below with the digest printed in the summary of the
+# controller-from-release workflow run; the image is pinned by digest, never
+# by tag.
+# The controller keeps its operator identity and runtime journal on /data.
+# Render restarts a web service after every exit and has no restart-policy
+# field, which is the always-restart behaviour the node needs: it exits 75 at
+# each service-window rollover and expects to start again. A start refused by
+# a recorded restart inhibition is paced by the image entrypoint.
+# The health check is liveness (`/_ryeos/health`: 200 while the node boots), not
+# readiness: a signed offline operation stops the node and starts it again to
+# apply the request, and Render must not replace the instance during that window.
+# No HTTP is served while the request is applied, which is bounded by time and
+# covered by Render's deploy grace period.
+services:
+  - type: web
+    name: ryeos-farm-controller
+    runtime: image
+    image:
+      url: ghcr.io/leolilley/ryeos-hosted-controller@sha256:<DIGEST>
+    plan: 1c-2g
+    region: singapore
+    numInstances: 1
+    healthCheckPath: /_ryeos/health
+    disk:
+      name: ryeos-state
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: RYEOS_SUBSTRATE_IMAGE
+        value: ghcr.io/leolilley/ryeos-hosted-controller@sha256:<DIGEST>
+      - key: RYEOS_SUBSTRATE_PROTOCOL
+        value: "1"

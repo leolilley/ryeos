@@ -1,229 +1,161 @@
-//! Generic overlay host. Overlays are transient surface layers over the
-//! view set; their content is data-projected in the shared VM and rendered
-//! here by widget shape, not by product-specific overlay names.
+//! The overlay as a full-screen list: the open Surfaces, what needs you and
+//! what is running, then its keys. The core holds whether it is open and which
+//! row is selected; this only draws it.
 
-use ryeos_client_base::layout::Rect;
-use ryeos_client_base::text_surface::{Border, Style, TextSurface};
-use ryeos_client_base::ui::view_model::{RyeOsOverlayItemVm, RyeOsOverlayVm};
+use ryeos_client_base::text_surface::{Style, TextSurface};
+use ryeos_client_base::ui::view_model::{RyeOsOverlayRowVm, RyeOsViewModel};
 
-use super::primitives::{fill_line, fill_rect};
+use super::primitives::fill_line;
 use super::text::{display_width, truncate};
-use super::theme::{ACCENT, BG, FG, GOOD, MUTED, PANEL};
+use super::theme::{ACCENT, BG, FG, style_muted, style_selected, tone_style};
 
-const CAT_W: usize = 12;
-const TABLE_PRIMARY_W: usize = 24;
-
-pub fn draw_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
-    match overlay.widget.as_str() {
-        "table" => draw_table_overlay(surface, overlay),
-        _ => draw_palette_overlay(surface, overlay),
+/// Draw the overlay over the whole surface.
+pub fn draw_overlay(surface: &mut TextSurface, vm: &RyeOsViewModel) {
+    let overlay = &vm.overlay;
+    let now_ms = i64::try_from(vm.now_ms).unwrap_or(i64::MAX);
+    let width = surface.width;
+    let height = surface.height;
+    for y in 0..height {
+        fill_line(surface, 0, y, width, Style::new().fg(FG).bg(BG));
     }
-}
-
-fn draw_palette_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
-    let w = surface.width.clamp(32, 76);
-    let max_rows = surface.height.saturating_sub(8).max(3);
-    let rows = overlay.items.len().min(max_rows);
-    let h = rows + 4;
-    let x = surface.width.saturating_sub(w) / 2;
-    let y = surface.height.saturating_sub(h) / 3;
-    let rect = Rect::new(x as u16, y as u16, w as u16, h as u16);
-    draw_panel(surface, rect, &overlay.title);
-    draw_prompt(surface, x, y + 1, w, &overlay.query);
-
-    let start = scroll_start(overlay.selected, rows, overlay.items.len());
-    for (row, item) in overlay.items.iter().skip(start).take(rows).enumerate() {
-        draw_palette_row(
-            surface,
-            x + 1,
-            y + 3 + row,
-            w.saturating_sub(2),
-            item,
-            start + row == overlay.selected && item.enabled,
-        );
-    }
-    draw_hint(surface, x, y + h - 2, &overlay.hint, w);
-}
-
-fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
-    let w = surface.width.clamp(44, 84);
-    let max_rows = surface.height.saturating_sub(9).max(4);
-    let rows = overlay.items.len().min(max_rows);
-    // Title, prompt, gap, headers, `rows` items, hint, bottom border —
-    // the hint owns its own row (h-2) and never overdraws the last item.
-    let h = rows + 6;
-    let x = surface.width.saturating_sub(w) / 2;
-    let y = surface.height.saturating_sub(h) / 3;
-    let rect = Rect::new(x as u16, y as u16, w as u16, h as u16);
-    draw_panel(surface, rect, &overlay.title);
-    draw_prompt(surface, x, y + 1, w, &overlay.query);
-    let first_header = overlay
-        .columns
-        .first()
-        .map(String::as_str)
-        .unwrap_or("Keys");
-    let second_header = overlay
-        .columns
-        .get(1)
-        .map(String::as_str)
-        .unwrap_or("Action");
-    let first_w = TABLE_PRIMARY_W;
-    surface.draw_text(
-        x + 2,
-        y + 3,
-        first_header,
-        Style::new().fg(GOOD).bg(PANEL).bold(),
-    );
-    surface.draw_text(
-        x + 2 + first_w,
-        y + 3,
-        second_header,
-        Style::new().fg(GOOD).bg(PANEL).bold(),
-    );
-    let start = scroll_start(overlay.selected, rows, overlay.items.len());
-    for (row, item) in overlay.items.iter().skip(start).take(rows).enumerate() {
-        let ry = y + 4 + row;
-        let selected = start + row == overlay.selected && item.enabled;
-        let bg = if selected { ACCENT } else { PANEL };
-        let fg = if selected {
-            BG
-        } else if item.enabled {
-            FG
-        } else {
-            MUTED
-        };
-        fill_line(
-            surface,
-            x + 1,
-            ry,
-            w.saturating_sub(2),
-            Style::new().fg(fg).bg(bg),
-        );
-        if item.header {
-            // A group header: fold glyph + title across the row; its
-            // Enter intent folds the group, so it reads as a control.
-            let glyph = if item.expanded { "▾" } else { "▸" };
-            let header_fg = if selected { BG } else { GOOD };
-            surface.draw_text(
-                x + 2,
-                ry,
-                &truncate(&format!("{glyph} {}", item.primary), w.saturating_sub(4)),
-                Style::new().fg(header_fg).bg(bg).bold(),
-            );
-            continue;
-        }
-        let indent = 2 * item.depth as usize;
-        surface.draw_text(
-            x + 2 + indent,
-            ry,
-            &truncate(&item.primary, first_w.saturating_sub(1 + indent)),
-            Style::new().fg(fg).bg(bg).bold(),
-        );
-        let detail = if item.meta.is_empty() {
-            item.secondary.clone()
-        } else {
-            format!("{} · {}", item.secondary, item.meta)
-        };
-        surface.draw_text(
-            x + 2 + first_w,
-            ry,
-            &truncate(&detail, w.saturating_sub(first_w + 5)),
-            Style::new().fg(if selected { BG } else { MUTED }).bg(bg),
-        );
-    }
-    draw_hint(surface, x, y + h - 2, &overlay.hint, w);
-}
-
-fn draw_panel(surface: &mut TextSurface, rect: Rect, title: &str) {
-    fill_rect(surface, rect, Style::new().fg(FG).bg(PANEL));
-    let x = rect.x as usize;
-    let y = rect.y as usize;
-    let w = rect.w as usize;
-    let h = rect.h as usize;
-    surface.draw_box(
-        x,
-        y,
-        x + w - 1,
-        y + h - 1,
-        Border::Thick,
-        Style::new().fg(ACCENT).bg(PANEL),
-    );
-    surface.draw_text(
-        x + 2,
-        y,
-        &format!(" {} ", title),
-        Style::new().fg(ACCENT).bg(PANEL).bold(),
-    );
-}
-
-fn draw_prompt(surface: &mut TextSurface, x: usize, y: usize, w: usize, query: &str) {
-    surface.draw_text(x + 2, y, ">", Style::new().fg(ACCENT).bg(PANEL).bold());
-    let query = truncate(query, w.saturating_sub(6));
-    surface.draw_text(x + 4, y, &query, Style::new().fg(FG).bg(PANEL));
-    let cur_x = x + 4 + display_width(&query);
-    surface.draw_char(cur_x, y, ' ', Style::new().fg(PANEL).bg(FG));
-}
-
-fn draw_hint(surface: &mut TextSurface, x: usize, y: usize, hint: &str, w: usize) {
-    if !hint.is_empty() {
-        surface.draw_text(
-            x + 2,
-            y,
-            &truncate(hint, w.saturating_sub(4)),
-            Style::new().fg(MUTED).bg(PANEL),
-        );
-    }
-}
-
-fn draw_palette_row(
-    surface: &mut TextSurface,
-    x: usize,
-    y: usize,
-    w: usize,
-    item: &RyeOsOverlayItemVm,
-    selected: bool,
-) {
-    let bg = if selected { ACCENT } else { PANEL };
-    let row_fg = if selected { BG } else { FG };
-    let cat_fg = if selected { BG } else { GOOD };
-    let desc_fg = if selected { BG } else { MUTED };
-    fill_line(surface, x, y, w, Style::new().fg(row_fg).bg(bg));
-    if item.header {
-        let glyph = if item.expanded { "▾" } else { "▸" };
-        surface.draw_text(
-            x + 1,
-            y,
-            &truncate(&format!("{glyph} {}", item.primary), w.saturating_sub(2)),
-            Style::new().fg(cat_fg).bg(bg).bold(),
-        );
+    if width < 4 || height < 2 {
         return;
     }
-    let cat = truncate(&item.category, CAT_W);
-    let cat_x = x + CAT_W.saturating_sub(display_width(&cat));
-    surface.draw_text(cat_x, y, &cat, Style::new().fg(cat_fg).bg(bg));
-    let primary_x = x + CAT_W + 2;
-    let primary = truncate(&item.primary, w.saturating_sub(CAT_W + 3));
-    let primary_style = if item.enabled {
-        Style::new().fg(row_fg).bg(bg).bold()
-    } else {
-        Style::new().fg(desc_fg).bg(bg)
-    };
-    surface.draw_text(primary_x, y, &primary, primary_style);
-    if !item.secondary.is_empty() {
-        let desc_x = primary_x + display_width(&primary) + 2;
-        if desc_x < x + w {
-            surface.draw_text(
-                desc_x,
-                y,
-                &truncate(&item.secondary, x + w - desc_x),
-                Style::new().fg(desc_fg).bg(bg),
-            );
+    // The last line holds the keys; everything else fits above it.
+    let last = height - 1;
+    let mut y = 0;
+
+    y = label(surface, y, "OPEN SURFACES", Some(vm.session.surfaces.len()));
+    if y < last {
+        let mut x = 2;
+        for surface_vm in &vm.session.surfaces {
+            let mut name = format!("{} {}", surface_vm.ordinal, surface_vm.title);
+            if surface_vm.chip.authored_in_project {
+                name.push('·');
+            }
+            let room = width.saturating_sub(x + 1);
+            if room < 2 {
+                break;
+            }
+            let style = if surface_vm.active {
+                Style::new().fg(FG).bg(BG).reverse()
+            } else {
+                style_muted()
+            };
+            x += surface.draw_text(x, y, &truncate(&format!(" {name} "), room), style);
+            x += 2;
         }
+        y += 2;
     }
+
+    let offset = overlay.needs_you.len();
+    for (title, rows, count, base) in [
+        ("NEEDS YOU", &overlay.needs_you, overlay.needs_you_count, 0),
+        ("RUNNING", &overlay.running, overlay.running_count, offset),
+    ] {
+        if y >= last {
+            break;
+        }
+        y = label(surface, y, title, count);
+        if count.is_none() {
+            if y < last {
+                surface.draw_text(2, y, "unavailable", style_muted());
+                y += 1;
+            }
+        } else if rows.is_empty() {
+            if y < last {
+                surface.draw_text(2, y, "nothing here", style_muted());
+                y += 1;
+            }
+        } else {
+            for (index, row) in rows.iter().enumerate() {
+                if y >= last {
+                    break;
+                }
+                let selected = overlay.selected == Some(base + index);
+                draw_row(surface, y, row, selected, now_ms);
+                y += 1;
+            }
+            if let Some(more) = count
+                .filter(|count| *count > rows.len())
+                .map(|count| count - rows.len())
+                && y < last
+            {
+                surface.draw_text(4, y, &format!("{more} more"), style_muted());
+                y += 1;
+            }
+        }
+        y += 1;
+    }
+
+    let keys = overlay
+        .key_hints
+        .iter()
+        .map(|hint| format!("[{}] {}", hint.keys, hint.word))
+        .collect::<Vec<_>>()
+        .join("  ");
+    surface.draw_text(1, last, &truncate(&keys, width - 2), style_muted());
 }
 
-fn scroll_start(selected: usize, rows: usize, total: usize) -> usize {
-    selected
-        .saturating_sub(rows / 2)
-        .min(total.saturating_sub(rows))
+/// A section label and its count; returns the next line.
+fn label(surface: &mut TextSurface, y: usize, title: &str, count: Option<usize>) -> usize {
+    let width = surface.width;
+    let x = 1 + surface.draw_text(
+        1,
+        y,
+        &truncate(title, width.saturating_sub(2)),
+        style_muted().bold(),
+    );
+    if let Some(count) = count
+        && x + 2 < width
+    {
+        surface.draw_text(x + 1, y, &count.to_string(), Style::new().fg(ACCENT).bg(BG));
+    }
+    y + 1
+}
+
+/// One row: `>` when selected, the tone dot, the title, where, and at the
+/// right the selected row's action keys or how long it has been.
+fn draw_row(
+    surface: &mut TextSurface,
+    y: usize,
+    row: &RyeOsOverlayRowVm,
+    selected: bool,
+    now_ms: i64,
+) {
+    let width = surface.width;
+    let base = if selected {
+        style_selected()
+    } else {
+        Style::new().fg(FG).bg(BG)
+    };
+    fill_line(surface, 0, y, width, base);
+    surface.draw_text(1, y, if selected { ">" } else { " " }, base);
+    surface.draw_text(3, y, "●", tone_style(row.tone));
+    let right = if selected && !row.actions.is_empty() {
+        row.actions
+            .iter()
+            .map(|action| format!("[{}] {}", action.keys, action.word))
+            .collect::<Vec<_>>()
+            .join("  ")
+    } else {
+        elapsed(now_ms.saturating_sub(row.since_ms))
+    };
+    let right_width = display_width(&right).min(width.saturating_sub(8));
+    let right_x = width.saturating_sub(right_width + 1);
+    let words = format!("{} — {}", row.title, row.where_);
+    let room = right_x.saturating_sub(5 + 1);
+    surface.draw_text(5, y, &truncate(&words, room), base);
+    surface.draw_text(right_x, y, &truncate(&right, right_width), base);
+}
+
+/// How long since, in the largest whole unit: `now`, `5m`, `2h`, `3d`.
+fn elapsed(ms: i64) -> String {
+    let seconds = ms.max(0) / 1000;
+    match seconds {
+        0..60 => "now".to_owned(),
+        60..3600 => format!("{}m", seconds / 60),
+        3600..86400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86400),
+    }
 }

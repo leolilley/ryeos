@@ -1,3 +1,6 @@
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const ENGINE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("engine");
+
 pub mod authority;
 pub mod boot_validation;
 pub mod composers;
@@ -6,6 +9,7 @@ pub mod contracts;
 pub mod dispatch;
 pub mod effective_validators;
 pub mod engine;
+pub mod env_probe;
 pub mod error;
 pub mod execution_contract;
 pub mod execution_evidence;
@@ -26,6 +30,7 @@ pub mod project_content;
 pub mod protocol_vocabulary;
 pub mod registry;
 pub mod roots;
+pub mod route_fixed_params;
 pub mod runtime;
 pub mod scheduled_fire_context;
 pub mod scope;
@@ -50,13 +55,11 @@ pub use registry::{
 
 #[doc(hidden)]
 pub mod test_support;
+pub mod work_tally;
 
 /// The working directory name used in all three spaces.
 /// Every space follows: `base_path / AI_DIR / {kind_directory} / {item_id}`
 pub const AI_DIR: &str = ".ai";
-
-/// Path under `AI_DIR` where trusted key documents live.
-pub const TRUST_KEYS_DIR: &str = "config/keys/trusted";
 
 /// Path under `AI_DIR` where kind schema YAML files live.
 pub const KIND_SCHEMAS_DIR: &str = "node/engine/kinds";

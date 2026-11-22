@@ -1,12 +1,12 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 
 use ryeos_api::registry::build_service_registry;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::NewCredentialProfile;
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use serde_json::{Value, json};
 
 const LIST_CAP: &str = "ryeos.execute.service.credential-profiles/list";
@@ -46,12 +46,12 @@ fn cli_descriptor_binds_pagination_flags_through_service_schema() {
     }
 }
 
-fn remote_operator(owner: &str) -> HandlerContext {
+fn remote_principal(owner: &str) -> HandlerContext {
     HandlerContext::new_with_authority(
         owner.to_owned(),
         vec![LIST_CAP.to_owned()],
         true,
-        Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+        Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
         Some(format!("site:{}", "c".repeat(64))),
     )
 }
@@ -60,6 +60,7 @@ fn add_profile(state: &AppState, id: &str, owner: &str) {
     state
         .state_store
         .create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id: id,
             owner_principal: owner,
             home_id: &format!("private-{id}"),
@@ -77,7 +78,7 @@ async fn list(state: Arc<AppState>, ctx: HandlerContext, params: Value) -> anyho
 
 #[tokio::test]
 async fn lists_only_owner_metadata_with_stable_pagination() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let alice = format!("fp:{}", "a".repeat(64));
     let bob = format!("fp:{}", "b".repeat(64));
@@ -97,7 +98,7 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
         .finish_credential_profile_deletion("d", &alice, generation)
         .unwrap();
 
-    let first = list(state.clone(), remote_operator(&alice), json!({"limit":1}))
+    let first = list(state.clone(), remote_principal(&alice), json!({"limit":1}))
         .await
         .unwrap();
     assert_eq!(first["profiles"].as_array().unwrap().len(), 1);
@@ -106,7 +107,7 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
     assert_eq!(first["next_cursor"], "a");
     let last = list(
         state.clone(),
-        remote_operator(&alice),
+        remote_principal(&alice),
         json!({"limit":1,"after":first["next_cursor"]}),
     )
     .await
@@ -133,7 +134,7 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
             "updated_at_ms"
         ]
     );
-    let other = list(state.clone(), remote_operator(&bob), json!({}))
+    let other = list(state.clone(), remote_principal(&bob), json!({}))
         .await
         .unwrap();
     assert_eq!(other["profiles"].as_array().unwrap().len(), 1);
@@ -150,10 +151,11 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
 
 #[tokio::test]
 async fn empty_list_works_for_configured_local_operator() {
-    let (_tmp, state) = test_state::build_test_state();
-    let owner = NodeIdentity::load(&state.config.operator_signing_key_path)
-        .unwrap()
-        .principal_id();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let owner =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap()
+            .principal_id();
     let ctx = HandlerContext::new_with_authority(
         owner,
         vec![LIST_CAP.to_owned()],
@@ -169,16 +171,16 @@ async fn empty_list_works_for_configured_local_operator() {
 
 #[tokio::test]
 async fn list_rejects_unverified_nonoperator_and_unforwarded_requests() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let owner = format!("fp:{}", "a".repeat(64));
     for (verified, class, origin) in [
         (
             false,
-            AuthorizedKeyPrincipalClass::RemoteOperator,
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
             Some(format!("site:{}", "b".repeat(64))),
         ),
-        (true, AuthorizedKeyPrincipalClass::RemoteOperator, None),
+        (true, AuthorizedKeyPrincipalClass::RemotePrincipal, None),
         (
             true,
             AuthorizedKeyPrincipalClass::RemoteNode,
@@ -203,7 +205,7 @@ async fn list_rejects_unverified_nonoperator_and_unforwarded_requests() {
 
 #[tokio::test]
 async fn list_rejects_invalid_bounds_and_caller_selected_ownership() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
     let owner = format!("fp:{}", "a".repeat(64));
     for request in [
@@ -218,7 +220,7 @@ async fn list_rejects_invalid_bounds_and_caller_selected_ownership() {
         json!({"all":true}),
     ] {
         assert!(
-            list(state.clone(), remote_operator(&owner), request.clone())
+            list(state.clone(), remote_principal(&owner), request.clone())
                 .await
                 .is_err(),
             "{request}"

@@ -65,14 +65,14 @@ pub fn run_doctor(
     isolation: Result<Arc<IsolationRuntime>, &str>,
     source: &Path,
     dependency_roots: &[PathBuf],
-    operator_config_root: &Path,
+    app_root: &Path,
 ) -> DoctorReport {
     let mut checks = vec![
         check_manifest(source),
         check_verify(
             source,
             dependency_roots,
-            operator_config_root,
+            app_root,
             isolation.as_ref().map(Arc::clone).map_err(|reason| *reason),
         ),
     ];
@@ -80,7 +80,6 @@ pub fn run_doctor(
         engine,
         isolation.as_deref().map_err(|reason| *reason),
         source,
-        operator_config_root,
     ));
     checks.push(advisory_bundle_events(source));
 
@@ -248,7 +247,7 @@ fn check_manifest(source: &Path) -> CheckResult {
 fn check_verify(
     source: &Path,
     dependency_roots: &[PathBuf],
-    operator_config_root: &Path,
+    app_root: &Path,
     isolation: Result<Arc<IsolationRuntime>, &str>,
 ) -> CheckResult {
     let isolation = match isolation {
@@ -281,7 +280,7 @@ fn check_verify(
         source,
         &declared_name,
         dependency_roots,
-        operator_config_root,
+        app_root,
         isolation,
     ) {
         Ok(report) => {
@@ -297,7 +296,6 @@ fn check_imports(
     engine: Result<&Engine, &str>,
     isolation: Result<&IsolationRuntime, &str>,
     source: &Path,
-    operator_config_root: &Path,
 ) -> Vec<CheckResult> {
     let refs = python_tool_refs(source);
     if refs.is_empty() {
@@ -367,9 +365,9 @@ fn check_imports(
         .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
         .collect::<Vec<_>>();
-    let isolation_node_trusted_keys_dir = operator_config_root.join("keys/trusted");
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:doctor".into(),
             scopes: vec!["execute".into()],
@@ -393,7 +391,6 @@ fn check_imports(
                 &plan_ctx,
                 &project_path,
                 &isolation_bundle_roots,
-                &isolation_node_trusted_keys_dir,
                 &item_ref,
             ) {
                 Ok(report) => report,
@@ -422,7 +419,6 @@ fn import_one(
     plan_ctx: &PlanContext,
     project_path: &Path,
     isolation_bundle_roots: &[PathBuf],
-    isolation_node_trusted_keys_dir: &Path,
     item_ref: &str,
 ) -> Result<Value, String> {
     let canonical = CanonicalRef::parse(item_ref).map_err(|e| format!("invalid ref: {e}"))?;
@@ -436,7 +432,7 @@ fn import_one(
         source_path: verified.resolved.source_path.clone(),
         content_hash: verified.resolved.content_hash.clone(),
     }];
-    Ok(ryeos_app::env_probe::import_dry_run(
+    Ok(ryeos_engine::env_probe::import_dry_run(
         engine,
         plan_ctx,
         &verified,
@@ -453,19 +449,22 @@ fn import_one(
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: isolation_bundle_roots,
-            node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             verified_code: &isolation_verified_code,
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref,
             thread_id: "offline-doctor",
+            verbatim_env_names: &[],
         },
     ))
 }
@@ -650,5 +649,78 @@ mod tests {
         assert_eq!(r.status, WARN);
         assert_eq!(r.detail["name_matches_directory"], false);
         assert!(r.detail["note"].is_string());
+    }
+
+    /// A purely mechanical bundle source: a manifest source and no kind
+    /// schemas, so preflight loads the node trust and then fails later on the
+    /// unsigned manifest.
+    fn mechanical_bundle(root: &Path) -> PathBuf {
+        let source = root.join("arc");
+        write(
+            &source.join(".ai/manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\n",
+        );
+        source
+    }
+
+    fn app_root_with_signer_registry(root: &Path) -> PathBuf {
+        let app_root = root.join("app");
+        let key = lillux::crypto::SigningKey::from_bytes(&[7u8; 32]);
+        ryeos_engine::test_support::pin_signer(
+            &app_root,
+            &key.verifying_key(),
+            "doctor-test",
+            ryeos_engine::trust::SignerRole::Publisher,
+            ryeos_engine::trust::SignerScope::everywhere(),
+        );
+        app_root
+    }
+
+    fn verify_error(source: &Path, app_root: &Path) -> String {
+        let result = check_verify(
+            source,
+            &[],
+            app_root,
+            Ok(Arc::new(IsolationRuntime::disabled_for_authoring())),
+        );
+        assert_eq!(result.status, FAIL, "{:?}", result.detail);
+        result.detail["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("verify failure carries an error: {:?}", result.detail))
+            .to_owned()
+    }
+
+    #[test]
+    fn verify_loads_node_trust_from_the_app_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = mechanical_bundle(tmp.path());
+        let app_root = app_root_with_signer_registry(tmp.path());
+
+        let error = verify_error(&source, &app_root);
+        // The signer registry under `<app_root>/.ai/node` was found and
+        // non-empty, so preflight went on to judge the bundle itself.
+        assert!(
+            !error.contains("load node trust store") && !error.contains("trust registry is empty"),
+            "trust must load from the app root: {error}"
+        );
+        assert!(!error.contains(".ai/.ai"), "doubled .ai path: {error}");
+    }
+
+    #[test]
+    fn verify_given_the_config_directory_fails_on_a_doubled_ai_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = mechanical_bundle(tmp.path());
+        let app_root = app_root_with_signer_registry(tmp.path());
+        let config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
+
+        let error = verify_error(&source, &config_root);
+        assert!(
+            error.contains("load node trust store"),
+            "a config directory is not an app root: {error}"
+        );
+        assert!(
+            error.contains(&format!("{}/.ai/node", config_root.display())),
+            "the trust path is joined under whatever root is passed: {error}"
+        );
     }
 }

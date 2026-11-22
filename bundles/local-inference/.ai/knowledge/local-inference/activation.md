@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-05T00:45:54Z:0af2ecaa3b1cafcc0752eaf8bd735ac2e2a2ead9d21fd4c0106ade8e6b919bea:C8RSKijGQ9jX9mx/mozt9DPNCky2TRej0mJtF81/ck8/q3/51IDWtIPiyZyPDTlbnoMYwd1oxprofbM0Ey0sBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:11012e4b54b32e89d3f390d4c80f6082291767ba00d4dbd096d6a2985687f2f2:oUM1V9QRyr/8ScQknKoTAQKMCe0f8aSr5PFciox/XKG0cJApfmDYZvaeTDzyXuSGNfymuHhSSs2aOzG07ks/BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, managed-activation, persistent-session, local-model, replay]
@@ -23,7 +23,7 @@ The ordinary full source installation includes the local-inference bundle:
 sudo scripts/pkg/install-local-direct.sh --populate --all --trust-source-publishers
 ~~~
 
-Installation does not acquire model/runtime bytes. A fresh explicit `full`
+Installation does not acquire model/runtime bytes. A fresh explicit `standard`
 initialization publishes a bounded publisher-authored acquisition and
 persistent-process baseline; reinstalling an existing node preserves that
 node's current policy generation.
@@ -76,7 +76,7 @@ filesystem/network isolation without changing the recorded provider contract.
 
 Apply a node-policy replacement only while the daemon is stopped. Online or
 cache-only managed activation needs no named filesystem root. The following is
-the current `full` installed-bundle union with a recommended
+the current `standard` installed-bundle union with a recommended
 higher residual reserve. When applying this change, start from the node's
 current complete `external_content` member and change only the two
 `minimum_free_bytes` values; do not remove capacity or hosts required by other
@@ -120,7 +120,7 @@ redirect ceiling, rechecks canonical HTTPS and the host allowlist on every hop,
 and still requires each exact signed archive digest.
 
 The 8 GiB residual free-space floor above is an operator recommendation, not
-workload identity. The publisher-authored `full` baseline
+workload identity. The publisher-authored `standard` baseline
 uses a reviewed 2 GiB floor so fresh source qualification can run on the
 storage-constrained hosted runner after deleting build targets. A higher local
 override changes admission testimony, never archive, manifest, program, or
@@ -148,7 +148,7 @@ limits:
   max_total_backlog_bytes: 16777216
 ~~~
 
-A fresh `full` installation selects a publisher-signed init
+A fresh `standard` installation selects a publisher-signed init
 profile whose capacities cover the exact acquisition and worker requirements
 above, with the reviewed 2 GiB residual free-space baseline, and publishes one
 complete node-signed generation under `.ai/node/policies/`. `external_content.yaml` and
@@ -236,17 +236,16 @@ Validate both signed profiles threadlessly, then execute them sequentially:
 
 ~~~text
 ryeos validate directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
-  --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
   --no-project --input '{}'
 
 ryeos execute directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
-  --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
   --no-project --no-stream --input '{}'
 ~~~
 
-The directive runtime requires its signed model declaration as the `model`
-launch binding. This binding selects the same trusted directive; it is not a
-caller-selected provider, model name, worker, or realization. Static validation
+The directive runtime binds its required `model` launch binding to the
+executed directive's own signed model declaration when the caller gives none.
+This binding selects the same trusted directive; it is not a caller-selected
+provider, model name, worker, or realization. Static validation
 invokes the same signed bounded launch preparer used by execution and reports
 the selected worker's canonical ref, as-launched resolution digest, source and
 four exact content/binding readiness records, and session-policy eligibility.

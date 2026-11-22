@@ -38,7 +38,6 @@ impl Drop for Owners {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn(
     state: AppState,
     thread_id: String,
@@ -152,7 +151,6 @@ fn permits_normal_settlement(
         && !output.termination.stderr.truncated
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run(
     state: &AppState,
     thread_id: &str,
@@ -212,6 +210,7 @@ fn run(
                         &protocol,
                         thread_id,
                         chain_root_id,
+                        params.provenance.execution_input_materialization(),
                     )?;
                 check_control(state, thread_id)?;
                 placement::prepare_external_direct_start(
@@ -221,6 +220,7 @@ fn run(
                     &protocol,
                     inputs.source.as_ref(),
                     inputs.authority,
+                    inputs.project_file.as_deref(),
                 )?
             }
             Entry::Recover => placement::recover_external_direct_start(state, thread_id)?,
@@ -234,23 +234,26 @@ fn run(
             reservation.startup_started_at_ms,
             reservation.startup_deadline_ms,
         )?;
-        let channel = loop {
-            check_control(state, thread_id)?;
-            ensure!(
-                !startup_deadline.has_elapsed(),
-                "external direct signed startup deadline expired"
-            );
-            match startup.advance().map_err(anyhow::Error::from)? {
-                ExternalCandidateStartProgress::Ready(channel) => break channel,
-                ExternalCandidateStartProgress::CleanupRequired => {
-                    bail!("external direct startup requires cleanup")
+        let channel = (|| -> Result<_> {
+            loop {
+                check_control(state, thread_id)?;
+                ensure!(
+                    !startup_deadline.has_elapsed(),
+                    "external direct signed startup deadline expired"
+                );
+                match startup.advance().map_err(anyhow::Error::from)? {
+                    ExternalCandidateStartProgress::Ready(channel) => break Ok(channel),
+                    ExternalCandidateStartProgress::CleanupRequired => {
+                        bail!("external direct startup requires cleanup")
+                    }
+                    ExternalCandidateStartProgress::CleanupProved => {
+                        bail!("external direct startup ended without a target")
+                    }
+                    _ => pause(startup_deadline),
                 }
-                ExternalCandidateStartProgress::CleanupProved => {
-                    bail!("external direct startup ended without a target")
-                }
-                _ => pause(startup_deadline),
             }
-        };
+        })()
+        .map_err(|error| placement::with_external_guest_owner_testimony(state, thread_id, error))?;
         drop(startup);
         check_control(state, thread_id)?;
         state.threads.mark_running(thread_id)?;
@@ -413,7 +416,7 @@ mod tests {
     #[test]
     fn external_direct_notification_loss_does_not_release_live_host_claim() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let thread_id = "T-external-host-notification-loss";
         let owners = reserved_owners(&state, thread_id);
         let (entered, entered_rx) = std::sync::mpsc::sync_channel(1);
@@ -483,7 +486,7 @@ mod tests {
     #[test]
     fn external_direct_notification_follows_guard_and_claim_release() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let thread_id = "T-external-host-completed";
         let owners = reserved_owners(&state, thread_id);
         let notification = spawn_owned(state.clone(), thread_id.into(), owners, |_| {
@@ -514,7 +517,7 @@ mod tests {
     #[test]
     fn external_direct_shutdown_refuses_before_thread_lookup_or_allocation() {
         let root = tempfile::tempdir().unwrap();
-        let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let thread_id = "T-external-host-shutdown";
         let owners = reserved_owners(&state, thread_id);
         state

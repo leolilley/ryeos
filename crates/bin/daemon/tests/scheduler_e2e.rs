@@ -14,7 +14,7 @@
 //! directive item exists in the test bundle), but the fire record proves
 //! the timer loop ticked and attempted dispatch.
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::DaemonHarness;
 use serde_json::{Value, json};
@@ -34,11 +34,35 @@ async fn exec(
         let object = params
             .as_object_mut()
             .expect("scheduler registration params must be an object");
-        object
-            .entry("capabilities")
-            .or_insert_with(|| json!(["ryeos.execute.directive.test/*"]));
+        let doctor =
+            object.get("item_ref").and_then(Value::as_str) == Some("tool:ryeos/core/node/doctor");
+        object.entry("capabilities").or_insert_with(|| {
+            if doctor {
+                json!([
+                    "ryeos.execute.tool.ryeos/core/node/doctor",
+                    "ryeos.read.project.live"
+                ])
+            } else {
+                json!(["ryeos.execute.directive.test/*"])
+            }
+        });
         object.entry("execution_policy").or_insert_with(|| {
-            json!({
+            if doctor {
+                json!({
+                    "schema_version": 2,
+                    "ownership": "daemon_owned",
+                    "recovery": "restart_recoverable",
+                    "response": "accepted",
+                    "target": {"kind": "here"},
+                    "environment": {"kind": "none"},
+                    "project": {
+                        "kind": "live_direct",
+                        "access": "read_only",
+                        "child_policy": {"kind": "inherit"}
+                    }
+                })
+            } else {
+                json!({
                 "schema_version": 2,
                 "ownership": "daemon_owned",
                 "recovery": "restart_recoverable",
@@ -46,7 +70,8 @@ async fn exec(
                 "target": {"kind": "here"},
                 "environment": {"kind": "none"},
                 "project": {"kind": "projectless"}
-            })
+                })
+            }
         });
     }
     h.post_execute(item_ref, ".", params)
@@ -69,7 +94,9 @@ fn unwrap_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> Value 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_register_and_list() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Register an interval schedule
     let (status, body) = exec(
@@ -111,7 +138,9 @@ async fn scheduler_register_and_list() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_register_update_existing() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Create
     let (status, _) = exec(
@@ -162,7 +191,9 @@ async fn scheduler_register_update_existing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_pause_and_resume() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Create
     exec(
@@ -215,7 +246,9 @@ async fn scheduler_pause_and_resume() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_show_fires_empty() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     exec(
         &h,
@@ -253,7 +286,9 @@ async fn scheduler_show_fires_empty() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_deregister_removes_schedule() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Create
     exec(
@@ -301,7 +336,9 @@ async fn scheduler_deregister_removes_schedule() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_register_cron_schedule() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, body) = exec(
         &h,
@@ -332,7 +369,9 @@ async fn scheduler_register_cron_schedule() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_register_rejects_bad_expression() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, body) = exec(
         &h,
@@ -360,7 +399,9 @@ async fn scheduler_register_rejects_bad_expression() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_register_rejects_past_at() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, body) = exec(
         &h,
@@ -390,7 +431,9 @@ async fn scheduler_register_rejects_past_at() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_deregister_nonexistent_fails() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, _) = exec(
         &h,
@@ -410,7 +453,9 @@ async fn scheduler_deregister_nonexistent_fails() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_pause_nonexistent_fails() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, _) = exec(
         &h,
@@ -434,12 +479,16 @@ async fn scheduler_pause_nonexistent_fails() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_at_schedule_fires() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Compute a timestamp 6 seconds from now (generous margin for
     // daemon startup + timer loop initialization)
-    let fire_at = chrono::Utc::now() + chrono::Duration::seconds(6);
-    let fire_at_str = fire_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let fire_at_str = ryeos_effect_contract::rfc3339::format_unix_millis(
+        lillux::time::timestamp_millis() + 6_000,
+    )
+    .unwrap();
 
     // Register at-schedule
     let (status, body) = exec(
@@ -467,6 +516,7 @@ async fn scheduler_at_schedule_fires() {
     let fire = poll_for_fires(&h, "at-fire-test", 1, Duration::from_secs(10))
         .await
         .expect("expected at least 1 fire within 10s");
+    let fire = await_dispatch_handoff(&h, "at-fire-test", fire).await;
 
     // Fire record exists — proves the timer dispatched
     assert_eq!(fire["schedule_id"], "at-fire-test");
@@ -498,7 +548,9 @@ async fn scheduler_at_schedule_fires() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_interval_schedule_fires() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, body) = exec(
         &h,
@@ -558,13 +610,185 @@ async fn scheduler_interval_schedule_fires() {
         panic!("expected at least 1 fire within 8s");
     }
 
-    let fire = fire.unwrap();
+    let fire = await_dispatch_handoff(&h, "interval-fire-test", fire.unwrap()).await;
     assert_eq!(fire["schedule_id"], "interval-fire-test");
     let status_str = fire["status"].as_str().unwrap_or("");
     assert!(
         matches!(status_str, "dispatched" | "failed"),
         "expected fire status dispatched or failed, got: {status_str}"
     );
+}
+
+// ── Authenticated Core doctor schedule: real subprocess + retained terminal ──
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduler_dispatches_core_doctor_and_records_terminal_fire() {
+    let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start Core+Scheduling daemon from prepared bundles");
+    let (status, body) = exec(&h, "service:bundle/list", json!({})).await;
+    let installed = unwrap_result(status, &body, "verify Core+Scheduling selection");
+    let bundles = installed["bundles"].as_array().expect("bundle list");
+    assert!(
+        !bundles
+            .iter()
+            .any(|bundle| bundle["name"] == "central-auth")
+    );
+    assert!(bundles.iter().any(|bundle| bundle["name"] == "core"));
+    assert!(bundles.iter().any(|bundle| bundle["name"] == "scheduling"));
+    for workflow in ["knowledge", "directive", "graph", "ryeos-docs"] {
+        assert!(!bundles.iter().any(|bundle| bundle["name"] == workflow));
+    }
+
+    let project_root = h.user_space.path().join("scheduler-doctor-project");
+    let project_ai = project_root.join(".ai");
+    let source = project_ai.join("fixtures/scheduler-doctor-probe");
+    let source_ai = source.join(".ai");
+    std::fs::create_dir_all(&source_ai).expect("create isolated doctor probe source");
+    std::fs::write(
+        project_ai.join("manifest.source.yaml"),
+        "name: scheduler-doctor-project\nversion: \"0.1.0\"\n",
+    )
+    .expect("write valid project source manifest");
+    // Recorded fixture bytes, SHA-256 e921fba150e4cbdc31364d8cd21d12c733cb4f2aa1c3535aee95ed0d0e648dc8.
+    const MALFORMED_DOCTOR_MANIFEST: &str =
+        "name: scheduler-doctor-probe\nversion: \"0.1.0\"\nbogus_field: true\n";
+    std::fs::write(
+        source_ai.join("manifest.source.yaml"),
+        MALFORMED_DOCTOR_MANIFEST,
+    )
+    .expect("write fixed malformed doctor input");
+    let project_root = project_root
+        .canonicalize()
+        .expect("resolve valid doctor project root");
+    let source = source
+        .canonicalize()
+        .expect("resolve malformed doctor probe source");
+    assert!(
+        source.starts_with(&project_root),
+        "doctor source must remain inside its admitted read-only project root"
+    );
+    let project_root_text = project_root.display().to_string();
+    // This is the exact registered Core path under the daemon's selected app root.
+    let core_registry_root = h.state_path.join(".ai/bundles/core");
+    let fire_at_str = ryeos_effect_contract::rfc3339::format_unix_millis(
+        lillux::time::timestamp_millis() + 8_000,
+    )
+    .unwrap();
+
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/register",
+        json!({
+            "schedule_id": "core-doctor-authenticated-fire",
+            "item_ref": "tool:ryeos/core/node/doctor",
+            "ref_bindings": {},
+            "schedule_type": "at",
+            "expression": fire_at_str,
+            "params": {
+                // The admitted plan refuses any parameter that embeds its
+                // project root, so the source is named relative to it.
+                "source": ".ai/fixtures/scheduler-doctor-probe",
+                "registry_roots": [core_registry_root.display().to_string()]
+            },
+            "timezone": "UTC",
+            "misfire_policy": "skip",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
+            "project_root": project_root_text,
+        }),
+    )
+    .await;
+    unwrap_result(status, &body, "register Core doctor schedule");
+    h.retain_evidence_on_drop(true);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let (thread_id, admitted_capsule_hash) = loop {
+        let (status, body) = exec(
+            &h,
+            "service:scheduler/show_fires",
+            json!({"schedule_id": "core-doctor-authenticated-fire"}),
+        )
+        .await;
+        let result = unwrap_result(status, &body, "observe Core doctor fire");
+        if let Some(fire) = result["fires"].as_array().and_then(|fires| fires.first()) {
+            assert!(
+                !matches!(fire["status"].as_str(), Some("failed" | "cancelled")),
+                "Core doctor fire failed before dispatch: {fire}"
+            );
+            if matches!(fire["status"].as_str(), Some("dispatched" | "completed")) {
+                let thread_id = fire["thread_id"]
+                    .as_str()
+                    .filter(|id| id.starts_with("T-"))
+                    .expect("admitted fire must retain its canonical root thread id");
+                let capsule_hash = fire["admitted_capsule_hash"]
+                    .as_str()
+                    .filter(|hash| {
+                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    .expect("admitted fire must retain its capsule content hash");
+                // The authenticated schedule's persisted capsule is the
+                // admission evidence; the local project manifest is only input.
+                break (thread_id.to_string(), capsule_hash.to_string());
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Core doctor fire did not reach admitted dispatch"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+
+    // The fire record keeps only status, outcome class, thread id and the
+    // admitted capsule hash; the doctor's findings are read back through the
+    // Core `threads/get` service once the thread is terminal.
+    loop {
+        let (status, body) = exec(
+            &h,
+            "service:scheduler/show_fires",
+            json!({"schedule_id": "core-doctor-authenticated-fire"}),
+        )
+        .await;
+        let result = unwrap_result(status, &body, "read terminal Core doctor fire");
+        if let Some(fire) = result["fires"].as_array().and_then(|fires| fires.first())
+            && fire["status"] == "completed"
+        {
+            assert_eq!(fire["outcome"], "success", "terminal fire failed: {fire}");
+            assert!(fire["completed_at"].as_i64().is_some());
+            assert_eq!(fire["thread_id"], thread_id);
+            assert_eq!(fire["admitted_capsule_hash"], admitted_capsule_hash);
+            // The tool completing is a lifecycle verdict; the doctor's own
+            // project verdict is a separate authority carried in its result.
+            let (status, body) =
+                exec(&h, "service:threads/get", json!({"thread_id": thread_id})).await;
+            let retained = unwrap_result(status, &body, "read retained doctor thread");
+            assert_eq!(retained["thread"]["status"], "completed", "{retained}");
+            let doctor_result = &retained["result"]["result"];
+            assert_eq!(doctor_result["ok"], false, "{retained}");
+            let manifest_finding = doctor_result["checks"]
+                .as_array()
+                .and_then(|checks| checks.iter().find(|check| check["name"] == "manifest"))
+                .expect("doctor report must retain the manifest finding");
+            assert_eq!(manifest_finding["status"], "fail");
+            assert!(
+                manifest_finding["detail"]["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("bogus_field")),
+                "malformed manifest finding must name the fixed unknown field: {manifest_finding}"
+            );
+            h.kill_daemon()
+                .await
+                .expect("stop daemon before restoring temporary cleanup");
+            h.retain_evidence_on_drop(false);
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "scheduler did not persist the terminal fire for thread {thread_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 // ── Timer dispatch: interval fires multiple times ──────────────────────────
@@ -574,7 +798,9 @@ async fn scheduler_interval_schedule_fires() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_interval_fires_twice() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, body) = exec(
         &h,
@@ -616,7 +842,9 @@ async fn scheduler_interval_fires_twice() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_pause_prevents_fires() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, _) = exec(
         &h,
@@ -681,7 +909,9 @@ async fn scheduler_pause_prevents_fires() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_deregister_stops_fires() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     let (status, _) = exec(
         &h,
@@ -729,20 +959,28 @@ async fn scheduler_deregister_stops_fires() {
     );
 
     // `show_fires` is owner-authorized through the live schedule spec and
-    // therefore returns not-found after deregistration. Inspect the durable
-    // fire projection instead: completion may still update an already-claimed
-    // row, but the successful response is the fence after which no new fire
-    // identity may be claimed.
-    let count_after_deregister =
-        projected_fire_count(&h, "dereg-stop").expect("read projected fires after deregister");
-    for _ in 0..3 {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        assert_eq!(
-            projected_fire_count(&h, "dereg-stop"),
-            Some(count_after_deregister),
-            "deregistered schedule should not claim additional fires"
-        );
-    }
+    // therefore returns not-found after deregistration. The successful
+    // deregister response is the fence after which no new fire identity may
+    // be reserved (completion may still update an already-claimed row). Give
+    // the 2s interval time to fire again, stop the node in order, and read
+    // the durable fire rows from the stopped Scheduler store.
+    let deregistered_at_ms = lillux::time::timestamp_millis();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    h.stop_gracefully()
+        .await
+        .expect("stop daemon before reading its Scheduler store");
+    let reservations = stopped_fire_reservations(&h, "dereg-stop");
+    assert!(
+        !reservations.is_empty(),
+        "the fire observed before deregistration must be durable: {reservations:?}"
+    );
+    assert!(
+        reservations
+            .iter()
+            .all(|(_, reserved_at)| *reserved_at <= deregistered_at_ms),
+        "deregistered schedule should not reserve additional fires after {deregistered_at_ms}: \
+         {reservations:?}"
+    );
 }
 
 // ── Schedule ID reuse blocked ──────────────────────────────────────────────
@@ -753,7 +991,9 @@ async fn scheduler_deregister_stops_fires() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_reuse_blocked_after_deregister() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Register with a short interval so a fire happens quickly
     let (status, _) = exec(
@@ -829,7 +1069,9 @@ async fn scheduler_reuse_blocked_after_deregister() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_survives_restart() {
-    let (mut h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Register a short-interval schedule
     let (status, _) = exec(
@@ -893,7 +1135,9 @@ async fn scheduler_survives_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_fire_id_deterministic() {
-    let (mut h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (mut h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Register a 2-second interval schedule
     let (status, _) = exec(
@@ -953,7 +1197,9 @@ async fn scheduler_fire_id_deterministic() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduler_registered_at_preserved_on_update() {
-    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
 
     // Register
     let (status, body) = exec(
@@ -1032,6 +1278,25 @@ async fn scheduler_registered_at_preserved_on_update() {
 
 /// Poll `show_fires` until at least `min_count` fire records appear.
 /// Returns the first fire record.
+/// A fire record is first written as `reserved` and becomes `dispatched` (or
+/// `failed`) when the launch handoff persists, so the first sighting of the
+/// record is not yet the dispatch outcome. Follow that fire, by identity
+/// since later fires may exist, until it leaves `reserved`; a fire that stays
+/// reserved past the deadline is returned as is and fails the caller's check.
+async fn await_dispatch_handoff(h: &DaemonHarness, schedule_id: &str, mut fire: Value) -> Value {
+    let first_fire_id = fire["fire_id"].clone();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while fire["status"] == "reserved" && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Some(fires) = poll_for_fires_count(h, schedule_id, 1, Duration::from_secs(1)).await
+            && let Some(latest) = fires.into_iter().find(|f| f["fire_id"] == first_fire_id)
+        {
+            fire = latest;
+        }
+    }
+    fire
+}
+
 async fn poll_for_fires(
     h: &DaemonHarness,
     schedule_id: &str,
@@ -1092,23 +1357,24 @@ async fn fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
     body.get("result")?.get("total")?.as_u64()
 }
 
-fn projected_fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
-    let path = h
-        .state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("scheduler.sqlite3");
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let count = connection
-        .query_row(
-            "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
-            [schedule_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .ok()?;
-    u64::try_from(count).ok()
+/// `(fire_id, reserved_at_ms)` of every durable fire of `schedule_id`, read
+/// from a stopped node's Scheduler store through the native test gate. The
+/// daemon must already have exited; a live store is never reopened.
+fn stopped_fire_reservations(h: &DaemonHarness, schedule_id: &str) -> Vec<(String, i64)> {
+    let state_dir = h.state_path.join(ryeos_engine::AI_DIR).join("state");
+    let host = ryeos_scheduler::test_native::TestSchedulerHost::acquire();
+    host.with_fixture_sql(&state_dir, "scheduler.sqlite3", false, |connection| {
+        let mut statement = connection.prepare(
+            "SELECT fire_id, reserved_at FROM schedule_fires \
+             WHERE schedule_id = ?1 ORDER BY reserved_at",
+        )?;
+        let rows = statement
+            .query_map([schedule_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
 }
 
 /// Observe `show_fires` over a time window, checking that the fire count

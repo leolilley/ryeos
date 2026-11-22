@@ -1,0 +1,40 @@
+# ryeos:signed:2026-11-20T23:17:59Z:f6215813d8835564684b7b96a83c04d9ba3eb462611e833f485daa2e4be1a92a:pT3WdDM3G+6IGy+Ei8wnaUTsQExr8+Ske2RPgKW/0v9DK5WArYPTcE22uQc2ousjjo7T8POtRZ+O258rMw+hBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# The principal's durable work list sits at the left. Inspection is shared by
+# the changes and execution groups through the view-set-scoped selection
+# owner; the conversation keeps its independently explicit input route. No
+# renderer-owned sample project or thread is used.
+schema: 2
+id: development
+title: Development
+root:
+  type: split
+  axis: horizontal
+  ratio: 0.13
+  first:
+    type: group
+    label: Explorer
+    views: ["view:ryeos/development/explorer", "view:ryeos/projects/list", "view:ryeos/project/files", "view:ryeos/sites/list"]
+    active: 0
+  second:
+    type: split
+    axis: horizontal
+    ratio: 0.7
+    first:
+      type: group
+      label: Worker
+      views: ["view:ryeos/thread/conversation", "view:ryeos/thread/transcript", "view:ryeos/work/evidence", "view:ryeos/project/document"]
+      active: 0
+    second:
+      type: split
+      axis: vertical
+      ratio: 0.55
+      first:
+        type: group
+        label: Changes
+        views: ["view:ryeos/development/changes", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+        active: 0
+      second:
+        type: group
+        label: Execution
+        views: ["view:ryeos/development/execution", "view:ryeos/development/occurrence", "view:ryeos/work/children", "view:ryeos/thread/tree"]
+        active: 0

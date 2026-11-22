@@ -1,4 +1,9 @@
-//! Same-operator, CAS-only product transfer testimony.
+//! Same-operator product transfer testimony.
+//!
+//! Ordinary-content products travel through the CAS. Large-content products
+//! additionally travel through the large-object tier; their payload is not
+//! trusted from the closure but is verified against the receiving store when
+//! the witness is looked up (resident object, matching sidecar, clean scrub).
 //!
 //! These contracts reuse generic admission publication. Their owning subjects
 //! are acceptance -> generic origin admission -> untouched product witness. Neither
@@ -144,7 +149,7 @@ pub fn verify_admitted_product_guarded(
     let cas = authority.cas_store()?;
     let closure =
         collect_object_closure_with_cas_and_limits(&cas, [admission.subject_hash.clone()], limits)?;
-    require_cas_only_closure(&closure)?;
+    require_complete_closure(&closure)?;
     let value = load_product_attestation_value(authority, &admission.subject_hash, limits, guard)?
         .context("transferred product witness is absent")?;
     let product_attestation = Attestation::from_value(&value)?;
@@ -211,14 +216,14 @@ pub fn verify_received_product_guarded(
     })
 }
 
-fn require_cas_only_closure(
+/// Completeness is the only closure property checked here. Large-object
+/// dependencies are allowed: their bytes are proven against the receiving
+/// large-object store by the witness lookup, not by the closure walk.
+fn require_complete_closure(
     closure: &crate::object_closure::ObjectClosureReport,
 ) -> anyhow::Result<()> {
     if !closure.is_complete() {
         bail!("product transfer requires a complete bounded CAS closure");
-    }
-    if !closure.large_object_hashes.is_empty() {
-        bail!("product transfer does not transport large-object sidecars");
     }
     Ok(())
 }
@@ -518,20 +523,19 @@ mod tests {
     }
 
     #[test]
-    fn actual_sidecar_dependencies_are_refused_even_when_resident() {
+    fn large_object_edges_pass_the_completeness_check_but_gaps_do_not() {
         let mut closure = crate::object_closure::ObjectClosureReport::default();
         closure.object_hashes.insert("a".repeat(64));
         closure.blob_hashes.insert("b".repeat(64));
-        require_cas_only_closure(&closure).unwrap();
+        require_complete_closure(&closure).unwrap();
         closure.large_object_hashes.insert("c".repeat(64));
-        assert!(require_cas_only_closure(&closure).is_err());
-        closure.large_object_hashes.clear();
+        require_complete_closure(&closure).unwrap();
         closure
             .missing_blobs
             .push(crate::object_closure::MissingDependency {
                 hash: "b".repeat(64),
                 referenced_by: Some("a".repeat(64)),
             });
-        assert!(require_cas_only_closure(&closure).is_err());
+        assert!(require_complete_closure(&closure).is_err());
     }
 }

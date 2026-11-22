@@ -19,7 +19,7 @@ pub struct Request {}
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>(
+        .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>(
     )?;
     Ok(serde_json::to_value(ryeos_app::ignore::IgnoreConfig {
         patterns: policy.patterns.clone(),

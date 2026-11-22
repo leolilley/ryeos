@@ -24,14 +24,35 @@ pub async fn handle(
 ) -> Result<Value> {
     ryeos_app::operator_authority::require_local_configured_operator(&state, &context)
         .context("grant reconciliation requires the configured local operator")?;
-    let params = request.into_params(state.config.app_root.clone())?;
+    // The caller was just proved to be the configured local operator, the one
+    // identity that may put an offline-operation scope into a grant.
+    let lifetime_secs = request.lifetime_secs;
+    let params = request.into_params_as_local_operator(state.config.app_root.clone())?;
+    let operator =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
+            .context("load configured operator identity")?;
+    if lillux::crypto::fingerprint(&params.public_key) == operator.fingerprint() {
+        return Err(anyhow::Error::from(
+            super::grant_terms::operator_grant_refusal(),
+        ));
+    }
+    let terms = ryeos_core_tools::actions::authorize::authorize_client_terms(
+        &params,
+        lifetime_secs,
+        &super::grant_terms::authorization_policy(&state)?,
+        super::grant_terms::caller_authorized_by(&context),
+    )
+    .map_err(|error| anyhow::Error::from(super::grant_terms::lifetime_refusal(error)))?;
     tokio::task::spawn_blocking(move || {
         // Standalone dispatch already owns this exact lock. Borrow that
         // authority, not a boolean mode flag or a second flock acquisition.
         // The live daemon deliberately does not expose its lifecycle lock.
-        let stopped_node = state.extensions.get::<ryeos_app::state_lock::StateLock>();
+        let stopped_node = state
+            .extensions
+            .get::<ryeos_node_runtime::state_lock::StateLock>();
         let result = ryeos_core_tools::actions::authorize::run_authorize_client_with_authority(
             params,
+            &terms,
             &state.identity,
             &state.config.authorized_keys_dir,
             stopped_node.as_deref(),

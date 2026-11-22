@@ -34,7 +34,8 @@ mod tests {
             "ryeos.execute.tool.*",
             "ryeos.execute.tool.echo"
         ));
-        assert!(capability_covers("ryeos.get.vault.?", "ryeos.get.vault.x"));
+        // `?` is literal: no grant may rely on a single-character wildcard.
+        assert!(!capability_covers("ryeos.get.vault.?", "ryeos.get.vault.x"));
         assert!(!capability_covers(
             "ryeos.execute.tool.echo",
             "prefix.ryeos.execute.tool.echo"

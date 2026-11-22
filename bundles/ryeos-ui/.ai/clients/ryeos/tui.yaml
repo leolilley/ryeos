@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-14T10:03:08Z:2cdae34ce30e4be582b5521a78cf043bc83d3f1c5872496c836a75bd41e51815:Q2U067onPX0TsY2TJmf0mYwafXA1GMoW+5DZpeoCP+KKvlBOnTylL5ahy2d6uD8MHZ5RefsC9GxBTx3FHe2UBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:39Z:027163af1c6f8d072b584fd1f89885a6af9889e34a90069899cf1070237ab3eb:L3/jabIt9ZmGnY1UC3ZTuqi57taSHKkRop6jUt+KkMrZgAlg71Cu2S6Lz++hi3L87AdTFuFFd+MeBJBHB5VlAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: client
 name: tui
 version: "1.0.0"
-description: Terminal surface renderer for RyeOS
+description: Terminal renderer for an admitted RyeOS shared presentation
 
 serves:
   kind: surface
@@ -12,9 +12,7 @@ launch:
   mode: cli_exec
   binary_ref: bin/{triple}/ryeos-tui
   args:
-    surface: "--surface"
-    surface_file: "--surface-file"
-    mock: "--mock"
+    presentation: "--presentation"
     project: "--project"
 
 capabilities:

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:860fec30fa34025fc70aaf4b167d8a0cba3526f01a2d499087cf95247f8680a3:z/tsoTBExFg4d0QE9tKkJWl6yWHS5EtuWx0mHq3vIIpMtW0kWapVkfBWfumdtOazL2FKEoHHQBG151aVsiZnCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T05:04:32Z:a1e03826c128fbcaaa6f3040d05b6c43c7d5b1ea997c271476bf0375820e02b3:a3WeHsTXvlnW/u+MFvszW6r3EFSzu9hv29RId9ZzlmXyyIEkzn+3CeT4OHxBo3sZdThQMo190AzS9tLKDurHBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, signing, trust, keys, revocation, recovery]
 version: "0.1.1"
-status: deferred
+status: in progress
 description: >
   Signer rotation, succession, and delegation for a substrate whose sealed
   history is gated by revocation checks.

@@ -1,14 +1,13 @@
-<!-- ryeos:signed:2026-06-21T03:45:13Z:a726e6720cacccab3285f3bdc34cb0b6abe7107809a88f96c47caf34560193c4:ewtST9iAdK9vHZwph6xwdF06nx7wbAPWArC25/s9JPmE/MkpBhNLueLq4lEUxFUjc1OSQ8+EgT0sP1wyxvSqBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
-<!-- rye:signed:2026-06-03T03:31:14Z:029d844e16f5bd8aca351ee88439aceac8f86745be195ff2019487e19f3ba434:oP35NL5kiEQmuc01oeZ8bUMSbD4yrhMZQ73dTUJpLhSjl5HNbEOmbOeaQeDOJxsoIW_053I_8D4pg06JSEZWCg:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:a6fd1c686f412458281fe847271c5ba08fd9bc4263bf8bfc69d8b4863e9d17a9:c8wXC6zp3whPk629btTtxlj+IvOBxeXVCimosj9Ogz/RJfUMypeEiCzbBkiCL0BR1mdjx6PwSPWuF3J3kzUqAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future/creative-code-spaces
 name: README
 title: Creative Code Spaces Overview
 entry_type: overview
-version: "0.2.0"
+version: "0.2.1"
 author: amp
 created_at: 2026-05-28T00:00:00Z
-updated_at: 2026-06-03T00:00:00Z
+updated_at: 2026-10-06T00:00:00Z
 description: Future overview for RyeOS as an OS-inside-the-OS for signed digital spaces, cockpit home dimensions, portals, worlds, hosted presence, and multiple renderer/runtime dimensions over signed CAS state.
 tags:
   - creative-code-spaces
@@ -22,6 +21,17 @@ tags:
 ```
 
 # Creative Code Spaces Overview
+
+## Place in the platform direction
+
+This is a deferred application-family proposal under the
+[platform direction and delivery](../platform-direction-and-delivery.md).
+Its examples, object names and sequencing are prospective domain designs, not
+new core kinds, current API guarantees or the project-wide delivery order.
+Choose a concrete creative application before scheduling this branch; begin
+with one persisted object, an admitted action, a view and a reusable application
+edit. Richer simulation, open frame authoring and federation follow their own
+requirements. Re-audit the historical baseline below against current owners.
 
 ## Thesis
 
@@ -169,7 +179,7 @@ Hosted nodes provide uptime, presence, and reachability. They do not own truth.
 
 ## Future spine
 
-The future stack should develop in this order:
+Within a selected creative application, the following sequence is a dependency sketch to reconcile with existing owners, not a requirement to implement all phases before the first application:
 
 1. **Signed world/project objects** — non-executable CAS objects become first-class substrate.
 2. **Policy objects** — project, world, frame, portal, and node policies are signed CAS objects.

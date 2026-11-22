@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-18T08:43:00Z:290d4fd0c48aabc9e651f4c51826a0987a729d730b9436477036da7b39311841:4GDo6t0I//LXx0ktJvtGQj6y+0RffNys/A+//hoAnh4sIvU3i1g0OtWXbf6jIWWddouSRLr8aZKzaxUWU51dAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/core
+name: extends-chain
+kind: handler
+serves: composer
+binary_ref: bin/x86_64-unknown-linux-gnu/rye-composer-extends-chain
+abi_version: "v3"
+required_caps: []
+description: "Extends chain composer handler"
+cache:
+  mode: content_addressed

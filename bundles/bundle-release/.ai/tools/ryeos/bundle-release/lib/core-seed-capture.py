@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-23T08:19:54Z:fae89090f1b8336b9d60c8cfda498fe51bba3ed34275e8463d6be144be5ea7fa:UxZ7pSfajzE0pfocMsNxnk/wQCJEauZTnUjeLpRx/xaW9YR0dEHARPdX0OwcwL1YQKTbgho/y19OrNQthdhYDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:1430fc53b2fd05dc645a6a034eac21f4ac0e286e19d752748aa8ac0359f7d31f:zpfAIzJdZaWQMqXFPKwIG2Ylnsd1Mxto/6Dz9por9DwqnEtMePtK8u+R7xSDbOagl8/kip7Warz6TkWWkQpNDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Apply the exact publisher manifest to one admitted unsigned Core seed."""
 import hashlib
 import json

@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-27T11:54:23Z:9ab87b00484fca92e32a42b2a147d6022397c6bc43c77951523547ea92e90bee:ys2aVvD9584Nx3xfySNR0qmIKoNaXbixFVKIkmg0Yil0HcVlBwzO75gN2qlAsRk53im4LCice7cgZY8h1Xd/DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T08:00:41Z:34190b4beddfdb3ed715bc342102647758eec8c78929db7212788656c0d6e833:KfvDYtcY/lLhN+LFEJG82reaCXsH1cGi8bEvSlvUVC9LwX3NqpugmyVewm2+DCLkUpm+hZu5D5DwnO3BJTrsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
-description: Retained credential-free node-rooted guest occurrence owner runtime
+description: Retained credential-free, controller-independent guest occurrence owner runtime
 build_products:
   schema: ryeos.build_products.v1
   output_roots:
@@ -9,7 +9,7 @@ build_products:
       path: products/external-guest-owner-runtime
       storage: content
       bounds:
-        maximum_entries: 4
+        maximum_entries: 3
         maximum_depth: 3
         maximum_file_bytes: 33554432
         maximum_total_bytes: 33558528
@@ -21,10 +21,54 @@ build_products:
       storage: content
       required: true
       bounds:
-        maximum_entries: 4
+        maximum_entries: 3
         maximum_depth: 3
         maximum_file_bytes: 33554432
         maximum_total_bytes: 33558528
 product_relationships:
   schema: ryeos.product_relationships.v1
-  relationships: []
+  relationships:
+    # The guest-wire verifier must be able to inspect an unqualified owner.
+    # Keep this distinct from the qualification edge below, whose evidence
+    # gate the launch and qualify-product name.
+    - name: owner_to_guest_wire_verifier_subject
+      producer:
+        canonical_ref: graph:codex/guest-owner-runtime-production
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: tool:codex/qualification/guest-wire-verifier
+        declaration_id: subject
+      required_product:
+        shape: tree
+        storage: content
+        bounds:
+          maximum_entries: 3
+          maximum_depth: 3
+          maximum_file_bytes: 33554432
+          maximum_total_bytes: 33558528
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: owner_to_guest_wire_verifier
+      producer:
+        canonical_ref: graph:codex/guest-owner-runtime-production
+        recipe_binding: product_recipe
+        product_name: runtime
+        parameters: {}
+      consumer:
+        canonical_ref: tool:codex/qualification/guest-wire-verifier
+        declaration_id: subject
+      required_product:
+        shape: tree
+        storage: content
+        bounds:
+          maximum_entries: 3
+          maximum_depth: 3
+          maximum_file_bytes: 33554432
+          maximum_total_bytes: 33558528
+      qualification:
+        policy_ref: config:codex/guest-wire-qualification-policy
+        required_claims:
+        - external_guest_inputs_v5_launcher_v4

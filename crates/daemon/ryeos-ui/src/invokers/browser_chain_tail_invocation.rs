@@ -5,7 +5,12 @@
 //! session's authenticated user principal for the chain ownership check, and
 //! emits every upstream envelope as an unnamed SSE message so the browser does
 //! not need a brittle allowlist of event names.
+//!
+//! Opening the stream passes the node's seat read policy for this route and
+//! the seat's authority over the chain's signed root subject; every event then
+//! passes the disclosure half of the admitting policy entry.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ryeos_api::route_error::{RouteConfigError, RouteDispatchError};
@@ -19,12 +24,15 @@ use ryeos_api::routes::response_modes::event_stream_mode::{
 };
 use ryeos_app::route_raw::RawRouteSpec;
 use serde_json::Value;
-use tokio_stream::StreamExt;
 
+use crate::seat_auth::SeatCaller;
+use crate::seat_stream_policy::{FrameMode, admit_open, shape_events};
 use crate::state::UiState;
 
 const SOURCE: &str = "browser_chain_tail";
 const REQUIRED_AUTH: &str = "browser_session";
+/// The one request parameter of this stream, as a policy entry names it.
+const CHAIN_ROOT_PARAM: &str = "chain_root_id";
 
 pub struct BrowserChainTailSourceFactory {
     pub ui: Arc<UiState>,
@@ -114,7 +122,55 @@ impl CompiledRouteInvocation for CompiledBrowserChainTailInvocation {
             .get_session(session_id)
             .ok_or(RouteDispatchError::Unauthorized)?;
         principal.id = session.principal_id.clone();
-        principal.scopes = session.granted_caps;
+        principal.scopes = session.granted_caps.clone();
+
+        let requested = ctx
+            .input
+            .get(CHAIN_ROOT_PARAM)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                RouteDispatchError::BadRequest("missing chain_root_id in request".into())
+            })?
+            .to_owned();
+
+        // The policy judges the request first: no entry, a denied or
+        // unmatched parameter, or an ambiguous entry refuses the open.
+        let admitted = admit_open(
+            &ctx.state,
+            &ctx.route_id,
+            &session,
+            serde_json::json!({ CHAIN_ROOT_PARAM: requested }),
+            &BTreeMap::from([(CHAIN_ROOT_PARAM.to_owned(), "string".to_owned())]),
+        )?;
+        let chain_root_id = admitted
+            .params
+            .get(CHAIN_ROOT_PARAM)
+            .and_then(Value::as_str)
+            .ok_or_else(|| RouteDispatchError::BadRequest("chain_root_id must be text".into()))?
+            .to_owned();
+
+        // The seat may see this chain only when the signed subject of its root
+        // thread says so. An absent chain, a thread that is not a chain root
+        // and an unauthorized chain are the same answer.
+        let caller = SeatCaller::Operator {
+            principal_id: session.principal_id.clone(),
+        };
+        let subjects = crate::thread_authorization::authorize_exact_thread_subjects_for(
+            &ctx.state,
+            &caller,
+            &[chain_root_id.as_str()],
+        )
+        .map_err(|error| match error {
+            ryeos_app::handler_error::HandlerError::NotFound => RouteDispatchError::NotFound,
+            other => RouteDispatchError::Internal(format!("{other}")),
+        })?;
+        if subjects
+            .first()
+            .is_none_or(|subject| subject.chain_root_id != chain_root_id)
+        {
+            return Err(RouteDispatchError::NotFound);
+        }
+        ctx.input = serde_json::json!({ CHAIN_ROOT_PARAM: chain_root_id });
 
         let upstream = CompiledChainTailInvocation {
             keep_alive_secs: self.keep_alive_secs,
@@ -125,18 +181,9 @@ impl CompiledRouteInvocation for CompiledBrowserChainTailInvocation {
             ));
         };
         let keep_alive_secs = stream.keep_alive_secs;
-        let events = stream.events.map(|item| {
-            item.map(|mut envelope| {
-                envelope.payload = serde_json::json!({
-                    "event_type": envelope.event_type,
-                    "payload": envelope.payload,
-                });
-                envelope.event_type = "message".to_string();
-                envelope
-            })
-        });
+        let events = shape_events(stream.events, admitted, FrameMode::WrapAsMessage);
         Ok(RouteInvocationResult::Stream(RouteEventStream {
-            events: Box::pin(events),
+            events,
             keep_alive_secs,
         }))
     }

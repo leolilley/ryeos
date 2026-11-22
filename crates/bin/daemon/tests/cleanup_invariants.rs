@@ -20,34 +20,34 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 use ryeos_engine::item_resolution::parse_signature_header;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::trust::TrustStore;
-
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 fn workspace_root() -> PathBuf {
     ryeos_engine::test_support::workspace_root()
 }
 
 fn build_test_engine() -> ryeos_engine::engine::Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let workspace = workspace_root();
     let core_kinds = workspace.join("bundles/core/.ai/node/engine/kinds");
-    let std_kinds = workspace.join("bundles/standard/.ai/node/engine/kinds");
-    let kinds = KindRegistry::load_base(&[core_kinds, std_kinds], &trust_store)
-        .expect("load kind registry");
+    let workflow_roots: Vec<_> = ["knowledge", "directive", "graph"]
+        .iter()
+        .map(|name| workspace.join("bundles").join(name))
+        .collect();
+    let mut kind_roots = vec![core_kinds];
+    kind_roots.extend(
+        workflow_roots
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = KindRegistry::load_base(&kind_roots, &trust_store).expect("load kind registry");
 
     let bundle_root = workspace.join("bundles/core");
-    let standard_root = workspace.join("bundles/standard");
-    let (parser_tools, _) = ryeos_engine::parsers::ParserRegistry::load_base(
-        &[bundle_root.clone(), standard_root.clone()],
-        &trust_store,
-        &kinds,
-    )
-    .expect("load parser tools");
+    let mut parser_roots = vec![bundle_root.clone()];
+    parser_roots.extend(workflow_roots.iter().cloned());
+    let (parser_tools, _) =
+        ryeos_engine::parsers::ParserRegistry::load_base(&parser_roots, &trust_store, &kinds)
+            .expect("load parser tools");
 
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher = ryeos_engine::parsers::ParserDispatcher::new(
@@ -58,7 +58,16 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive composers");
 
-    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, vec![bundle_root, standard_root])
+    // The descriptor table also serves the bundle catalog, bundle release and
+    // (in builds composed with scheduling) scheduler services, whose signed
+    // items live in their own source bundles.
+    let mut bundle_roots = parser_roots;
+    bundle_roots.extend([
+        workspace.join("bundles/bundle-source"),
+        workspace.join("bundles/bundle-release"),
+        workspace.join("bundles/scheduling"),
+    ]);
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store.clone())
         .with_node_trust_store(trust_store)
         .with_composers(composers)
@@ -66,6 +75,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
 fn local_plan_ctx() -> PlanContext {
     PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-cleanup".into(),
             scopes: vec![],
@@ -98,7 +108,7 @@ fn service_refs() -> Vec<&'static str> {
     descriptors().iter().map(|d| d.service_ref).collect()
 }
 
-// ── Gate 1: All 17 service refs resolve + endpoint matches ────────────
+// ── Gate 1: Every service ref resolves + endpoint matches ────────────
 
 #[test]
 fn gate_01_all_service_refs_resolve_with_matching_endpoint() {
@@ -135,7 +145,7 @@ fn gate_01_all_service_refs_resolve_with_matching_endpoint() {
     }
 }
 
-// ── Gate 2: All 17 service refs resolve and verify trust chain ───────
+// ── Gate 2: Every service ref resolves and verifies trust chain ───────
 
 #[test]
 fn gate_02_all_service_refs_resolve_and_verify() {
@@ -522,8 +532,7 @@ fn gate_16_service_ref_format() {
 
 #[test]
 fn gate_17_trust_store_loads() {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     assert!(
         !trust_store.is_empty(),

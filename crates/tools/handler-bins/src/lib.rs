@@ -1,14 +1,21 @@
-pub mod direct_execution_evidence;
-pub mod directive_launch;
-pub mod extends_chain;
-pub mod graph_effective_validator;
-pub mod graph_execution_evidence;
-pub mod graph_launch;
-pub mod identity;
-pub mod regex_kv;
-pub mod scoped_qualification_execution_evidence;
-pub mod yaml_document;
-pub mod yaml_header_document;
+#[cfg(not(feature = "common-handler"))]
+compile_error!(
+    "select an explicit handler composition: core-handlers, extends-composer, graph-handlers, or directive-handlers"
+);
 
-mod stdio;
-pub use stdio::run_handler;
+#[cfg(feature = "core-handlers")]
+pub mod direct_execution_evidence;
+#[cfg(feature = "directive-handlers")]
+pub mod directive_launch;
+#[cfg(feature = "extends-composer")]
+pub mod extends_chain;
+#[cfg(feature = "graph-handlers")]
+pub mod graph_effective_validator;
+#[cfg(feature = "graph-handlers")]
+pub mod graph_execution_evidence;
+#[cfg(feature = "graph-handlers")]
+pub mod graph_launch;
+#[cfg(feature = "core-handlers")]
+pub mod identity;
+#[cfg(feature = "core-handlers")]
+pub mod scoped_qualification_execution_evidence;

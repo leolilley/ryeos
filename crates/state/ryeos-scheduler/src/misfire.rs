@@ -11,49 +11,14 @@ use super::db::SchedulerDb;
 use super::projection;
 use super::types::{FireRecord, PendingFire, ScheduleSpecRecord};
 use crate::SchedulerContext;
+use ryeos_scheduler_contract::{MisfirePolicy, parse_misfire_policy};
 
 // Processing bound only, not schedule policy: subsequent timer passes resume
 // from the persisted fire/cursor boundary and continue the same downtime gap.
 const MISFIRE_SCAN_BATCH: usize = 10_000;
 
-/// All four misfire policies.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MisfirePolicy {
-    Skip,
-    FireOnceNow,
-    CatchUpBounded(usize),
-    CatchUpWithinSecs(u64),
-}
-
 pub fn resolve_misfire_policy(spec: &ScheduleSpecRecord) -> Result<MisfirePolicy> {
     parse_misfire_policy(&spec.misfire_policy)
-}
-
-pub fn parse_misfire_policy(raw: &str) -> Result<MisfirePolicy> {
-    match raw {
-        "skip" => Ok(MisfirePolicy::Skip),
-        "fire_once_now" => Ok(MisfirePolicy::FireOnceNow),
-        s if s.starts_with("catch_up_bounded:") => {
-            let count = s
-                .strip_prefix("catch_up_bounded:")
-                .expect("prefix checked")
-                .parse::<usize>()
-                .map_err(|_| anyhow::anyhow!("invalid misfire_policy: {raw}"))?;
-            Ok(MisfirePolicy::CatchUpBounded(count))
-        }
-        s if s.starts_with("catch_up_within_secs:") => {
-            let seconds = s
-                .strip_prefix("catch_up_within_secs:")
-                .expect("prefix checked")
-                .parse::<u64>()
-                .map_err(|_| anyhow::anyhow!("invalid misfire_policy: {raw}"))?;
-            if seconds > (i64::MAX as u64) / 1_000 {
-                anyhow::bail!("misfire_policy window is too large: {raw}");
-            }
-            Ok(MisfirePolicy::CatchUpWithinSecs(seconds))
-        }
-        _ => anyhow::bail!("invalid misfire_policy: {raw}"),
-    }
 }
 
 /// Detect missed fires after `anchor` and before `horizon_exclusive`.
@@ -72,6 +37,9 @@ pub fn detect_misfires_before(
     let mut missed = Vec::new();
     let mut cursor = anchor;
     let mut scanned = 0usize;
+    // Boundaries past the schedule's lifetime bounds do not exist, so they are
+    // never missed either.
+    let horizon_exclusive = super::planning::clamp_to_lifetime_exclusive(spec, horizon_exclusive);
 
     if cursor >= horizon_exclusive {
         return Ok(missed);
@@ -208,26 +176,23 @@ pub async fn evaluate_misfires_before<Ctx: SchedulerContext>(
         }
 
         MisfirePolicy::CatchUpBounded(max) => {
-            // Take oldest `max` fires (already in chronological order)
-            let to_fire: Vec<i64> = missed.iter().take(max).copied().collect();
-            let skipped_count = missed.len().saturating_sub(max);
+            let (to_fire, to_skip) = split_bounded(&missed, max);
             tracing::warn!(
                 schedule_id = %spec.schedule_id,
                 missed = missed.len(),
                 catching_up = to_fire.len(),
-                skipped = skipped_count,
+                skipped = to_skip.len(),
                 policy = "catch_up_bounded",
                 max,
                 "misfires detected — catching up bounded"
             );
-            // Skip the fires beyond the bound (newest ones)
-            for &scheduled_at in &missed[max..] {
+            for &scheduled_at in to_skip {
                 let fid = super::types::fire_id(&spec.schedule_id, scheduled_at);
                 record_skip(ctx, &fid, spec, scheduled_at, "misfire_skipped_bounded").await?;
             }
             to_fire
-                .into_iter()
-                .map(|scheduled_at| PendingFire {
+                .iter()
+                .map(|&scheduled_at| PendingFire {
                     fire_id: super::types::fire_id(&spec.schedule_id, scheduled_at),
                     scheduled_at,
                     reason: "misfire_catch_up",
@@ -267,6 +232,13 @@ pub async fn evaluate_misfires_before<Ctx: SchedulerContext>(
         }
     };
     Ok(pending)
+}
+
+/// Split chronologically ordered missed fires under `catch_up_bounded:max`:
+/// the oldest `max` fire, everything newer is skipped. Fewer than `max`
+/// missed fires means every one fires and nothing is skipped.
+fn split_bounded(missed: &[i64], max: usize) -> (&[i64], &[i64]) {
+    missed.split_at(max.min(missed.len()))
 }
 
 async fn record_skip<Ctx: SchedulerContext>(
@@ -330,8 +302,8 @@ mod tests {
             signer_fingerprint: "11".repeat(32),
             spec_hash: "22".repeat(32),
             registered_at: 0,
-            execution: crate::types::ScheduleExecution {
-                authority: crate::types::ScheduleExecutionAuthority::Node {
+            execution: ryeos_scheduler_contract::ScheduleExecution {
+                authority: ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
                     principal_id: format!("fp:{}", "33".repeat(32)),
                     effective_origin_site_id: "site:test".to_string(),
                 },
@@ -339,6 +311,9 @@ mod tests {
                 policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
                     ryeos_engine::execution_contract::ExecutionResponse::Accepted,
                 ),
+                limits: None,
+                max_fires: None,
+                expires_at: None,
             },
         }
     }
@@ -374,6 +349,25 @@ mod tests {
             ),
             admitted_capsule_hash: Some("44".repeat(32)),
         }
+    }
+
+    #[test]
+    fn split_bounded_fires_the_oldest_and_never_panics() {
+        let missed: Vec<i64> = (1..=5).collect();
+        let cases: [(usize, &[i64], &[i64]); 5] = [
+            (5, &[1, 2, 3, 4, 5], &[]),
+            (4, &[1, 2, 3, 4], &[5]),
+            (1, &[1], &[2, 3, 4, 5]),
+            (10, &[1, 2, 3, 4, 5], &[]),
+            (0, &[], &[1, 2, 3, 4, 5]),
+        ];
+        for (max, fire, skip) in cases {
+            let (to_fire, to_skip) = split_bounded(&missed, max);
+            assert_eq!(to_fire, fire, "max={max}");
+            assert_eq!(to_skip, skip, "max={max}");
+        }
+        let (to_fire, to_skip) = split_bounded(&[], 5);
+        assert!(to_fire.is_empty() && to_skip.is_empty());
     }
 
     #[test]
@@ -441,7 +435,7 @@ mod tests {
 
     #[test]
     fn detect_misfires_excludes_current_due_boundary() {
-        let db = SchedulerDb::new_in_memory().unwrap();
+        let db = crate::test_native::TestSchedulerDb::open();
         let spec = make_cron_spec(1780455600000); // 2026-06-03T03:00:00Z
         db.upsert_fire(&make_fire(&spec.schedule_id, 1780457400000))
             .unwrap(); // 03:30
@@ -462,7 +456,7 @@ mod tests {
 
     #[test]
     fn detect_misfires_includes_older_missing_boundary_before_current() {
-        let db = SchedulerDb::new_in_memory().unwrap();
+        let db = crate::test_native::TestSchedulerDb::open();
         let spec = make_cron_spec(1780455600000); // 2026-06-03T03:00:00Z
         db.upsert_fire(&make_fire(&spec.schedule_id, 1780456500000))
             .unwrap(); // 03:15
@@ -480,7 +474,7 @@ mod tests {
 
     #[test]
     fn detect_misfires_startup_after_missed_first_fire() {
-        let db = SchedulerDb::new_in_memory().unwrap();
+        let db = crate::test_native::TestSchedulerDb::open();
         let spec = make_cron_spec(1780457760000); // 2026-06-03T03:36:00Z
 
         let missed = detect_misfires_before(
@@ -495,8 +489,28 @@ mod tests {
     }
 
     #[test]
+    fn detect_misfires_never_reports_boundaries_past_the_lifetime() {
+        let db = crate::test_native::TestSchedulerDb::open();
+        let mut spec = make_cron_spec(1780457760000); // 2026-06-03T03:36:00Z
+        spec.execution.expires_at = Some("2026-06-03T03:45:00Z".to_string());
+
+        let missed = detect_misfires_before(
+            &spec,
+            spec.registered_at,
+            1780458720000, // 03:52; startup reconcile horizon
+            &db,
+        )
+        .unwrap();
+
+        assert!(
+            missed.is_empty(),
+            "the 03:45 boundary is at the expiry instant and must not be admitted"
+        );
+    }
+
+    #[test]
     fn detect_misfires_startup_before_first_fire_is_empty() {
-        let db = SchedulerDb::new_in_memory().unwrap();
+        let db = crate::test_native::TestSchedulerDb::open();
         let spec = make_cron_spec(1780457760000); // 2026-06-03T03:36:00Z
 
         let missed = detect_misfires_before(

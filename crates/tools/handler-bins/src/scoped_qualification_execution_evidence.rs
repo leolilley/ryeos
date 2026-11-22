@@ -23,10 +23,10 @@ pub fn describe(request: ExecutionEvidenceDescribeRequest) -> HandlerResponse {
 
 pub fn project(request: ExecutionEvidenceProjectRequest) -> HandlerResponse {
     let response = match project_inner(request) {
-        Ok((result, scoped_attempt)) => ExecutionEvidenceProjectResponse::Projected {
+        Ok((result, subordinate_attempt)) => ExecutionEvidenceProjectResponse::Projected {
             result,
             calls: Vec::new(),
-            scoped_attempt: Some(scoped_attempt),
+            subordinate_attempt: Some(subordinate_attempt),
         },
         Err(message) => ExecutionEvidenceProjectResponse::Refused { message },
     };
@@ -46,7 +46,7 @@ fn project_inner(
 ) -> Result<
     (
         serde_json::Value,
-        ExecutionEvidenceCandidateScopedAttemptWire,
+        ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire,
     ),
     String,
 > {
@@ -69,13 +69,47 @@ fn project_inner(
         );
     }
     let result = ProductQualificationResult::from_value(&request.terminal.result)
-        .map_err(|error| error.to_string())?;
-    let claimed = result
-        .probe_evidence
-        .get("scoped_attempt")
-        .ok_or_else(|| "scoped qualification terminal omits its attempt coordinate".to_owned())?;
-    let candidate: ExecutionEvidenceCandidateScopedAttemptWire =
-        serde_json::from_value(claimed.clone()).map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
+    use ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire;
+    let candidate = if request.config == serde_json::json!({"subordinate":"remote_consumer"}) {
+        if result.probe_evidence.get("scoped_attempt").is_some() {
+            return Err("remote consumer terminal contains scoped producer evidence".into());
+        }
+        let claimed = result
+            .probe_evidence
+            .get("remote_consumer_attempt")
+            .ok_or_else(|| "remote consumer terminal omits exact retained references".to_owned())?;
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RemoteReferences {
+            operation_id: String,
+            evidence_sha256: String,
+            termination_operation_id: String,
+            terminal_observation_sha256: String,
+        }
+        let references: RemoteReferences =
+            serde_json::from_value(claimed.clone()).map_err(|error| error.to_string())?;
+        ExecutionEvidenceCandidateSubordinateAttemptWire::RemoteConsumer {
+            operation_id: references.operation_id,
+            evidence_sha256: references.evidence_sha256,
+            termination_operation_id: references.termination_operation_id,
+            terminal_observation_sha256: references.terminal_observation_sha256,
+        }
+    } else {
+        if result
+            .probe_evidence
+            .get("remote_consumer_attempt")
+            .is_some()
+        {
+            return Err("scoped producer terminal contains remote consumer evidence".into());
+        }
+        let claimed = result.probe_evidence.get("scoped_attempt").ok_or_else(|| {
+            "scoped qualification terminal omits its attempt coordinate".to_owned()
+        })?;
+        let coordinate: ExecutionEvidenceCandidateScopedAttemptWire =
+            serde_json::from_value(claimed.clone()).map_err(|error| error.to_string())?;
+        ExecutionEvidenceCandidateSubordinateAttemptWire::ScopedProducer { coordinate }
+    };
     Ok((request.terminal.result, candidate))
 }
 
@@ -83,12 +117,34 @@ fn require_program(
     config: &serde_json::Value,
     program: &ryeos_handler_protocol::ExecutionEvidenceProgramWire,
 ) -> Result<(), String> {
-    if config != &serde_json::json!({})
-        || program.composed.composed.get("execution_protocol")
-            != Some(&serde_json::json!(
-                "protocol:ryeos/core/qualification_scoped_callback"
-            ))
-    {
+    let remote = config == &serde_json::json!({"subordinate":"remote_consumer"});
+    let expected_protocol = if config == &serde_json::json!({}) {
+        "protocol:ryeos/core/qualification_scoped_callback"
+    } else if remote {
+        "protocol:ryeos/core/qualification_consumer_callback"
+    } else {
+        return Err("qualification projector configuration is not exact".into());
+    };
+    let scalar = program.composed.composed.get("execution_protocol");
+    let list = program.composed.composed.get("execution_protocols");
+    let exact = match (scalar, list) {
+        (Some(scalar), None) => scalar == &serde_json::json!(expected_protocol),
+        (None, Some(list)) if remote => {
+            let expected: std::collections::BTreeSet<&str> = [
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_trusted",
+            ]
+            .into_iter()
+            .collect();
+            list.as_array().is_some_and(|items| {
+                let actual: std::collections::BTreeSet<&str> =
+                    items.iter().filter_map(|item| item.as_str()).collect();
+                items.len() == expected.len() && actual == expected
+            })
+        }
+        _ => false,
+    };
+    if !exact {
         return Err(
             "scoped qualification projector requires its exact protocol and empty configuration"
                 .into(),
@@ -159,6 +215,46 @@ mod tests {
     }
 
     #[test]
+    fn remote_projection_requires_its_protocol_and_exclusive_references() {
+        let mut valid = request();
+        valid.config = json!({"subordinate":"remote_consumer"});
+        valid.effective_program.composed.composed["execution_protocol"] =
+            json!("protocol:ryeos/core/qualification_consumer_callback");
+        valid.terminal.result["probe_evidence"] = json!({"remote_consumer_attempt":{
+            "operation_id":"a".repeat(64), "evidence_sha256":"b".repeat(64),
+            "termination_operation_id":"c".repeat(64), "terminal_observation_sha256":"d".repeat(64),
+        }});
+        assert!(matches!(project(valid.clone()), HandlerResponse::ExecutionEvidenceProject {
+            response: ExecutionEvidenceProjectResponse::Projected {
+                subordinate_attempt: Some(ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire::RemoteConsumer { .. }), ..
+            }
+        }));
+        let mut mixed = valid.clone();
+        mixed.terminal.result["probe_evidence"]["scoped_attempt"] = json!({});
+        assert!(matches!(
+            project(mixed),
+            HandlerResponse::ExecutionEvidenceProject {
+                response: ExecutionEvidenceProjectResponse::Refused { .. }
+            }
+        ));
+        let mut wrong_protocol = valid.clone();
+        wrong_protocol.effective_program = program();
+        assert!(matches!(
+            project(wrong_protocol),
+            HandlerResponse::ExecutionEvidenceProject {
+                response: ExecutionEvidenceProjectResponse::Refused { .. }
+            }
+        ));
+        valid.terminal.result["probe_evidence"]["remote_consumer_attempt"]["retry"] = json!(true);
+        assert!(matches!(
+            project(valid),
+            HandlerResponse::ExecutionEvidenceProject {
+                response: ExecutionEvidenceProjectResponse::Refused { .. }
+            }
+        ));
+    }
+
+    #[test]
     fn projects_only_exact_scoped_terminal_coordinate() {
         let HandlerResponse::ExecutionEvidenceDescribe {
             response: ExecutionEvidenceDescribeResponse::Described { required_calls },
@@ -174,7 +270,7 @@ mod tests {
             response:
                 ExecutionEvidenceProjectResponse::Projected {
                     calls,
-                    scoped_attempt: Some(scoped),
+                    subordinate_attempt: Some(ryeos_handler_protocol::ExecutionEvidenceCandidateSubordinateAttemptWire::ScopedProducer { coordinate: scoped }),
                     ..
                 },
         } = project(request())
@@ -207,5 +303,69 @@ mod tests {
                 response: ExecutionEvidenceProjectResponse::Refused { .. }
             }
         ));
+    }
+
+    fn remote_with_protocols(composed: serde_json::Value) -> ExecutionEvidenceProjectRequest {
+        let mut remote = request();
+        remote.config = json!({"subordinate":"remote_consumer"});
+        remote.effective_program.composed.composed = composed;
+        remote.terminal.result["probe_evidence"] = json!({"remote_consumer_attempt":{
+            "operation_id":"a".repeat(64), "evidence_sha256":"b".repeat(64),
+            "termination_operation_id":"c".repeat(64), "terminal_observation_sha256":"d".repeat(64),
+        }});
+        remote
+    }
+
+    fn is_refused(request: ExecutionEvidenceProjectRequest) -> bool {
+        matches!(
+            project(request),
+            HandlerResponse::ExecutionEvidenceProject {
+                response: ExecutionEvidenceProjectResponse::Refused { .. }
+            }
+        )
+    }
+
+    #[test]
+    fn remote_projection_accepts_the_exact_protocol_list() {
+        let both = json!({"execution_protocols":[
+            "protocol:ryeos/core/qualification_consumer_callback_trusted",
+            "protocol:ryeos/core/qualification_consumer_callback_contained",
+        ]});
+        assert!(!is_refused(remote_with_protocols(both)));
+    }
+
+    #[test]
+    fn remote_projection_refuses_a_wrong_protocol_list() {
+        for list in [
+            json!(["protocol:ryeos/core/qualification_consumer_callback_contained"]),
+            json!([
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback"
+            ]),
+            json!([
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_trusted",
+                "protocol:ryeos/core/qualification_scoped_callback"
+            ]),
+            json!([
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_contained"
+            ]),
+        ] {
+            assert!(is_refused(remote_with_protocols(
+                json!({"execution_protocols": list})
+            )));
+        }
+    }
+
+    #[test]
+    fn remote_projection_refuses_both_protocol_keys() {
+        assert!(is_refused(remote_with_protocols(json!({
+            "execution_protocol":"protocol:ryeos/core/qualification_consumer_callback",
+            "execution_protocols":[
+                "protocol:ryeos/core/qualification_consumer_callback_contained",
+                "protocol:ryeos/core/qualification_consumer_callback_trusted",
+            ],
+        }))));
     }
 }

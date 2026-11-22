@@ -4,7 +4,11 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
+#[cfg(any(test, feature = "test-support"))]
 use ryeos_state::external_execution::transport::ExternalControllerTransportContract;
+use ryeos_state::external_execution::transport::{
+    ExternalControllerTransportSelection, ExternalNetworkInputPolicy,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -13,7 +17,17 @@ use crate::node_config::{
     SectionCardinality, SectionLoadPhase, SectionLoadSpec, SectionSignerPolicy, SectionTraversal,
 };
 
+pub mod compose;
+pub mod compose_qualification;
+pub mod provision;
+
 pub const SECTION_NAME: &str = "external_execution";
+/// Upper bound on the native work one placement may declare: a thousand
+/// times the largest envelope an incarnation is issued today.
+pub(crate) const MAX_NATIVE_WORK_STEPS: u64 = 1_000_000_000_000;
+/// The native work a placement declares when its binding states none: a
+/// tenth of the incarnation envelope the shipped profiles issue.
+pub(crate) const DEFAULT_NATIVE_WORK_STEPS: u64 = 2_000_000;
 pub struct ExternalExecutionSection;
 
 /// Workload-specific authority in one node-signed placement binding. Direct
@@ -23,6 +37,7 @@ pub struct ExternalExecutionSection;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ExternalWorkloadBinding {
     StructuredSession(ExternalStructuredSessionBinding),
+    QualificationStructuredSession(ExternalQualificationStructuredSessionBinding),
     DirectCommand {},
 }
 
@@ -40,40 +55,148 @@ pub(crate) struct ExternalStructuredSessionBinding {
     pub(crate) connector_artifact_bytes: u64,
 }
 
+/// A signed, zero-export placement choice for proving one captured runtime
+/// through its Worker recipe before that runtime has a qualification. The
+/// accepted root and current occurrence supply the use and contact authority;
+/// this binding only selects exact executable and Worker identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalQualificationStructuredSessionBinding {
+    pub(crate) provider_declaration_id: String,
+    pub(crate) provider_configuration_destination: String,
+    pub(crate) requirement_digest: String,
+    pub(crate) worker_profile_hash: String,
+    pub(crate) runtime_manifest_hash: String,
+    pub(crate) runtime_member_sha256: String,
+    pub(crate) configuration_adapter_artifact_hash: String,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_protocol: String,
+    pub(crate) connector_artifact_hash: String,
+    pub(crate) connector_artifact_bytes: u64,
+}
+
+/// Shared signed artifact coordinates for the two distinct session lanes.
+/// Workload admission still checks the exact ordinary or qualification
+/// program separately before these executables may be used.
+pub(crate) struct ExternalSessionArtifactSelection<'a> {
+    pub(crate) provider_declaration_id: &'a str,
+    pub(crate) provider_configuration_destination: &'a str,
+    pub(crate) configuration_adapter_artifact_hash: &'a str,
+    pub(crate) configuration_adapter_artifact_bytes: u64,
+    pub(crate) connector_protocol: &'a str,
+    pub(crate) connector_artifact_hash: &'a str,
+    pub(crate) connector_artifact_bytes: u64,
+}
+
 impl ExternalWorkloadBinding {
     pub(crate) fn structured_session(&self) -> Result<&ExternalStructuredSessionBinding> {
         match self {
             Self::StructuredSession(session) => Ok(session),
+            Self::QualificationStructuredSession(_) => anyhow::bail!(
+                "qualification-only binding cannot authorize an ordinary structured session"
+            ),
             Self::DirectCommand {} => anyhow::bail!(
                 "external direct-command binding cannot authorize a structured session"
             ),
         }
     }
 
-    fn validate(&self) -> Result<()> {
-        let Self::StructuredSession(session) = self else {
-            return Ok(());
+    pub(crate) fn qualification_structured_session(
+        &self,
+    ) -> Result<&ExternalQualificationStructuredSessionBinding> {
+        match self {
+            Self::QualificationStructuredSession(session) => Ok(session),
+            _ => anyhow::bail!("external binding has no qualification-only session authority"),
+        }
+    }
+
+    pub(crate) fn session_artifacts(&self) -> Result<ExternalSessionArtifactSelection<'_>> {
+        let selection = match self {
+            Self::StructuredSession(session) => ExternalSessionArtifactSelection {
+                provider_declaration_id: &session.provider_declaration_id,
+                provider_configuration_destination: &session.provider_configuration_destination,
+                configuration_adapter_artifact_hash: &session.configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes: session.configuration_adapter_artifact_bytes,
+                connector_protocol: &session.connector_protocol,
+                connector_artifact_hash: &session.connector_artifact_hash,
+                connector_artifact_bytes: session.connector_artifact_bytes,
+            },
+            Self::QualificationStructuredSession(session) => ExternalSessionArtifactSelection {
+                provider_declaration_id: &session.provider_declaration_id,
+                provider_configuration_destination: &session.provider_configuration_destination,
+                configuration_adapter_artifact_hash: &session.configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes: session.configuration_adapter_artifact_bytes,
+                connector_protocol: &session.connector_protocol,
+                connector_artifact_hash: &session.connector_artifact_hash,
+                connector_artifact_bytes: session.connector_artifact_bytes,
+            },
+            Self::DirectCommand {} => {
+                anyhow::bail!("external direct command has no session artifact selection")
+            }
         };
-        ryeos_state::external_content::products::validate_name(&session.provider_declaration_id)?;
+        Ok(selection)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let (
+            provider_declaration_id,
+            provider_configuration_destination,
+            runtime_manifest_hash,
+            configuration_adapter_artifact_hash,
+            configuration_adapter_artifact_bytes,
+            connector_protocol,
+            connector_artifact_hash,
+            connector_artifact_bytes,
+        ) = match self {
+            Self::StructuredSession(session) => (
+                &session.provider_declaration_id,
+                &session.provider_configuration_destination,
+                &session.runtime_manifest_hash,
+                &session.configuration_adapter_artifact_hash,
+                session.configuration_adapter_artifact_bytes,
+                &session.connector_protocol,
+                &session.connector_artifact_hash,
+                session.connector_artifact_bytes,
+            ),
+            Self::QualificationStructuredSession(session) => {
+                validate_content_identity(&session.requirement_digest)?;
+                validate_content_identity(&session.worker_profile_hash)?;
+                validate_content_identity(&session.runtime_member_sha256)?;
+                (
+                    &session.provider_declaration_id,
+                    &session.provider_configuration_destination,
+                    &session.runtime_manifest_hash,
+                    &session.configuration_adapter_artifact_hash,
+                    session.configuration_adapter_artifact_bytes,
+                    &session.connector_protocol,
+                    &session.connector_artifact_hash,
+                    session.connector_artifact_bytes,
+                )
+            }
+            Self::DirectCommand {} => return Ok(()),
+        };
+        ryeos_state::external_content::products::validate_name(provider_declaration_id)?;
         ryeos_state::objects::validate_session_configuration_destination(
-            &session.provider_configuration_destination,
+            provider_configuration_destination,
         )?;
         for value in [
-            &session.runtime_manifest_hash,
-            &session.runtime_selection_identity,
-            &session.configuration_adapter_artifact_hash,
-            &session.connector_artifact_hash,
+            runtime_manifest_hash,
+            configuration_adapter_artifact_hash,
+            connector_artifact_hash,
         ] {
             validate_content_identity(value)?;
         }
+        if let Self::StructuredSession(session) = self {
+            validate_content_identity(&session.runtime_selection_identity)?;
+        }
         for bytes in [
-            session.configuration_adapter_artifact_bytes,
-            session.connector_artifact_bytes,
+            configuration_adapter_artifact_bytes,
+            connector_artifact_bytes,
         ] {
             validate_artifact_bytes(bytes)?;
         }
         ensure!(
-            session.connector_protocol
+            connector_protocol.as_str()
                 == ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
             "placement binding requires the exact bounded connector contract"
         );
@@ -109,6 +232,37 @@ pub(crate) struct ExternalRuntimeQualificationBinding {
     pub(crate) owner_principal: String,
     pub(crate) qualification:
         ryeos_state::external_content::products::composition::ProductRelationshipQualification,
+    /// Required nullable. `Some` selects a remote qualification testimony
+    /// accepted under local policy: `attestation_hash` is then the origin's
+    /// qualification attestation hash and `owner_principal` the attesting
+    /// operator. `None` is the local qualification path, unchanged.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub(crate) remote_testimony: Option<ExternalRemoteQualificationTestimonyBinding>,
+}
+
+/// Names one local acceptance of a remote testimony and the local policy it
+/// was accepted under. It selects testimony; it never grants launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalRemoteQualificationTestimonyBinding {
+    pub(crate) acceptance_hash: String,
+    pub(crate) acceptance_policy_ref: String,
+}
+
+impl ExternalRemoteQualificationTestimonyBinding {
+    pub(crate) fn validate(&self) -> Result<()> {
+        validate_content_identity(&self.acceptance_hash)?;
+        let reference =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(&self.acceptance_policy_ref)?;
+        ensure!(
+            reference.kind == "config"
+                && reference.to_string() == self.acceptance_policy_ref
+                && !self.acceptance_policy_ref.contains('@')
+                && self.acceptance_policy_ref.len() <= 2048,
+            "remote qualification testimony requires an exact acceptance policy config ref"
+        );
+        Ok(())
+    }
 }
 
 impl ExternalRuntimeQualificationBinding {
@@ -124,6 +278,59 @@ impl ExternalRuntimeQualificationBinding {
             self.qualification.policy_ref.is_some(),
             "external runtime qualification requires a signed policy"
         );
+        if let Some(remote) = &self.remote_testimony {
+            remote.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Acquired structured-session runtime compatibility, distinct from the
+/// guest-owner snapshot testimony above. This selects proof, never grants it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalRuntimeContentQualificationBinding {
+    pub(crate) activation_ref: String,
+    pub(crate) coordinate_id: String,
+    pub(crate) attestation_hash: String,
+    pub(crate) owner_principal: String,
+    pub(crate) required_claims: Vec<String>,
+    /// Required nullable. `Some` selects a remote content testimony accepted
+    /// under local policy: `coordinate_id` and `attestation_hash` are then the
+    /// origin's, `owner_principal` is the attesting operator and
+    /// `activation_ref` names the content on both nodes. `None` is the local
+    /// qualification path, unchanged.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub(crate) remote_testimony: Option<ExternalRemoteQualificationTestimonyBinding>,
+}
+
+impl ExternalRuntimeContentQualificationBinding {
+    pub(crate) fn validate(&self) -> Result<()> {
+        let reference = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.activation_ref)?;
+        ensure!(
+            reference.kind == "config"
+                && reference.to_string() == self.activation_ref
+                && !self.activation_ref.contains('@')
+                && self.activation_ref.len() <= 2048,
+            "runtime content qualification requires an exact activation config ref"
+        );
+        validate_content_identity(&self.coordinate_id)?;
+        validate_content_identity(&self.attestation_hash)?;
+        validate_content_identity(
+            self.owner_principal
+                .strip_prefix("fp:")
+                .context("runtime content qualification owner must be a fingerprint principal")?,
+        )?;
+        ensure!(!self.required_claims.is_empty()
+            && self.required_claims.len() <= ryeos_state::external_content::products::qualification::MAX_PRODUCT_QUALIFICATION_CLAIMS
+            && self.required_claims.windows(2).all(|pair| pair[0] < pair[1]),
+            "runtime content qualification requires bounded sorted compatibility claims");
+        for claim in &self.required_claims {
+            ryeos_state::external_content::products::validate_name(claim)?;
+        }
+        if let Some(remote) = &self.remote_testimony {
+            remote.validate()?;
+        }
         Ok(())
     }
 }
@@ -153,18 +360,32 @@ struct BindingDocument {
     /// presence alone never grants activation or provider contact.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     runtime_qualification: Option<ExternalRuntimeQualificationBinding>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    runtime_content_qualification: Option<ExternalRuntimeContentQualificationBinding>,
     launcher_artifact_hash: String,
     launcher_artifact_bytes: u64,
     network_policy: String,
     storage_policy: String,
     cleanup_proof: String,
-    controller_transport: ExternalControllerTransportContract,
+    /// Host adapter contact inputs are signed independently of the guest's
+    /// controller transport. A file-relay guest has no network authority.
+    provider_network_inputs: ExternalNetworkInputPolicy,
+    controller_transport: ExternalControllerTransportSelection,
     controller_tls_root_certificates_der_base64: Vec<String>,
     max_active: u16,
     timeout_seconds: u32,
     contact_timeout_seconds: u32,
     observation_timeout_seconds: u32,
     cleanup_timeout_seconds: u32,
+    /// Prepaid native work (SQL VM steps) one placement may spend on the
+    /// node across its whole life. A fresh placement is admitted only when
+    /// the daemon incarnation has at least this much left. A document that
+    /// states none declares [`DEFAULT_NATIVE_WORK_STEPS`], the figure a
+    /// compose without an explicit limit writes; it is kept absent rather
+    /// than filled in, because a retained binding generation must
+    /// re-canonicalize to the exact bytes the node retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_work_steps: Option<u64>,
     max_workspace_bytes: u64,
     max_export_bytes: u64,
     max_transfer_bytes: u64,
@@ -172,7 +393,9 @@ struct BindingDocument {
     max_guest_package_framed_bytes: u64,
 }
 
-fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::Deserialize<'de>,
@@ -183,8 +406,18 @@ where
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 14,
-            "unsupported external placement binding schema"
+            self.kind == "node"
+                && self.schema
+                    == match &self.controller_transport {
+                        ExternalControllerTransportSelection::HttpJson(_) => 20,
+                        ExternalControllerTransportSelection::ControllerFileRelay(_) =>
+                            match &self.workload {
+                                ExternalWorkloadBinding::QualificationStructuredSession(_) => 21,
+                                ExternalWorkloadBinding::StructuredSession(_) => 22,
+                                ExternalWorkloadBinding::DirectCommand {} => 0,
+                            },
+                    },
+            "unsupported external placement binding schema for selected transport"
         );
         self.workload.validate()?;
         ensure!(
@@ -215,6 +448,10 @@ impl BindingDocument {
         if let Some(qualification) = &self.runtime_qualification {
             qualification.validate()?;
         }
+        if let Some(qualification) = &self.runtime_content_qualification {
+            qualification.validate()?;
+            self.workload.structured_session()?;
+        }
         ensure!(
             self.settings.is_object()
                 && lillux::canonical_json(&self.settings)?.len() <= 64 * 1024
@@ -234,13 +471,17 @@ impl BindingDocument {
         );
         ensure!(
             (1..=60).contains(&self.contact_timeout_seconds)
-                && (1..=300).contains(&self.observation_timeout_seconds)
+                && (1..=900).contains(&self.observation_timeout_seconds)
                 && (1..=600).contains(&self.cleanup_timeout_seconds),
             "placement binding lifecycle deadlines exceed bounds"
         );
         ensure!(
-            self.network_policy == "supervisor_pinned_owner_only_candidate_denied_v1"
-                && self.storage_policy == "ephemeral_private_candidate_v1"
+            self.native_work_steps
+                .is_none_or(|steps| (1..=MAX_NATIVE_WORK_STEPS).contains(&steps)),
+            "placement binding declares native work outside bounds"
+        );
+        ensure!(
+            self.storage_policy == "ephemeral_private_candidate_v1"
                 && self.cleanup_proof == "provider_terminal_occurrence_v1",
             "placement binding requests an unsupported lifecycle contract"
         );
@@ -263,18 +504,41 @@ impl BindingDocument {
                     && self.max_transfer_bytes >= self.max_export_bytes,
                 "structured-session placement export budgets exceed bounds"
             ),
+            ExternalWorkloadBinding::QualificationStructuredSession(_) => ensure!(
+                self.max_export_bytes == 0
+                    && self.runtime_qualification.is_none()
+                    && self.runtime_content_qualification.is_none(),
+                "qualification-only placement cannot authorize export or borrow ordinary runtime qualification"
+            ),
             ExternalWorkloadBinding::DirectCommand {} => ensure!(
                 self.max_export_bytes == 0,
                 "direct-command placement cannot authorize candidate export"
             ),
         }
         self.controller_transport.validate()?;
-        ensure!(
-            ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                &self.controller_tls_root_certificates_der_base64,
-            )? == self.controller_transport.tls_root_bundle_digest,
-            "external controller TLS roots changed their signed identity"
-        );
+        self.provider_network_inputs.validate()?;
+        match &self.controller_transport {
+            ExternalControllerTransportSelection::HttpJson(http) => ensure!(
+                self.network_policy == "supervisor_pinned_owner_only_candidate_denied_v1"
+                    && ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                        &self.controller_tls_root_certificates_der_base64,
+                    )? == http.tls_root_bundle_digest,
+                "external controller TLS roots changed their signed identity"
+            ),
+            // Whether the installed adapter implements the relay operation is
+            // checked at placement qualification, where its declaration is in
+            // hand; the adapter also checks its own settings against the
+            // relay's workspace scope when it moves a file.
+            ExternalControllerTransportSelection::ControllerFileRelay(_) => ensure!(
+                matches!(
+                    &self.workload,
+                    ExternalWorkloadBinding::QualificationStructuredSession(_)
+                        | ExternalWorkloadBinding::StructuredSession(_)
+                ) && self.network_policy == "controller_file_relay_guest_deny_all_v1"
+                    && self.controller_tls_root_certificates_der_base64.is_empty(),
+                "external controller file relay requires a session workload, the relay network policy and no TLS roots"
+            ),
+        }
         Ok(())
     }
 
@@ -293,11 +557,13 @@ impl BindingDocument {
             supervisor_artifact_bytes: self.supervisor_artifact_bytes,
             guest_runtime_manifest_hash: self.guest_runtime_manifest_hash.clone(),
             runtime_qualification: self.runtime_qualification.clone(),
+            runtime_content_qualification: self.runtime_content_qualification.clone(),
             launcher_artifact_hash: self.launcher_artifact_hash.clone(),
             launcher_artifact_bytes: self.launcher_artifact_bytes,
             network_policy: self.network_policy.clone(),
             storage_policy: self.storage_policy.clone(),
             cleanup_proof: self.cleanup_proof.clone(),
+            provider_network_inputs: self.provider_network_inputs.clone(),
             controller_transport: self.controller_transport.clone(),
             controller_tls_root_certificates_der_base64: self
                 .controller_tls_root_certificates_der_base64
@@ -307,6 +573,7 @@ impl BindingDocument {
             contact_timeout_seconds: self.contact_timeout_seconds,
             observation_timeout_seconds: self.observation_timeout_seconds,
             cleanup_timeout_seconds: self.cleanup_timeout_seconds,
+            native_work_steps: self.native_work_steps.unwrap_or(DEFAULT_NATIVE_WORK_STEPS),
             max_workspace_bytes: self.max_workspace_bytes,
             max_export_bytes: self.max_export_bytes,
             max_transfer_bytes: self.max_transfer_bytes,
@@ -314,6 +581,27 @@ impl BindingDocument {
             max_guest_package_framed_bytes: self.max_guest_package_framed_bytes,
         }
     }
+}
+
+/// A file-relay selection moves files for exactly one workspace scope, and the
+/// adapter's settings name that scope under a key its signed declaration
+/// states. Refuse a selection whose scope differs from the settings, or whose
+/// adapter states no key, so a mismatch is caught before any provider contact.
+/// Other transports carry no scope.
+pub(crate) fn require_relay_scope(
+    transport: &ExternalControllerTransportSelection,
+    scope_setting: Option<&str>,
+    settings: &Value,
+) -> Result<()> {
+    let ExternalControllerTransportSelection::ControllerFileRelay(relay) = transport else {
+        return Ok(());
+    };
+    let key = scope_setting.context("the adapter declares no relay scope setting")?;
+    ensure!(
+        settings.get(key).and_then(Value::as_str) == Some(relay.owner_workspace_id.as_str()),
+        "the adapter's relay scope setting differs from the file relay workspace"
+    );
+    Ok(())
 }
 
 /// Exact non-secret adapter contract projected from the signed binding. A
@@ -333,18 +621,21 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) supervisor_artifact_bytes: u64,
     pub(crate) guest_runtime_manifest_hash: String,
     pub(crate) runtime_qualification: Option<ExternalRuntimeQualificationBinding>,
+    pub(crate) runtime_content_qualification: Option<ExternalRuntimeContentQualificationBinding>,
     pub(crate) launcher_artifact_hash: String,
     pub(crate) launcher_artifact_bytes: u64,
     pub(crate) network_policy: String,
     pub(crate) storage_policy: String,
     pub(crate) cleanup_proof: String,
-    pub(crate) controller_transport: ExternalControllerTransportContract,
+    pub(crate) provider_network_inputs: ExternalNetworkInputPolicy,
+    pub(crate) controller_transport: ExternalControllerTransportSelection,
     pub(crate) controller_tls_root_certificates_der_base64: Vec<String>,
     pub(crate) max_active: u16,
     pub(crate) timeout_seconds: u32,
     pub(crate) contact_timeout_seconds: u32,
     pub(crate) observation_timeout_seconds: u32,
     pub(crate) cleanup_timeout_seconds: u32,
+    pub(crate) native_work_steps: u64,
     pub(crate) max_workspace_bytes: u64,
     pub(crate) max_export_bytes: u64,
     pub(crate) max_transfer_bytes: u64,
@@ -362,10 +653,10 @@ impl ExternalPlacementBackendContract {
             matches!(self.workload, ExternalWorkloadBinding::DirectCommand {}),
             "direct startup budget requires an ordinary-command binding"
         );
-        Ok(u64::from(self.contact_timeout_seconds)
+        u64::from(self.contact_timeout_seconds)
             .checked_add(u64::from(self.observation_timeout_seconds))
             .and_then(|seconds| seconds.checked_mul(1_000))
-            .context("external direct startup budget overflow")?)
+            .context("external direct startup budget overflow")
     }
 }
 
@@ -426,7 +717,8 @@ impl RetainedExternalExecutionBinding {
         );
         ensure!(
             !self.signed_source.is_empty()
-                && self.signed_source.len() <= crate::node_document::MAX_ITEM_BYTES as usize,
+                && self.signed_source.len()
+                    <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
             "retained placement signed source is invalid"
         );
         self.document.validate()?;
@@ -466,6 +758,7 @@ impl RetainedExternalExecutionBinding {
             &header,
             &envelope,
             &trust,
+            &ryeos_engine::trust::SignerContext::node("node_config"),
         )
         .context("verify retained placement signature")?;
         ensure!(
@@ -513,6 +806,16 @@ impl RetainedExternalExecutionBinding {
     ) -> Result<()> {
         check_program(&self.document, program)
     }
+    /// Signed selection only. The accepted root, bound occurrence and current
+    /// launch owner must be checked again before any provider contact.
+    pub(crate) fn check_qualification_program(
+        &self,
+        program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+        purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    ) -> Result<()> {
+        self.validate()?;
+        check_qualification_program(&self.document, program, purpose)
+    }
     /// Rejoin a compiled ordinary command to this exact retained generation.
     /// This is a content/limit check, not guest capability evidence or contact
     /// permission; the born-thread owner and backend must still be admitted.
@@ -541,27 +844,52 @@ impl RetainedExternalExecutionBinding {
         Ok(())
     }
 
+    /// The fixture binding's document as JSON, for a loader test that signs
+    /// it as a node item.
     #[cfg(test)]
+    pub(crate) fn test_fixture_document_value() -> Value {
+        serde_json::to_value(&Self::test_fixture().document).expect("fixture binding document")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_fixture() -> Self {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
 
         let controller_tls_root_certificates_der_base64 =
             vec![STANDARD.encode(b"fixture controller TLS root")];
+        // The fixture declares what binding composition declares, so a change
+        // to which inputs are required reaches the fixture without an edit.
+        let sources = ryeos_external_execution_contract::operator_network_inputs();
+        let provider_network_inputs = ExternalNetworkInputPolicy {
+            resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                source: "/etc/resolv.conf".into(),
+                max_bytes: 64 * 1024,
+                required: sources.resolver_required,
+            },
+            hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                source: "/etc/hosts".into(),
+                max_bytes: 64 * 1024,
+                required: sources.hosts_required,
+            },
+        };
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 14,
+            schema: 20,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
-            workload: ExternalWorkloadBinding::StructuredSession(ExternalStructuredSessionBinding {
-                provider_declaration_id: "codex-hosted".into(),
-                provider_configuration_destination: "environments.toml".into(),
-                runtime_manifest_hash: "b".repeat(64),
-                runtime_selection_identity: "c".repeat(64),
-                configuration_adapter_artifact_hash: "2".repeat(64),
-                configuration_adapter_artifact_bytes: 4096,
-                connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
-                connector_artifact_hash: "f".repeat(64),
-                connector_artifact_bytes: 4096,
-            }),
+            workload: ExternalWorkloadBinding::StructuredSession(
+                ExternalStructuredSessionBinding {
+                    provider_declaration_id: "codex-hosted".into(),
+                    provider_configuration_destination: "environments.toml".into(),
+                    runtime_manifest_hash: "b".repeat(64),
+                    runtime_selection_identity: "c".repeat(64),
+                    configuration_adapter_artifact_hash: "2".repeat(64),
+                    configuration_adapter_artifact_bytes: 4096,
+                    connector_protocol:
+                        ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                    connector_artifact_hash: "f".repeat(64),
+                    connector_artifact_bytes: 4096,
+                },
+            ),
             backend: "fixture".into(),
             account: "account".into(),
             capacity_group: "candidate-workers".into(),
@@ -580,42 +908,39 @@ impl RetainedExternalExecutionBinding {
             supervisor_artifact_bytes: 4096,
             guest_runtime_manifest_hash: "4".repeat(64),
             runtime_qualification: None,
+            runtime_content_qualification: None,
             launcher_artifact_hash: "e".repeat(64),
             launcher_artifact_bytes: 4096,
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
-            controller_transport: ExternalControllerTransportContract {
-                schema: 2,
-                https_origin: "https://controller.example:7443".into(),
-                route_contract:
-                    ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
-                        .into(),
-                tls_root_bundle_digest:
-                    ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                        &controller_tls_root_certificates_der_base64,
-                    )
-                    .unwrap(),
-                connect_timeout_ms: 5_000,
-                request_timeout_ms: 10_000,
-                maximum_response_bytes: 1024 * 1024,
-                network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
-                    resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/resolv.conf".into(),
-                        max_bytes: 64 * 1024,
-                    },
-                    hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
-                        source: "/etc/hosts".into(),
-                        max_bytes: 64 * 1024,
-                    },
+            provider_network_inputs: provider_network_inputs.clone(),
+            controller_transport: ExternalControllerTransportSelection::HttpJson(
+                ExternalControllerTransportContract {
+                    schema: 3,
+                    https_origin: "https://controller.example:7443".into(),
+                    route_contract:
+                        ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
+                            .into(),
+                    tls_root_bundle_digest:
+                        ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                            &controller_tls_root_certificates_der_base64,
+                        )
+                        .unwrap(),
+                    connect_timeout_ms: 5_000,
+                    request_timeout_ms: 10_000,
+                    maximum_response_bytes: 1024 * 1024,
+                    max_clock_skew_ms: None,
+                    network_inputs: provider_network_inputs,
                 },
-            },
+            ),
             controller_tls_root_certificates_der_base64,
             max_active: 1,
             timeout_seconds: 60,
             contact_timeout_seconds: 30,
             observation_timeout_seconds: 60,
             cleanup_timeout_seconds: 120,
+            native_work_steps: Some(2_000_000),
             max_workspace_bytes: 1024,
             max_export_bytes: 512,
             max_transfer_bytes: 2048,
@@ -642,9 +967,9 @@ impl RetainedExternalExecutionBinding {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn composed_test_fixture(
+    pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
+        controller_transport: impl Into<ComposedTestTransport>,
         controller_tls_root_certificates_der_base64: Vec<String>,
         backend: String,
         backend_artifact_hash: String,
@@ -658,8 +983,10 @@ impl RetainedExternalExecutionBinding {
         configuration_adapter_artifact_bytes: u64,
         connector_artifact_hash: String,
         connector_artifact_bytes: u64,
+        settings: Value,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
-        Self::composed_test_fixture_with_settings(
+        Self::composed_test_fixture_with_settings_and_timeout(
             program,
             controller_transport,
             controller_tls_root_certificates_der_base64,
@@ -675,15 +1002,18 @@ impl RetainedExternalExecutionBinding {
             configuration_adapter_artifact_bytes,
             connector_artifact_hash,
             connector_artifact_bytes,
-            serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
+            settings,
+            qualification,
+            60,
         )
     }
 
+    /// The same fixture with the binding's execution timeout (which is also
+    /// the lease lifetime of a leased session) stated.
     #[cfg(any(test, feature = "test-support"))]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn composed_test_fixture_with_settings(
+    pub(crate) fn composed_test_fixture_with_settings_and_timeout(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
+        controller_transport: impl Into<ComposedTestTransport>,
         controller_tls_root_certificates_der_base64: Vec<String>,
         backend: String,
         backend_artifact_hash: String,
@@ -698,75 +1028,80 @@ impl RetainedExternalExecutionBinding {
         connector_artifact_hash: String,
         connector_artifact_bytes: u64,
         settings: Value,
+        qualification: &PlacementQualificationSelection,
+        timeout_seconds: u32,
     ) -> Result<Self> {
-        program.validate()?;
-        controller_transport.validate()?;
-        ensure!(
-            ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
-                &controller_tls_root_certificates_der_base64,
-            )? == controller_transport.tls_root_bundle_digest,
-            "composed fixture TLS roots changed their transport identity"
-        );
-        let document = BindingDocument {
-            kind: "node".into(),
-            schema: 14,
-            protocol: program.requirement.protocol.clone(),
-            workload: ExternalWorkloadBinding::StructuredSession(
-                ExternalStructuredSessionBinding {
-                    provider_declaration_id: program.requirement.provider_declaration_id.clone(),
-                    provider_configuration_destination: program
-                        .requirement
-                        .provider_configuration_destination
-                        .clone(),
-                    runtime_manifest_hash: program.runtime_manifest_hash.clone(),
-                    runtime_selection_identity: program.selection_identity_digest.clone(),
-                    configuration_adapter_artifact_hash,
-                    configuration_adapter_artifact_bytes,
-                    connector_protocol: program.requirement.connector_protocol.clone(),
-                    connector_artifact_hash,
-                    connector_artifact_bytes,
-                },
-            ),
+        let transport: ComposedTestTransport = controller_transport.into();
+        let document = compose::compose_binding_document(compose::ComposeInputs {
+            program,
+            controller_transport: transport.selection,
+            provider_network_inputs: transport.network_inputs,
+            tls_roots_der_base64: controller_tls_root_certificates_der_base64,
             backend,
             account: "account".into(),
-            capacity_group: "candidate-workers".into(),
+            capacity_group: compose::DEFAULT_CAPACITY_GROUP.into(),
             credential_generation: "a".repeat(64),
-            settings_digest: adapter_settings_digest(&settings)?,
-            settings_schema_digest,
             settings,
-            backend_artifact_hash,
-            backend_artifact_bytes,
-            supervisor_artifact_hash,
-            supervisor_artifact_bytes,
-            guest_runtime_manifest_hash: "4".repeat(64),
-            runtime_qualification: None,
-            launcher_artifact_hash,
-            launcher_artifact_bytes,
-            network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
-            storage_policy: "ephemeral_private_candidate_v1".into(),
-            cleanup_proof: "provider_terminal_occurrence_v1".into(),
-            controller_transport,
-            controller_tls_root_certificates_der_base64,
-            max_active: 1,
-            timeout_seconds: 60,
-            // The composed native fixture transfers the exact guest runtime
-            // through descriptor authority during the one bounded activation
-            // contact. Use the contract's maximum contact window so a large
-            // admitted runtime is not measured against the smaller unit-
-            // fixture default.
-            contact_timeout_seconds: 60,
-            observation_timeout_seconds: 60,
-            cleanup_timeout_seconds: 120,
-            max_workspace_bytes: 16 * 1024 * 1024,
-            max_export_bytes: 8 * 1024 * 1024,
-            max_transfer_bytes: 16 * 1024 * 1024,
-            // Debug-built supervisor and launcher fixtures are captured in
-            // full, alongside both distinct admitted runtime destinations.
-            // Bound their aggregate package without changing production policy.
-            max_guest_package_regular_bytes: 768 * 1024 * 1024,
-            max_guest_package_framed_bytes: 1024 * 1024 * 1024,
-        };
-        document.validate()?;
+            guest_runtime_manifest_hash: qualification.guest_runtime_manifest_hash.clone(),
+            runtime_qualification: qualification.guest.as_ref().map(|guest| {
+                ExternalRuntimeQualificationBinding {
+                    attestation_hash: guest.attestation_hash.clone(),
+                    owner_principal: guest.owner_principal.clone(),
+                    qualification:
+                        ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                            policy_ref: Some(guest.policy_ref.clone()),
+                            required_claims: guest.required_claims.clone(),
+                        },
+                    remote_testimony: None,
+                }
+            }),
+            runtime_content_qualification: qualification.content.as_ref().map(|content| {
+                ExternalRuntimeContentQualificationBinding {
+                    activation_ref: content.activation_ref.clone(),
+                    coordinate_id: content.coordinate_id.clone(),
+                    attestation_hash: content.attestation_hash.clone(),
+                    owner_principal: content.owner_principal.clone(),
+                    required_claims: content.required_claims.clone(),
+                    remote_testimony: None,
+                }
+            }),
+            artifacts: compose::BundleArtifactFacts {
+                backend_artifact_hash,
+                backend_artifact_bytes,
+                settings_schema_digest,
+                supervisor_artifact_hash,
+                supervisor_artifact_bytes,
+                launcher_artifact_hash,
+                launcher_artifact_bytes,
+                configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes,
+                connector_artifact_hash,
+                connector_artifact_bytes,
+                relay_scope_setting: transport.relay_scope_setting,
+            },
+            limits: compose::ComposeLimits {
+                max_active: 1,
+                timeout_seconds,
+                // The composed native fixture transfers the exact guest
+                // runtime through descriptor authority during the one
+                // bounded activation contact. Use the contract's maximum
+                // contact window so a large admitted runtime is not measured
+                // against the smaller unit-fixture default.
+                contact_timeout_seconds: 60,
+                observation_timeout_seconds: 60,
+                cleanup_timeout_seconds: 120,
+                native_work_steps: 2_000_000,
+                max_workspace_bytes: 16 * 1024 * 1024,
+                max_export_bytes: 8 * 1024 * 1024,
+                max_transfer_bytes: 16 * 1024 * 1024,
+                // Debug-built supervisor and launcher fixtures are captured
+                // in full, alongside both distinct admitted runtime
+                // destinations. Bound their aggregate package without
+                // changing production policy.
+                max_guest_package_regular_bytes: 768 * 1024 * 1024,
+                max_guest_package_framed_bytes: 1024 * 1024 * 1024,
+            },
+        })?;
         let id = "composed-test".to_owned();
         let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
         let signer_verifying_key = key.verifying_key().to_bytes();
@@ -811,6 +1146,73 @@ impl std::fmt::Debug for InstalledExternalExecutionBinding {
     }
 }
 
+/// The controller transport a composed test binding selects, with the
+/// provider network inputs its lifecycle contacts read.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct ComposedTestTransport {
+    pub selection: ExternalControllerTransportSelection,
+    pub network_inputs: ExternalNetworkInputPolicy,
+    /// The adapter-settings key a file-relay selection's workspace scope is
+    /// carried under, as the adapter's signed declaration states it.
+    pub relay_scope_setting: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl From<ExternalControllerTransportContract> for ComposedTestTransport {
+    fn from(contract: ExternalControllerTransportContract) -> Self {
+        Self {
+            network_inputs: contract.network_inputs.clone(),
+            selection: contract.into(),
+            relay_scope_setting: None,
+        }
+    }
+}
+
+/// Plain-data selection of the runtime proofs a composed test binding carries.
+/// The binding types themselves stay crate-private; a downstream fixture
+/// names the published attestations it qualified and nothing else.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct PlacementQualificationSelection {
+    /// Expected independently qualified guest-owner runtime.
+    pub guest_runtime_manifest_hash: String,
+    pub guest: Option<GuestRuntimeQualificationSelection>,
+    pub content: Option<ContentRuntimeQualificationSelection>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct GuestRuntimeQualificationSelection {
+    pub attestation_hash: String,
+    pub owner_principal: String,
+    pub policy_ref: String,
+    pub required_claims: Vec<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct ContentRuntimeQualificationSelection {
+    pub activation_ref: String,
+    pub coordinate_id: String,
+    pub attestation_hash: String,
+    pub owner_principal: String,
+    pub required_claims: Vec<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PlacementQualificationSelection {
+    /// A binding that selects no runtime proof, for an adapter that does not
+    /// declare independent guest-runtime admission.
+    pub fn unselected() -> Self {
+        Self {
+            guest_runtime_manifest_hash: "4".repeat(64),
+            guest: None,
+            content: None,
+        }
+    }
+}
+
 /// Provision only a fixture credential for an already-admitted, current-node
 /// binding into the same persistent vault that a real daemon will reopen.
 /// This grants no allocation authority and never constructs a raw vault key.
@@ -825,7 +1227,7 @@ pub fn provision_installed_test_placement_credential(
     // Reverify the exact signed source, including its document, capacity owner
     // and digest, before opening a vault that may perform recovery writes.
     binding.retained_generation()?;
-    let identity = crate::identity::NodeIdentity::load(
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(
         &app_root
             .join(ryeos_engine::AI_DIR)
             .join("node/identity/private_key.pem"),
@@ -843,10 +1245,10 @@ pub fn provision_installed_test_placement_credential(
 
 impl InstalledExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
+        controller_transport: impl Into<ComposedTestTransport>,
         controller_tls_root_certificates_der_base64: Vec<String>,
         backend: String,
         backend_artifact_hash: String,
@@ -861,8 +1263,9 @@ impl InstalledExternalExecutionBinding {
         connector_artifact_hash: String,
         connector_artifact_bytes: u64,
         settings: Value,
+        qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
-        let retained = RetainedExternalExecutionBinding::composed_test_fixture_with_settings(
+        Self::composed_test_fixture_with_settings_and_timeout(
             program,
             controller_transport,
             controller_tls_root_certificates_der_base64,
@@ -879,7 +1282,53 @@ impl InstalledExternalExecutionBinding {
             connector_artifact_hash,
             connector_artifact_bytes,
             settings,
-        )?;
+            qualification,
+            60,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn composed_test_fixture_with_settings_and_timeout(
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+        controller_transport: impl Into<ComposedTestTransport>,
+        controller_tls_root_certificates_der_base64: Vec<String>,
+        backend: String,
+        backend_artifact_hash: String,
+        backend_artifact_bytes: u64,
+        settings_schema_digest: String,
+        supervisor_artifact_hash: String,
+        supervisor_artifact_bytes: u64,
+        launcher_artifact_hash: String,
+        launcher_artifact_bytes: u64,
+        configuration_adapter_artifact_hash: String,
+        configuration_adapter_artifact_bytes: u64,
+        connector_artifact_hash: String,
+        connector_artifact_bytes: u64,
+        settings: Value,
+        qualification: &PlacementQualificationSelection,
+        timeout_seconds: u32,
+    ) -> Result<Self> {
+        let retained =
+            RetainedExternalExecutionBinding::composed_test_fixture_with_settings_and_timeout(
+                program,
+                controller_transport,
+                controller_tls_root_certificates_der_base64,
+                backend,
+                backend_artifact_hash,
+                backend_artifact_bytes,
+                settings_schema_digest,
+                supervisor_artifact_hash,
+                supervisor_artifact_bytes,
+                launcher_artifact_hash,
+                launcher_artifact_bytes,
+                configuration_adapter_artifact_hash,
+                configuration_adapter_artifact_bytes,
+                connector_artifact_hash,
+                connector_artifact_bytes,
+                settings,
+                qualification,
+                timeout_seconds,
+            )?;
         Ok(Self {
             id: retained.id,
             document: retained.document,
@@ -891,7 +1340,7 @@ impl InstalledExternalExecutionBinding {
         })
     }
 
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.id
     }
     pub(crate) fn digest(&self) -> &str {
@@ -914,6 +1363,9 @@ impl InstalledExternalExecutionBinding {
     pub(crate) fn backend_contract(&self) -> ExternalPlacementBackendContract {
         self.document.backend_contract()
     }
+    pub(crate) fn credential_generation(&self) -> &str {
+        &self.document.credential_generation
+    }
     pub(crate) fn retained_generation(&self) -> Result<RetainedExternalExecutionBinding> {
         let retained = RetainedExternalExecutionBinding {
             schema: 2,
@@ -935,6 +1387,14 @@ impl InstalledExternalExecutionBinding {
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     ) -> Result<()> {
         check_program(&self.document, program)
+    }
+
+    pub(crate) fn check_qualification_program(
+        &self,
+        program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+        purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+    ) -> Result<()> {
+        check_qualification_program(&self.document, program, purpose)
     }
 
     #[cfg(test)]
@@ -1025,6 +1485,31 @@ fn check_program(
     Ok(())
 }
 
+fn check_qualification_program(
+    document: &BindingDocument,
+    program: &ryeos_state::external_execution::qualification_session::AdmittedExternalQualificationSessionProgram,
+    purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
+) -> Result<()> {
+    let session = document.workload.qualification_structured_session()?;
+    program.validate_against_purpose(purpose)?;
+    ensure!(
+        document.max_export_bytes == 0
+            && document.runtime_content_qualification.is_none()
+            && program.requirement.protocol == document.protocol
+            && program.requirement.provider_declaration_id == session.provider_declaration_id
+            && program.requirement.provider_configuration_destination
+                == session.provider_configuration_destination
+            && program.requirement.connector_protocol == session.connector_protocol
+            && program.requirement.qualification_requirement_digest()?
+                == session.requirement_digest
+            && program.qualification_use.profile_hash == session.worker_profile_hash
+            && program.runtime_manifest_hash == session.runtime_manifest_hash
+            && program.runtime_member.executable_sha256 == session.runtime_member_sha256,
+        "qualification-only program contradicts its signed zero-export placement binding"
+    );
+    Ok(())
+}
+
 struct ParsedBinding {
     id: String,
     document: BindingDocument,
@@ -1085,6 +1570,14 @@ impl NodeConfigSection for ExternalExecutionSection {
         ctx: &NodeItemContext,
         body: &Value,
     ) -> Result<Box<dyn CompiledNodeConfigItem>> {
+        // Schemas 20, 21 and 22 are the transport/workload shapes
+        // `BindingDocument::validate` admits.
+        crate::node_config::coherence::require_admitted_binding_schema(
+            SECTION_NAME,
+            body,
+            &[20, 21, 22],
+            ryeos_state::external_execution::admission::PROTOCOL,
+        )?;
         let document: BindingDocument =
             serde_json::from_value(body.clone()).context("invalid external placement binding")?;
         document.validate()?;
@@ -1101,6 +1594,245 @@ mod workload_binding_tests {
 
     fn document() -> BindingDocument {
         RetainedExternalExecutionBinding::test_fixture().document
+    }
+
+    fn ordinary_relay_document() -> BindingDocument {
+        let mut document = document();
+        document.schema = 22;
+        document.backend = "example-backend".into();
+        document.settings = serde_json::json!({"owner_id":"owner-a"});
+        document.settings_digest = adapter_settings_digest(&document.settings).unwrap();
+        document.network_policy = "controller_file_relay_guest_deny_all_v1".into();
+        document.controller_tls_root_certificates_der_base64.clear();
+        document.controller_transport = ExternalControllerTransportSelection::ControllerFileRelay(
+            ryeos_state::external_execution::transport::ExternalControllerFileRelayContract {
+                schema: 3,
+                route_contract:
+                    ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT
+                        .into(),
+                owner_workspace_id: "owner-a".into(),
+                private_mailbox_parent: "/run/ryeos/private-relay".into(),
+                maximum_file_bytes: 1024 * 1024,
+                maximum_frames: 1024,
+                poll_interval_ms: 1000,
+                poll_deadline_ms: 30_000,
+                max_clock_skew_ms: None,
+            },
+        );
+        document
+    }
+
+    #[test]
+    fn a_retained_binding_without_native_work_round_trips_exactly_and_declares_the_default() {
+        let retained = RetainedExternalExecutionBinding::test_fixture();
+        // The row a node retained before the field existed: the same
+        // document signed without it, so its canonical bytes carry no key.
+        let mut before = retained.clone();
+        before.document.native_work_steps = None;
+        let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
+        let body = serde_yaml::to_string(&before.document).unwrap();
+        before.signed_source =
+            lillux::signature::sign_content_at(&body, &key, "#", None, "2026-09-20T00:00:00Z");
+        before.digest = binding_digest(&before.id, &before.signer, &before.signed_source).unwrap();
+        before.capacity_owner = capacity_owner(&before.signer, &before.document).unwrap();
+        let json = before.canonical_json().unwrap();
+        assert!(!json.contains("native_work_steps"));
+        let decoded: RetainedExternalExecutionBinding = serde_json::from_str(&json).unwrap();
+        assert!(decoded == before);
+        assert_eq!(decoded.canonical_json().unwrap(), json);
+        assert_eq!(
+            decoded.backend_contract().native_work_steps,
+            DEFAULT_NATIVE_WORK_STEPS
+        );
+        // A composed binding states it, and the statement survives.
+        assert_eq!(
+            retained.backend_contract().native_work_steps,
+            retained.document.native_work_steps.unwrap()
+        );
+        assert!(
+            retained
+                .canonical_json()
+                .unwrap()
+                .contains("native_work_steps")
+        );
+    }
+
+    #[test]
+    fn ordinary_relay_binding_uses_schema_22_and_refuses_cross_pairs() {
+        let document = ordinary_relay_document();
+        document.validate().unwrap();
+        assert!(document.workload.structured_session().is_ok());
+
+        let mut q_schema = document.clone();
+        q_schema.schema = 21;
+        assert!(q_schema.validate().is_err());
+
+        let mut http_schema_22 = document.clone();
+        let mut http = RetainedExternalExecutionBinding::test_fixture().document;
+        http.schema = 22;
+        http_schema_22.controller_transport = http.controller_transport;
+        http_schema_22.controller_tls_root_certificates_der_base64 =
+            http.controller_tls_root_certificates_der_base64;
+        http_schema_22.network_policy = "supervisor_pinned_owner_only_candidate_denied_v1".into();
+        assert!(http_schema_22.validate().is_err());
+    }
+
+    #[test]
+    fn qualification_binding_has_exact_identity_and_no_export_or_ordinary_session_authority() {
+        let mut document = document();
+        let ExternalWorkloadBinding::StructuredSession(ordinary) = &document.workload else {
+            unreachable!("fixture has an ordinary session")
+        };
+        let ordinary = ordinary.clone();
+        document.workload = ExternalWorkloadBinding::QualificationStructuredSession(
+            ExternalQualificationStructuredSessionBinding {
+                provider_declaration_id: ordinary.provider_declaration_id.clone(),
+                provider_configuration_destination: ordinary
+                    .provider_configuration_destination
+                    .clone(),
+                requirement_digest: "a".repeat(64),
+                worker_profile_hash: "b".repeat(64),
+                runtime_manifest_hash: ordinary.runtime_manifest_hash.clone(),
+                runtime_member_sha256: "c".repeat(64),
+                configuration_adapter_artifact_hash: ordinary
+                    .configuration_adapter_artifact_hash
+                    .clone(),
+                configuration_adapter_artifact_bytes: ordinary.configuration_adapter_artifact_bytes,
+                connector_protocol: ordinary.connector_protocol.clone(),
+                connector_artifact_hash: ordinary.connector_artifact_hash.clone(),
+                connector_artifact_bytes: ordinary.connector_artifact_bytes,
+            },
+        );
+        assert!(document.validate().is_err());
+        document.max_export_bytes = 0;
+        document.validate().unwrap();
+        assert!(document.workload.structured_session().is_err());
+        assert!(document.workload.qualification_structured_session().is_ok());
+        document.runtime_content_qualification = Some(ExternalRuntimeContentQualificationBinding {
+            activation_ref: "config:codex/runtime-activation".into(),
+            coordinate_id: "1".repeat(64),
+            attestation_hash: "2".repeat(64),
+            owner_principal: format!("fp:{}", "3".repeat(64)),
+            required_claims: vec!["runtime_compatible".into()],
+            remote_testimony: None,
+        });
+        assert!(document.validate().is_err());
+        document.runtime_content_qualification = None;
+        document.runtime_qualification = Some(ExternalRuntimeQualificationBinding {
+            attestation_hash: "4".repeat(64),
+            owner_principal: format!("fp:{}", "5".repeat(64)),
+            qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
+            },
+            remote_testimony: None,
+        });
+        assert!(document.validate().is_err());
+        let mut ordinary_binding = document.clone();
+        ordinary_binding.workload = ExternalWorkloadBinding::StructuredSession(ordinary);
+        ordinary_binding.max_export_bytes = 1;
+        ordinary_binding.validate().unwrap();
+    }
+
+    #[test]
+    fn session_runtime_content_selection_is_distinct_and_explicit() {
+        let mut selected = document();
+        selected.runtime_content_qualification = Some(ExternalRuntimeContentQualificationBinding {
+            activation_ref: "config:codex/runtime-activation".into(),
+            coordinate_id: "1".repeat(64),
+            attestation_hash: "2".repeat(64),
+            owner_principal: format!("fp:{}", "3".repeat(64)),
+            required_claims: vec!["runtime_compatible".into()],
+            remote_testimony: None,
+        });
+        selected.validate().unwrap();
+        assert_eq!(
+            selected.backend_contract().runtime_content_qualification,
+            selected.runtime_content_qualification
+        );
+        assert!(selected.runtime_qualification.is_none());
+        let mut missing = serde_json::to_value(&selected).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_content_qualification");
+        assert!(serde_json::from_value::<BindingDocument>(missing).is_err());
+        let mut predecessor = selected.clone();
+        predecessor.schema = 14;
+        assert!(predecessor.validate().is_err());
+        let mut direct = selected.clone();
+        direct.workload = ExternalWorkloadBinding::DirectCommand {};
+        assert!(direct.validate().is_err());
+        let mut empty_claims = selected.clone();
+        empty_claims
+            .runtime_content_qualification
+            .as_mut()
+            .unwrap()
+            .required_claims
+            .clear();
+        assert!(empty_claims.validate().is_err());
+    }
+
+    #[test]
+    fn content_remote_testimony_selection_is_required_nullable_and_exact() {
+        let mut selected = document();
+        selected.runtime_content_qualification = Some(ExternalRuntimeContentQualificationBinding {
+            activation_ref: "config:codex/runtime-activation".into(),
+            coordinate_id: "1".repeat(64),
+            attestation_hash: "2".repeat(64),
+            owner_principal: format!("fp:{}", "3".repeat(64)),
+            required_claims: vec!["runtime_compatible".into()],
+            remote_testimony: Some(ExternalRemoteQualificationTestimonyBinding {
+                acceptance_hash: "8".repeat(64),
+                acceptance_policy_ref: "config:codex/runtime-acceptance".into(),
+            }),
+        });
+        selected.validate().unwrap();
+        let value = serde_json::to_value(&selected).unwrap();
+        assert!(serde_json::from_value::<BindingDocument>(value.clone()).unwrap() == selected);
+
+        let mut local = value.clone();
+        local["runtime_content_qualification"]["remote_testimony"] = serde_json::Value::Null;
+        let local = serde_json::from_value::<BindingDocument>(local).unwrap();
+        local.validate().unwrap();
+        assert!(
+            local
+                .runtime_content_qualification
+                .unwrap()
+                .remote_testimony
+                .is_none()
+        );
+
+        let mut missing = value.clone();
+        missing["runtime_content_qualification"]
+            .as_object_mut()
+            .unwrap()
+            .remove("remote_testimony");
+        assert!(serde_json::from_value::<BindingDocument>(missing).is_err());
+
+        let mut unknown = value;
+        unknown["runtime_content_qualification"]["remote_testimony"]["extra"] =
+            serde_json::json!(1);
+        assert!(serde_json::from_value::<BindingDocument>(unknown).is_err());
+
+        for (field, bad) in [
+            ("acceptance_hash", "not-a-hash"),
+            ("acceptance_policy_ref", "tool:codex/runtime-acceptance"),
+        ] {
+            let mut wrong = selected.clone();
+            let remote = wrong
+                .runtime_content_qualification
+                .as_mut()
+                .unwrap()
+                .remote_testimony
+                .as_mut()
+                .unwrap();
+            match field {
+                "acceptance_hash" => remote.acceptance_hash = bad.into(),
+                _ => remote.acceptance_policy_ref = bad.into(),
+            }
+            assert!(wrong.validate().is_err(), "{field} {bad}");
+        }
     }
 
     #[test]
@@ -1141,9 +1873,10 @@ mod workload_binding_tests {
             attestation_hash: "6".repeat(64),
             owner_principal: format!("fp:{}", "7".repeat(64)),
             qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                policy_ref: Some("config:render/snapshot-qualification".into()),
-                required_claims: vec!["render_snapshot_v1".into()],
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
             },
+            remote_testimony: None,
         });
         qualified.validate().unwrap();
         assert_eq!(
@@ -1175,6 +1908,73 @@ mod workload_binding_tests {
         let mut malformed = document;
         malformed.guest_runtime_manifest_hash = "not-a-content-identity".into();
         assert!(malformed.validate().is_err());
+    }
+
+    #[test]
+    fn remote_testimony_selection_is_required_nullable_and_exact() {
+        let mut qualified = document();
+        qualified.runtime_qualification = Some(ExternalRuntimeQualificationBinding {
+            attestation_hash: "6".repeat(64),
+            owner_principal: format!("fp:{}", "7".repeat(64)),
+            qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
+            },
+            remote_testimony: Some(ExternalRemoteQualificationTestimonyBinding {
+                acceptance_hash: "8".repeat(64),
+                acceptance_policy_ref: "config:test/snapshot-acceptance".into(),
+            }),
+        });
+        qualified.validate().unwrap();
+        assert_eq!(
+            qualified.backend_contract().runtime_qualification,
+            qualified.runtime_qualification
+        );
+        let value = serde_json::to_value(&qualified).unwrap();
+        assert!(serde_json::from_value::<BindingDocument>(value.clone()).unwrap() == qualified);
+
+        let mut local = value.clone();
+        local["runtime_qualification"]["remote_testimony"] = serde_json::Value::Null;
+        let local = serde_json::from_value::<BindingDocument>(local).unwrap();
+        local.validate().unwrap();
+        assert!(
+            local
+                .runtime_qualification
+                .unwrap()
+                .remote_testimony
+                .is_none()
+        );
+
+        let mut missing = value.clone();
+        missing["runtime_qualification"]
+            .as_object_mut()
+            .unwrap()
+            .remove("remote_testimony");
+        assert!(serde_json::from_value::<BindingDocument>(missing).is_err());
+
+        let mut unknown = value.clone();
+        unknown["runtime_qualification"]["remote_testimony"]["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<BindingDocument>(unknown).is_err());
+
+        for (field, bad) in [
+            ("acceptance_hash", "not-a-hash"),
+            ("acceptance_policy_ref", "tool:test/snapshot-acceptance"),
+            ("acceptance_policy_ref", "config:test/snapshot-acceptance@1"),
+        ] {
+            let mut wrong = qualified.clone();
+            let remote = wrong
+                .runtime_qualification
+                .as_mut()
+                .unwrap()
+                .remote_testimony
+                .as_mut()
+                .unwrap();
+            match field {
+                "acceptance_hash" => remote.acceptance_hash = bad.into(),
+                _ => remote.acceptance_policy_ref = bad.into(),
+            }
+            assert!(wrong.validate().is_err(), "{field} {bad}");
+        }
     }
 
     #[test]
@@ -1237,6 +2037,8 @@ mod workload_binding_tests {
         let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
         let retained = binding.retained_generation().unwrap();
         let projection = ExternalDirectCommandProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
+            target_limits: None,
             argv0: "/runtime/bin/check".into(),
             arguments: Vec::new(),
             cwd: "/workspace".into(),
@@ -1290,12 +2092,28 @@ mod workload_binding_tests {
         let session = document();
         session.validate().unwrap();
         let value = serde_json::to_value(&session).unwrap();
-        assert_eq!(value["schema"], 14);
+        assert_eq!(value["schema"], 20);
         assert_eq!(value["workload"]["kind"], "structured_session");
         assert!(value.get("provider_declaration_id").is_none());
         assert!(value.get("runtime_selection_identity").is_none());
         let decoded: BindingDocument = serde_json::from_value(value.clone()).unwrap();
         assert!(decoded == session);
+        let mut independent_host_policy = session.clone();
+        independent_host_policy
+            .provider_network_inputs
+            .resolver
+            .source = "/etc/ryeos-provider-resolver".into();
+        independent_host_policy.validate().unwrap();
+        assert_eq!(
+            independent_host_policy
+                .backend_contract()
+                .provider_network_inputs,
+            independent_host_policy.provider_network_inputs
+        );
+        assert_eq!(
+            independent_host_policy.controller_transport, session.controller_transport,
+            "host provider network inputs must not change guest controller transport"
+        );
 
         let mut direct = session.clone();
         direct.workload = ExternalWorkloadBinding::DirectCommand {};
@@ -1311,6 +2129,22 @@ mod workload_binding_tests {
         assert!(direct.workload.structured_session().is_err());
 
         for original in [value, direct_value] {
+            let mut missing_provider_inputs = original.clone();
+            missing_provider_inputs
+                .as_object_mut()
+                .unwrap()
+                .remove("provider_network_inputs");
+            assert!(serde_json::from_value::<BindingDocument>(missing_provider_inputs).is_err());
+            for predecessor_schema in [15, 16] {
+                let mut predecessor = original.clone();
+                predecessor["schema"] = serde_json::json!(predecessor_schema);
+                assert!(
+                    serde_json::from_value::<BindingDocument>(predecessor)
+                        .unwrap()
+                        .validate()
+                        .is_err()
+                );
+            }
             let mut unknown = original.clone();
             unknown["workload"]["unexpected"] = serde_json::json!(true);
             assert!(serde_json::from_value::<BindingDocument>(unknown).is_err());
@@ -1405,6 +2239,80 @@ mod workload_binding_tests {
         assert!(session.validate().is_err());
     }
 
+    /// The runtime selection identity is derived through the real admission
+    /// path from installed-bundle selections. A bundle-owned relationship
+    /// whose content changes under the same publisher changes that identity,
+    /// and the installed binding then refuses the program.
+    #[test]
+    fn check_program_refuses_a_changed_bundle_owned_relationship() {
+        use ryeos_state::external_content::products::composition::ResolvedProductConsumerSource;
+        use ryeos_state::external_execution::admission::{
+            fixture_placement,
+            test_support::{
+                fixture_qualification_use, fixture_requirement,
+                qualified_external_candidate_selections,
+            },
+        };
+        let requirement = fixture_requirement();
+        let qualification_use = fixture_qualification_use(&requirement).unwrap();
+        let runtime_manifest_hash = "b".repeat(64);
+        let derive = |relationship_digest: &str| {
+            let selections = qualified_external_candidate_selections(
+                &runtime_manifest_hash,
+                &requirement,
+                &qualification_use,
+            )
+            .unwrap();
+            let mut map = selections.into_inner();
+            let runtime = map
+                .get_mut(&requirement.runtime_product_declaration_id)
+                .unwrap();
+            runtime.relationship_raw_content_digest = relationship_digest.to_owned();
+            runtime.relationship_project_dependent = false;
+            runtime.consumer_source = ResolvedProductConsumerSource::InstalledBundle {
+                consumer_ref: runtime.consumer_source.consumer_ref().to_owned(),
+                publisher_fingerprint: runtime.consumer_source.publisher_fingerprint().to_owned(),
+            };
+            let selections =
+                ryeos_state::external_content::products::composition::ResolvedExternalProductSelections::new(map)
+                    .unwrap();
+            requirement
+                .resolve_for_use(Some(&selections), &qualification_use, fixture_placement())
+                .unwrap()
+        };
+        let original = derive(&"1".repeat(64));
+        let mut binding = document();
+        match &mut binding.workload {
+            ExternalWorkloadBinding::StructuredSession(session) => {
+                session.provider_declaration_id =
+                    original.requirement.provider_declaration_id.clone();
+                session.provider_configuration_destination = original
+                    .requirement
+                    .provider_configuration_destination
+                    .clone();
+                session.runtime_manifest_hash = original.runtime_manifest_hash.clone();
+                session.runtime_selection_identity = original.selection_identity_digest.clone();
+            }
+            _ => panic!("fixture is a structured session"),
+        }
+        check_program(&binding, &original).unwrap();
+        let changed = derive(&"2".repeat(64));
+        assert_ne!(
+            changed.selection_identity_digest,
+            original.selection_identity_digest
+        );
+        assert_eq!(
+            changed.runtime_manifest_hash,
+            original.runtime_manifest_hash
+        );
+        assert!(
+            check_program(&binding, &changed)
+                .unwrap_err()
+                .to_string()
+                .contains("contradicts installed placement binding")
+        );
+    }
+
     #[test]
     fn retained_binding_cannot_change_workload_without_signed_authority() {
         let mut retained = RetainedExternalExecutionBinding::test_fixture();
@@ -1425,11 +2333,13 @@ mod workload_binding_tests {
 #[cfg(test)]
 mod persistent_placement_credential_tests {
     use super::*;
-    use crate::vault::{NodeVault as _, SealedEnvelopeVault, default_sealed_store_path};
+    use crate::vault::{
+        NodeVault as _, NodeVaultReadAll as _, SealedEnvelopeVault, default_sealed_store_path,
+    };
 
     fn fixture() -> (tempfile::TempDir, InstalledExternalExecutionBinding) {
         let root = tempfile::tempdir().unwrap();
-        let identity = crate::identity::NodeIdentity::create(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.path().join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
@@ -1474,7 +2384,7 @@ mod persistent_placement_credential_tests {
         let access = binding.credential_access().unwrap();
         let retained = reopened.placement_credential(&access).unwrap();
         assert_eq!(access.decode(retained).unwrap().secret(), "fixture-secret");
-        assert!(reopened.read_all("fixture-operator").unwrap().is_empty());
+        assert!(reopened.read_all().unwrap().is_empty());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:64e4d519f2c8bf2417d2421f08b85dab5dac4f9ed01dacded7f5e50a328da1b0:YeBtvWjL4W5bN/ab5aUWzL+7NpPRlDU84JRt33N04fp3t8bOjkndojjvu5UUldwC/NGDlHuQKustTM4KqkObCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T01:53:56Z:62363ff1685452c470352fb6f22b89c0ad3ea8a43f8c285b3c494245a88c9469:ZA9BvhcPe2oldZRZuLlk4P/FUkOJeT+rI4VuExlhQ9Ai132eX9dCOCmItHiqHHUe9rzIyachFJG3W1gCOHkyCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-bundles
 title: Bundles
 version: "1.0.0"
@@ -14,5 +14,3 @@ projections:
   columns:
     - label: bundle
       field: name
-    - label: path
-      field: path

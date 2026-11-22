@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -9,308 +9,9 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
-use ryeos_app::identity::NodeIdentity;
 use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
-use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
-
-/// Bootstrap options.
-///
-/// `force` controls node-key regeneration ONLY. The user signing key is
-/// never overwritten by init — it is always load-or-create. Node-key
-/// rotation is a daemon-internal operation; user-key rotation requires
-/// explicit operator action.
-#[derive(Debug)]
-pub struct InitOptions {
-    /// If true, regenerate the node signing key even if one already exists.
-    /// Does NOT affect the user signing key.
-    pub force: bool,
-}
-
-/// Collect signed node-config items under `app_root/<AI_DIR>/node/`
-/// that would become unverifiable if the node signing key is
-/// regenerated.
-///
-/// A file is considered signed if its first non-empty line begins
-/// with `# ryeos:signed:`. Returns sorted, deduplicated absolute paths.
-fn find_signed_node_config_items(app_root: &Path) -> Result<Vec<PathBuf>> {
-    let node_dir = app_root.join(AI_DIR).join("node");
-    if !node_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut hits = Vec::new();
-    collect_signed_yaml_recursive(&node_dir, &mut hits)?;
-    hits.sort();
-    hits.dedup();
-    Ok(hits)
-}
-
-/// Recursive helper: walk a directory tree looking for signed YAMLs.
-fn collect_signed_yaml_recursive(dir: &Path, hits: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.context("dir entry")?;
-        let path = entry.path();
-        let ft = entry.file_type().context("file type")?;
-        if ft.is_dir() {
-            collect_signed_yaml_recursive(&path, hits)?;
-            continue;
-        }
-        if !ft.is_file() {
-            continue;
-        }
-        if !matches!(
-            path.extension().and_then(|s| s.to_str()),
-            Some("yaml") | Some("yml")
-        ) {
-            continue;
-        }
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let first_non_empty = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        if first_non_empty.starts_with("# ryeos:signed:") {
-            hits.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// One-time idempotent filesystem bootstrap.
-///
-/// Creates the node space layout, generates or loads BOTH the node signing
-/// key (daemon-internal state) and the user signing key (operator edits),
-/// writes the public identity document for the node, and bootstraps
-/// self-trust for both keys.
-#[tracing::instrument(name = "engine:lifecycle", skip(config), fields(event = "bootstrap"))]
-pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
-    // 1. Create directory layout
-    create_directory_layout(config)?;
-
-    // Bootstrap configuration is created by the stopped-node `ryeos init`
-    // transaction. Daemon repair must never become a second configuration
-    // publisher or reinterpret `force` as endpoint mutation.
-
-    // 2. Create auth directory
-    fs::create_dir_all(&config.authorized_keys_dir)?;
-
-    // Discover operator trust directory early — needed for stale-entry cleanup
-    // during node-key regeneration. Operator config is folded into the app root.
-    let trust_dir = config.runtime_root().trusted_keys_dir();
-
-    // 4. Generate or load the NODE signing key (daemon-internal state)
-    let node_key_path = &config.node_signing_key_path;
-    let node_identity = if options.force && node_key_path.exists() {
-        // γ: refuse --force if signed node-config items exist — rotating
-        // the node key would make them unverifiable. The operator must
-        // manually re-sign items before rotating, or use --force only on
-        // fresh installs.
-        let signed_items = find_signed_node_config_items(&config.app_root)?;
-        if !signed_items.is_empty() {
-            let lines: Vec<String> = signed_items
-                .iter()
-                .map(|p| format!("  {}", p.display()))
-                .collect();
-            bail!(
-                "refusing --force: existing signed node-config items would become \
-                 unverifiable after node-key regeneration:\n\n{}\n\n\
-                 To rotate safely: manually re-sign the listed items with the new key \
-                 (using ryeos-core-tools sign), then retry --force. \
-                 `--force` is only safe on a fresh install or when no signed items exist.",
-                lines.join("\n")
-            );
-        }
-
-        // Before regenerating, clean up stale trust entries from old keys.
-        // The trust entry path includes the fingerprint, so old entries become
-        // orphans. We remove the known file; any other orphan cleanup is
-        // deferred to explicit operator action.
-        let old_identity = NodeIdentity::load(node_key_path)?;
-        let old_trust = trust_dir.join(format!("{}.toml", old_identity.fingerprint()));
-        if old_trust.exists() {
-            tracing::info!(
-                path = %old_trust.display(),
-                old_fingerprint = %old_identity.fingerprint(),
-                "removing stale node trust entry before regeneration"
-            );
-            fs::remove_file(&old_trust).with_context(|| {
-                format!("failed to remove stale trust entry {}", old_trust.display())
-            })?;
-        }
-        tracing::info!(path = %node_key_path.display(), "regenerating node signing key (--force)");
-        fs::remove_file(node_key_path).with_context(|| {
-            format!("failed to remove old node key {}", node_key_path.display())
-        })?;
-        NodeIdentity::create(node_key_path)?
-    } else if node_key_path.exists() {
-        NodeIdentity::load(node_key_path)?
-    } else {
-        NodeIdentity::create(node_key_path)?
-    };
-
-    tracing::info!(
-        fingerprint = %node_identity.fingerprint(),
-        path = %node_key_path.display(),
-        "node signing key ready"
-    );
-
-    // 5. Generate or load the operator signing key (operator edits in project/app root).
-    //    NEVER force-regenerate: the user key is the operator's persistent identity.
-    //    Rotation is an explicit out-of-band action.
-    let user_key_path = &config.operator_signing_key_path;
-    let user_identity = if user_key_path.exists() {
-        NodeIdentity::load(user_key_path)?
-    } else {
-        NodeIdentity::create(user_key_path)?
-    };
-
-    tracing::info!(
-        fingerprint = %user_identity.fingerprint(),
-        path = %user_key_path.display(),
-        "user signing key ready"
-    );
-
-    // 6. Write public identity document (node only)
-    let identity_path = config
-        .app_root
-        .join(AI_DIR)
-        .join("node")
-        .join("identity")
-        .join("public-identity.json");
-    if options.force || !identity_path.exists() {
-        node_identity.write_public_identity(&identity_path)?;
-        tracing::info!(path = %identity_path.display(), "wrote node public identity");
-    }
-
-    // 6b. Vault X25519 keypair. Separate from the Ed25519 node identity
-    // so node-key rotation does NOT brick the vault. Auto-generated on
-    // first boot if missing (parallel to user/node keys above); never
-    // force-rotated by daemon bootstrap (rotation is `ryeos vault rewrap`).
-    let vault_dir = config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("vault");
-    let vault_secret_path = vault_dir.join("private_key.pem");
-    let vault_public_path = vault_dir.join("public_key.pem");
-    let vault_sk = if vault_secret_path.exists() {
-        lillux::vault::read_secret_key(&vault_secret_path)
-            .with_context(|| format!("load vault key {}", vault_secret_path.display()))?
-    } else {
-        let sk = lillux::vault::VaultSecretKey::generate();
-        lillux::vault::write_secret_key(&vault_secret_path, &sk)
-            .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
-        sk
-    };
-    lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
-        .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
-    tracing::info!(
-        fingerprint = %vault_sk.public_key().fingerprint(),
-        path = %vault_secret_path.display(),
-        "vault X25519 keypair ready"
-    );
-
-    // 7. Authorize the operator key so the local CLI can authenticate to
-    // the local daemon. The CLI signs requests with the operator's persistent
-    // identity at <app_root>/.ai/config/keys/signing/.
-    // The authorized-key TOML must be signed by the node key per
-    // auth::load_authorized_key().
-    let user_auth_entry = config
-        .authorized_keys_dir
-        .join(format!("{}.toml", user_identity.fingerprint()));
-    if options.force || !user_auth_entry.exists() {
-        write_operator_authorized(
-            &user_auth_entry,
-            user_identity.verifying_key(),
-            node_identity.signing_key(),
-        )?;
-    }
-
-    // 8. Bootstrap self-trust: write verifying keys as trusted key docs
-    // (trust_dir computed above, before node-key regeneration)
-
-    // Node key trust doc
-    let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
-    if options.force || !node_trust_entry.exists() {
-        write_self_trust(
-            &trust_dir,
-            &node_trust_entry,
-            node_identity.verifying_key(),
-            node_identity.signing_key(),
-        )?;
-    }
-
-    // User key trust doc
-    let user_trust_entry = trust_dir.join(format!("{}.toml", user_identity.fingerprint()));
-    if options.force || !user_trust_entry.exists() {
-        write_self_trust(
-            &trust_dir,
-            &user_trust_entry,
-            user_identity.verifying_key(),
-            user_identity.signing_key(),
-        )?;
-    }
-
-    // NOTE: Bundle registrations are written by `ryeos init` (ryeos-core-tools),
-    // not by daemon bootstrap. The daemon only reads registrations during
-    // `load_node_config_two_phase`. Any bundles discovered by init are
-    // registered at `app_root/.ai/node/bundles/{name}.yaml`.
-
-    Ok(())
-}
-
-/// Write a self-signed trusted-key TOML entry so the key's own signed items verify.
-///
-/// The document is signed by the key it declares (self-signature), using the
-/// `# ryeos:signed:...` envelope format consumed by `TrustStore::load`.
-fn write_self_trust(
-    trust_dir: &Path,
-    trust_entry: &Path,
-    verifying_key: &lillux::crypto::VerifyingKey,
-    signing_key: &lillux::crypto::SigningKey,
-) -> Result<()> {
-    fs::create_dir_all(trust_dir)
-        .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
-
-    let fingerprint = lillux::cas::sha256_hex(verifying_key.as_bytes());
-    let key_b64 = base64::engine::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        verifying_key.as_bytes(),
-    );
-
-    let body = format!(
-        r#"fingerprint = "{fingerprint}"
-owner = "self"
-version = "1.0.0"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-
-    // Self-sign using the `# ryeos:signed:...` envelope
-    let signed = lillux::signature::sign_content(&body, signing_key, "#", None);
-
-    let tmp = trust_entry.with_extension("tmp");
-    fs::write(&tmp, signed.as_bytes())
-        .with_context(|| format!("failed to write trust entry {}", trust_entry.display()))?;
-    fs::rename(&tmp, trust_entry).with_context(|| {
-        format!(
-            "failed to rename {} → {}",
-            tmp.display(),
-            trust_entry.display()
-        )
-    })?;
-
-    tracing::info!(
-        path = %trust_entry.display(),
-        fingerprint = %fingerprint,
-        "wrote self-signed trust entry"
-    );
-
-    Ok(())
-}
+use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
 
 /// Write a node-signed authorized-key TOML for the user key so the CLI
 /// can authenticate to the local daemon.
@@ -335,16 +36,21 @@ fn write_operator_authorized(
         .ok_or_else(|| anyhow::anyhow!("authorized-key path has no parent directory"))?;
     let now = lillux::time::iso8601_now();
 
-    let _path = ryeos_app::identity::write_authorized_key_toml(
+    let _path = ryeos_node_runtime::identity::write_authorized_key_toml(
         auth_dir,
         &fp,
         &key_b64,
         &["*".to_string()],
-        "bootstrap-authorized-user",
+        "operator",
         &fp,
         &now,
+        // Initialization has no signed request: the operator who runs it is
+        // the principal that asks for their own grant, which never lapses.
+        &ryeos_node_runtime::identity::GrantTerms::operator(
+            ryeos_node_runtime::identity::AuthorizedBy::principal_request(&fp, None),
+        ),
         node_signing_key,
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;
 
     tracing::info!(
@@ -440,7 +146,7 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 /// Repair daemon-local artifacts after init-state verification.
 ///
 /// `ryeos init` is the single authoritative path for operator artifacts
-/// (operator signing key, user/node trust docs, official-publisher pinning,
+/// (operator signing key, operator signer record, official-publisher pinning,
 /// bundle install + registration). Daemon startup must NOT recreate or
 /// partially substitute for any of those.
 ///
@@ -449,42 +155,27 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 ///      completion. Daemon startup never requires the operator private key.
 ///   2. Verifies the node signing key exists. Missing → fail (we cannot
 ///      safely regenerate the node key here because doing so would
-///      invalidate the existing node trust doc in operator config).
+///      invalidate every record the existing node key signed in the signer
+///      registry).
 ///   3. Repairs daemon-local artifacts only: daemon-local directory
 ///      layout, default config, vault X25519 keypair, public identity
 ///      document, node-signed authorized-key entry for the user key.
 ///
-/// Trust docs in operator config are NEVER written here.
+/// Signer registry records are NEVER written here.
 pub fn repair_daemon_local(config: &Config) -> Result<()> {
     let completion = ryeos_node::verify_init_completion(&config.app_root)?
         .context("node has no complete signed initialization transaction")?;
-    let trust_dir = config.app_root.join(AI_DIR).join("config/keys/trusted");
 
     if !config.node_signing_key_path.exists() {
         bail!(
             "node signing key missing at {} — run: ryeos init\n\
              (daemon refuses to regenerate the node key automatically because doing so \
-             would invalidate the node trust doc already pinned in app root)",
+             would invalidate the signer registry records it signed in the app root)",
             config.node_signing_key_path.display()
         );
     }
 
     let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
-
-    let operator_trust_entry = trust_dir.join(format!("{}.toml", completion.operator_fingerprint));
-    if !operator_trust_entry.exists() {
-        bail!(
-            "pinned operator trust document missing at {} — run: ryeos init",
-            operator_trust_entry.display()
-        );
-    }
-    let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
-    if !node_trust_entry.exists() {
-        bail!(
-            "node trust doc missing at {} — run: ryeos init",
-            node_trust_entry.display()
-        );
-    }
 
     // ── 2. Daemon-local layout (idempotent) ──
     create_directory_layout(config)?;
@@ -512,6 +203,21 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
     if !identity_path.exists() {
         node_identity.write_public_identity(&identity_path)?;
         tracing::info!(path = %identity_path.display(), "wrote node public identity");
+    }
+
+    // ── 4b. Signer registry. A bad record refuses startup with its typed
+    //    code. The pinned operator must have a record in it. ──
+    let trust_store = TrustStore::load_node_registry(&config.app_root)
+        .map_err(|e| anyhow::anyhow!("node signer registry refused ({}): {e}", e.code()))?;
+    if trust_store
+        .signer(&completion.operator_fingerprint)
+        .is_none()
+    {
+        bail!(
+            "pinned operator {} has no signer record in the node registry at {} — run: ryeos init",
+            completion.operator_fingerprint,
+            ryeos_engine::trust::signers_dir(&config.app_root).display()
+        );
     }
 
     // ── 5. Vault X25519 keypair (daemon-local). Decoupled from node
@@ -549,8 +255,6 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
     if !user_auth_entry.exists() {
         // Repair authenticates the operator from pinned public trust, never
         // by loading operator private custody or substituting the node key.
-        let trust_store = TrustStore::load(None, &config.runtime_config_dir())
-            .context("load pinned operator public authority for authorization repair")?;
         let operator = trust_store
             .get(&completion.operator_fingerprint)
             .context("init completion operator is absent from pinned trust")?;
@@ -576,25 +280,61 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// 3. Phase 2: full node-config scan across all sections → snapshot.
 ///
 /// Trust continuity: the trust store used for node-config verification is
-/// loaded via the engine's `TrustStore::load`, which sources trust
-/// from operator tiers ONLY (project + operator config). The daemon's identity must
-/// have its trust doc pinned in the operator tier (created by `ryeos init` /
-/// daemon bootstrap) for daemon-written `kind: node` items to verify on
-/// next boot.
+/// the node signer registry (`TrustStore::load_node_registry`). The node key
+/// is its implicit root, so daemon-written `kind: node` items verify on next
+/// boot without a record; a bad registry record refuses startup.
 ///
 /// Returns the engine, node-config snapshot, and the immutable isolation snapshot
 /// selected after runtime admission. A mandatory launch preparer may cause the
 /// returned snapshot to capture its selected isolation backend even when the
 /// general policy is disabled.
+/// Every optional Cargo feature of this daemon, with whether it is compiled
+/// in. The capability report lists the compiled ones.
+const COMPILED_FEATURES: [(&str, bool); 6] = [
+    (
+        "crash-qualification-test-support",
+        cfg!(feature = "crash-qualification-test-support"),
+    ),
+    (
+        "handoff-test-support",
+        cfg!(feature = "handoff-test-support"),
+    ),
+    ("latency-profiling", cfg!(feature = "latency-profiling")),
+    ("test-support", cfg!(feature = "test-support")),
+    (
+        "model-provider-setup",
+        cfg!(feature = "model-provider-setup"),
+    ),
+    ("scheduling", cfg!(feature = "scheduling")),
+];
+
+/// The optional Cargo features this binary was compiled with, in table order.
+pub fn compiled_features() -> Vec<String> {
+    COMPILED_FEATURES
+        .iter()
+        .filter(|(_, compiled)| *compiled)
+        .map(|(name, _)| (*name).to_owned())
+        .collect()
+}
+
 pub fn load_node_config_two_phase(
     config: &Config,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), None)
+    // Isolation pins the callback-only socket: a sandboxed tool is shown that
+    // endpoint and never the operator control socket.
+    load_node_config_two_phase_with_socket(
+        config,
+        Some(&config.runtime_uds_path()),
+        None,
+        provider_environment,
+    )
+    .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
 }
 
 /// Running-daemon bootstrap with one already selected protected host runtime.
@@ -602,14 +342,23 @@ pub fn load_node_config_two_phase(
 /// never discovers a lifecycle provider or decodes an OS backend.
 pub fn load_node_config_two_phase_with_host_runtime(
     config: &Config,
-    host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+    host_runtime: Option<ryeos_node::host_runtime::SelectedHostRuntime<'_>>,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
-    load_node_config_two_phase_with_socket(config, Some(&config.uds_path), host_runtime)
+    // Isolation pins the callback-only socket: a sandboxed tool is shown that
+    // endpoint and never the operator control socket.
+    load_node_config_two_phase_with_socket(
+        config,
+        Some(&config.runtime_uds_path()),
+        host_runtime,
+        provider_environment,
+    )
+    .map(|(engine, snapshot, policy, isolation, _report)| (engine, snapshot, policy, isolation))
 }
 
 /// Standalone service execution has no daemon callback listener to capture.
@@ -618,26 +367,34 @@ pub fn load_node_config_two_phase_with_host_runtime(
 /// It also does not own the supervised process-scope provider. Definition
 /// admission retains enforced isolation without claiming those capabilities;
 /// persistent worker execution belongs to the normal daemon bootstrap.
+///
+/// The capability report it admitted the service on is returned with the
+/// rest: the floor was met on the planned residency, and the native host
+/// the service issues must meet it again on the residency it establishes.
 pub fn load_node_config_two_phase_standalone(
     config: &Config,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
+    ryeos_node::capability_report::NodeCapabilityReport,
 )> {
-    load_node_config_two_phase_with_socket(config, None, None)
+    load_node_config_two_phase_with_socket(config, None, None, provider_environment)
 }
 
 fn load_node_config_two_phase_with_socket(
     config: &Config,
     daemon_socket: Option<&Path>,
-    host_runtime: Option<&ryeos_node::host_runtime::HostRuntimeBinding>,
+    host_runtime: Option<ryeos_node::host_runtime::SelectedHostRuntime<'_>>,
+    provider_environment: &ryeos_node::provider_env::StartupProviderEnvironment,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
+    ryeos_node::capability_report::NodeCapabilityReport,
 )> {
     let app_root = &config.app_root;
 
@@ -646,16 +403,16 @@ fn load_node_config_two_phase_with_socket(
     // snapshot. Mutation paths take this same node-wide lock before planning
     // or activation, so one daemon generation cannot mix bundle generations.
     let _bundle_generation_lock =
-        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire_for_startup(app_root)
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire_for_startup(app_root)
             .context("acquire bundle-generation lock for node bootstrap")?;
 
     // ── Phase 1: bootstrap trust store + bundle section ──
-    // Use operator config trust so daemon-written items verify.
-    let operator_config_root = config.runtime_root().config();
-    let bootstrap_trust_store = TrustStore::load(None, &operator_config_root)
-        .context("failed to load bootstrap trust store for node-config verification")?;
+    // The node signer registry; the node key is its implicit root so
+    // daemon-written items verify.
+    let bootstrap_trust_store = TrustStore::load_node_registry(app_root)
+        .map_err(|e| anyhow::anyhow!("failed to load node signer registry ({}): {e}", e.code()))?;
 
-    let bootstrap_loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let bootstrap_loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
         trust_store: &bootstrap_trust_store,
     };
@@ -665,7 +422,7 @@ fn load_node_config_two_phase_with_socket(
         .context("Phase 1: failed to load bundle section from node config")?;
 
     let generation = Arc::new(
-        ryeos_app::engine_init::VerifiedBundleGeneration::capture(
+        ryeos_node_runtime::engine_init::VerifiedBundleGeneration::capture(
             bundle_records,
             &bootstrap_trust_store,
         )
@@ -677,7 +434,7 @@ fn load_node_config_two_phase_with_socket(
     // validate before any registry is constructed from these roots.
     generation
         .checked(&bootstrap_trust_store, || {
-            ryeos_app::engine_init::validate_installed_bundle_plan(
+            ryeos_node_runtime::engine_init::validate_installed_bundle_plan(
                 app_root,
                 &generation,
                 &bootstrap_trust_store,
@@ -693,23 +450,29 @@ fn load_node_config_two_phase_with_socket(
     // raw path.
     let config_table = NodeConfigTable::new();
     let policy_table = NodePolicyTable::new();
-    let policy_generation = ryeos_app::node_policy::generation::load_policy_generation(
+    let policy_generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         app_root,
         &bootstrap_trust_store,
         &policy_table,
     )
     .context("Phase 1: load exact node policy generation")?;
+    // The provider environment was taken before the async runtime existed,
+    // under the generation then on disk. Composing under any other
+    // generation would deliver names this policy does not declare.
+    provider_environment
+        .require_generation(app_root, policy_generation.digest())
+        .context("Phase 1: bind the startup provider environment to the loaded policy")?;
     let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
-    let node_policy = Arc::new(ryeos_app::node_policy::compile_generation(
+    let node_policy = Arc::new(ryeos_node_runtime::node_policy::compile_generation(
         app_root,
         &policy_table,
         &policy_generation,
         node_identity.fingerprint(),
     )?);
     let command_registration = node_policy.require::<
-        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+        ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
-    let full_loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let full_loader = ryeos_app::node_config::loader::NodeConfigLoader {
         app_root,
         trust_store: &bootstrap_trust_store,
     };
@@ -724,13 +487,22 @@ fn load_node_config_two_phase_with_socket(
             .context("Phase 2: failed to load full node config")
     })?);
 
-    let isolation_backend = generation
+    let (isolation_backend, verified_backend_capture) = generation
         .checked(&bootstrap_trust_store, || {
-            ryeos_app::engine_init::resolve_isolation_backend(
-                &generation,
-                &bootstrap_trust_store,
-                node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
-            )
+            if daemon_socket.is_some() {
+                ryeos_node_runtime::engine_init::resolve_isolation_backend_with_verified_captures(
+                    &generation,
+                    &bootstrap_trust_store,
+                    node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
+                )
+            } else {
+                ryeos_node_runtime::engine_init::resolve_isolation_backend(
+                    &generation,
+                    &bootstrap_trust_store,
+                    node_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?,
+                )
+                .map(|backend| (backend, None))
+            }
         })
         .context("Phase 1: resolve selected isolation backend")?;
     // A stopped-node snapshot validates the signed contract only. It must not
@@ -746,20 +518,23 @@ fn load_node_config_two_phase_with_socket(
         ) {
         match host_runtime {
             Some(runtime) => {
-                runtime.verify_loaded_node_identity(&node_identity)?;
-                Some(runtime.open_process_scope_provider()?)
+                runtime
+                    .binding
+                    .verify_loaded_node_identity(&node_identity)?;
+                Some(runtime.binding.open_process_scope_provider()?)
             }
-            // Direct nodes remain valid for non-scope-backed work. The
-            // isolation runtime records no capability, and dedicated workers
-            // fail admission rather than selecting a weaker host process
-            // boundary.
+            // Without a host runtime no scope capability qualifies. Policy
+            // validation guarantees required scopes name termination:scope
+            // and recovery:scope in the capability floor, so the floor match
+            // below refuses this start, records why, and names what the host
+            // can prove instead.
             None => None,
         }
     } else {
         None
     };
     let process_scope_authority_digest = host_runtime
-        .map(|runtime| runtime.identity_digest())
+        .map(|runtime| runtime.binding.identity_digest())
         .transpose()
         .context("Phase 1: identify protected host-runtime authority")?;
     let isolation = match daemon_socket {
@@ -767,12 +542,18 @@ fn load_node_config_two_phase_with_socket(
             ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
                 app_root,
                 daemon_socket,
+                Some(&config.uds_path),
                 node_policy
                     .require::<ryeos_engine::isolation::IsolationPolicy>()?
                     .clone(),
-                ryeos_app::node_policy::generation::policy_directory(app_root)
+                ryeos_node_runtime::node_policy::generation::policy_directory(app_root)
                     .join("isolation.yaml"),
-                format!("sha256:{}", node_policy.generation_digest()),
+                // The isolation policy's own digest: a retained realization
+                // stays valid across edits to other policy sections.
+                format!(
+                    "sha256:{}",
+                    node_policy.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?
+                ),
                 isolation_backend,
                 process_scope_provider,
                 process_scope_authority_digest,
@@ -787,18 +568,129 @@ fn load_node_config_two_phase_with_socket(
             node_policy
                 .require::<ryeos_engine::isolation::IsolationPolicy>()?
                 .clone(),
-            ryeos_app::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
-            format!("sha256:{}", node_policy.generation_digest()),
+            ryeos_node_runtime::node_policy::generation::policy_directory(app_root).join("isolation.yaml"),
+            format!(
+                "sha256:{}",
+                node_policy.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?
+            ),
             isolation_backend,
         ),
     }
     .context("Phase 1: load node isolation policy")?;
-    let isolation = Arc::new(ryeos_app::engine_init::retain_daemon_generation(
+    // Same actual runtime/backend and checked node-generation captures.
+    // Retention alone grants no native launch or settlement evidence.
+    let isolation = match verified_backend_capture {
+        Some(capture) => isolation
+            .retain_verified_backend_capture(capture)
+            .context("Phase 1: retain actual isolation executable captures")?,
+        None => isolation,
+    };
+    let isolation = Arc::new(ryeos_node_runtime::engine_init::retain_daemon_generation(
         isolation,
         app_root.to_path_buf(),
         Arc::clone(&generation),
         bootstrap_trust_store.clone(),
     ));
+
+    // Signed inits trusted to exit with their only child, admitted before
+    // the host is observed below and before any lifetime witness is recorded,
+    // so both judge the node's enclosure by the same policy.
+    lillux::process_control::admit_enclosure_inits(&isolation.inspection().enclosure_inits)
+        .map_err(anyhow::Error::msg)
+        .context("Phase 1: admit trusted enclosure inits")?;
+
+    // Every node process records what it contains and what its host proves,
+    // then admits itself only if the signed policy's capability floor is met.
+    // This precedes the engine and every native reservation, so a refusal
+    // spends no incarnation. Every per-scope proof is attributed to the host
+    // runtime's transport, which cannot change within one incarnation, so a
+    // floor that constrains providers is decided here once.
+    let daemon_digest = lillux::current_executable_digest()
+        .map_err(anyhow::Error::msg)
+        .context("Phase 1: measure the running daemon executable")?;
+    // Only the running daemon serves the TCP listener; it is bound before
+    // this point, so the configured address is the bound one.
+    let listeners = match daemon_socket {
+        Some(_) => vec![config.bind.to_string()],
+        None => Vec::new(),
+    };
+    // Every import root node policy declares for use in place is measured
+    // again at every start, never trusted from an earlier boot: the store
+    // resolves reference objects through what this measurement found.
+    let (in_place_roots, in_place_reports) =
+        ryeos_node_runtime::in_place_roots::InPlaceRoots::measure(
+            node_policy
+                .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?,
+        );
+    for (name, root) in &in_place_reports {
+        match &root.refusal {
+            Some(refusal) => tracing::warn!(
+                root = %name,
+                %refusal,
+                "in-place import root is not usable; objects held there are refused by name until they are imported again"
+            ),
+            None => tracing::info!(
+                root = %name,
+                basis = ?root.proof.as_ref().map(|proof| proof.basis.as_str()),
+                "in-place import root is proven immutable"
+            ),
+        }
+    }
+    ryeos_state::install_reference_roots(Arc::new(in_place_roots));
+    let report = ryeos_node::capability_report::NodeCapabilityReport::assemble(
+        ryeos_node::capability_report::ReportInputs {
+            in_place_roots: in_place_reports,
+            app_root,
+            node_fingerprint: node_identity.fingerprint(),
+            daemon_digest: format!("sha256:{daemon_digest}"),
+            bundles: generation
+                .records()
+                .iter()
+                .map(|record| record.name.clone())
+                .collect(),
+            compiled_features: compiled_features(),
+            listeners,
+            policy_generation: format!("sha256:{}", node_policy.generation_digest()),
+            isolation: isolation.inspection(),
+            host_runtime_provider: host_runtime.map(|runtime| runtime.provider),
+            provider_environment: provider_environment.environment().as_ref(),
+        },
+    )
+    .context("Phase 1: assemble node capability report")?;
+    if daemon_socket.is_none() {
+        // A standalone or stopped-node service opens no process scopes and
+        // admits no scoped job, so the per-scope names of the floor describe
+        // nothing it does and are not checked here; every host-level name
+        // is. The recorded report stays the running daemon's, so it is not
+        // overwritten from this process. This check is on the planned
+        // residency; the service checks again on the one its native host
+        // establishes.
+        report
+            .require_floor_without_scopes()
+            .context("Phase 1: node capability floor for a service without process scopes")?;
+    } else {
+        // The daemon's report is written either way so the doctor can show
+        // the reason.
+        let floor_result = report.require_floor();
+        let signed = report
+            .clone()
+            .sign(node_identity.signing_key())
+            .context("Phase 1: sign node capability report")?;
+        let path = signed
+            .write(app_root)
+            .context("Phase 1: record node capability report")?;
+        tracing::info!(
+            report = %path.display(),
+            digest = %signed.digest,
+            provided = ?signed.report.provided.keys().collect::<Vec<_>>(),
+            missing = ?signed.report.missing.keys().collect::<Vec<_>>(),
+            floor_met_by = ?signed.report.floor.met_by,
+            residency_basis = ?signed.report.host.residency.as_ref().and_then(|proof| proof.capability_name()),
+            residency = ?signed.report.host.residency,
+            "node capability report recorded"
+        );
+        floor_result?;
+    }
 
     tracing::info!(
         app_root = %app_root.display(),
@@ -814,7 +706,7 @@ fn load_node_config_two_phase_with_socket(
         isolation,
         &bootstrap_trust_store,
         node_policy
-            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>(
             )?,
     )?;
     let engine = Arc::new(engine);
@@ -825,249 +717,61 @@ fn load_node_config_two_phase_with_socket(
         "Phase 2: node config loaded"
     );
 
-    Ok((engine, snapshot, node_policy, isolation))
+    Ok((engine, snapshot, node_policy, isolation, report))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_app::identity::NodeIdentity;
-
-    /// Build a minimal Config for testing with all paths under a tempdir.
-    fn test_config(tmp: &std::path::Path) -> Config {
-        let app_root = tmp.join("state");
-        let user_keys = tmp.join("user_keys");
-        std::fs::create_dir_all(
-            app_root
-                .join(".ai")
-                .join("node")
-                .join("auth")
-                .join("authorized_keys"),
-        )
-        .unwrap();
-        std::fs::create_dir_all(app_root.join(".ai").join("state")).unwrap();
-        std::fs::create_dir_all(user_keys.join("signing")).unwrap();
-        Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            db_path: app_root.join(".ai").join("state").join("runtime.sqlite3"),
-            uds_path: app_root.join("ryeosd.sock"),
-            app_root: app_root.clone(),
-            node_signing_key_path: app_root
-                .join(".ai")
-                .join("node")
-                .join("identity")
-                .join("private_key.pem"),
-            operator_signing_key_path: user_keys.join("signing").join("private_key.pem"),
-            authorized_keys_dir: app_root
-                .join(".ai")
-                .join("node")
-                .join("auth")
-                .join("authorized_keys"),
-        }
-    }
-
-    /// Helper: extract the fingerprint from a PEM key file.
-    fn fingerprint_at(path: &std::path::Path) -> String {
-        let id = NodeIdentity::load(path).unwrap();
-        id.fingerprint().to_string()
-    }
 
     #[test]
-    fn init_creates_both_keys_on_fresh_state() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = test_config(tmp.path());
-
-        init(&config, &InitOptions { force: false }).unwrap();
-
-        assert!(
-            config.node_signing_key_path.exists(),
-            "node key should be created"
-        );
-        assert!(
-            config.operator_signing_key_path.exists(),
-            "user key should be created"
-        );
-
-        // Trust entries for both keys live under the runtime root's trusted-keys
-        // dir — the same path init() writes to.
-        let trust_dir = config.runtime_root().trusted_keys_dir();
-        let node_fp = fingerprint_at(&config.node_signing_key_path);
-        let user_fp = fingerprint_at(&config.operator_signing_key_path);
-        assert!(
-            trust_dir.join(format!("{}.toml", node_fp)).exists(),
-            "node trust entry"
-        );
-        assert!(
-            trust_dir.join(format!("{}.toml", user_fp)).exists(),
-            "user trust entry"
-        );
-    }
-
-    #[test]
-    fn init_idempotent_reuses_existing_keys() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = test_config(tmp.path());
-
-        init(&config, &InitOptions { force: false }).unwrap();
-        let node_fp1 = fingerprint_at(&config.node_signing_key_path);
-        let user_fp1 = fingerprint_at(&config.operator_signing_key_path);
-
-        // Second init without force — keys should be the same
-        init(&config, &InitOptions { force: false }).unwrap();
-        let node_fp2 = fingerprint_at(&config.node_signing_key_path);
-        let user_fp2 = fingerprint_at(&config.operator_signing_key_path);
-
+    fn every_optional_cargo_feature_is_reported_when_compiled() {
+        let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
+        let declared: std::collections::BTreeSet<&str> = manifest["features"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|name| *name != "default")
+            .collect();
+        let reported: std::collections::BTreeSet<&str> =
+            COMPILED_FEATURES.iter().map(|(name, _)| *name).collect();
         assert_eq!(
-            node_fp1, node_fp2,
-            "node key should not change on idempotent init"
+            reported, declared,
+            "the report table must list every daemon feature"
         );
         assert_eq!(
-            user_fp1, user_fp2,
-            "user key should not change on idempotent init"
+            compiled_features().contains(&"scheduling".to_owned()),
+            cfg!(feature = "scheduling")
         );
     }
 
     #[test]
-    fn force_regenerates_node_key_but_preserves_operator_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = test_config(tmp.path());
-
-        init(&config, &InitOptions { force: false }).unwrap();
-        let user_fp_before = fingerprint_at(&config.operator_signing_key_path);
-        let node_fp_before = fingerprint_at(&config.node_signing_key_path);
-
-        // Force regenerate
-        init(&config, &InitOptions { force: true }).unwrap();
-        let user_fp_after = fingerprint_at(&config.operator_signing_key_path);
-        let node_fp_after = fingerprint_at(&config.node_signing_key_path);
-
-        assert_ne!(
-            node_fp_before, node_fp_after,
-            "node key SHOULD change with --force"
-        );
-        assert_eq!(
-            user_fp_before, user_fp_after,
-            "user key MUST NOT change with --force"
-        );
-
-        // Trust dir — where init() writes trusted-key entries.
-        let trust_dir = config.runtime_root().trusted_keys_dir();
-
-        // Old node trust entry should be cleaned up
-        assert!(
-            !trust_dir.join(format!("{}.toml", node_fp_before)).exists(),
-            "stale node trust entry should be removed after force regeneration"
-        );
-        // New node trust entry should exist
-        assert!(
-            trust_dir.join(format!("{}.toml", node_fp_after)).exists(),
-            "new node trust entry should exist after force regeneration"
-        );
+    fn the_daemon_digest_is_stable_for_one_executable() {
+        let first = lillux::current_executable_digest().unwrap();
+        assert_eq!(first.len(), 64, "{first}");
+        assert_eq!(lillux::current_executable_digest().unwrap(), first);
     }
+}
 
+#[cfg(test)]
+mod runtime_socket_pin_tests {
+    /// Isolation must pin the callback-only socket for both daemon snapshot
+    /// constructors and withhold the control socket; the full snapshot cannot
+    /// be built without a node, so the choice is pinned at its source. The
+    /// patterns are assembled so this test does not match itself.
     #[test]
-    fn force_creates_fresh_keys_when_none_exist() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = test_config(tmp.path());
-
-        init(&config, &InitOptions { force: true }).unwrap();
-
-        assert!(
-            config.node_signing_key_path.exists(),
-            "node key should be created even with --force on fresh state"
-        );
-        assert!(
-            config.operator_signing_key_path.exists(),
-            "user key should be created on fresh state"
-        );
-    }
-
-    // ── γ: --force refusal when signed node-config items exist ───────
-
-    #[test]
-    fn force_refuses_when_signed_node_config_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = test_config(tmp.path());
-
-        // Run init once normally to create node key.
-        init(&config, &InitOptions { force: false }).unwrap();
-        assert!(config.node_signing_key_path.exists());
-
-        // Plant a signed YAML in the node dir.
-        let node_bundles = config.app_root.join(".ai").join("node").join("bundles");
-        fs::create_dir_all(&node_bundles).unwrap();
-        let signed_yaml = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nname: test-bundle\n";
-        fs::write(node_bundles.join("test.yaml"), signed_yaml).unwrap();
-
-        // Now try --force — should be refused.
-        let err = init(&config, &InitOptions { force: true }).expect_err("expected refusal");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("refusing --force"), "got: {msg}");
-        assert!(msg.contains("test.yaml"), "got: {msg}");
-        assert!(msg.contains("re-sign the listed items"), "got: {msg}");
-    }
-
-    #[test]
-    fn force_succeeds_on_fresh_install() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = test_config(tmp.path());
-
-        // Fresh state, --force should succeed (no signed items to protect).
-        init(&config, &InitOptions { force: true })
-            .expect("fresh install should succeed under --force");
-    }
-
-    #[test]
-    fn force_succeeds_when_node_dir_has_only_unsigned_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = test_config(tmp.path());
-
-        // Run init once to create keys and node dir.
-        init(&config, &InitOptions { force: false }).unwrap();
-
-        // Plant an unsigned YAML.
-        let node_bundles = config.app_root.join(".ai").join("node").join("bundles");
-        fs::create_dir_all(&node_bundles).unwrap();
-        fs::write(
-            node_bundles.join("unsigned.yaml"),
-            "name: unsigned-bundle\n",
-        )
-        .unwrap();
-
-        // --force should succeed — no signed items.
-        init(&config, &InitOptions { force: true })
-            .expect("unsigned files should not block --force");
-    }
-
-    #[test]
-    fn find_signed_node_config_items_detects_nested_signed_yaml() {
-        let tmp = tempfile::tempdir().unwrap();
-        let node_dir = tmp.path().join(".ai").join("node").join("deep").join("sub");
-        fs::create_dir_all(&node_dir).unwrap();
-
-        let signed_yaml = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nkey: value\n";
-        fs::write(node_dir.join("nested.yaml"), signed_yaml).unwrap();
-
-        let items = find_signed_node_config_items(tmp.path()).unwrap();
-        assert_eq!(items.len(), 1);
-        assert!(items[0].ends_with("nested.yaml"));
-    }
-
-    /// Daemon verification derives public trust from the app-root authority
-    /// namespace, never from the operator private-key location.
-    #[test]
-    fn repair_daemon_local_uses_app_root_public_trust_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app_root = tmp.path().join("home");
-        let expected_trust_dir = app_root
-            .join(".ai")
-            .join("config")
-            .join("keys")
-            .join("trusted");
-
-        assert_eq!(
-            app_root.join(AI_DIR).join("config/keys/trusted"),
-            expected_trust_dir
-        );
+    fn bootstrap_pins_the_runtime_socket_and_withholds_the_control_socket() {
+        let source: String = include_str!("bootstrap.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let pinned = format!("Some(&config.{}()),", "runtime_uds_path");
+        assert_eq!(source.matches(&pinned).count(), 2);
+        let control = format!("Some(&config.{}),", "uds_path");
+        // The control path appears once: as the socket withheld from mounts.
+        assert_eq!(source.matches(&control).count(), 1);
+        let withheld = format!("daemon_socket,{control}node_policy");
+        assert!(source.contains(&withheld));
     }
 }

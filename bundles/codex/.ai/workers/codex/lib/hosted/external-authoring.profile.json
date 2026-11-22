@@ -1,7 +1,8 @@
 {
-  "schema_version": 10,
+  "schema_version": 13,
   "external_candidate": {
-    "schema": 6,
+    "schema": 7,
+    "runtime_authority": "captured_product",
     "required_lifecycle_capabilities": [
       "exact_terminal_observation"
     ],
@@ -56,7 +57,7 @@
     "-c",
     "approvals_reviewer=\"user\"",
     "-c",
-    "default_permissions=\"danger-full-access\"",
+    "default_permissions=\":danger-full-access\"",
     "-c",
     "web_search=\"disabled\"",
     "-c",
@@ -66,7 +67,7 @@
     "-c",
     "agents={ enabled=false }",
     "-c",
-    "features={ apps=false, plugins=false, skill_mcp_dependency_install=false, remote_plugin=false, hooks=false, multi_agent=false, multi_agent_v2=false, memories=false, network_proxy=false, code_mode_host=true, code_mode={ enabled=false } }",
+    "features={ image_generation=false, goals=false, apps=false, plugins=false, skill_mcp_dependency_install=false, remote_plugin=false, hooks=false, multi_agent=false, multi_agent_v2=false, memories=false, network_proxy=false, code_mode_host=true, code_mode={ enabled=false } }",
     "app-server"
   ],
   "workload_home_env": "CODEX_HOME",
@@ -74,10 +75,19 @@
     "TMPDIR"
   ],
   "workload_client": null,
-  "baseline_config": "authoring.config.toml",
+  "baseline_config": "external-authoring.config.toml",
   "baseline_destination": "config.toml",
   "auxiliary_configs": [],
   "runtime_configs": [],
+  "configuration_absence": {
+    "absolute_paths": [
+      "/etc/codex/config.toml",
+      "/etc/codex/managed_config.toml",
+      "/etc/codex/requirements.toml"
+    ],
+    "startup_ancestor_paths": [".codex/config.toml"],
+    "route_ancestor_paths": [".codex/config.toml"]
+  },
   "portable_state": {
     "schema": 1,
     "restore_contract": "ryeos.worker_session.restore.v1",
@@ -226,6 +236,91 @@
       "/type"
     ]
   },
+  "requires": {
+    "workload_class": "codex.authoring.remote",
+    "controller": [
+      {
+        "any_of": [
+          "accounting",
+          "residency:swap_absent"
+        ]
+      },
+      {
+        "any_of": [
+          "recovery:enclosure",
+          "recovery:enclosure_trusted_init"
+        ],
+        "accept": [
+          "measured",
+          "trusted"
+        ]
+      },
+      {
+        "any_of": [
+          "termination:enclosure",
+          "termination:enclosure_trusted_init"
+        ],
+        "accept": [
+          "measured",
+          "trusted"
+        ]
+      },
+      {
+        "name": "persistence:durable_state",
+        "accept": [
+          "measured",
+          "provider_attested",
+          "trusted"
+        ]
+      },
+      "time"
+    ],
+    "credential_kinds": {
+      "credential_profile": [
+        {
+          "name": "credential:private_home",
+          "accept": [
+            "measured",
+            "provider_attested",
+            "trusted"
+          ]
+        }
+      ]
+    },
+    "lease": [
+      {
+        "name": "guest.ready_authenticated",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "lease.create_bound",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "lease.lifetime_bound",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "lease.network_policy",
+        "accept": [
+          "provider_attested"
+        ]
+      },
+      {
+        "name": "lease.terminate_observed",
+        "accept": [
+          "provider_attested"
+        ]
+      }
+    ],
+    "guest": []
+  },
   "initialization": [
     {
       "method": "initialize",
@@ -249,6 +344,23 @@
       "params": {},
       "response_schema": null,
       "notification": "initialized"
+    },
+    {
+      "method": "configRequirements/read",
+      "effect_class": "pure_read",
+      "params": null,
+      "response_schema": "schema/QNoManagedRequirements.json",
+      "notification": null
+    },
+    {
+      "method": "config/read",
+      "effect_class": "pure_read",
+      "params": {
+        "cwd": "/workspace",
+        "includeLayers": true
+      },
+      "response_schema": "schema/QOriginalConfigGate.json",
+      "notification": null
     }
   ],
   "recovery": {
@@ -445,7 +557,7 @@
       "id": "session.start",
       "method": "thread/start",
       "effect_class": "external_effect",
-      "request_schema": "schema/ThreadStartParams.experimental.json",
+      "request_schema": "schema/ExternalThreadStartParams.json",
       "response_schema": "schema/ThreadStartResponse.json",
       "fixed_params": {
         "approvalsReviewer": "user",
@@ -467,7 +579,9 @@
         "baseInstructions",
         "serviceName",
         "modelProvider",
-        "sandbox"
+        "sandbox",
+        "permissions",
+        "runtimeWorkspaceRoots"
       ],
       "forbidden_fields": [
         "approvalPolicy",
@@ -507,7 +621,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "danger-full-access"
+          "equals": ":danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -551,7 +665,7 @@
       "method": "thread/resume",
       "audience": "runtime",
       "effect_class": "session_mutation",
-      "request_schema": "schema/ThreadResumeParams.json",
+      "request_schema": "schema/ExternalThreadResumeParams.json",
       "response_schema": "schema/ThreadResumeResponse.json",
       "fixed_params": {
         "approvalsReviewer": "user"
@@ -563,7 +677,9 @@
         "config",
         "baseInstructions",
         "modelProvider",
-        "sandbox"
+        "sandbox",
+        "permissions",
+        "runtimeWorkspaceRoots"
       ],
       "forbidden_fields": [
         "approvalPolicy"
@@ -602,7 +718,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "danger-full-access"
+          "equals": ":danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -752,7 +868,7 @@
         "turn/started"
       ],
       "effect_class": "external_effect",
-      "request_schema": "schema/TurnStartParams.json",
+      "request_schema": "schema/ExternalTurnStartParams.json",
       "response_schema": "schema/TurnStartResponse.json",
       "fixed_params": {
         "approvalsReviewer": "user"
@@ -807,7 +923,7 @@
       "id": "turn.steer",
       "method": "turn/steer",
       "effect_class": "external_effect",
-      "request_schema": "schema/TurnSteerParams.json",
+      "request_schema": "schema/ExternalTurnSteerParams.json",
       "response_schema": "schema/TurnSteerResponse.json",
       "fixed_params": {},
       "workspace_fields": [],
@@ -874,7 +990,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/login/completed",
@@ -920,7 +1039,10 @@
           }
         }
       ],
-      "ceremony_clear": true
+      "ceremony_clear": true,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/rateLimits/updated",
@@ -937,7 +1059,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/updated",
@@ -954,7 +1079,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "turn/completed",
@@ -979,6 +1107,11 @@
             "pointer": "/message/params/turn/status",
             "optional": true,
             "max_string_bytes": 256
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1009,7 +1142,10 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": true,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/agentMessage/delta",
@@ -1038,11 +1174,19 @@
             "op": "pointer",
             "pointer": "/message/params/delta",
             "max_string_bytes": 65536
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/commandExecution/outputDelta",
@@ -1070,11 +1214,19 @@
           "delta_digest": {
             "op": "digest",
             "pointer": "/message/params/delta"
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/fileChange/outputDelta",
@@ -1102,11 +1254,19 @@
           "delta_digest": {
             "op": "digest",
             "pointer": "/message/params/delta"
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/fileChange/patchUpdated",
@@ -1134,11 +1294,19 @@
           "changes_digest": {
             "op": "digest",
             "pointer": "/message/params/changes"
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/started",
@@ -1152,11 +1320,19 @@
             "op": "pointer",
             "pointer": "/message/params/thread/id",
             "max_string_bytes": 256
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/status/changed",
@@ -1175,11 +1351,19 @@
             "op": "pointer",
             "pointer": "/message/params/status",
             "max_string_bytes": 256
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "turn/started",
@@ -1199,6 +1383,11 @@
             "op": "pointer",
             "pointer": "/message/params/turn/id",
             "max_string_bytes": 256
+          },
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
           }
         }
       },
@@ -1229,7 +1418,10 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "configWarning",
@@ -1246,7 +1438,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "deprecationNotice",
@@ -1263,7 +1458,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "error",
@@ -1280,7 +1478,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "warning",
@@ -1297,7 +1498,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/summaryPartAdded",
@@ -1309,7 +1513,10 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/summaryTextDelta",
@@ -1321,7 +1528,10 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/textDelta",
@@ -1333,7 +1543,178 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "item/started",
+      "schema": "schema/ItemStartedNotification.json",
+      "upstream_session_pointer": "/message/params/threadId",
+      "event_type": "item.started",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "item/completed",
+      "schema": "schema/ItemCompletedNotification.json",
+      "upstream_session_pointer": "/message/params/threadId",
+      "event_type": "item.completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "rawResponseItem/completed",
+      "schema": "schema/RawResponseItemCompletedNotification.json",
+      "upstream_session_pointer": "/message/params/threadId",
+      "event_type": "workload.raw_response_item_completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "rawResponse/completed",
+      "schema": "schema/RawResponseCompletedNotification.json",
+      "upstream_session_pointer": "/message/params/threadId",
+      "event_type": "workload.raw_response_completed",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "notification_json": {
+            "op": "json_string",
+            "pointer": "/message",
+            "max_bytes": 65536
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "thread/environment/connected",
+      "schema": "schema/EnvironmentConnectionNotification.json",
+      "event_type": "workload.environment_connected",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "thread/environment/disconnected",
+      "schema": "schema/EnvironmentConnectionNotification.json",
+      "event_type": "workload.environment_disconnected",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "thread/compacted",
+      "schema": "schema/ContextCompactedNotification.json",
+      "event_type": "workload.context_compacted",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "guardianWarning",
+      "schema": "schema/GuardianWarningNotification.json",
+      "event_type": "workload.guardian_warning",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     }
   ],
   "ignored_notifications": {
@@ -1344,13 +1725,14 @@
     "thread/tokenUsage/updated": "schema/ThreadTokenUsageUpdatedNotification.json",
     "turn/diff/updated": "schema/TurnDiffUpdatedNotification.json",
     "turn/plan/updated": "schema/TurnPlanUpdatedNotification.json",
-    "item/started": "schema/ItemStartedNotification.json",
-    "item/completed": "schema/ItemCompletedNotification.json",
     "item/plan/delta": "schema/PlanDeltaNotification.json",
     "serverRequest/resolved": "schema/ServerRequestResolvedNotification.json",
     "model/rerouted": "schema/ModelReroutedNotification.json",
     "model/verification": "schema/ModelVerificationNotification.json",
-    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json"
+    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json",
+    "turn/moderationMetadata": "schema/TurnModerationMetadataNotification.json",
+    "model/safetyBuffering/updated": "schema/ModelSafetyBufferingUpdatedNotification.json",
+    "item/commandExecution/terminalInteraction": "schema/TerminalInteractionNotification.json"
   },
   "server_requests": [
     {
@@ -1366,12 +1748,6 @@
           "op": "literal",
           "value": {
             "decision": "accept"
-          }
-        },
-        "cancel": {
-          "op": "literal",
-          "value": {
-            "decision": "cancel"
           }
         },
         "decline": {
@@ -1452,12 +1828,6 @@
             "decision": "accept"
           }
         },
-        "cancel": {
-          "op": "literal",
-          "value": {
-            "decision": "cancel"
-          }
-        },
         "decline": {
           "op": "literal",
           "value": {
@@ -1512,17 +1882,6 @@
       },
       "responses": {
         "accept": {
-          "op": "literal",
-          "value": {
-            "permissions": {
-              "fileSystem": null,
-              "network": null
-            },
-            "scope": "turn",
-            "strictAutoReview": true
-          }
-        },
-        "cancel": {
           "op": "literal",
           "value": {
             "permissions": {

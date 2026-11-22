@@ -1,0 +1,17 @@
+{
+  "revision": "4c206a52b1a72a98db8c97576959b54fa2a38232",
+  "files": {
+    "tinygrad/llm/model.py": "1757a02f59f52df42750d0d44f8e1fe28762310a3ecb0b6689d573390f3f2410",
+    "tinygrad/engine/jit.py": "9fb798d7d3ced6e6c19a4959d8076196f50a4d5609a303362bd9fefd401488fc",
+    "tinygrad/engine/realize.py": "4a1572fe9e8e55b0d4b51400498e25a45403362fb3b0c6b1df6fe9928f69c613",
+    "tinygrad/device.py": "af167183c04ae548b8ba303959f6b998bd6e9b477b26dd6dfac44ff24988bb6d",
+    "tinygrad/helpers.py": "ef89394f072e053dee45585dfdc606a2f9e4aafed61ddbe18bd72118a858e7e9",
+    "tinygrad/runtime/ops_cuda.py": "e3d22944295b54c105c5a531562b04b23473b92acf160028ff05bf86df9ebdc3",
+    "tinygrad/runtime/graph/cuda.py": "613edd9b4a89787dd3753ba91cc9b699b21c0daef1871d24252a3dcf57e0f457",
+    "tinygrad/runtime/support/compiler_cuda.py": "36d836a67e186f2bc97cdcdf37dc4cad6f0238d032f6aaee043628761a4049fb",
+    "tinygrad/renderer/ptx.py": "028fb8d54a751e84ac74800546ffd8db98a16055e6488e1f3bbf441e0638b016",
+    "tinygrad/runtime/support/c.py": "c7d84a703a37d4e4ac072be628a6d37788e3df82b810af973edb13b0cd63117e",
+    "tinygrad/runtime/autogen/cuda.py": "fd9f44aa833d13fd9f163fbb74ff6eae4aceefaafece467ba57ce2220d043c73",
+    "tinygrad/runtime/ops_cpu.py": "4b3de0005f72b1e4c04a23e8d4abfed8d0aedf19f73d87c9e97f135d7587f26f"
+  }
+}

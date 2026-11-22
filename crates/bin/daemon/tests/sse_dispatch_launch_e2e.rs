@@ -17,12 +17,12 @@
 //!   - `sse_dispatch_launch_rejects_non_root_executable_kind` — proves
 //!     non-root kinds are rejected before any thread id is published
 //!
-//! Tool happy-path test: skipped. The standard bundle ships no
+//! Tool happy-path test: skipped. The shipped bundles carry no
 //! launchable tool fixture with a trivial body (tool kind requires
 //! subprocess executor). Adding one would modify production bundle
 //! content solely for test enablement — out of scope per plan.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -123,35 +123,6 @@ model:
     );
     let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
     std::fs::write(&path, signed)?;
-    Ok(())
-}
-
-/// Plant the /execute/stream route YAML. Phase E ships this in
-/// `bundles/core/.ai/node/routes/execute-stream.yaml`; the test
-/// re-plants it under the daemon's state path signed by the publisher
-/// key so the trusted-loader policy accepts it.
-fn plant_execute_stream_route(state_path: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = state_path.join(".ai/node/routes");
-    std::fs::create_dir_all(&dir)?;
-    let body = r#"id: execute/stream
-path: /execute/stream
-methods:
-  - POST
-auth: ryeos_signed
-limits:
-  body_bytes_max: 1048576
-  timeout_ms: 0
-  concurrent_max: 32
-request:
-  body: json
-response:
-  mode: event_stream
-  source: dispatch_launch
-  source_config:
-    keep_alive_secs: 15
-"#;
-    let signed = lillux::signature::sign_content(body, signer, "#", None);
-    std::fs::write(dir.join("execute-stream.yaml"), signed)?;
     Ok(())
 }
 
@@ -284,7 +255,14 @@ async fn assert_pre_admission_rejection(resp: reqwest::Response, expected_messag
 /// Returns `(harness, user_sk, publisher_sk, node_fp)`. The provider is
 /// bundle-owned; a directive-running test plants only its routing overlay and
 /// directive into the project it passes as `project_path`.
-async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
+async fn boot_daemon() -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    SigningKey,
+    String,
+) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("from dispatch_launch".into()),
@@ -294,14 +272,13 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-dispatch-launch-model-config",
                 fixture,
                 |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
             )?;
-            plant_execute_stream_route(state_path, &fixture.publisher)?;
             // Authorize the user key (HTTP caller principal). The file must
             // be signed by the node identity (daemon requirement).
             write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
@@ -317,9 +294,8 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
     .await
     .expect("start daemon with mock + execute-stream route");
 
-    std::mem::forget(mock);
     let node_fp = fixture.node_fp();
-    (h, fixture.user, fixture.publisher, node_fp)
+    (Box::new(mock), h, fixture.user, fixture.publisher, node_fp)
 }
 
 /// Plant the routing overlay and directive into a project root for the
@@ -341,7 +317,7 @@ fn plant_launch_project(project: &Path, publisher: &SigningKey) {
 /// lifecycle event from `thread_started` onward.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_e2e_round_trip() {
-    let (h, node_sk, publisher_sk, node_fp) = boot_daemon().await;
+    let (_keep, h, node_sk, publisher_sk, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     plant_launch_project(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();
@@ -484,7 +460,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_last_event_id() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -531,7 +507,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -558,7 +534,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -586,7 +562,7 @@ async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -635,15 +611,13 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
 /// is OsRng-backed and operationally collision-free.
 #[test]
 fn sse_dispatch_launch_collision() {
-    use ryeos_app::identity::NodeIdentity;
-    use ryeos_app::state_store::{NewThreadRecord, NodeIdentitySigner, StateStore};
+    use ryeos_app::state_store::{NewThreadRecord, NodeIdentitySigner};
     use ryeos_app::thread_lifecycle::new_thread_id;
     use ryeos_app::write_barrier::WriteBarrier;
+    use ryeos_node_runtime::identity::NodeIdentity;
     use std::sync::Arc;
 
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
-    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
-    let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
 
     let identity = NodeIdentity::create(&key_path).expect("create identity");
@@ -654,10 +628,8 @@ fn sse_dispatch_launch_collision() {
         *identity.verifying_key(),
     );
     let write_barrier = WriteBarrier::new();
-    let state_store = StateStore::new_with_head_trust(
-        tmpdir.path().to_path_buf(),
-        runtime_state_dir,
-        runtime_db_path,
+    let state_store = ryeos_app::test_support::TestStateStore::open_with_barrier(
+        tmpdir.path(),
         signer,
         write_barrier,
         Arc::new(head_trust),
@@ -760,7 +732,7 @@ fn new_thread_id_format_and_uniqueness() {
 ///
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR))
         .expect("initialize project root");
@@ -798,7 +770,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
     drop(project);
 }
 
-// Tool happy-path SSE test: skipped. The standard bundle ships no
+// Tool happy-path SSE test: skipped. The shipped bundles carry no
 // launchable tool fixture with a trivial body (tool kind requires
 // subprocess executor). Adding one would modify production bundle
 // content solely for test enablement — out of scope per plan.
@@ -809,7 +781,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
 /// validation happens before the SSE handshake completes.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_relative_project_path() {
-    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
+    let (_keep, h, user_sk, _publisher, node_fp) = boot_daemon().await;
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",

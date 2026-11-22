@@ -414,6 +414,33 @@ def _validate_request(
     return request, output_limit, temperature, seed
 
 
+def _append_text_part(parts: list[dict[str, Any]], kind: str, text: str) -> None:
+    """Append streamed text to the answer, merging runs of the same kind."""
+    if parts and parts[-1]["type"] == kind:
+        parts[-1]["text"] += text
+    else:
+        parts.append({"type": kind, "text": text})
+
+
+def _answer_message(
+    parts: list[dict[str, Any]], tool_calls: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The recorded assistant message: parts in generation order, calls last."""
+    return {
+        "role": "assistant",
+        "parts": parts
+        + [
+            {
+                "type": "tool_call",
+                "call_id": call["id"],
+                "name": call["name"],
+                "arguments": call["arguments"],
+            }
+            for call in tool_calls
+        ],
+    }
+
+
 def _parse_tools(raw: str, request_id: str) -> tuple[list[dict[str, Any]], str]:
     calls: list[dict[str, Any]] = []
     consumed: list[tuple[int, int]] = []
@@ -485,8 +512,7 @@ class Worker:
             raise ValueError("local Qwen prompt plus output exceeds the admitted context")
         decoder = self.tokenizer.stream_decoder()
         router = OutputRouter()
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
+        answer_parts: list[dict[str, Any]] = []
         output_tokens = 0
         finish_reason = "length"
 
@@ -504,25 +530,25 @@ class Worker:
                 if not delta:
                     continue
                 if field == "reasoning":
-                    reasoning_parts.append(delta)
+                    _append_text_part(answer_parts, "reasoning", delta)
                     emit({"kind": "reasoning_delta", "text": delta})
                 else:
-                    content_parts.append(delta)
+                    _append_text_part(answer_parts, "text", delta)
                     emit({"kind": "text_delta", "text": delta})
         tail = decoder(None)
         for field, delta in router.route(tail, final=True):
             if not delta:
                 continue
             if field == "reasoning":
-                reasoning_parts.append(delta)
+                _append_text_part(answer_parts, "reasoning", delta)
                 emit({"kind": "reasoning_delta", "text": delta})
             else:
-                content_parts.append(delta)
+                _append_text_part(answer_parts, "text", delta)
                 emit({"kind": "text_delta", "text": delta})
 
         tool_calls, unparsed = _parse_tools(router.buffer, request_id)
         if unparsed:
-            content_parts.append(unparsed)
+            _append_text_part(answer_parts, "text", unparsed)
             emit({"kind": "text_delta", "text": unparsed})
         for index, call in enumerate(tool_calls):
             emit(
@@ -536,17 +562,9 @@ class Worker:
             )
         if tool_calls and finish_reason == "stop":
             finish_reason = "tool_calls"
-        content = "".join(content_parts)
-        reasoning = "".join(reasoning_parts)
         return {
             "answer": {
-                "message": {
-                    "role": "assistant",
-                    "content": content if content else None,
-                    "tool_calls": tool_calls if tool_calls else None,
-                    "tool_call_id": None,
-                    "reasoning_content": reasoning if reasoning else None,
-                },
+                "message": _answer_message(answer_parts, tool_calls),
                 "finish_reason": finish_reason,
             },
             "usage": {

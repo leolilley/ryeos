@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T23:12:22Z:9499b5ceb6586f643bf328cc74ed27b6e1915401b5f618ce5c14a735b96185b9:J6XkTU8HnGGlr7Z9LFA3vkbHgP699GbWb6eTrPBC7hlM7j+yq4iWz81br3b9maS/VnMxT3txxlYU2u1NQ4MDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T00:19:46Z:91690f6dcabd52a2289750f9303607f19615b8698737225d084bc9ee29542b8f:8iMixiEi+CT9O4s9Y+e1UT4WhQjmkisOAzRyFJaHUFVdzckQ1AGtTjEk44NtHpPWnO1PauwPbcxkhyEEUzyHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "central-auth"
 version: "0.1.0"
 description: "JSON-schema-style contract for central-auth realm policies."
@@ -7,6 +7,7 @@ type: object
 required:
   - roles
   - allowed_capabilities
+  - login_throttle
 properties:
   roles:
     type: object
@@ -23,3 +24,43 @@ properties:
     type: array
     items:
       type: string
+  login_throttle:
+    type: object
+    additionalProperties: false
+    required:
+      - max_failures
+      - window_secs
+      - lockout_secs
+    properties:
+      max_failures:
+        type: integer
+        minimum: 1
+        description: "Failed passphrase logins per principal (and per client_address, when given) within window_secs before a lockout."
+      window_secs:
+        type: integer
+        minimum: 1
+      lockout_secs:
+        type: integer
+        minimum: 1
+  principal_management:
+    type: object
+    additionalProperties: false
+    description: "Optional. Lets an operator list accounts with manageability and disable or re-enable them (set-principal-disabled). Without it those requests are refused with principal_management_unconfigured."
+    required:
+      - operator_capability
+      - managed_roles
+    properties:
+      operator_capability:
+        type: string
+        description: "Capability (in allowed_capabilities) that marks an operator. Always protected: no operator manages another."
+      managed_roles:
+        type: array
+        minItems: 1
+        items:
+          type: string
+        description: "Roles an operator may manage. A manageable account has only these roles and no direct capabilities."
+      protected_capabilities:
+        type: array
+        items:
+          type: string
+        description: "Capabilities whose holders are never manageable, in addition to operator_capability."

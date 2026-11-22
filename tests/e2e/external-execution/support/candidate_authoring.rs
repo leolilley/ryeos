@@ -8,20 +8,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use lillux::crypto::EncodePublicKey as _;
-use ryeos_state::external_execution::admission::{
-    ExternalCandidateExecutionRoute, ExternalCandidateProcFilesystem, ExternalCandidateRequirement,
-    ExternalCandidateRuntimeRecipe,
+pub use super::candidate_requirement::{
+    joined_external_candidate_requirement, real_codex_requirement,
 };
 
-/// Exact signed fixture source, before runtime-product selection. The profile
-/// is compiled from the bytes written below; its admitted source binding is
-/// independently previewed from this signed root by the test caller.
+/// Exact signed fixture source, before runtime-product selection. Its admitted
+/// source binding is independently previewed from this signed root by the test
+/// caller.
 pub struct CandidateAuthoringBundle {
     pub root: PathBuf,
-    pub profile: ryeos_state::objects::AdmittedStructuredSessionProfile,
-    pub provider_runtime_manifest_hash: String,
 }
 
 /// A signed draft permits source preview but cannot qualify the relationship's
@@ -29,33 +24,115 @@ pub struct CandidateAuthoringBundle {
 /// use tuple only after independently previewing the signed Worker source.
 pub fn sign_candidate_qualification_inputs(
     bundle_root: &Path,
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
     external_runtime_manifest_hash: &str,
     qualification_runtime_manifest_hash: &str,
     parameters: &serde_json::Value,
     final_policy: bool,
 ) {
-    let parameters = lillux::canonical_json(parameters).unwrap();
-    let claims = if final_policy {
-        "    - bounded_candidate_capture\n    - candidate_only_execution\n    - controller_credential_exclusion\n    - native_writer_exclusion\n    - no_local_execution_fallback\n"
+    let claim_names: &[&str] = if final_policy {
+        &[
+            "bounded_candidate_capture",
+            "candidate_only_execution",
+            "controller_credential_exclusion",
+            "native_writer_exclusion",
+            "no_local_execution_fallback",
+        ]
     } else {
-        "    - fixture_draft_never_admit\n"
+        &["fixture_draft_never_admit"]
     };
     let ai = bundle_root.join(".ai");
-    let policy = format!(
-        "category: fixtures\nversion: \"1.0.0\"\ndescription: Exact synthetic external candidate runtime qualification\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v2\n  verifier_ref: tool:fixtures/verify-external-runtime\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
-    );
     let path = ai.join("config/fixtures/qualification.yaml");
     std::fs::write(
         path,
-        lillux::signature::sign_content(&policy, identity.signing_key(), "#", None),
+        lillux::signature::sign_content(
+            &qualification_policy_source(
+                "Exact synthetic external candidate runtime qualification",
+                "tool:fixtures/verify-external-runtime",
+                claim_names,
+                parameters,
+                None,
+            ),
+            identity.signing_key(),
+            "#",
+            None,
+        ),
     )
     .unwrap();
-    let tool = format!(
+    let path = ai.join("tools/fixtures/verify-external-runtime.yaml");
+    std::fs::write(
+        path,
+        lillux::signature::sign_content(
+            &qualification_verifier_tool_source(
+                "verify-external-runtime",
+                "Execute the exact synthetic runtime's independent qualification probe",
+                external_runtime_manifest_hash,
+                qualification_runtime_manifest_hash,
+                claim_names,
+                parameters,
+            ),
+            identity.signing_key(),
+            "#",
+            None,
+        ),
+    )
+    .unwrap();
+}
+
+/// Signed policy source whose allowed claims and verifier parameters are the
+/// exact values the paired verifier tool is rendered from.
+pub fn qualification_policy_source(
+    description: &str,
+    verifier_ref: &str,
+    claims: &[&str],
+    parameters: &serde_json::Value,
+    launch_shape: Option<&ryeos_external_execution_contract::runtime_snapshot::LaunchShape>,
+) -> String {
+    let parameters = lillux::canonical_json(parameters).unwrap();
+    // A policy states the launch shape its verifier qualifies the runtime for;
+    // JSON is valid YAML, so the shape is written as its canonical wire form.
+    let launch_shape = match launch_shape {
+        Some(shape) => format!(
+            "  launch_shape: {}\n",
+            lillux::canonical_json(&serde_json::to_value(shape).unwrap()).unwrap()
+        ),
+        None => String::new(),
+    };
+    let claims = claims
+        .iter()
+        .map(|claim| format!("    - {claim}\n"))
+        .collect::<String>();
+    // The minimum stays `trusted_process_group_absent` on purpose: it is
+    // exactly the shipped bundle-release and environment-qualification case.
+    // Those signed policies name that lowest floor and run on the enforced
+    // release-authority node, which exceeds the floor with its own retained
+    // containment.
+    format!(
+        "category: fixtures\nversion: \"1.0.0\"\ndescription: {description}\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v5\n  verifier_ref: {verifier_ref}\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n{launch_shape}"
+    )
+}
+
+/// Signed verifier tool source. The probe receives the policy's claim list as
+/// argv, and `config_schema` pins the one parameter object the matching policy
+/// carries, so a verifier cannot be reused under another policy.
+pub fn qualification_verifier_tool_source(
+    name: &str,
+    description: &str,
+    external_runtime_manifest_hash: &str,
+    qualification_runtime_manifest_hash: &str,
+    claims: &[&str],
+    parameters: &serde_json::Value,
+) -> String {
+    let parameters = lillux::canonical_json(parameters).unwrap();
+    let claim_args = claims
+        .iter()
+        .map(|claim| format!("    - {claim}\n"))
+        .collect::<String>();
+    format!(
         r#"category: fixtures
-name: verify-external-runtime
+name: {name}
 version: "1.0.0"
-description: Execute the exact synthetic runtime's independent qualification probe
+description: {description}
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
@@ -89,19 +166,13 @@ config:
     - /ryeos/realizations/qualification/verifier/bin/candidate
     - --qualification-probe
     - {external_runtime_manifest_hash}
-  env: {{}}
+{claim_args}  env: {{}}
   timeout_secs: 30
 config_schema:
   type: object
   const: {parameters}
-"#,
-    );
-    let path = ai.join("tools/fixtures/verify-external-runtime.yaml");
-    std::fs::write(
-        path,
-        lillux::signature::sign_content(&tool, identity.signing_key(), "#", None),
+"#
     )
-    .unwrap();
 }
 
 /// One exact recipe source for both the installed consumer and its real
@@ -193,122 +264,21 @@ product_relationships:
     Ok(source)
 }
 
-#[cfg(test)]
-mod runtime_recipe_tests {
-    use super::external_runtime_recipe_source;
-    use ryeos_state::external_content::products::composition::ProductRelationships;
-    use ryeos_state::external_content::products::{
-        ProductDeclarations, ProductShape, ProductSource, ProductStorage,
-    };
-
-    fn assert_exact_recipe(
-        large: bool,
-        storage: ProductStorage,
-        file_limit: u64,
-        total_limit: u64,
-    ) {
-        let manifest_hash = "a".repeat(64);
-        let source = external_runtime_recipe_source(&manifest_hash, large).unwrap();
-        assert_eq!(
-            source,
-            external_runtime_recipe_source(&manifest_hash, large).unwrap()
-        );
-        let parsed: serde_json::Value = serde_yaml::from_str(&source).unwrap();
-        let declarations =
-            ProductDeclarations::from_value(parsed["build_products"].clone()).unwrap();
-        let relationships =
-            ProductRelationships::from_value(parsed["product_relationships"].clone()).unwrap();
-        relationships
-            .validate_against(&declarations, "product_recipe")
-            .unwrap();
-        assert!(declarations.output_roots.is_empty());
-        assert_eq!(declarations.products.len(), 1);
-        let runtime = declarations.select("auxiliary").unwrap();
-        assert!(matches!(runtime.source, ProductSource::RetainedProject {}));
-        assert_eq!(runtime.path, "products/external-runtime");
-        assert_eq!(runtime.shape, ProductShape::Tree);
-        assert_eq!(runtime.storage, storage);
-        assert!(runtime.required);
-        assert_eq!(
-            runtime.expected_manifest_hash.as_deref(),
-            Some(manifest_hash.as_str())
-        );
-        assert_eq!(runtime.bounds.maximum_entries, 16);
-        assert_eq!(runtime.bounds.maximum_depth, 4);
-        assert_eq!(runtime.bounds.maximum_file_bytes, file_limit);
-        assert_eq!(runtime.bounds.maximum_total_bytes, total_limit);
-        assert_eq!(relationships.relationships.len(), 1);
-        let relationship = relationships.select("auxiliary_to_verifier").unwrap();
-        assert_eq!(runtime.bounds, relationship.required_product.bounds);
-        assert_eq!(runtime.storage, relationship.required_product.storage);
-        assert_eq!(
-            relationship.producer.canonical_ref,
-            "graph:fixtures/build_runtime"
-        );
-        assert_eq!(relationship.producer.product_name, "auxiliary");
-        assert_eq!(relationship.producer.recipe_binding, "product_recipe");
-        assert_eq!(relationship.producer.parameters, serde_json::json!({}));
-        assert_eq!(
-            relationship.consumer.canonical_ref,
-            "worker:test/external-candidate"
-        );
-        assert_eq!(relationship.consumer.declaration_id, "auxiliary");
-        assert_eq!(
-            relationship.qualification.policy_ref.as_deref(),
-            Some("config:fixtures/qualification")
-        );
-        assert_eq!(
-            relationship.qualification.required_claims,
-            [
-                "bounded_candidate_capture",
-                "candidate_only_execution",
-                "controller_credential_exclusion",
-                "native_writer_exclusion",
-                "no_local_execution_fallback",
-            ]
-        );
-        assert_ne!(
-            source,
-            external_runtime_recipe_source(&"b".repeat(64), large).unwrap()
-        );
-    }
-
-    #[test]
-    fn ordinary_runtime_recipe_has_exact_valid_declaration_and_relationship() {
-        assert_exact_recipe(false, ProductStorage::Content, 33_554_432, 134_217_728);
-    }
-
-    #[test]
-    fn large_runtime_recipe_has_exact_valid_declaration_and_relationship() {
-        assert_exact_recipe(
-            true,
-            ProductStorage::LargeContent,
-            536_870_912,
-            1_073_741_824,
-        );
-    }
-
-    #[test]
-    fn runtime_recipe_refuses_malformed_expected_manifest_hash() {
-        for large in [false, true] {
-            for invalid in [String::new(), "not-a-manifest-hash".into(), "a".repeat(63)] {
-                assert!(external_runtime_recipe_source(&invalid, large).is_err());
-            }
-        }
-    }
-}
-
 pub fn write_candidate_authoring_bundle(
     repository_source_root: &Path,
     root: &Path,
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
     external_runtime_manifest_hash: &str,
     qualification_runtime_manifest_hash: &str,
     real_codex: bool,
     large_runtime: bool,
     scripted_model_origin: Option<&str>,
     command_tools_manifest_hash: Option<&str>,
-) -> CandidateAuthoringBundle {
+    placement_requires: Option<serde_json::Value>,
+) -> (
+    CandidateAuthoringBundle,
+    ryeos_state::objects::AdmittedStructuredSessionProfile,
+) {
     let bundle = root.join("external-candidate-authoring");
     let ai = bundle.join(".ai");
     let tool_path = ai.join("tools/external-candidate-authoring/integrate.yaml");
@@ -401,8 +371,9 @@ config_schema:
     let session_response = br#"{"additionalProperties":false,"properties":{"thread":{"additionalProperties":false,"properties":{"id":{"type":"string"}},"required":["id"],"type":"object"}},"required":["thread"],"type":"object"}"#;
     let turn_response = br#"{"additionalProperties":false,"properties":{"turn":{"additionalProperties":false,"properties":{"id":{"type":"string"}},"required":["id"],"type":"object"}},"required":["turn"],"type":"object"}"#;
     let mut profile = serde_json::json!({
-        "schema_version": 10,
+        "schema_version": ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
         "external_candidate": joined_external_candidate_requirement(),
+        "requires": fixture_placement_requires(),
         "transport": "stdio_jsonrpc",
         "http_sse": null,
         "configuration_authority": "immutable_argv",
@@ -416,6 +387,11 @@ config_schema:
         "baseline_destination": "fixture.json",
         "auxiliary_configs": [],
         "runtime_configs": [],
+        "configuration_absence": {
+            "absolute_paths": [],
+            "startup_ancestor_paths": [],
+            "route_ancestor_paths": []
+        },
         "portable_state": {
             "schema":1,
             "restore_contract":"ryeos.worker_session.restore.v1",
@@ -579,6 +555,9 @@ config_schema:
             &mut profile_sources,
         );
     }
+    if let Some(requires) = placement_requires {
+        profile["requires"] = requires;
+    }
     let profile = lillux::canonical_json(&profile).unwrap();
     profile_sources.insert("profile.json".into(), profile.as_bytes().to_vec());
     let compiled_profile =
@@ -661,7 +640,7 @@ config:
         std::fs::create_dir_all(environment_path.parent().unwrap()).unwrap();
         let environment = format!(
             r#"category: test
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 external_product_slots: []
 worker_ref: worker:test/external-candidate
 external_content:
@@ -750,11 +729,17 @@ requires:
         lillux::signature::sign_content(&execution, identity.signing_key(), "#", None),
     )
     .unwrap();
-    CandidateAuthoringBundle {
-        root: bundle,
-        profile: compiled_profile,
-        provider_runtime_manifest_hash: external_runtime_manifest_hash.to_owned(),
-    }
+    (CandidateAuthoringBundle { root: bundle }, compiled_profile)
+}
+
+/// What an admitted external-candidate profile declares about its placement:
+/// no lease and no guest fact, so the fixture session is placed without one.
+pub fn fixture_placement_requires() -> serde_json::Value {
+    serde_json::json!({
+        "workload_class": "fixture.workload",
+        "controller": ["time"],
+        "credential_kinds": {"credential_profile": ["credential:private_home"]}
+    })
 }
 
 fn configure_real_codex_handshake_profile(
@@ -763,6 +748,7 @@ fn configure_real_codex_handshake_profile(
     sources: &mut BTreeMap<String, Vec<u8>>,
 ) {
     profile["external_candidate"] = serde_json::to_value(real_codex_requirement()).unwrap();
+    profile["requires"] = fixture_placement_requires();
     profile["workload_executable"] = "bin/codex".into();
     profile["workload_args"] = serde_json::json!([
         "--strict-config",
@@ -897,6 +883,7 @@ pub fn configure_real_codex_scripted_turn_profile(
     *sources = authored_codex_hosted_sources(repository_source_root);
     *profile = serde_json::from_slice(sources.get("authoring.profile.json").unwrap()).unwrap();
     profile["external_candidate"] = serde_json::to_value(real_codex_requirement()).unwrap();
+    profile["requires"] = fixture_placement_requires();
     profile["workload_realization_id"] = "provider-runtime".into();
     profile["workload_executable"] = "bin/codex".into();
     profile["workload_args"] = serde_json::json!([
@@ -945,105 +932,107 @@ pub fn configure_real_codex_scripted_turn_profile(
     sources.insert("scripted.config.toml".into(), baseline.into_bytes());
 }
 
-pub fn real_codex_requirement() -> ExternalCandidateRequirement {
-    let mut requirement = joined_external_candidate_requirement();
-    requirement.runtime_recipe.executable_relative_path = "bin/codex".into();
-    requirement.runtime_recipe.argv0 = "codex".into();
-    requirement.runtime_recipe.arguments =
-        vec!["exec-server".into(), "--listen".into(), "stdio".into()];
-    requirement.runtime_recipe.environment.clear();
-    requirement
-}
-
-pub fn joined_external_candidate_requirement() -> ExternalCandidateRequirement {
-    ExternalCandidateRequirement {
-        schema: 6,
-        required_lifecycle_capabilities: Default::default(),
-        protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
-        connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
-        execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
-        provider_declaration_id: "codex-hosted".into(),
-        provider_configuration_destination: "environments.toml".into(),
-        runtime_product_declaration_id: "auxiliary".into(),
-        runtime_recipe: ExternalCandidateRuntimeRecipe {
-            schema: 2,
-            runtime_mount_destination: "/runtime".into(),
-            executable_relative_path: "lib64/ld-linux-x86-64.so.2".into(),
-            argv0: "ld-linux-x86-64.so.2".into(),
-            arguments: vec![
-                "--library-path".into(),
-                "/runtime/usr/lib".into(),
-                "/runtime/bin/candidate".into(),
-            ],
-            cwd: "/workspace".into(),
-            environment: BTreeMap::from([(
-                "RYEOS_SYNTHETIC_JOINED_PROVIDER_REQUIRED".into(),
-                "1".into(),
-            )]),
-            max_stdout_bytes: 1024 * 1024,
-            max_stderr_bytes: 1024 * 1024,
-            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
-            contain_process_group: false,
-            nested_sandbox: true,
-        },
-    }
-}
-
-pub fn signed_candidate_operation_sources(
-    identity: &ryeos_app::identity::NodeIdentity,
-) -> BTreeMap<String, (Vec<u8>, u32)> {
-    let metadata = |description: &str, workspace_access: &str| {
-        format!(
-            "# ryeos-tool:\n#   category: test/external-candidate\n#   version: \"1.0.0\"\n#   description: {description}\n#   executor_id: tool:ryeos/core/runtimes/python/script\n#   execution_protocol: protocol:ryeos/core/opaque\n#   effects: live\n#   workspace_access: {workspace_access}\n#   filesystem_authority: node_policy\n#   network_authority: node_policy\n#   config_schema:\n#     type: object\n#     additionalProperties: true\n"
-        )
+#[cfg(test)]
+mod runtime_recipe_tests {
+    use super::external_runtime_recipe_source;
+    use ryeos_state::external_content::products::composition::ProductRelationships;
+    use ryeos_state::external_content::products::{
+        ProductDeclarations, ProductShape, ProductSource, ProductStorage,
     };
-    let evaluator = format!(
-        "{}{}",
-        metadata(
-            "Independently evaluate one exact candidate generation",
-            "immutable_current_generation",
-        ),
-        r##"import json, sys
-from pathlib import Path
 
-request = json.loads(sys.stdin.buffer.read(65537))
-project = Path(sys.argv[2])
-candidate = request["candidate_snapshot_hash"]
-base = request["base_snapshot_hash"]
-accepted = candidate != base and (project / "candidate-strategy.txt").read_text() == "composed external candidate C\n"
-if request.get("expect_integration"):
-    integration = project / ".ai/knowledge/test/external-candidate/integration.md"
-    accepted = accepted and integration.is_file() and "# Integration D" in integration.read_text()
-print(json.dumps({"schema_version": 1, "candidate_snapshot_hash": candidate,
-                  "base_snapshot_hash": base, "accepted": accepted,
-                  "evidence": {"operation": "independent-test-evaluator"}},
-                 sort_keys=True, separators=(",", ":")))
-"##,
-    );
-    let signing_key = identity.signing_key();
-    let fingerprint = identity.fingerprint();
-    let public_der = identity.verifying_key().to_public_key_der().unwrap();
-    let public_pem = format!(
-        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
-        STANDARD.encode(public_der.as_bytes())
-    );
-    let trust = format!(
-        "version = \"1.0.0\"\nfingerprint = \"{fingerprint}\"\nowner = \"external candidate E2E\"\nattestation = \"\"\n\n[public_key]\npem = \"\"\"\n{public_pem}\"\"\"\n"
-    );
-    BTreeMap::from([
-        (
-            ".ai/config/keys/trusted/e2e.toml".into(),
-            (
-                trust.into_bytes(),
-                ryeos_state::objects::ProjectFile::REGULAR_MODE,
-            ),
-        ),
-        (
-            ".ai/tools/test/external-candidate/evaluate.py".into(),
-            (
-                lillux::signature::sign_content(&evaluator, signing_key, "#", None).into_bytes(),
-                ryeos_state::objects::ProjectFile::REGULAR_MODE,
-            ),
-        ),
-    ])
+    fn assert_exact_recipe(
+        large: bool,
+        storage: ProductStorage,
+        file_limit: u64,
+        total_limit: u64,
+    ) {
+        let manifest_hash = "a".repeat(64);
+        let source = external_runtime_recipe_source(&manifest_hash, large).unwrap();
+        assert_eq!(
+            source,
+            external_runtime_recipe_source(&manifest_hash, large).unwrap()
+        );
+        let parsed: serde_json::Value = serde_yaml::from_str(&source).unwrap();
+        let declarations =
+            ProductDeclarations::from_value(parsed["build_products"].clone()).unwrap();
+        let relationships =
+            ProductRelationships::from_value(parsed["product_relationships"].clone()).unwrap();
+        relationships
+            .validate_against(&declarations, "product_recipe")
+            .unwrap();
+        assert!(declarations.output_roots.is_empty());
+        assert_eq!(declarations.products.len(), 1);
+        let runtime = declarations.select("auxiliary").unwrap();
+        assert!(matches!(runtime.source, ProductSource::RetainedProject {}));
+        assert_eq!(runtime.path, "products/external-runtime");
+        assert_eq!(runtime.shape, ProductShape::Tree);
+        assert_eq!(runtime.storage, storage);
+        assert!(runtime.required);
+        assert_eq!(
+            runtime.expected_manifest_hash.as_deref(),
+            Some(manifest_hash.as_str())
+        );
+        assert_eq!(runtime.bounds.maximum_entries, 16);
+        assert_eq!(runtime.bounds.maximum_depth, 4);
+        assert_eq!(runtime.bounds.maximum_file_bytes, file_limit);
+        assert_eq!(runtime.bounds.maximum_total_bytes, total_limit);
+        assert_eq!(relationships.relationships.len(), 1);
+        let relationship = relationships.select("auxiliary_to_verifier").unwrap();
+        assert_eq!(runtime.bounds, relationship.required_product.bounds);
+        assert_eq!(runtime.storage, relationship.required_product.storage);
+        assert_eq!(
+            relationship.producer.canonical_ref,
+            "graph:fixtures/build_runtime"
+        );
+        assert_eq!(relationship.producer.product_name, "auxiliary");
+        assert_eq!(relationship.producer.recipe_binding, "product_recipe");
+        assert_eq!(relationship.producer.parameters, serde_json::json!({}));
+        assert_eq!(
+            relationship.consumer.canonical_ref,
+            "worker:test/external-candidate"
+        );
+        assert_eq!(relationship.consumer.declaration_id, "auxiliary");
+        assert_eq!(
+            relationship.qualification.policy_ref.as_deref(),
+            Some("config:fixtures/qualification")
+        );
+        assert_eq!(
+            relationship.qualification.required_claims,
+            [
+                "bounded_candidate_capture",
+                "candidate_only_execution",
+                "controller_credential_exclusion",
+                "native_writer_exclusion",
+                "no_local_execution_fallback",
+            ]
+        );
+        assert_ne!(
+            source,
+            external_runtime_recipe_source(&"b".repeat(64), large).unwrap()
+        );
+    }
+
+    #[test]
+    fn ordinary_runtime_recipe_has_exact_valid_declaration_and_relationship() {
+        assert_exact_recipe(false, ProductStorage::Content, 33_554_432, 134_217_728);
+    }
+
+    #[test]
+    fn large_runtime_recipe_has_exact_valid_declaration_and_relationship() {
+        assert_exact_recipe(
+            true,
+            ProductStorage::LargeContent,
+            536_870_912,
+            1_073_741_824,
+        );
+    }
+
+    #[test]
+    fn runtime_recipe_refuses_malformed_expected_manifest_hash() {
+        for large in [false, true] {
+            for invalid in [String::new(), "not-a-manifest-hash".into(), "a".repeat(63)] {
+                assert!(external_runtime_recipe_source(&invalid, large).is_err());
+            }
+        }
+    }
 }

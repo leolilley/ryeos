@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-06T03:37:13Z:0940fe9acb1dc271d23ce89cdf0f4b70c75ed62b18f29aab1eb9c5bbba1cd6fb:X5ZpynSbYrbRfEHE/CgJNOeZsDznx6ncquasRStojvF+MtrQu+dqZ2b1eaBUwrJr2mvRqR3ZhM7J1LEsLNULCw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:991fadfad9d62758027eb4232ca1ffb1baaef04c8afabb066830d49e9791803b:TgKsZL1m6woAnMqRSEDjk8KcOkbjR6Hk1nPIviAHNV3ZfPOVISc5U7eIRxe+nSWndjq7G1WXngNPyYPMVGLqCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Directive provider accounting and hard budgets
 
 ## Status
@@ -57,16 +57,18 @@ are one-way derived and never parse back into authority.
   `future/ryeos-ui-local-project-registry-and-multitenancy.md` later add
   principal/organization account kinds; the account-kind enum stays closed
   until their admission authority exists.
-- `future/node-operations.md` consumes the durable health/query surface
-  (`service:threads/accounting/summary`, node-status accounting health) and
-  defines deployment paging policy.
+- Operational clients may consume `service:threads/accounting/summary` and
+  node-status accounting health. Deployment paging needs its selected operator
+  policy; `future/node-operations.md` only proposes a possible operation taxonomy.
 - `future/signed-envelope-v2-authenticated-metadata.md` owns authenticated
   metadata evolution; this document owns the `financial_authority` payload
   semantics carried through the launch contract.
 - `future/data-driven-scope-profiles.md` may later select financial account
   sets but cannot bypass the daemon ledger.
-- Tool-runtime authority documents remain the home of CPU/memory/process/
-  storage quotas — those are not financial reservations.
+- Tool-runtime authority owns applicable runtime grants. Process/isolation and
+  hosted containment owners govern CPU, memory and process enforcement; content
+  storage and retention owners govern their storage limits. These are distinct
+  from financial reservations.
 
 ## Token limits are a distinct guarantee
 

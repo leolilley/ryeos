@@ -64,6 +64,31 @@ pub enum DispatchError {
     InvalidRef(String, String),
     #[error("kind '{kind}' is not root-executable: {detail}")]
     NotRootExecutable { kind: String, detail: String },
+    /// One item name exists in more than one format in the folder that would
+    /// win resolution. Resolution never ranks formats silently; the operator
+    /// keeps exactly one of the candidate files.
+    #[error(
+        "item '{item_ref}' exists in more than one format in {space} ({}); keep exactly one of these files",
+        candidates.join(", ")
+    )]
+    AmbiguousItemFormats {
+        item_ref: String,
+        space: String,
+        candidates: Vec<String>,
+    },
+    /// A project file sits inside a namespace an installed bundle owns or is
+    /// named for. The
+    /// project cannot shadow it; the file moves to the project's own
+    /// namespace and whatever named it is repointed.
+    #[error(
+        "project file {project_path} for '{item_ref}' is inside namespace '{namespace}' owned by (or named for) installed bundle '{bundle}'; a project cannot shadow an installed bundle's namespace or name"
+    )]
+    ReservedNamespaceShadow {
+        item_ref: String,
+        namespace: String,
+        bundle: String,
+        project_path: String,
+    },
     #[error(
         "insufficient capabilities for runtime '{runtime}': required {required:?}, caller_scopes {caller_scopes:?}"
     )]
@@ -112,6 +137,11 @@ pub enum DispatchError {
         required: String,
         caller_scopes: Vec<String>,
     },
+    /// The service handler itself refused the call as forbidden, for the
+    /// reason it gives. The caller held the service's declared capabilities
+    /// (that check is `ServiceCapDenied`); this is the handler's own rule.
+    #[error("service '{service_ref}' refused: {reason}")]
+    ServiceRefused { service_ref: String, reason: String },
     /// Service is unavailable in the current execution mode (e.g.
     /// daemon-only service called from offline/standalone mode).
     #[error("service '{service_ref}' is unavailable in {mode} mode (requires {requires})")]
@@ -145,6 +175,16 @@ pub enum DispatchError {
     /// root tools.
     #[error("root executor missing for '{item_ref}': {detail}")]
     RootExecutorMissing { item_ref: String, detail: String },
+    /// A direct tool launch named a predecessor thread. Direct tools have no
+    /// continuation admission, so the launch is refused before resolution or
+    /// any secret access.
+    #[error(
+        "direct tool '{item_ref}' cannot continue thread '{previous_thread_id}': continuations run through the successor launch with the predecessor's sealed root request"
+    )]
+    DirectContinuationUnsupported {
+        item_ref: String,
+        previous_thread_id: String,
+    },
     /// Subprocess run failed — the waited or detached run encountered
     /// an error after resolution succeeded.
     #[error("subprocess run failed for '{item_ref}': {detail}")]
@@ -370,8 +410,52 @@ pub enum DispatchError {
     /// classification to the leader's immutable result.
     #[error("{0}")]
     Shared(Arc<DispatchError>),
-    #[error("internal: {0}")]
+    /// A handler process could not be created because fork-sensitive
+    /// descriptor authority stayed retained past the setup deadline. Raised
+    /// only before the request was admitted, so nothing ran and the same
+    /// request may be reissued after `PROCESS_CREATION_BUSY_RETRY_AFTER_MS`.
+    /// The public message is generic; `detail` (holder sites) is logged only.
+    #[error(
+        "process creation is busy; retry after {} ms",
+        PROCESS_CREATION_BUSY_RETRY_AFTER_MS
+    )]
+    ProcessCreationBusy { detail: String },
+    #[error("internal: {0:#}")]
     Internal(#[from] anyhow::Error),
+}
+
+/// The retry hint carried by a `process_creation_busy` refusal. Fork windows
+/// close for milliseconds; a held one strands or reopens within the five
+/// second setup deadline.
+pub const PROCESS_CREATION_BUSY_RETRY_AFTER_MS: u64 = 250;
+
+/// The public code of the transient process-creation refusal.
+pub const PROCESS_CREATION_BUSY_CODE: &str = "process_creation_busy";
+
+/// Map a pre-admission failure whose cause chain holds the transient
+/// process-creation refusal. Logs the holder detail, which never reaches the
+/// caller.
+pub fn process_creation_busy_from_chain(error: &anyhow::Error) -> Option<DispatchError> {
+    let busy = error.chain().find_map(|cause| {
+        if let Some(engine) = cause.downcast_ref::<ryeos_engine::error::EngineError>() {
+            return engine
+                .is_process_creation_busy()
+                .then(|| engine.to_string());
+        }
+        if let Some(ryeos_engine::resolution::ResolutionError::StepFailed {
+            class: ryeos_engine::resolution::ResolutionFailureClass::ProcessCreationBusy,
+            reason,
+            ..
+        }) = cause.downcast_ref::<ryeos_engine::resolution::ResolutionError>()
+        {
+            return Some(reason.clone());
+        }
+        cause
+            .downcast_ref::<lillux::ProcessCreationBusy>()
+            .map(ToString::to_string)
+    })?;
+    tracing::warn!(detail = %busy, "process creation busy; request refused before admission");
+    Some(DispatchError::ProcessCreationBusy { detail: busy })
 }
 
 /// Operator-actionable remediation for a missing required secret. The secret
@@ -427,16 +511,38 @@ impl DispatchError {
             Self::PreBirthAdmissionRefused(error) => return error.http_status(),
             _ => {}
         }
+        if source_owner_trust_refusal(self).is_some() {
+            return StatusCode::FORBIDDEN;
+        }
+        if native_headroom_refusal(self).is_some() {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+        if quarantined_large_object(self).is_some()
+            || refused_reference_large_object(self).is_some()
+        {
+            return StatusCode::NOT_FOUND;
+        }
+        if selected_qualification_refusal(self).is_some() {
+            return StatusCode::CONFLICT;
+        }
+        if let Some(refusal) = qualification_refusal(self) {
+            return StatusCode::from_u16(ryeos_app::handler_error::qualification_refusal_status(
+                refusal,
+            ))
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         match self {
             Self::InvalidRef(..)
             | Self::AliasCycle { .. }
             | Self::AliasChainTooLong { .. }
             | Self::CapabilityRejected { .. }
             | Self::SchemaMisconfigured { .. }
-            | Self::RootExecutorMissing { .. } => StatusCode::BAD_REQUEST,
+            | Self::RootExecutorMissing { .. }
+            | Self::DirectContinuationUnsupported { .. } => StatusCode::BAD_REQUEST,
             Self::RefBindingNotApplicable { .. } => StatusCode::BAD_REQUEST,
             Self::InsufficientCaps { .. }
             | Self::ServiceCapDenied { .. }
+            | Self::ServiceRefused { .. }
             | Self::MissingCap { .. }
             | Self::LaunchPolicyForbidden { .. } => StatusCode::FORBIDDEN,
             Self::NotFound
@@ -448,6 +554,8 @@ impl DispatchError {
             // State-conflict: push-first, checkout race, etc.
             Self::ProjectSource(_)
             | Self::ProjectSourcePushFirst(_)
+            | Self::AmbiguousItemFormats { .. }
+            | Self::ReservedNamespaceShadow { .. }
             | Self::Conflict(_)
             | Self::LaunchCancelled { .. }
             | Self::RuntimeActionResultUnavailable { .. } => StatusCode::CONFLICT,
@@ -494,6 +602,7 @@ impl DispatchError {
                 StatusCode::BAD_GATEWAY
             }
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
+            Self::ProcessCreationBusy { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::HookDispatchIntegrity { .. }
             | Self::RecordingIntegrity { .. }
             | Self::RuntimeActionOutcomeUnknown { .. }
@@ -512,9 +621,33 @@ impl DispatchError {
             Self::PreBirthAdmissionRefused(error) => return error.code(),
             _ => {}
         }
+        if native_headroom_refusal(self).is_some() {
+            return ryeos_app::native_headroom::NativeHeadroomInsufficient::CODE;
+        }
+        if quarantined_large_object(self).is_some() {
+            return crate::execution::external_content::LARGE_OBJECT_QUARANTINED_CODE;
+        }
+        if selected_qualification_refusal(self).is_some() {
+            return ryeos_app::operator_external_content::qualification_testimony::SelectedQualificationRefused::CODE;
+        }
+        if let Some(refusal) = qualification_refusal(self) {
+            return refusal.code();
+        }
+        if let Some(refused) = refused_reference_large_object(self) {
+            return refused.code.as_str();
+        }
+        if let Some(refusal) = source_owner_trust_refusal(self) {
+            return if refusal.unsigned {
+                "effective_trust_unsigned"
+            } else {
+                "effective_trust_refused"
+            };
+        }
         match self {
             Self::InvalidRef(..) => "invalid_ref",
             Self::NotRootExecutable { .. } => "not_root_executable",
+            Self::AmbiguousItemFormats { .. } => "ambiguous_item_formats",
+            Self::ReservedNamespaceShadow { .. } => "reserved_namespace_shadow",
             Self::InsufficientCaps { .. } => "insufficient_caps",
             Self::AliasCycle { .. } => "alias_cycle",
             Self::AliasChainTooLong { .. } => "alias_chain_too_long",
@@ -524,10 +657,12 @@ impl DispatchError {
             Self::ProjectSource(_) => "project_source",
             Self::ServiceHandlerMissing { .. } => "service_handler_missing",
             Self::ServiceCapDenied { .. } => "service_cap_denied",
+            Self::ServiceRefused { .. } => "service_refused",
             Self::ServiceUnavailable { .. } => "service_unavailable",
             Self::ServiceNotInstalled { .. } => "service_not_installed",
             Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
             Self::RootExecutorMissing { .. } => "root_executor_missing",
+            Self::DirectContinuationUnsupported { .. } => "direct_continuation_unsupported",
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
             Self::ExecutionNotRestartEligible { .. } => "execution_not_restart_eligible",
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
@@ -564,6 +699,7 @@ impl DispatchError {
             Self::RecordingIntegrity { .. } => "recording_integrity",
             Self::RuntimeActionOutcomeUnknown { .. } => "runtime_action_outcome_unknown",
             Self::RuntimeActionResultUnavailable { .. } => "runtime_action_result_unavailable",
+            Self::ProcessCreationBusy { .. } => PROCESS_CREATION_BUSY_CODE,
             Self::Internal(_) => "internal",
             Self::Shared(_) | Self::PreBirthAdmissionRefused(_) => {
                 unreachable!("transparent error wrappers return before classification")
@@ -581,10 +717,97 @@ impl DispatchError {
             _ => {}
         }
         match self {
-            Self::ServiceUnavailable { .. } => true,
+            Self::ServiceUnavailable { .. } | Self::ProcessCreationBusy { .. } => true,
             Self::LaunchPreparationFailed { classification, .. } => classification == "unavailable",
             _ => false,
         }
+    }
+}
+
+/// A source-owner signature refusal raised below the dispatch layer travels
+/// as an internal error's cause; it is still a launch-policy refusal and is
+/// reported as one.
+fn source_owner_trust_refusal(
+    error: &DispatchError,
+) -> Option<&ryeos_app::source_closure_admission::SourceOwnerTrustRefused> {
+    match error {
+        DispatchError::Internal(error) => error.chain().find_map(|cause| {
+            cause.downcast_ref::<ryeos_app::source_closure_admission::SourceOwnerTrustRefused>()
+        }),
+        _ => None,
+    }
+}
+
+/// A launch whose content needs a large object that scrub quarantined is an
+/// operator-correctable resource state wherever the store's refusal surfaced:
+/// it travels as an internal error's cause and keeps its own code.
+pub(crate) fn quarantined_large_object(
+    error: &DispatchError,
+) -> Option<&ryeos_state::LargeObjectQuarantined> {
+    match error {
+        DispatchError::Internal(error) => error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectQuarantined>()),
+        _ => None,
+    }
+}
+
+/// A launch whose content needs a reference large object that is refused by
+/// name travels the same way and keeps its own stable code.
+pub(crate) fn refused_reference_large_object(
+    error: &DispatchError,
+) -> Option<&ryeos_state::LargeObjectReferenceRefused> {
+    match error {
+        DispatchError::Internal(error) => error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectReferenceRefused>()),
+        _ => None,
+    }
+}
+
+/// A selection that disagrees with the remote testimony the node holds
+/// travels as an internal error's cause; it is a conflict the caller cures by
+/// changing the selection, not an internal failure, and keeps its own code.
+pub(crate) fn selected_qualification_refusal(
+    error: &DispatchError,
+) -> Option<
+    &ryeos_app::operator_external_content::qualification_testimony::SelectedQualificationRefused,
+> {
+    match error {
+        DispatchError::Internal(error) => {
+            ryeos_app::operator_external_content::qualification_testimony::SelectedQualificationRefused::find(error)
+        }
+        _ => None,
+    }
+}
+
+/// A qualification or testimony refused at admission, by policy or because it
+/// is stale, travels as an internal error's cause and keeps its own code and
+/// class status.
+pub(crate) fn qualification_refusal(
+    error: &DispatchError,
+) -> Option<&ryeos_state::external_content::products::qualification::QualificationRefused> {
+    match error {
+        DispatchError::Internal(error) => {
+            ryeos_state::external_content::products::qualification::QualificationRefused::find(
+                error,
+            )
+        }
+        _ => None,
+    }
+}
+
+/// A fresh placement refused for this incarnation's headroom travels as an
+/// internal error's cause; it is a capacity refusal with its own code and
+/// fields, not an internal failure.
+pub(crate) fn native_headroom_refusal(
+    error: &DispatchError,
+) -> Option<&ryeos_app::native_headroom::NativeHeadroomInsufficient> {
+    match error {
+        DispatchError::Internal(error) => {
+            ryeos_app::native_headroom::NativeHeadroomInsufficient::find(error)
+        }
+        _ => None,
     }
 }
 
@@ -592,6 +815,71 @@ impl DispatchError {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+
+    #[test]
+    fn selected_qualification_refusal_is_a_typed_non_retryable_conflict() {
+        let refusal = anyhow::Error::new(
+            ryeos_app::operator_external_content::qualification_testimony::SelectedQualificationRefused::new(
+                "remote product testimony differs from the selected qualification",
+            ),
+        )
+        .context("admit root product selections");
+        let err = DispatchError::Internal(refusal);
+        assert_eq!(err.http_status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "selected_qualification_refused");
+        assert!(!err.retryable());
+        let payload = crate::structured_error::dispatch_error_value(&err);
+        assert_eq!(payload["code"], "selected_qualification_refused");
+        assert_eq!(payload["retryable"], false);
+    }
+
+    #[test]
+    fn qualification_refusals_map_by_class_and_are_not_retryable() {
+        use ryeos_state::external_content::products::qualification::QualificationRefused;
+        for (error, code, expected) in [
+            (
+                QualificationRefused::policy_denied("lane not allowed"),
+                "qualification_policy_denied",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                QualificationRefused::stale("policy changed since acceptance"),
+                "qualification_stale",
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let err = DispatchError::Internal(error.context("admit root product selections"));
+            assert_eq!(err.http_status(), expected);
+            assert_eq!(err.code(), code);
+            assert!(!err.retryable());
+            let payload = crate::structured_error::dispatch_error_value(&err);
+            assert_eq!(payload["code"], code);
+            assert_eq!(payload["retryable"], false);
+        }
+    }
+
+    #[test]
+    fn a_genuine_internal_error_stays_500_internal() {
+        let err = DispatchError::Internal(anyhow::anyhow!("disk exploded"));
+        assert_eq!(err.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code(), "internal");
+        assert!(!err.retryable());
+    }
+
+    #[test]
+    fn direct_continuation_refusal_is_a_typed_client_error() {
+        let err = DispatchError::DirectContinuationUnsupported {
+            item_ref: "tool:test/run".to_owned(),
+            previous_thread_id: "T-prior".to_owned(),
+        };
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "direct_continuation_unsupported");
+        let message = err.to_string();
+        assert!(
+            message.contains("tool:test/run") && message.contains("T-prior"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn required_secret_missing_names_all_three_sources() {
@@ -847,5 +1135,67 @@ mod tests {
         assert_eq!(details.errors[0].path, "launch.mode");
         assert_eq!(details.errors[0].code, "enum_mismatch");
         assert_eq!(details.warnings[0].code, "unexpected_field");
+    }
+
+    #[test]
+    fn a_source_owner_trust_refusal_is_a_launch_policy_refusal() {
+        let unsigned = DispatchError::Internal(
+            anyhow::Error::new(
+                ryeos_app::source_closure_admission::SourceOwnerTrustRefused {
+                    unsigned: true,
+                    detail: "source file `x.py` is unsigned".to_owned(),
+                },
+            )
+            .context("verify owner-signed files"),
+        );
+        assert_eq!(unsigned.http_status(), StatusCode::FORBIDDEN);
+        assert_eq!(unsigned.code(), "effective_trust_unsigned");
+        let unpinned = DispatchError::Internal(anyhow::Error::new(
+            ryeos_app::source_closure_admission::SourceOwnerTrustRefused {
+                unsigned: false,
+                detail: "source file `x.py` has no current owner testimony".to_owned(),
+            },
+        ));
+        assert_eq!(unpinned.code(), "effective_trust_refused");
+        let other = DispatchError::Internal(anyhow::anyhow!("disk full"));
+        assert_eq!(other.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn a_quarantined_large_object_keeps_its_code_wherever_it_surfaced() {
+        let quarantined = ryeos_state::LargeObjectQuarantined {
+            file_sha256: "a".repeat(64),
+        };
+        let error = DispatchError::Internal(
+            anyhow::Error::new(quarantined.clone()).context("redeem the realization"),
+        );
+        assert_eq!(error.http_status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.code(), "large_object_quarantined");
+        let body = crate::structured_error::dispatch_error_value(&error);
+        assert_eq!(body["code"], "large_object_quarantined");
+        assert_eq!(body["error"], quarantined.to_string());
+    }
+
+    #[test]
+    fn a_native_headroom_refusal_keeps_its_code_and_fields() {
+        let refusal = ryeos_app::native_headroom::NativeHeadroomInsufficient {
+            what: "external qualification start".to_owned(),
+            dimension: ryeos_app::native_headroom::NativeHeadroomDimension::ServiceSeconds,
+            declared: 3_700,
+            remaining: 3_000,
+        };
+        let error = DispatchError::Internal(
+            anyhow::Error::new(refusal.clone()).context("start the qualification"),
+        );
+        assert_eq!(error.http_status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code(), "native_headroom_insufficient");
+        assert!(!error.retryable());
+        let body = crate::structured_error::dispatch_error_value(&error);
+        assert_eq!(body["code"], "native_headroom_insufficient");
+        assert_eq!(body["error"], refusal.to_string());
+        assert_eq!(
+            body["details"],
+            serde_json::json!({"dimension": "service_seconds", "declared": 3700, "remaining": 3000})
+        );
     }
 }

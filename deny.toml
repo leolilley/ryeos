@@ -3,11 +3,19 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # unsafe-libyaml is unmaintained and serde_yaml, which 29 workspace crates
+    # read signed YAML through, has no safe successor to upgrade to; the
+    # advisory reports no vulnerability. The migration off serde_yaml is a
+    # tracked item; until it lands this advisory is acknowledged, not fixed.
+    "RUSTSEC-2024-0449",
+]
 
 [licenses]
 confidence-threshold = 0.8
 allow = [
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
@@ -31,3 +39,6 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The Rune UI toolkit, taken from its fork at an exact rev. Only the browser renderer's own
+# workspace (crates/clients/rune) uses it; the root lock names crates.io sources only.
+allow-git = ["https://github.com/leolilley/rune"]

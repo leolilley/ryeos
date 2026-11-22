@@ -1,0 +1,9 @@
+name: graph
+version: "0.5.0"
+description: "Graph kind, graph runtime, and graph validation and launch handlers"
+requires_kinds:
+  - handler
+  - node
+  - parser
+  - runtime
+uses_kinds: []

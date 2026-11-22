@@ -1,30 +1,37 @@
-# ryeos:signed:2026-08-04T10:21:25Z:0501e23e31c330db9931cf08626a878902a2079066ebb4e50c29b44c07df4741:3m88dSgbYk9KBdTFUMq3V2qj/GGt39bhmGXAwtymsdnIbiznucPzno8d6C5HmIJEpTfPbgYmFlVAugWdEZ7vCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:9c4776d267e892439c7b0528d80d9371f8b2cbbd72189a3de091d368b5e8f15f:h28pzytMLTg2Nu5yXhloqZiXUBVeUosrlri+OHMwEn8Bc5qUry2xeQAi43pYE9wY2SpPWU6zURLM0RcwYg3MBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-remotes
 title: Remotes
 version: "1.0.0"
-description: Configured remote nodes
+description: Remote configuration and invalid entries; no reachability probe is performed
 
-widget: table
+widget: sections
 sources:
   default:
     ref: service:ui/ryeos-ui/remotes/list
     params: {}
+sections:
+  - title: Configured — not probed
+    source_channel: default
     collection: remotes
-projections:
-  columns:
-    - label: remote
-      field: name
-    - label: url
-      field: url
-    - label: scope
-      field: scope
-selection:
-  activate: aim-site
-affordances:
-  - id: aim-site
-    label: Aim input at site
-    invoke:
-      plane: ui
-      facet: input.route
-      merge:
-        site: "{record.name}"
+    projection:
+      identity: name
+      primary: name
+      meta: url
+      expand:
+        fields: [name, scope, url, principal_id, site_id, config_path, project_bindings]
+  - title: Invalid configuration
+    source_channel: default
+    collection: invalid_remotes
+    projection:
+      identity: name
+      primary: name
+      meta: error
+      expand:
+        fields: [name, scope, config_path, url, error, repair_hint]
+  - title: Repair guidance
+    source_channel: default
+    collection: invalid_remotes
+    projection:
+      identity: name
+      primary: name
+      meta: repair_hint

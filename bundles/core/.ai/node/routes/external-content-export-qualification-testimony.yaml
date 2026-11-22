@@ -1,0 +1,15 @@
+# ryeos:signed:2026-10-22T22:14:21Z:18386e790896c3ee9765cf44ac99a86d86099b24491292254f520ffd49373870:juch67loggAZeNUkX2BI/zhXeflgnDfUWM58dT1fppprToDa4FEOlXcp0oeYee3wZofQ1PtqZRh07PKbmhR4Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: external-content/export-qualification-testimony
+path: /external-content/export-qualification-testimony
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 600000
+  concurrent_max: 4
+response:
+  mode: json
+  source: service:external-content/export-qualification-testimony

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-19T07:22:30Z:17fd2825446ad9c2cd246d79dbde5682dde632d0666530d3cb3be7743e5f5e93:oyP+oqlj3wLJZSRGQq7i3KfkJ5YqzvVTrDTFyE0zU4WnVGXt8JOr3HGoyw10t4BqPYQNLBTRoC/0uFFzMIq7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-18T06:38:05Z:4d821ea8c8c98941357388eeae27386681c7434d66e7682bcff2f4d3cbb0ce66:0ZSF1RDEW884FK17Oyah8QT67akW8j6x5Us4dOvtfgCUEkuvZ4kECgKLBhGQsfZxjV/XoCrriDihORW4RKlkBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
 title: "RyeOS UI Project/Thread/View Navigation Tree v1"
 description: "The semantic navigation tree for driving RyeOS UI across projects, threads, thread lenses, project lenses, and node-wide operations"
 entry_type: reference
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # RyeOS UI Navigation Tree v1
@@ -67,8 +67,8 @@ partial closure as complete. Execution evidence reports whether durable launch
 posture is retained, missing, unreadable, or corrupt; an empty posture section
 is not evidence of complete coverage.
 The explorer, conversation, changes and execution regions are ordinary view
-groups in the signed nested layout tree. They are not fixed Svelte product
-panes, and the four supporting slots remain free for independently authored
+groups in the signed nested layout tree. They are not fixed renderer product
+panes, and any other tile stays free for independently authored
 persistent views. Their short group labels are signed arrangement metadata:
 they identify a stable region above its selectable member tabs, survive saved
 view-set round trips, and never create another renderer-owned navigation model.
@@ -232,7 +232,7 @@ RyeOS UI
 |       `-- Fire History
 |-- Layouts / Surfaces
 |   |-- Assistant
-|   |   |-- Signed navigation: Home / Work / Review / Sites / Programs
+|   |   |-- Explorer group: Home / Work / Review / Sites / Programs views
 |   |   |-- Center: One selected lens
 |   |   |-- Bottom: Routed Input
 |   |   `-- Optional context through signed views
@@ -254,10 +254,6 @@ RyeOS UI
 |       |-- Remotes
 |       `-- Maintenance
 `-- Presentation
-    |-- Backdrop
-    |   |-- Crystal Scene
-    |   |-- Animated Empty Center
-    |   `-- Underlay Behind Tiles
     |-- Tile Style
     |   |-- Opaque
     |   |-- Translucent
@@ -326,7 +322,9 @@ view:ryeos/project/schedules
 view:ryeos/node/status
 view:ryeos/node/threads/history
 view:ryeos/node/events
+view:ryeos/node/usage
 view:ryeos/node/remotes
+view:ryeos/node/machines
 view:ryeos/node/bundles
 view:ryeos/node/gc
 ```
@@ -361,10 +359,16 @@ view:ryeos/threads/history          view:ryeos/node/threads/history
 view:ryeos/files/list               view:ryeos/project/files
 view:ryeos/items/space              view:ryeos/project/items
 view:ryeos/schedules/list           view:ryeos/project/schedules
-view:ryeos/remotes/list             view:ryeos/node/remotes
-view:ryeos/bundles/list             view:ryeos/node/bundles
-view:ryeos/gc/status                view:ryeos/node/gc
 ```
+
+Node bundles, remotes, and garbage collection each have one authored View,
+under `view:ryeos/node/`. Saved arrangements re-resolve their exact authored
+origins. A removed origin fails resolution; it is not silently redirected to
+a different View or granted a replacement attachment. Reopen the current
+authored View explicitly when an old saved arrangement reports a missing origin.
+
+The remote table reports configured remote nodes. Selecting a row does not
+retarget a conversation, change input routing, or establish remote authority.
 
 `view:ryeos/threads/history` is project-scoped by default:
 
@@ -429,8 +433,7 @@ surface:ryeos/ui/assistant
 `-- operator surface
     |-- view-set strip: independently retained compositions
     |-- active view set: one authored layout of mounted views
-    |-- optional top/left/right/bottom slots: ordinary supporting views
-    `-- navigation: signed destination-to-view bindings
+    `-- destinations: ordinary views in the layout (no navigation chrome)
 
 surface:ryeos/ui/thread
 `-- focused thread surface
@@ -439,9 +442,8 @@ surface:ryeos/ui/thread
         `-- optional conversation input view
 
 surface:ryeos/ui/thread-crystal
-`-- focused thread surface over the prism backdrop
-    |-- initial view set: view:ryeos/thread/transcript
-    `-- backdrop: view:ryeos/backdrop/prism
+`-- focused thread surface
+    `-- initial view set: view:ryeos/thread/transcript
 
 surface:ryeos/ui/workbench
 `-- project work surface
@@ -464,38 +466,9 @@ surface:ryeos/ui/node
     |-- events: view:ryeos/node/events
     `-- maintenance lenses
 
-surface:ryeos/ui/atlas
-`-- namespace and item topology
-
 surface:ryeos/ui/base
 `-- general home/library surface
 ```
-
-## Ambient Chat
-
-The empty center already draws the backdrop as content. A chat-over-crystal
-surface extends that idea: the backdrop remains visible as an underlay while
-the chat lens and input sit above it.
-
-The current concrete knob is a normal backdrop plus translucent ambient opacity:
-
-```yaml
-backdrop: view:ryeos/backdrop/prism
-
-ambient:
-  show_background: true
-  opacity: 0.35
-
-style:
-  border: hidden
-```
-
-When a populated center has a declared backdrop and `ambient.opacity` is between
-0 and 1, clients render the backdrop first and then draw the tile tree over it.
-Web can express this with real layering and translucent tile panels. Terminal
-preserves the already-drawn backdrop cells where tile rendering does not need to
-clear them. The contract is "background scene remains alive under the lens", not
-pixel-identical alpha blending across renderers.
 
 ## Driving Inspector
 
@@ -537,7 +510,7 @@ view. It should report RyeOS UI decisions, not renderer wrapper nodes.
 
 ## References
 
-- `bundles/ryeos-ui/.ai/knowledge/ryeos/ui/frame-v1.md`
+- `bundles/ryeos-ui/.ai/knowledge/ryeos/ui/frame-v2.md`
 - `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/assistant.yaml`
 - `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/thread.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/projects/list.yaml`
@@ -546,4 +519,4 @@ view. It should report RyeOS UI decisions, not renderer wrapper nodes.
 - `bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml`
 - `crates/clients/base/src/ui/model.rs`
 - `crates/clients/base/src/ui/view_model.rs`
-- `crates/clients/web/docs/web-parity.md`
+- `crates/clients/base/docs/adapter-parity.md`

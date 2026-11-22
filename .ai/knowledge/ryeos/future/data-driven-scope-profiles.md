@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-23T03:27:17Z:86ff304a4b4aff0f7a6064ad08ec736225bb3a5611b08c0a93265876413e2df4:2t1EhbsKW5KZxTApzP4VCotMP/jV4xTiNv2VLBzQ09G662JuVvahSpqk+LW7ZUyGyMMr8l33ClOxyMrdG+/sDA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-10-12T21:50:37Z:bdaf002916b75947a5eae78657e56b080ec29580585d78c21d1e3f0e1bece9db:DDllbpDZQN+Qa/HlzbVINgsKbVm/PElu1StA8onmMqnuoAMao8LGWny+vS4ak9sLJMUDm4DjGhHjjpHEXTDfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Data-driven scope profiles for authorized-key grants
 
 ## Status
@@ -70,8 +70,8 @@ category: "auth"
 section: "scope_profiles"
 schema_version: "1.0.0"
 
-id: "tv-tracker/backend"
-description: "Capabilities for the TV Tracker backend service account"
+id: "example-app/backend"
+description: "Capabilities for an example app backend service account"
 
 grants:
   - cap: "ryeos.execute.service.objects/has"
@@ -82,7 +82,7 @@ grants:
   - select:
       verb: "execute"
       kind: "tool"
-      path_prefix: "apps/tv-tracker/api/"
+      path_prefix: "apps/example-app/api/"
 ```
 
 The `cap` form is already materialized. The `select` form is a data-driven
@@ -97,9 +97,9 @@ scopes or a profile:
 ```bash
 ryeos-core-tools authorize-client \
   --system-space-dir /data/core \
-  --public-key "$TV_TRACKER_BACKEND_PUBLIC_KEY" \
-  --label tv-tracker-backend \
-  --scope-profile tv-tracker/backend
+  --public-key "$EXAMPLE_APP_BACKEND_PUBLIC_KEY" \
+  --label example-app-backend \
+  --scope-profile example-app/backend
 ```
 
 `--scopes` and `--scope-profile` should be mutually exclusive. JSON input should
@@ -109,8 +109,8 @@ support the same field:
 {
   "system_space_dir": "/data/core",
   "public_key": "ed25519:...",
-  "label": "tv-tracker-backend",
-  "scope_profile": "tv-tracker/backend"
+  "label": "example-app-backend",
+  "scope_profile": "example-app/backend"
 }
 ```
 
@@ -124,8 +124,8 @@ The authenticated `/authorize-key` handler can support the same request shape:
 ```json
 {
   "public_key": "ed25519:...",
-  "label": "tv-tracker-backend",
-  "scope_profile": "tv-tracker/backend"
+  "label": "example-app-backend",
+  "scope_profile": "example-app/backend"
 }
 ```
 
@@ -167,24 +167,24 @@ For the example:
 - select:
     verb: "execute"
     kind: "tool"
-    path_prefix: "apps/tv-tracker/api/"
+    path_prefix: "apps/example-app/api/"
 ```
 
 If the verified inventory contains:
 
 ```text
-tool:apps/tv-tracker/api/sync
-tool:apps/tv-tracker/api/oauth-callback
-tool:apps/tv-tracker/api/refresh
+tool:apps/example-app/api/sync
+tool:apps/example-app/api/oauth-callback
+tool:apps/example-app/api/refresh
 ```
 
 the materialized grant is:
 
 ```toml
 scopes = [
-  "ryeos.execute.tool.apps/tv-tracker/api/sync",
-  "ryeos.execute.tool.apps/tv-tracker/api/oauth-callback",
-  "ryeos.execute.tool.apps/tv-tracker/api/refresh"
+  "ryeos.execute.tool.apps/example-app/api/sync",
+  "ryeos.execute.tool.apps/example-app/api/oauth-callback",
+  "ryeos.execute.tool.apps/example-app/api/refresh"
 ]
 ```
 
@@ -274,7 +274,7 @@ This design does not ban wildcard capability patterns from RyeOS. Wildcards are
 still useful inside signed runtime policy and item permissions, for example:
 
 ```text
-ryeos.execute.tool.apps/tv-tracker/api/*
+ryeos.execute.tool.apps/example-app/api/*
 ryeos.execute.directive.*
 ```
 

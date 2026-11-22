@@ -9,3 +9,6 @@ repository = "https://github.com/leolilley/ryeos"
 [[bin]]
 name = "ryeos-session-exec"
 path = "src/main.rs"
+
+[lints]
+workspace = true

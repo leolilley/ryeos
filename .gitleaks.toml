@@ -1,0 +1,30 @@
+# Secret-scan policy for the commit scan in CI. Everything listed here was
+# reviewed: vendored SQLite sources, the development publisher key that is
+# public by design, and test fixtures whose "keys" are placeholders.
+title = "ryeos"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "reviewed non-secrets"
+paths = [
+  '''^vendor/''',
+  '''^\.dev-keys/PUBLISHER_DEV\.pem$''',
+  '''^tests/e2e/authoring-environment/test_rebuild_build_support_inputs\.py$''',
+  '''^crates/.*/tests/.*\.rs$''',
+  '''^bundles/local-inference/\.ai/workers/local-inference/lib/local-tinygrad-gnu/tokenizer\.py$''',
+  '''^bundles/local-inference/\.ai/workers/local-inference/lib/local-tinygrad-gnu/cuda_lifecycle/nvml_qualification\.md$''',
+  # A test fixture PEM made of repeated A's, and a bake secret id.
+  '''^crates/daemon/ryeos-app/src/node_config/sections/external_execution/compose\.rs$''',
+  '''^docker-bake\.composition\.hcl$''',
+  # The lease-lane e2e TLS server key for the test-only name controller.test,
+  # signed by a CA that only the e2e tests trust (see lease-controller-README.md).
+  '''^tests/e2e/external-execution/fixtures/lease-controller-server\.key\.pem$''',
+]
+regexes = [
+  '''id=publisher-key,src=''',
+  '''Sec-WebSocket-Key: ''',
+  # rust-cache cache names in the CI workflow.
+  '''^(workspace-crates|scheduler-compositions|crash-qualification)-v[0-9]+$''',
+]

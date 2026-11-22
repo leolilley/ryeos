@@ -24,7 +24,6 @@ pub enum RetainedWorkspaceOutputContent {
 }
 
 impl RetainedWorkspaceOutputContent {
-    #[allow(clippy::too_many_arguments)]
     pub fn select(
         cas: &lillux::CasStore,
         capture: &WorkspaceOutputCapture,
@@ -81,9 +80,9 @@ impl RetainedWorkspaceOutputContent {
         }
         let bounds = declaration.bounds.intersect(current_node_bounds)?;
         match &capture.outputs[&root.name] {
-            WorkspaceOutputCaptureState::Absent => return absent(declaration),
+            WorkspaceOutputCaptureState::Absent => absent(declaration),
             WorkspaceOutputCaptureState::EmptyDirectory if !relative.is_empty() => {
-                return absent(declaration);
+                absent(declaration)
             }
             WorkspaceOutputCaptureState::EmptyDirectory => {
                 bail!("present empty workspace output cannot be published as a product");
@@ -182,10 +181,10 @@ impl RetainedWorkspaceOutputContent {
                         Self::LargeContent(selected)
                     }
                 };
-                if let Some(expected) = &declaration.expected_manifest_hash {
-                    if &selected.manifest_hash()? != expected {
-                        bail!("workspace-output product differs from its expected manifest");
-                    }
+                if let Some(expected) = &declaration.expected_manifest_hash
+                    && &selected.manifest_hash()? != expected
+                {
+                    bail!("workspace-output product differs from its expected manifest");
                 }
                 Ok(Some(selected))
             }
@@ -240,7 +239,6 @@ fn absent(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn select_members(
     members: &[(&str, EntryKind, Option<u64>)],
     relative: &str,

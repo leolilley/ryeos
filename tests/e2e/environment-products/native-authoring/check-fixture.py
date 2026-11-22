@@ -17,7 +17,7 @@ sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 TOOL = (ROOT /
-    "bundles/standard/.ai/tools/ryeos/environments/qualification/native-authoring/verify.py")
+    "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/native-authoring/verify.py")
 SPEC = importlib.util.spec_from_file_location("native_authoring_verifier", TOOL)
 verifier = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(verifier)
@@ -69,11 +69,11 @@ def main():
     if "product_selections:" in source:
         raise SystemExit("native qualifier Tool must receive selectors only at launch")
     policy = (ROOT /
-        "bundles/standard/.ai/config/ryeos/environments/qualification/native-authoring.yaml").read_text()
+        "bundles/environment-qualification/.ai/config/ryeos/environments/qualification/native-authoring.yaml").read_text()
     if "allowed_claims: [authoring_runtime_closed]" not in policy:
         raise SystemExit("native qualifier policy lost its finite claim")
     qualification_runtime = (ROOT /
-        "bundles/standard/.ai/tools/ryeos/environments/qualification/native-authoring/runtime.yaml").read_text()
+        "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/native-authoring/runtime.yaml").read_text()
     for required in (
         "executor_id: \"@subprocess\"",
         "execution_protocol: protocol:ryeos/core/opaque",

@@ -1,0 +1,394 @@
+{
+  "surface:ryeos/ui/assistant": [
+    {
+      "schema": 2,
+      "id": "development",
+      "title": "Development",
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "ratio": 0.13,
+        "first": {
+          "type": "group",
+          "label": "Explorer",
+          "views": [
+            "view:ryeos/development/explorer",
+            "view:ryeos/projects/list",
+            "view:ryeos/project/files",
+            "view:ryeos/sites/list"
+          ],
+          "active": 0
+        },
+        "second": {
+          "type": "split",
+          "axis": "horizontal",
+          "ratio": 0.7,
+          "first": {
+            "type": "group",
+            "label": "Worker",
+            "views": [
+              "view:ryeos/thread/conversation",
+              "view:ryeos/thread/transcript",
+              "view:ryeos/work/evidence",
+              "view:ryeos/project/document"
+            ],
+            "active": 0
+          },
+          "second": {
+            "type": "split",
+            "axis": "vertical",
+            "ratio": 0.55,
+            "first": {
+              "type": "group",
+              "label": "Changes",
+              "views": [
+                "view:ryeos/development/changes",
+                "view:ryeos/work/candidate",
+                "view:ryeos/work/approvals"
+              ],
+              "active": 0
+            },
+            "second": {
+              "type": "group",
+              "label": "Execution",
+              "views": [
+                "view:ryeos/development/execution",
+                "view:ryeos/development/occurrence",
+                "view:ryeos/work/children",
+                "view:ryeos/thread/tree"
+              ],
+              "active": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "schema": 2,
+      "id": "overview",
+      "title": "Overview",
+      "root": {
+        "type": "group",
+        "views": [
+          "view:ryeos/home/overview",
+          "view:ryeos/sites/list",
+          "view:ryeos/programs/list"
+        ],
+        "active": 0
+      }
+    },
+    {
+      "schema": 2,
+      "id": "work",
+      "title": "Work",
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "ratio": 0.22,
+        "first": {
+          "type": "group",
+          "label": "Work",
+          "views": [
+            "view:ryeos/work/list"
+          ],
+          "active": 0
+        },
+        "second": {
+          "type": "group",
+          "label": "Detail",
+          "views": [
+            "view:ryeos/work/overview",
+            "view:ryeos/work/children",
+            "view:ryeos/work/evidence",
+            "view:ryeos/work/candidate",
+            "view:ryeos/work/approvals"
+          ],
+          "active": 0
+        }
+      }
+    },
+    {
+      "schema": 2,
+      "id": "review",
+      "title": "Review",
+      "root": {
+        "type": "group",
+        "views": [
+          "view:ryeos/review/pending",
+          "view:ryeos/review/history"
+        ],
+        "active": 0
+      }
+    }
+  ],
+  "surface:ryeos/ui/assistant-observe": [
+    {
+      "schema": 2,
+      "id": "development",
+      "title": "Development",
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "ratio": 0.13,
+        "first": {
+          "type": "group",
+          "label": "Explorer",
+          "views": [
+            "view:ryeos/development/explorer",
+            "view:ryeos/projects/list",
+            "view:ryeos/project/files",
+            "view:ryeos/sites/list"
+          ],
+          "active": 0
+        },
+        "second": {
+          "type": "split",
+          "axis": "horizontal",
+          "ratio": 0.7,
+          "first": {
+            "type": "group",
+            "label": "Worker",
+            "views": [
+              "view:ryeos/thread/conversation",
+              "view:ryeos/thread/transcript",
+              "view:ryeos/work/evidence",
+              "view:ryeos/project/document"
+            ],
+            "active": 0
+          },
+          "second": {
+            "type": "split",
+            "axis": "vertical",
+            "ratio": 0.55,
+            "first": {
+              "type": "group",
+              "label": "Changes",
+              "views": [
+                "view:ryeos/development/changes",
+                "view:ryeos/work/candidate",
+                "view:ryeos/work/approvals"
+              ],
+              "active": 0
+            },
+            "second": {
+              "type": "group",
+              "label": "Execution",
+              "views": [
+                "view:ryeos/development/execution",
+                "view:ryeos/development/occurrence",
+                "view:ryeos/work/children",
+                "view:ryeos/thread/tree"
+              ],
+              "active": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "schema": 2,
+      "id": "overview",
+      "title": "Overview",
+      "root": {
+        "type": "group",
+        "views": [
+          "view:ryeos/home/overview",
+          "view:ryeos/sites/list",
+          "view:ryeos/programs/list"
+        ],
+        "active": 0
+      }
+    },
+    {
+      "schema": 2,
+      "id": "work",
+      "title": "Work",
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "ratio": 0.22,
+        "first": {
+          "type": "group",
+          "label": "Work",
+          "views": [
+            "view:ryeos/work/list"
+          ],
+          "active": 0
+        },
+        "second": {
+          "type": "group",
+          "label": "Detail",
+          "views": [
+            "view:ryeos/work/overview",
+            "view:ryeos/work/children",
+            "view:ryeos/work/evidence",
+            "view:ryeos/work/candidate",
+            "view:ryeos/work/approvals"
+          ],
+          "active": 0
+        }
+      }
+    },
+    {
+      "schema": 2,
+      "id": "review",
+      "title": "Review",
+      "root": {
+        "type": "group",
+        "views": [
+          "view:ryeos/review/pending",
+          "view:ryeos/review/history"
+        ],
+        "active": 0
+      }
+    }
+  ],
+  "surface:ryeos/ui/base-observe": [
+    {
+      "schema": 2,
+      "id": "overview",
+      "title": "Overview",
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "ratio": 0.22,
+        "first": {
+          "type": "group",
+          "label": "Projects",
+          "views": [
+            "view:ryeos/projects/list",
+            "view:ryeos/sites/list"
+          ],
+          "active": 0
+        },
+        "second": {
+          "type": "split",
+          "axis": "vertical",
+          "ratio": 0.6,
+          "first": {
+            "type": "group",
+            "views": [
+              "view:ryeos/home/overview"
+            ],
+            "active": 0
+          },
+          "second": {
+            "type": "group",
+            "label": "Recent",
+            "views": [
+              "view:ryeos/threads/history",
+              "view:ryeos/work/list"
+            ],
+            "active": 0
+          }
+        }
+      }
+    },
+    {
+      "schema": 2,
+      "id": "development",
+      "title": "Development",
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "ratio": 0.13,
+        "first": {
+          "type": "group",
+          "label": "Explorer",
+          "views": [
+            "view:ryeos/development/explorer",
+            "view:ryeos/projects/list",
+            "view:ryeos/project/files",
+            "view:ryeos/sites/list"
+          ],
+          "active": 0
+        },
+        "second": {
+          "type": "split",
+          "axis": "horizontal",
+          "ratio": 0.7,
+          "first": {
+            "type": "group",
+            "label": "Worker",
+            "views": [
+              "view:ryeos/thread/conversation",
+              "view:ryeos/thread/transcript",
+              "view:ryeos/work/evidence",
+              "view:ryeos/project/document"
+            ],
+            "active": 0
+          },
+          "second": {
+            "type": "split",
+            "axis": "vertical",
+            "ratio": 0.55,
+            "first": {
+              "type": "group",
+              "label": "Changes",
+              "views": [
+                "view:ryeos/development/changes",
+                "view:ryeos/work/candidate",
+                "view:ryeos/work/approvals"
+              ],
+              "active": 0
+            },
+            "second": {
+              "type": "group",
+              "label": "Execution",
+              "views": [
+                "view:ryeos/development/execution",
+                "view:ryeos/development/occurrence",
+                "view:ryeos/work/children",
+                "view:ryeos/thread/tree"
+              ],
+              "active": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "schema": 2,
+      "id": "work",
+      "title": "Work",
+      "root": {
+        "type": "split",
+        "axis": "horizontal",
+        "ratio": 0.22,
+        "first": {
+          "type": "group",
+          "label": "Work",
+          "views": [
+            "view:ryeos/work/list"
+          ],
+          "active": 0
+        },
+        "second": {
+          "type": "group",
+          "label": "Detail",
+          "views": [
+            "view:ryeos/work/overview",
+            "view:ryeos/work/children",
+            "view:ryeos/work/evidence",
+            "view:ryeos/work/candidate",
+            "view:ryeos/work/approvals"
+          ],
+          "active": 0
+        }
+      }
+    },
+    {
+      "schema": 2,
+      "id": "review",
+      "title": "Review",
+      "root": {
+        "type": "group",
+        "views": [
+          "view:ryeos/review/pending",
+          "view:ryeos/review/history"
+        ],
+        "active": 0
+      }
+    }
+  ]
+}

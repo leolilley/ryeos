@@ -1,0 +1,15 @@
+# ryeos:signed:2026-10-18T03:41:41Z:9244ee7484da9ae5b67a7c1265596bcf986b3d35577d135f82bc62435d6d31bf:l41O1Vfl4WqguvYpN3MMznYCDvqcA7zAu7TTyvb08134yeKega3NylnSyhJFoj/ZaViw+/SIz3zYUiv1RmrHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: directive
+version: 0.5.0
+description: Directive kind, directive runtime, model providers, and model routing
+provides_kinds:
+- directive
+requires_kinds:
+- config
+- handler
+- parser
+- runtime
+- service
+- worker
+uses_kinds:
+- knowledge

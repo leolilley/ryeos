@@ -1,0 +1,826 @@
+//! Node-owned execution admission and host-environment authority.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use anyhow::{Context as _, bail};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection, TypedNodePolicy};
+
+pub const SECTION_NAME: &str = "execution";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeExecutionAdmissionPolicy {
+    pub schema: u32,
+    pub max_live_fanout: u32,
+    pub max_private_materialization_copy_bytes: u64,
+    pub host_env_passthrough: Vec<String>,
+    /// Required-nullable target ceiling for a boot-local workload client.
+    /// Project data may request less; absence disables admission completely.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub workload_client: Option<ryeos_runtime::workload_client::WorkloadClientNodePolicy>,
+    /// Required-nullable node authority for constrained execution resources.
+    /// `null` is deny-all; a populated policy is still only a ceiling and does
+    /// not assert that matching devices were observed or allocated.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub resource_authority: Option<NodeExecutionResourcePolicy>,
+    /// Required-nullable node ceiling for signed product producer recipes.
+    /// `null` denies producer admission; a recipe may only narrow these bounds.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub producer_resource_ceiling:
+        Option<ryeos_state::external_content::products::producer_recipe::ProducerResourceBounds>,
+    /// Node ceilings on the remote leases lifecycle adapters create for
+    /// placed workloads. Omission admits no lease at all and keeps the
+    /// policy identity of a node that places none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_lease_budget: Option<ExternalLeaseBudget>,
+    /// A synchronized wall clock this node must hold before it issues the
+    /// absolute-time windows of an external execution. Omission is report
+    /// only: the node issues windows whatever its clock says, and the clock
+    /// trust is still reported where the node reports its health. Omission
+    /// keeps the policy identity of a node that requires nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_wall_clock_requirement: Option<ExternalWallClockRequirement>,
+}
+
+/// The largest clock error bound a node may accept, one minute in
+/// microseconds. A looser bound than the guests' own skew tolerance defeats
+/// the requirement.
+pub const MAX_EXTERNAL_WALL_CLOCK_ERROR_US: u64 = 60_000_000;
+
+/// A synchronized-clock requirement for issuing external execution windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWallClockRequirement {
+    /// The most the kernel may admit its wall-clock error to be, in
+    /// microseconds, while it also claims to be synchronized.
+    pub max_error_us: u64,
+}
+
+impl ExternalWallClockRequirement {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !(1..=MAX_EXTERNAL_WALL_CLOCK_ERROR_US).contains(&self.max_error_us) {
+            bail!(
+                "node external wall-clock requirement max_error_us must be between 1 and \
+                 {MAX_EXTERNAL_WALL_CLOCK_ERROR_US}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Refuse, naming the cause, unless `trust` satisfies the requirement.
+    pub fn require(&self, trust: &lillux::time::WallClockTrust) -> anyhow::Result<()> {
+        match trust {
+            lillux::time::WallClockTrust::Synced {
+                maximum_error_us, ..
+            } if *maximum_error_us <= self.max_error_us => Ok(()),
+            lillux::time::WallClockTrust::Synced {
+                maximum_error_us, ..
+            } => bail!(
+                "this node's wall clock is too uncertain to issue external execution windows: \
+                 the kernel admits an error of up to {maximum_error_us} us, node execution \
+                 policy allows {} us",
+                self.max_error_us
+            ),
+            lillux::time::WallClockTrust::Unsynchronized => bail!(
+                "this node's wall clock is unsynchronized, and node execution policy requires \
+                 a synchronized wall clock (error at most {} us) to issue external execution \
+                 windows",
+                self.max_error_us
+            ),
+            lillux::time::WallClockTrust::Unknown => bail!(
+                "this node cannot determine whether its wall clock is synchronized, and node \
+                 execution policy requires a synchronized wall clock (error at most {} us) to \
+                 issue external execution windows",
+                self.max_error_us
+            ),
+        }
+    }
+}
+
+/// The most concurrent leases a node may declare. Providers bound a
+/// workspace well above this; a node policy asking for more is a typo, not a
+/// plan.
+pub const MAX_EXTERNAL_CONCURRENT_LEASES: u32 = 64;
+/// The longest lease a node may declare, one day.
+pub const MAX_EXTERNAL_LEASE_LIFETIME_SECONDS: u32 = 24 * 60 * 60;
+
+/// Spend ceilings for remote leases, held as node data.
+///
+/// Every lease runs for its placement binding's execution timeout, which
+/// must not exceed `max_lease_lifetime_seconds`; that ceiling is a bound, not
+/// the lifetime itself. `daily_lease_seconds` is counted in budget seconds:
+/// one lease-second costs as many budget seconds as the `budget_weight` its
+/// admitting signed provider spec declares, so a costlier provider (a GPU
+/// lease, say) spends the same budget faster. The lease reserves its whole
+/// lifetime at that weight against `daily_lease_seconds` before the provider
+/// is contacted. At most `max_concurrent_leases` leases are held at once. A
+/// held lease is released when its allocation settles, and only the seconds
+/// it actually lasted, at its weight, stay charged. The daily budget covers
+/// the leases reserved in the last 24 hours. A lease that does not fit is
+/// refused, never queued.
+///
+/// `turn_end_margin_seconds` is the lease time a turn must leave unused
+/// after its own deadline, so the turn's result can be frozen, exported and
+/// imported before the provider ends the lease. A turn is started on a lease
+/// only when the lease outlives the turn's deadline by this margin; a lease
+/// that can no longer do so is terminated rather than kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalLeaseBudget {
+    pub max_concurrent_leases: u32,
+    pub max_lease_lifetime_seconds: u32,
+    pub daily_lease_seconds: u64,
+    pub turn_end_margin_seconds: u32,
+}
+
+impl ExternalLeaseBudget {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !(1..=MAX_EXTERNAL_CONCURRENT_LEASES).contains(&self.max_concurrent_leases) {
+            bail!(
+                "node external lease budget max_concurrent_leases must be between 1 and \
+                 {MAX_EXTERNAL_CONCURRENT_LEASES}"
+            );
+        }
+        if !(1..=MAX_EXTERNAL_LEASE_LIFETIME_SECONDS).contains(&self.max_lease_lifetime_seconds) {
+            bail!(
+                "node external lease budget max_lease_lifetime_seconds must be between 1 and \
+                 {MAX_EXTERNAL_LEASE_LIFETIME_SECONDS}"
+            );
+        }
+        let most = u64::from(self.max_concurrent_leases)
+            * u64::from(MAX_EXTERNAL_LEASE_LIFETIME_SECONDS)
+            * u64::from(ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT);
+        if self.daily_lease_seconds < u64::from(self.max_lease_lifetime_seconds)
+            || self.daily_lease_seconds > most
+        {
+            bail!(
+                "node external lease budget daily_lease_seconds is counted in budget seconds \
+                 (lease-seconds times the admitting provider spec's budget_weight) and must \
+                 hold at least one whole lease lifetime at weight 1 and at most {most} budget \
+                 seconds, what its concurrent leases could use in a day at the highest weight"
+            );
+        }
+        if self.turn_end_margin_seconds == 0
+            || self.turn_end_margin_seconds >= self.max_lease_lifetime_seconds
+        {
+            bail!(
+                "node external lease budget turn_end_margin_seconds must be positive and \
+                 shorter than max_lease_lifetime_seconds, or no turn could ever start on a lease"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeExecutionResourcePolicy {
+    pub admission: ryeos_engine::contracts::ExecutionResourceAdmissionPolicy,
+    /// Node-owned portion of every finite occupancy maximum reserved for
+    /// termination, reap and terminal meter capture. It is captured into the
+    /// exact process identity; project content cannot narrow it away.
+    pub cleanup_allowance_ms: u64,
+    /// Optional exact ceiling for trusted resource cleanup. Omission denies
+    /// trusted resource authority and preserves predecessor policy identities.
+    /// This does not qualify a driver, resource observer or runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_cleanup_contract_digest: Option<String>,
+    pub resources: Vec<NodeExecutionResourceDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeExecutionResourceDescriptor {
+    pub stable_id: String,
+    pub class: String,
+    pub observation_contract_digest: String,
+    /// Reserved for semantic facts emitted by a qualified admitted host
+    /// observer. The initial resource adapter accepts only an empty map; node
+    /// policy authorship alone is not hardware observation.
+    pub facts:
+        std::collections::BTreeMap<String, ryeos_engine::contracts::ExecutionResourceFactValue>,
+    pub character_devices: Vec<lillux::CharacterDeviceSpec>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub accounting: Option<ryeos_accounting::ResourceAccountingAuthority>,
+}
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+impl NodeExecutionAdmissionPolicy {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != 4 {
+            bail!("node execution policy schema is not current");
+        }
+        if self.max_live_fanout == 0 {
+            bail!("node execution max_live_fanout must be greater than zero");
+        }
+        if self.max_private_materialization_copy_bytes == 0 {
+            bail!("node execution private materialization copy limit must be greater than zero");
+        }
+        let canonical = self
+            .host_env_passthrough
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if canonical != self.host_env_passthrough {
+            bail!("node execution host-env allowlist must be sorted and unique");
+        }
+        ryeos_engine::runtime::HostEnvBindings::from_allowlist(
+            self.host_env_passthrough.iter().cloned(),
+        )
+        .map_err(anyhow::Error::from)
+        .context("validate node execution host-env allowlist")?;
+        if let Some(policy) = &self.workload_client {
+            policy
+                .validate()
+                .context("validate node workload-client ceiling")?;
+        }
+        if let Some(policy) = &self.resource_authority {
+            policy
+                .validate()
+                .context("validate node execution resource authority")?;
+        }
+        if let Some(ceiling) = &self.producer_resource_ceiling {
+            ceiling
+                .validate()
+                .context("validate node producer ceiling")?;
+        }
+        if let Some(budget) = &self.external_lease_budget {
+            budget.validate()?;
+        }
+        if let Some(requirement) = &self.external_wall_clock_requirement {
+            requirement.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn admit_producer_bounds(
+        &self,
+        bounds: &ryeos_state::external_content::products::producer_recipe::ProducerResourceBounds,
+    ) -> anyhow::Result<()> {
+        bounds.validate()?;
+        let ceiling = self
+            .producer_resource_ceiling
+            .as_ref()
+            .context("node producer admission is disabled")?;
+        ceiling.validate()?;
+        if bounds.maximum_wall_time_ms > ceiling.maximum_wall_time_ms
+            || bounds.maximum_stdout_bytes > ceiling.maximum_stdout_bytes
+            || bounds.maximum_stderr_bytes > ceiling.maximum_stderr_bytes
+            || bounds.maximum_memory_bytes > ceiling.maximum_memory_bytes
+            || bounds.maximum_processes > ceiling.maximum_processes
+        {
+            bail!("producer resource bounds exceed the node ceiling");
+        }
+        Ok(())
+    }
+
+    pub fn admit_execution_target(
+        &self,
+        target: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    ) -> anyhow::Result<()> {
+        let Some(target) = target else {
+            return Ok(());
+        };
+        target.validate()?;
+        if !target.requests_resources() {
+            return Ok(());
+        }
+        let policy = self.resource_authority.as_ref().context(
+            "node execution resource authority is disabled for a resource-bearing target",
+        )?;
+        policy.admission.admit(target)
+    }
+
+    pub fn host_env_bindings(&self) -> anyhow::Result<ryeos_engine::runtime::HostEnvBindings> {
+        ryeos_engine::runtime::HostEnvBindings::from_allowlist(
+            self.host_env_passthrough.iter().cloned(),
+        )
+        .map_err(anyhow::Error::from)
+        .context("resolve node execution host-env bindings")
+    }
+}
+
+impl NodeExecutionResourcePolicy {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.admission.validate()?;
+        if let Some(digest) = &self.trusted_cleanup_contract_digest {
+            validate_digest("node trusted resource cleanup contract digest", digest)?;
+        }
+        if self.cleanup_allowance_ms == 0 || self.cleanup_allowance_ms > 10 * 60 * 1000 {
+            bail!("node resource cleanup allowance is outside its operational bound");
+        }
+        if self.resources.len() > ryeos_engine::contracts::MAX_EXECUTION_TARGET_REQUIREMENTS {
+            bail!("node resource catalog exceeds the portable resource bound");
+        }
+        let mut previous: Option<&str> = None;
+        for resource in &self.resources {
+            resource.validate()?;
+            if let Some(ryeos_accounting::ResourceAccountingAuthority {
+                spend:
+                    ryeos_accounting::ResourceSpendAuthority::Bounded {
+                        maximum_occupancy_milliseconds,
+                        ..
+                    },
+                ..
+            }) = resource.accounting.as_ref()
+                && self.cleanup_allowance_ms >= *maximum_occupancy_milliseconds
+            {
+                bail!(
+                    "node resource `{}` cleanup allowance consumes its finite occupancy maximum",
+                    resource.stable_id
+                );
+            }
+            if previous.is_some_and(|candidate| candidate >= resource.stable_id.as_str()) {
+                bail!("node resources must be stable-id sorted and unique");
+            }
+            if self
+                .admission
+                .allowed_classes
+                .binary_search(&resource.class)
+                .is_err()
+            {
+                bail!(
+                    "node resource `{}` uses class `{}` outside its admission allowlist",
+                    resource.stable_id,
+                    resource.class
+                );
+            }
+            previous = Some(&resource.stable_id);
+        }
+        Ok(())
+    }
+}
+
+impl NodeExecutionResourceDescriptor {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_resource_token("node resource stable_id", &self.stable_id)?;
+        validate_resource_token("node resource class", &self.class)?;
+        validate_digest(
+            "node resource observation contract digest",
+            &self.observation_contract_digest,
+        )?;
+        if self.facts.len() > ryeos_engine::contracts::MAX_EXECUTION_RESOURCE_FACTS {
+            bail!("node resource `{}` has too many facts", self.stable_id);
+        }
+        for (name, value) in &self.facts {
+            validate_resource_fact_key(name)?;
+            if let ryeos_engine::contracts::ExecutionResourceFactValue::Text(value) = value {
+                validate_resource_token("node resource fact value", value)?;
+            }
+        }
+        let mut previous: Option<&str> = None;
+        for device in &self.character_devices {
+            device.validate().map_err(anyhow::Error::msg)?;
+            if previous.is_some_and(|candidate| candidate >= device.role.as_str()) {
+                bail!(
+                    "node resource `{}` character-device roles must be sorted and unique",
+                    self.stable_id
+                );
+            }
+            previous = Some(&device.role);
+        }
+        if let Some(accounting) = &self.accounting {
+            accounting.validate().map_err(anyhow::Error::msg)?;
+            if accounting.stable_resource_id != self.stable_id
+                || accounting.resource_class != self.class
+                || accounting.observation_contract_digest.as_str()
+                    != self.observation_contract_digest
+            {
+                bail!(
+                    "node resource `{}` accounting authority contradicts its descriptor",
+                    self.stable_id
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_digest(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("{label} must be a lowercase sha256 digest");
+    }
+    Ok(())
+}
+
+fn validate_resource_token(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > ryeos_engine::contracts::MAX_EXECUTION_RESOURCE_FACT_VALUE_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        bail!("{label} is not a bounded canonical token");
+    }
+    Ok(())
+}
+
+fn validate_resource_fact_key(value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > ryeos_engine::contracts::MAX_EXECUTION_RESOURCE_FACT_KEY_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        bail!("node resource fact is not a bounded canonical key");
+    }
+    Ok(())
+}
+
+impl TypedNodePolicy for NodeExecutionAdmissionPolicy {
+    const SECTION_NAME: &'static str = SECTION_NAME;
+}
+
+pub struct NodeExecutionPolicySection;
+
+impl NodePolicySection for NodeExecutionPolicySection {
+    fn name(&self) -> &'static str {
+        SECTION_NAME
+    }
+
+    fn parse(
+        &self,
+        _context: &NodePolicyContext,
+        body: &Value,
+    ) -> anyhow::Result<Arc<dyn ErasedNodePolicy>> {
+        let record: NodeExecutionAdmissionPolicy =
+            serde_json::from_value(body.clone()).context("parse node execution policy")?;
+        record.validate()?;
+        Ok(Arc::new(record))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_state::external_content::products::producer_recipe::ProducerResourceBounds;
+
+    fn producer_bounds() -> ProducerResourceBounds {
+        ProducerResourceBounds {
+            maximum_wall_time_ms: 1_000,
+            maximum_stdout_bytes: 2_000,
+            maximum_stderr_bytes: 3_000,
+            maximum_memory_bytes: 4_000,
+            maximum_processes: 5,
+        }
+    }
+
+    fn valid_policy() -> NodeExecutionAdmissionPolicy {
+        NodeExecutionAdmissionPolicy {
+            schema: 4,
+            max_live_fanout: 8,
+            max_private_materialization_copy_bytes: 17_179_869_184,
+            host_env_passthrough: Vec::new(),
+            workload_client: None,
+            resource_authority: None,
+            producer_resource_ceiling: None,
+            external_lease_budget: None,
+            external_wall_clock_requirement: None,
+        }
+    }
+
+    fn controller_lease_budget() -> ExternalLeaseBudget {
+        ExternalLeaseBudget {
+            max_concurrent_leases: 2,
+            max_lease_lifetime_seconds: 4 * 60 * 60,
+            daily_lease_seconds: 8 * 60 * 60,
+            turn_end_margin_seconds: 10 * 60,
+        }
+    }
+
+    #[test]
+    fn wall_clock_requirement_is_optional_data_and_names_its_cause() {
+        let policy = valid_policy();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert!(value.get("external_wall_clock_requirement").is_none());
+        let mut required = valid_policy();
+        required.external_wall_clock_requirement = Some(ExternalWallClockRequirement {
+            max_error_us: 50_000,
+        });
+        required.validate().unwrap();
+        let parsed: NodeExecutionAdmissionPolicy =
+            serde_json::from_value(serde_json::to_value(&required).unwrap()).unwrap();
+        assert_eq!(parsed, required);
+        for bad in [0, MAX_EXTERNAL_WALL_CLOCK_ERROR_US + 1] {
+            required.external_wall_clock_requirement =
+                Some(ExternalWallClockRequirement { max_error_us: bad });
+            assert!(required.validate().is_err());
+        }
+
+        let requirement = ExternalWallClockRequirement {
+            max_error_us: 50_000,
+        };
+        requirement
+            .require(&lillux::time::WallClockTrust::Synced {
+                maximum_error_us: 50_000,
+                estimated_error_us: 10,
+            })
+            .unwrap();
+        let too_uncertain = requirement
+            .require(&lillux::time::WallClockTrust::Synced {
+                maximum_error_us: 50_001,
+                estimated_error_us: 10,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            too_uncertain.contains("up to 50001 us") && too_uncertain.contains("allows 50000 us")
+        );
+        let unsynchronized = requirement
+            .require(&lillux::time::WallClockTrust::Unsynchronized)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unsynchronized.contains("is unsynchronized"),
+            "{unsynchronized}"
+        );
+        let unknown = requirement
+            .require(&lillux::time::WallClockTrust::Unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("cannot determine"), "{unknown}");
+    }
+
+    #[test]
+    fn lease_budget_is_optional_data_and_bounded() {
+        let policy = valid_policy();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert!(value.get("external_lease_budget").is_none());
+        let mut with_budget = valid_policy();
+        with_budget.external_lease_budget = Some(controller_lease_budget());
+        with_budget.validate().unwrap();
+        let parsed: NodeExecutionAdmissionPolicy =
+            serde_json::from_value(serde_json::to_value(&with_budget).unwrap()).unwrap();
+        assert_eq!(parsed, with_budget);
+
+        let refused = |change: fn(&mut ExternalLeaseBudget)| {
+            let mut budget = controller_lease_budget();
+            change(&mut budget);
+            budget.validate().err().map(|error| error.to_string())
+        };
+        assert!(
+            refused(|b| b.max_concurrent_leases = 0)
+                .unwrap()
+                .contains("max_concurrent")
+        );
+        assert!(
+            refused(|b| b.max_concurrent_leases = MAX_EXTERNAL_CONCURRENT_LEASES + 1).is_some()
+        );
+        assert!(
+            refused(|b| b.max_lease_lifetime_seconds = 0)
+                .unwrap()
+                .contains("lifetime")
+        );
+        assert!(
+            refused(|b| b.max_lease_lifetime_seconds = MAX_EXTERNAL_LEASE_LIFETIME_SECONDS + 1)
+                .is_some()
+        );
+        assert!(
+            refused(|b| b.daily_lease_seconds = 4 * 60 * 60 - 1)
+                .unwrap()
+                .contains("daily")
+        );
+        // The ceiling is two concurrent day-long leases at the highest
+        // budget weight, in budget seconds.
+        let most = 2
+            * u64::from(MAX_EXTERNAL_LEASE_LIFETIME_SECONDS)
+            * u64::from(ryeos_external_execution_contract::MAX_LEASE_BUDGET_WEIGHT);
+        assert_eq!(most, 2 * 24 * 60 * 60 * 1000);
+        let over = refused(|b| {
+            b.daily_lease_seconds = 2 * 24 * 60 * 60 * 1000 + 1;
+        })
+        .unwrap();
+        assert!(
+            over.contains("budget seconds") && over.contains(&format!("at most {most}")),
+            "{over}"
+        );
+        assert!(refused(|b| b.daily_lease_seconds = 2 * 24 * 60 * 60 * 1000).is_none());
+        assert!(refused(|b| b.daily_lease_seconds = 2 * 24 * 60 * 60 + 1).is_none());
+        assert!(refused(|b| b.daily_lease_seconds = 4 * 60 * 60).is_none());
+        assert!(
+            refused(|b| b.turn_end_margin_seconds = 0)
+                .unwrap()
+                .contains("turn_end_margin")
+        );
+        assert!(refused(|b| b.turn_end_margin_seconds = 4 * 60 * 60).is_some());
+        assert!(refused(|b| b.turn_end_margin_seconds = 4 * 60 * 60 - 1).is_none());
+    }
+
+    #[test]
+    fn limits_are_explicit_and_positive() {
+        let mut policy = valid_policy();
+        assert!(policy.validate().is_ok());
+        policy.max_live_fanout = 0;
+        assert!(policy.validate().is_err());
+        policy = valid_policy();
+        policy.max_private_materialization_copy_bytes = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn host_environment_allowlist_is_canonical() {
+        let mut policy = valid_policy();
+        policy.host_env_passthrough = vec!["PATH".into(), "PATH".into()];
+        assert!(policy.validate().is_err());
+        policy.host_env_passthrough = vec!["Z_VALUE".into(), "A_VALUE".into()];
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn node_trusted_cleanup_contract_omission_denies_and_preserves_identity() {
+        let mut policy = NodeExecutionResourcePolicy {
+            admission: ryeos_engine::contracts::ExecutionResourceAdmissionPolicy {
+                limits: ryeos_engine::contracts::ExecutionTargetLimits {
+                    max_requirements: 1,
+                    max_resource_count: 1,
+                    max_facts_per_requirement: 4,
+                },
+                max_total_resource_count: 1,
+                max_concurrent_exclusive_allocations: 1,
+                allowed_classes: vec!["accelerator".to_owned()],
+                allowed_allocations: vec![
+                    ryeos_engine::contracts::ExecutionResourceAllocation::Exclusive,
+                ],
+                allowed_access: vec![
+                    ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+                ],
+            },
+            cleanup_allowance_ms: 1_000,
+            trusted_cleanup_contract_digest: None,
+            resources: Vec::new(),
+        };
+        let old = serde_json::to_value(&policy).unwrap();
+        assert!(old.get("trusted_cleanup_contract_digest").is_none());
+        let decoded: NodeExecutionResourcePolicy = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(decoded.trusted_cleanup_contract_digest, None);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), old);
+        assert!(policy.validate().is_ok());
+        for invalid in [String::new(), "A".repeat(64), "a".repeat(63)] {
+            policy.trusted_cleanup_contract_digest = Some(invalid);
+            assert!(policy.validate().is_err());
+        }
+        policy.trusted_cleanup_contract_digest = Some("a".repeat(64));
+        assert!(policy.validate().is_ok());
+        assert_ne!(serde_json::to_value(policy).unwrap(), old);
+    }
+
+    #[test]
+    fn absent_resource_authority_is_deny_all() {
+        let policy = valid_policy();
+        let target = ryeos_engine::contracts::ExecutionTargetRequirement {
+            os: std::env::consts::OS.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            resources: vec![ryeos_engine::contracts::ExecutionResourceRequirement {
+                class: "accelerator".to_owned(),
+                count: 1,
+                allocation: ryeos_engine::contracts::ExecutionResourceAllocation::Exclusive,
+                access: ryeos_engine::contracts::ExecutionResourceAccess::ExecutionRestricted,
+                exact_facts: Default::default(),
+                minimum_facts: Default::default(),
+            }],
+        };
+        assert!(policy.admit_execution_target(Some(&target)).is_err());
+    }
+
+    #[test]
+    fn producer_ceiling_is_required_nullable_and_positive() {
+        let mut value = serde_json::to_value(valid_policy()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("producer_resource_ceiling");
+        assert!(serde_json::from_value::<NodeExecutionAdmissionPolicy>(value).is_err());
+
+        let mut policy = valid_policy();
+        assert!(policy.admit_producer_bounds(&producer_bounds()).is_err());
+        policy.producer_resource_ceiling = Some(producer_bounds());
+        assert!(policy.validate().is_ok());
+        policy
+            .producer_resource_ceiling
+            .as_mut()
+            .unwrap()
+            .maximum_processes = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn producer_bounds_may_narrow_but_never_widen_any_node_ceiling() {
+        let mut policy = valid_policy();
+        let ceiling = producer_bounds();
+        policy.producer_resource_ceiling = Some(ceiling.clone());
+        assert!(policy.admit_producer_bounds(&ceiling).is_ok());
+
+        let mut narrower = ceiling.clone();
+        narrower.maximum_wall_time_ms -= 1;
+        narrower.maximum_stdout_bytes -= 1;
+        narrower.maximum_stderr_bytes -= 1;
+        narrower.maximum_memory_bytes -= 1;
+        narrower.maximum_processes -= 1;
+        assert!(policy.admit_producer_bounds(&narrower).is_ok());
+
+        let mut wider = ceiling.clone();
+        wider.maximum_wall_time_ms += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+        wider = ceiling.clone();
+        wider.maximum_stdout_bytes += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+        wider = ceiling.clone();
+        wider.maximum_stderr_bytes += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+        wider = ceiling.clone();
+        wider.maximum_memory_bytes += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+        wider = ceiling;
+        wider.maximum_processes += 1;
+        assert!(policy.admit_producer_bounds(&wider).is_err());
+    }
+
+    #[test]
+    fn authored_source_profiles_use_the_current_execution_policy_contract() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let profile_dir = repository.join("bundles/.ai/node/init/profiles");
+        let mut profiles = std::fs::read_dir(&profile_dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                assert!(entry.file_type().unwrap().is_file());
+                let path = entry.path();
+                assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("yaml"));
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        profiles.sort();
+        assert_eq!(
+            profiles.len(),
+            15,
+            "update init-profile policy expectations"
+        );
+
+        for profile in profiles {
+            let path = repository.join(format!("bundles/.ai/node/init/profiles/{profile}.yaml"));
+            let source = std::fs::read_to_string(&path).unwrap();
+            let document: serde_json::Value = serde_yaml::from_str(&source).unwrap();
+            let policy: NodeExecutionAdmissionPolicy =
+                serde_json::from_value(document["policies"]["execution"].clone()).unwrap();
+            policy.validate().unwrap();
+            assert_eq!(policy.schema, 4, "{}", path.display());
+            match profile.as_str() {
+                "standard" | "contained-workflow" | "development" | "release-authority" => {
+                    assert!(policy.producer_resource_ceiling.is_some(), "{profile}");
+                }
+                "central-host"
+                | "standard-central-auth"
+                | "local-inference"
+                | "hosted-node"
+                | "hosted-workflow"
+                | "hosted-controller"
+                | "bundle-source"
+                | "core"
+                | "core-knowledge"
+                | "core-scheduling"
+                | "core-workflow" => {
+                    assert!(policy.producer_resource_ceiling.is_none(), "{profile}");
+                }
+                _ => panic!("add an explicit producer-admission expectation for {profile}"),
+            }
+            // Only the remote-authoring controller creates leases, with the
+            // qualification ceiling: two concurrent leases of at most four
+            // hours, about eight lease-hours a day, and ten minutes of each
+            // lease kept free after a turn's deadline.
+            if profile == "hosted-controller" {
+                assert_eq!(
+                    policy.external_lease_budget,
+                    Some(controller_lease_budget()),
+                    "{profile}"
+                );
+            } else {
+                assert!(policy.external_lease_budget.is_none(), "{profile}");
+            }
+        }
+    }
+}

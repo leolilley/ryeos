@@ -21,6 +21,11 @@ on:
         required: false
         default: ""
         type: string
+      dry_run:
+        description: "Rehearse the release without publishing: build every artifact and image, run every build-time check, publish nothing. `version` must equal the branch's workspace version."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -37,6 +42,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
       build_date: ${{ steps.source.outputs.build_date }}
       source_sha: ${{ steps.source.outputs.sha }}
       source_date_epoch: ${{ steps.source.outputs.source_date_epoch }}
@@ -57,35 +63,60 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           REQUESTED_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           VERSION="$(scripts/release/resolve-version.sh \
             "$EVENT_NAME" "$REF_NAME" "$REQUESTED_VERSION")"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION"
+          PRERELEASE="$(scripts/release/resolve-version.sh \
+            "$EVENT_NAME" "$REF_NAME" "$REQUESTED_VERSION" --prerelease)"
+          # A rehearsal is never a stable release, whatever version it builds.
+          if [[ "$DRY_RUN" == true ]]; then
+            PRERELEASE=true
+          fi
+          {
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION (prerelease=$PRERELEASE)"
 
       - name: Check out immutable release tag
+        if: ${{ !inputs.dry_run }}
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: refs/tags/v${{ steps.release.outputs.version }}
 
+      - name: Check workspace crate versions match the release version
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          python3 -B scripts/release/check-workspace-versions.py "$VERSION" \
+            --manifests scripts/release/versioned-crates.txt
+
       - name: Resolve and verify source revision
         id: source
         env:
           VERSION: ${{ steps.release.outputs.version }}
           RECOVERY_BUILD_DATE: ${{ inputs.recovery_build_date }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           git fetch --force --tags
           SOURCE_SHA="$(git rev-parse HEAD)"
           TAG="v${VERSION}"
-          if ! TAG_COMMIT="$(git rev-parse --verify "${TAG}^{commit}")"; then
-            echo "::error::Release tag $TAG does not exist"
-            exit 1
-          fi
-          if [ "$SOURCE_SHA" != "$TAG_COMMIT" ]; then
-            echo "::error::Release source mismatch: checked-out HEAD $SOURCE_SHA != $TAG $TAG_COMMIT"
-            exit 1
+          if [[ "$DRY_RUN" == true ]]; then
+            # A rehearsal builds the dispatched revision itself; no tag is
+            # required, and none is ever created.
+            TAG_COMMIT="$SOURCE_SHA"
+          else
+            if ! TAG_COMMIT="$(git rev-parse --verify "${TAG}^{commit}")"; then
+              echo "::error::Release tag $TAG does not exist"
+              exit 1
+            fi
+            if [ "$SOURCE_SHA" != "$TAG_COMMIT" ]; then
+              echo "::error::Release source mismatch: checked-out HEAD $SOURCE_SHA != $TAG $TAG_COMMIT"
+              exit 1
+            fi
           fi
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$TAG_COMMIT")"
           if [[ -n "$RECOVERY_BUILD_DATE" ]]; then
@@ -146,6 +177,7 @@ jobs:
             --require-promoted
 
       - name: Resolve immutable bundle assets
+        if: ${{ !inputs.dry_run }}
         id: bundle-assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -203,6 +235,7 @@ jobs:
           echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
 
       - name: Resolve immutable workload-client realization assets
+        if: ${{ !inputs.dry_run }}
         id: workload-client-assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -252,6 +285,47 @@ jobs:
           echo "archive_exists=$ARCHIVE_EXISTS" >> "$GITHUB_OUTPUT"
           echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve immutable node binary assets
+        if: ${{ !inputs.dry_run }}
+        id: node-binary-assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          ARCHIVE="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-node-binaries-artifacts"
+          ARCHIVE_EXISTS=false
+          CHECKSUM_EXISTS=false
+          [[ ! -e "$ARTIFACT_DIR" ]] || {
+            echo "::error::Node binary artifact workspace already exists: $ARTIFACT_DIR"
+            exit 1
+          }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING_ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+            ARCHIVE_COUNT="$(grep -Fxc "$ARCHIVE" <<<"$EXISTING_ASSETS" || true)"
+            CHECKSUM_COUNT="$(grep -Fxc "$CHECKSUM" <<<"$EXISTING_ASSETS" || true)"
+            if (( ARCHIVE_COUNT > 1 || CHECKSUM_COUNT > 1 )); then
+              echo "::error::Duplicate immutable node binary assets exist for $TAG"
+              exit 1
+            fi
+            if (( ARCHIVE_COUNT == 1 )); then ARCHIVE_EXISTS=true; fi
+            if (( CHECKSUM_COUNT == 1 )); then CHECKSUM_EXISTS=true; fi
+          fi
+          if [[ "$CHECKSUM_EXISTS" != "$ARCHIVE_EXISTS" ]]; then
+            echo "::error::Unsafe partial node binary release state for $TAG; refusing regeneration"
+            exit 1
+          fi
+          if [[ "$ARCHIVE_EXISTS" == true ]]; then
+            mkdir "$ARTIFACT_DIR"
+            gh release download "$TAG" --dir "$ARTIFACT_DIR" --pattern "$ARCHIVE"
+            gh release download "$TAG" --dir "$ARTIFACT_DIR" --pattern "$CHECKSUM"
+            (cd "$ARTIFACT_DIR" && sha256sum --check "$CHECKSUM")
+          fi
+          echo "archive_exists=$ARCHIVE_EXISTS" >> "$GITHUB_OUTPUT"
+          echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
+
       - name: Assert publisher key secret exists
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
@@ -295,6 +369,7 @@ jobs:
       # credentials are needed before that solve can publish image outputs;
       # provenance and signatures are checked against the pushed digests below.
       - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -302,6 +377,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cosign
+        if: ${{ !inputs.dry_run }}
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Resolve immutable image tags
@@ -310,6 +386,7 @@ jobs:
           VERSION: ${{ needs.qualify.outputs.version }}
           SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
           BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           resolve_tag() {
             local tag="$1"
@@ -356,6 +433,16 @@ jobs:
             echo "local_inference_candidate_tag=$LOCAL_INFERENCE_CANDIDATE"
             echo "hosted_workflow_candidate_tag=$HOSTED_WORKFLOW_CANDIDATE"
           } >> "$GITHUB_OUTPUT"
+          if [[ "$DRY_RUN" == true ]]; then
+            # A rehearsal never queries the registry: every image is built.
+            for prefix in standard central local_inference hosted_workflow; do
+              {
+                echo "${prefix}_exists=false"
+                echo "${prefix}_digest="
+              } >> "$GITHUB_OUTPUT"
+            done
+            exit 0
+          fi
           resolve_tag "$STANDARD_VERSION" standard
           resolve_tag "$CENTRAL_VERSION" central
           resolve_tag "$LOCAL_INFERENCE_VERSION" local_inference
@@ -366,6 +453,7 @@ jobs:
         env:
           ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
           WORKLOAD_CLIENT_ARCHIVE_EXISTS: ${{ steps.workload-client-assets.outputs.archive_exists }}
+          NODE_BINARIES_ARCHIVE_EXISTS: ${{ steps.node-binary-assets.outputs.archive_exists }}
           STANDARD_EXISTS: ${{ steps.resolve-images.outputs.standard_exists }}
           CENTRAL_EXISTS: ${{ steps.resolve-images.outputs.central_exists }}
           LOCAL_INFERENCE_EXISTS: ${{ steps.resolve-images.outputs.local_inference_exists }}
@@ -374,6 +462,7 @@ jobs:
           targets=()
           [[ "$ARCHIVE_EXISTS" == true ]] || targets+=(bundle-artifact)
           [[ "$WORKLOAD_CLIENT_ARCHIVE_EXISTS" == true ]] || targets+=(workload-client-artifact)
+          [[ "$NODE_BINARIES_ARCHIVE_EXISTS" == true ]] || targets+=(node-binaries-artifact)
           [[ "$STANDARD_EXISTS" == true ]] || targets+=(standard)
           [[ "$CENTRAL_EXISTS" == true ]] || targets+=(central-host)
           [[ "$LOCAL_INFERENCE_EXISTS" == true ]] || targets+=(local-inference)
@@ -397,6 +486,13 @@ jobs:
           source: .
           files: ./docker-bake.release.hcl
           targets: ${{ steps.release-plan.outputs.targets }}
+          # A rehearsal builds every image so each build-time check runs, but
+          # exports none of them to a registry.
+          set: |
+            ${{ inputs.dry_run && 'standard.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'central-host.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'local-inference.output=type=cacheonly' || '' }}
+            ${{ inputs.dry_run && 'hosted-workflow.output=type=cacheonly' || '' }}
           vars: |
             VERSION=${{ needs.qualify.outputs.version }}
             SOURCE_DATE_EPOCH=${{ needs.qualify.outputs.source_date_epoch }}
@@ -404,12 +500,14 @@ jobs:
             BUILD_DATE=${{ needs.qualify.outputs.build_date }}
             ARTIFACT_DIR=${{ runner.temp }}/ryeos-release-artifacts
             WORKLOAD_CLIENT_ARTIFACT_DIR=${{ runner.temp }}/ryeos-workload-client-artifacts
+            NODE_BINARIES_ARTIFACT_DIR=${{ runner.temp }}/ryeos-node-binaries-artifacts
             STANDARD_TAG=${{ steps.resolve-images.outputs.standard_candidate_tag }}
             CENTRAL_HOST_TAG=${{ steps.resolve-images.outputs.central_candidate_tag }}
             LOCAL_INFERENCE_TAG=${{ steps.resolve-images.outputs.local_inference_candidate_tag }}
             HOSTED_WORKFLOW_TAG=${{ steps.resolve-images.outputs.hosted_workflow_candidate_tag }}
 
       - name: Resolve newly baked candidate digests
+        if: ${{ !inputs.dry_run }}
         id: baked-digests
         env:
           BAKE_METADATA: ${{ steps.release-build.outputs.metadata }}
@@ -423,11 +521,55 @@ jobs:
             echo "hosted_workflow=$(jq -r '.["hosted-workflow"]["containerimage.digest"] // empty' <<<"$METADATA")"
           } >> "$GITHUB_OUTPUT"
 
+      # Rehearsal only: the checks the publish steps run on the freshly built
+      # artifacts before uploading them, run here against the local artifact
+      # directories, so a failure shows up without a release.
+      - name: Verify locally built artifacts (dry run)
+        if: ${{ inputs.dry_run }}
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+          BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ needs.qualify.outputs.source_date_epoch }}
+        run: |
+          BUNDLE_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
+          BUNDLE="$BUNDLE_DIR/ryeos-bundles-${VERSION}-x86_64.tar.gz"
+          test -s "$BUNDLE"
+          test -s "$BUNDLE.sha256"
+          scripts/release/verify-bundle-artifact.sh \
+            --version "$VERSION" \
+            --archive "$BUNDLE" \
+            --checksum "$BUNDLE.sha256"
+
+          WORKLOAD="$RUNNER_TEMP/ryeos-workload-client-artifacts/ryeos-workload-client-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          test -s "$WORKLOAD"
+          test -s "$WORKLOAD.sha256"
+          scripts/release/verify-workload-client-realization.sh \
+            --version "$VERSION" \
+            --source-revision "$SOURCE_SHA" \
+            --build-date "$BUILD_DATE" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --archive "$WORKLOAD" \
+            --checksum "$WORKLOAD.sha256"
+
+          NODE_DIR="$RUNNER_TEMP/ryeos-node-binaries-artifacts"
+          NAME="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu"
+          NODE="$NODE_DIR/${NAME}.tar.gz"
+          test -s "$NODE"
+          test -s "$NODE.sha256"
+          EXPECTED_LISTING="$(printf '%s\n' "${NAME}/" "${NAME}/LICENSE" "${NAME}/bin/" "${NAME}/bin/ryeos" "${NAME}/bin/ryeosd")"
+          [[ "$(tar -tzf "$NODE" | LC_ALL=C sort)" == "$(LC_ALL=C sort <<<"$EXPECTED_LISTING")" ]] || {
+            echo "::error::Node binary archive has unexpected contents"
+            exit 1
+          }
+          (cd "$NODE_DIR" && sha256sum --check "$(basename "$NODE.sha256")")
+
       # Sign the exact digests returned by this authorized solve before any
       # later publication step. Candidate tags are mutable staging locations,
       # never recovery authority: every retry whose immutable image is absent
       # overwrites the candidate and uses only the current Bake's digest.
       - name: Cosign newly baked image candidates
+        if: ${{ !inputs.dry_run }}
         env:
           COSIGN_EXPERIMENTAL: "true"
           STANDARD_DIGEST: ${{ steps.baked-digests.outputs.standard }}
@@ -447,9 +589,11 @@ jobs:
           done
 
       - name: Publish immutable official bundle assets
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.qualify.outputs.version }}
+          PRERELEASE: ${{ needs.qualify.outputs.prerelease }}
           ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
           CHECKSUM_EXISTS: ${{ steps.bundle-assets.outputs.checksum_exists }}
         run: |
@@ -464,10 +608,15 @@ jobs:
             --archive "$ARCHIVE" \
             --checksum "$CHECKSUM"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
+            PRERELEASE_FLAG=()
+            if [[ "$PRERELEASE" == true ]]; then
+              PRERELEASE_FLAG=(--prerelease)
+            fi
             gh release create "$TAG" \
               --verify-tag \
               --title "RyeOS ${VERSION}" \
-              --generate-notes
+              --generate-notes \
+              "${PRERELEASE_FLAG[@]}"
           fi
           # Archive-first publication keeps interrupted upload recovery safe.
           # Existing canonical bytes are never overwritten.
@@ -490,6 +639,7 @@ jobs:
             --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
 
       - name: Publish immutable workload-client realization assets
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.qualify.outputs.version }}
@@ -533,7 +683,47 @@ jobs:
             --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
             --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
 
+      - name: Publish immutable node binary assets
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+          ARCHIVE_EXISTS: ${{ steps.node-binary-assets.outputs.archive_exists }}
+          CHECKSUM_EXISTS: ${{ steps.node-binary-assets.outputs.checksum_exists }}
+        run: |
+          TAG="v${VERSION}"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-node-binaries-artifacts"
+          NAME="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu"
+          ARCHIVE="$ARTIFACT_DIR/${NAME}.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          test -s "$ARCHIVE"
+          test -s "$CHECKSUM"
+          # The archive holds exactly the node pair and the license, under one
+          # versioned directory, and the checksum names the archive it sits by.
+          EXPECTED_LISTING="$(printf '%s\n' "${NAME}/" "${NAME}/LICENSE" "${NAME}/bin/" "${NAME}/bin/ryeos" "${NAME}/bin/ryeosd")"
+          [[ "$(tar -tzf "$ARCHIVE" | LC_ALL=C sort)" == "$(LC_ALL=C sort <<<"$EXPECTED_LISTING")" ]] || {
+            echo "::error::Node binary archive has unexpected contents"
+            exit 1
+          }
+          (cd "$ARTIFACT_DIR" && sha256sum --check "$(basename "$CHECKSUM")")
+          if [[ "$ARCHIVE_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$ARCHIVE"
+          fi
+          if [[ "$CHECKSUM_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$CHECKSUM"
+          fi
+
+          PUBLISHED_DIR="$RUNNER_TEMP/verified-published-node-binaries"
+          [[ ! -e "$PUBLISHED_DIR" ]]
+          mkdir "$PUBLISHED_DIR"
+          gh release download "$TAG" --dir "$PUBLISHED_DIR" \
+            --pattern "$(basename "$ARCHIVE")" \
+            --pattern "$(basename "$CHECKSUM")"
+          (cd "$PUBLISHED_DIR" && sha256sum --check "$(basename "$CHECKSUM")")
+          cmp "$ARCHIVE" "$PUBLISHED_DIR/$(basename "$ARCHIVE")"
+
       - name: Resolve release image digests
+        if: ${{ !inputs.dry_run }}
         id: release-digests
         env:
           EXISTING_STANDARD: ${{ steps.resolve-images.outputs.standard_digest }}
@@ -569,6 +759,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Authenticate recovered immutable image digests before inspection
+        if: ${{ !inputs.dry_run }}
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
@@ -608,6 +799,7 @@ jobs:
           authenticate_recovered "ghcr.io/leolilley/ryeos-hosted-workflow@${HOSTED_WORKFLOW_DIGEST}" "$HOSTED_WORKFLOW_CURRENT"
 
       - name: Verify release image provenance and SBOM attestations
+        if: ${{ !inputs.dry_run }}
         env:
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
@@ -634,6 +826,7 @@ jobs:
           done
 
       - name: Verify release image signatures
+        if: ${{ !inputs.dry_run }}
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
@@ -673,6 +866,7 @@ jobs:
       # build/verification check-use window and fails rather than overwriting
       # any version tag observed here.
       - name: Promote verified digests to immutable versions
+        if: ${{ !inputs.dry_run }}
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
@@ -712,6 +906,7 @@ jobs:
           promote_immutable ryeos-hosted-workflow "$HOSTED_WORKFLOW_DIGEST" "$HOSTED_WORKFLOW_EXISTED"
 
       - name: Verify immutable tag bindings
+        if: ${{ !inputs.dry_run }}
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
@@ -738,6 +933,7 @@ jobs:
       # Mutable image tags move only after all immutable images and the native
       # bundle artifact have passed verification and publication.
       - name: Promote verified images to latest
+        if: ${{ !inputs.dry_run && needs.qualify.outputs.prerelease != 'true' }}
         env:
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}

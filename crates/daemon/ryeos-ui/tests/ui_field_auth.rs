@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_ui::test_support as test_state;
 
 use std::sync::Arc;
 
@@ -62,7 +62,7 @@ fn append_fixture_event(
             &[NewEventRecord {
                 event_type: "cognition_in".to_string(),
                 storage_class: "indexed".to_string(),
-                payload: serde_json::json!({"content": "fixture"}),
+                payload: serde_json::json!({"origin": "operator", "parts": [{"type": "text", "text": "fixture"}]}),
             }],
         )
         .unwrap()
@@ -72,7 +72,7 @@ fn append_fixture_event(
 
 #[tokio::test]
 async fn every_field_handler_rejects_before_parsing_an_unauthenticated_request() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let state = Arc::new(state);
     let unauthenticated = HandlerContext::new("anonymous:test".to_string(), Vec::new(), false);
     let malformed = serde_json::json!({"not": "a valid request for any field handler"});
@@ -96,7 +96,7 @@ async fn every_field_handler_rejects_before_parsing_an_unauthenticated_request()
 
 #[tokio::test]
 async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let operator = local_operator_context(&state, Vec::new());
     create_running_thread(&state, "T-selected", &operator.fingerprint);
     create_running_thread(&state, "T-foreign", &operator.fingerprint);
@@ -121,7 +121,7 @@ async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() 
     )
     .await
     .expect_err("a foreign braid must not become the selected cut");
-    assert!(format!("{cross_chain:#}").contains("outside the selected execution closure"));
+    assert!(format!("{cross_chain:#}").contains("outside the authorized execution closure"));
 
     let hash_mismatch = (ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler)(
         serde_json::json!({
@@ -144,8 +144,32 @@ async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() 
 }
 
 #[tokio::test]
+async fn admitted_operator_cannot_read_a_foreign_signed_thread() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let operator = local_operator_context(&state, Vec::new());
+    let foreign = format!("fp:{}", "f".repeat(64));
+    assert_ne!(foreign, operator.fingerprint);
+    create_running_thread(&state, "T-foreign-owner", &foreign);
+    let event = append_fixture_event(&state, "T-foreign-owner");
+    let error = (ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler)(
+        serde_json::json!({
+            "thread_id":"T-foreign-owner",
+            "cursor":{"mode":"braid_cut","anchor":{
+                "chain_root_id":event.chain_root_id,"chain_seq":event.chain_seq,"event_hash":event.event_hash
+            }}
+        }),
+        operator,
+        Arc::new(state),
+    ).await.expect_err("operator authentication does not grant another principal's projectless thread");
+    assert!(matches!(
+        error.downcast_ref::<ryeos_app::handler_error::HandlerError>(),
+        Some(ryeos_app::handler_error::HandlerError::NotFound)
+    ));
+}
+
+#[tokio::test]
 async fn execution_handler_applies_expansion_to_a_valid_braid_cut() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let operator = local_operator_context(&state, Vec::new());
     create_running_thread(&state, "T-cut", &operator.fingerprint);
     let event = append_fixture_event(&state, "T-cut");

@@ -5,6 +5,7 @@
 //! realization.  The daemon may pool a process admitted by this capsule; the
 //! owning adapter assigns meaning to request and response bodies.
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +36,23 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // executable product selection is not a substitute for placement qualification.
 // v18 also binds the published product owner's principal, so retained proof
 // authentication never guesses the owner from a later node configuration.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 18;
+// v21 retains the signed finite configuration-absence inventory.
+// Missing predecessor inventory is never interpreted as an empty policy.
+// v22 requires the same byte-bounded BundleExecutor member-source proof as
+// admitted launch capsules; signed init-v2 remains an independent wire contract.
+// v24 makes the remote-testimony lane of the guest-runtime proof an explicit
+// required-nullable field; a local qualification is never inferred from absence.
+// v25 retains remote qualification acceptance evidence v4, and a remote
+// runtime-content testimony retains the receiver's own activation join (its
+// receipt, binding and node) beside the origin's evidence. A v24 capsule's
+// acceptance stated a different contract and is not reinterpreted.
+// v26 adds the `delivered_secret` process-environment kind: the capsule names
+// a secret the session owner's admitted environment authority delivers at
+// session start; the value is never retained.
+// v27 freezes the worker kind's signed `max_lifetime_seconds_ceiling` in the
+// lifecycle contract; a v26 capsule has no ceiling and is not reinterpreted.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 27;
+pub const MAX_PERSISTENT_SESSION_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -309,6 +326,11 @@ fn validate_portable_state_pattern(pattern: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Sanity bound (seven days) on the signed request, idle and lifetime values a
+/// lifecycle contract may freeze. The kind's signed ceilings govern; this only
+/// rejects values no node could honour.
+const SESSION_TIME_SANITY_SECONDS: u64 = 7 * 24 * 60 * 60;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionLifecycleContract {
@@ -321,6 +343,10 @@ pub struct PersistentSessionLifecycleContract {
     pub ready_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub idle_timeout_ms: u64,
+    /// The worker kind's signed ceiling on the lifetime a launch may state
+    /// for this session, in seconds. Frozen here so every later reader judges
+    /// the launch's stated lifetime against the same signed value.
+    pub max_lifetime_seconds_ceiling: u64,
 }
 
 impl PersistentSessionLifecycleContract {
@@ -337,9 +363,11 @@ impl PersistentSessionLifecycleContract {
             || self.ready_timeout_ms == 0
             || self.ready_timeout_ms > 10 * 60 * 1000
             || self.request_timeout_ms == 0
-            || self.request_timeout_ms > 60 * 60 * 1000
+            || self.request_timeout_ms > SESSION_TIME_SANITY_SECONDS * 1000
             || self.idle_timeout_ms == 0
-            || self.idle_timeout_ms > 24 * 60 * 60 * 1000
+            || self.idle_timeout_ms > SESSION_TIME_SANITY_SECONDS * 1000
+            || self.max_lifetime_seconds_ceiling == 0
+            || self.max_lifetime_seconds_ceiling > SESSION_TIME_SANITY_SECONDS
         {
             anyhow::bail!("persistent-session lifecycle contract is outside substrate bounds");
         }
@@ -420,7 +448,7 @@ impl ExecutableSearchPathEntry {
         }
         if self.relative_directory != "." {
             super::validate_canonical_project_relative_path(&self.relative_directory)
-                .map_err(|error| anyhow::anyhow!("executable-search directory: {error}"))?;
+                .map_err(|error| anyhow::anyhow!("executable-search directory: {error:#}"))?;
         }
         Ok(())
     }
@@ -444,7 +472,42 @@ pub enum SessionProcessEnvironmentValue {
     RuntimeViewDirectory {
         relative_path: String,
     },
+    /// A secret named here, delivered at session start under the session
+    /// owner's admitted environment authority. Only the name is retained; the
+    /// value reaches the bridge on a descriptor and never enters the capsule,
+    /// the plan or the prepared environment.
+    DeliveredSecret {
+        name: String,
+    },
 }
+
+impl SessionProcessEnvironmentValue {
+    pub fn delivered_secret_name(&self) -> Option<&str> {
+        match self {
+            Self::DeliveredSecret { name } => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// The secret names a retained environment asks to have delivered, sorted and
+/// distinct.
+pub fn session_process_environment_delivered_secret_names(
+    environment: &BTreeMap<String, SessionProcessEnvironmentValue>,
+) -> Vec<String> {
+    let names: std::collections::BTreeSet<String> = environment
+        .values()
+        .filter_map(SessionProcessEnvironmentValue::delivered_secret_name)
+        .map(str::to_owned)
+        .collect();
+    names.into_iter().collect()
+}
+
+/// Upper bound on the distinct delivered secrets one session may name.
+pub const MAX_SESSION_DELIVERED_SECRETS: usize = 8;
+/// Upper bound on one delivered secret value. A larger value is refused at
+/// delivery rather than truncated.
+pub const MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -572,7 +635,21 @@ pub fn validate_session_process_environment(
             SessionProcessEnvironmentValue::RuntimeViewDirectory { relative_path } => {
                 validate_session_process_environment_relative_path(relative_path)?;
             }
+            SessionProcessEnvironmentValue::DeliveredSecret { name } => {
+                validate_session_process_environment_name(name).map_err(|_| {
+                    anyhow::anyhow!(
+                        "session process environment delivered secret name is protected or invalid"
+                    )
+                })?;
+            }
         }
+    }
+    if session_process_environment_delivered_secret_names(environment).len()
+        > MAX_SESSION_DELIVERED_SECRETS
+    {
+        anyhow::bail!(
+            "session process environment names more than {MAX_SESSION_DELIVERED_SECRETS} delivered secrets"
+        );
     }
     let encoded = serde_json::to_vec(environment)?;
     if encoded.len() > MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES {
@@ -622,7 +699,7 @@ pub fn validate_session_process_environment_name(name: &str) -> anyhow::Result<(
 pub fn validate_session_process_environment_relative_path(path: &str) -> anyhow::Result<()> {
     if path != "." {
         super::validate_canonical_project_relative_path(path)
-            .map_err(|error| anyhow::anyhow!("session process environment path: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("session process environment path: {error:#}"))?;
     }
     Ok(())
 }
@@ -640,6 +717,27 @@ impl PersistentSessionAuthority {
         self.wire.validate()?;
         self.artifact_identity.validate()?;
         self.execution_closure.validate()?;
+        if let (
+            AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                execution_plan_hash,
+                executable_identity,
+                ..
+            },
+            AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. },
+        ) = (&self.artifact_identity, &self.execution_closure)
+        {
+            let canonical_plan = lillux::canonical_json_bounded(
+                execution_plan,
+                MAX_PERSISTENT_SESSION_CAPSULE_BYTES,
+            )?;
+            if lillux::sha256_hex(&canonical_plan) != *execution_plan_hash {
+                anyhow::bail!("persistent-session execution plan contradicts artifact identity");
+            }
+            super::admitted_launch_capsule::validate_bundle_executor_plan_proof(
+                execution_plan,
+                executable_identity,
+            )?;
+        }
         if self.artifact_identity.launch_driver() != ExecutionLaunchDriver::DirectItemExecutor
             || self.execution_closure.launch_driver() != ExecutionLaunchDriver::DirectItemExecutor
         {
@@ -695,6 +793,28 @@ pub struct RetainedExternalRuntimeQualification {
     pub guest_runtime_manifest_hash: String,
     pub owner_principal: String,
     pub proof: crate::external_content::products::composition::AdmittedProductQualification,
+    /// Required nullable: `Some` marks the proof as a remote testimony accepted
+    /// under local policy; `proof.evidence` stays the origin's evidence.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub remote_testimony: Option<RetainedRemoteQualificationTestimony>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedRemoteQualificationTestimony {
+    pub acceptance_hash: String,
+    pub acceptance:
+        crate::external_content::products::qualification_testimony::RemoteQualificationAcceptanceEvidence,
+}
+
+impl RetainedRemoteQualificationTestimony {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        super::thread_snapshot::validate_canonical_hash(
+            "remote qualification acceptance",
+            &self.acceptance_hash,
+        )?;
+        self.acceptance.validate()
+    }
 }
 
 impl RetainedExternalRuntimeQualification {
@@ -719,6 +839,93 @@ impl RetainedExternalRuntimeQualification {
         if self.proof.evidence.result.subject_manifest_hash != self.guest_runtime_manifest_hash {
             anyhow::bail!("retained external runtime proof differs from guest manifest");
         }
+        if let Some(testimony) = &self.remote_testimony {
+            testimony.validate()?;
+            let verified = testimony.acceptance.verify()?;
+            if verified.evidence.product()? != &self.proof.evidence
+                || verified.body.qualification_attestation_hash != self.proof.attestation_hash
+                || verified.testimony.issuer != self.owner_principal
+            {
+                anyhow::bail!("retained remote testimony differs from the retained runtime proof");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Historical session-runtime compatibility testimony, not guest-owner
+/// snapshot qualification or a renewed permission for provider contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedExternalRuntimeContentQualification {
+    pub binding_hash: String,
+    pub runtime_manifest_hash: String,
+    pub activation_ref: String,
+    pub coordinate_id: String,
+    pub attestation_hash: String,
+    pub evidence: crate::external_content::qualification_evidence::ContentQualificationEvidence,
+    /// Required nullable: `Some` marks the content as a remote testimony
+    /// accepted under local policy; `attestation_hash`, `coordinate_id` and
+    /// `evidence` then stay the origin's, and the testimony's activation ref
+    /// is this ref.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub remote_testimony: Option<RetainedRemoteQualificationTestimony>,
+    /// Required nullable, present exactly with `remote_testimony`: the
+    /// receiver's own activation of the content the origin qualified, as its
+    /// launch authenticated it. The origin's evidence names the origin's
+    /// receipt, binding and node; this names this node's. A local
+    /// qualification's evidence already names the local join, so it is null.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub receiver_join:
+        Option<crate::external_content::qualification_subject::ContentQualificationLocalJoin>,
+}
+
+impl RetainedExternalRuntimeContentQualification {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (label, hash) in [
+            ("runtime content binding", &self.binding_hash),
+            ("runtime content manifest", &self.runtime_manifest_hash),
+            ("runtime content coordinate", &self.coordinate_id),
+            ("runtime content attestation", &self.attestation_hash),
+        ] {
+            super::thread_snapshot::validate_canonical_hash(label, hash)?;
+        }
+        crate::external_content::products::validate_canonical_unsuffixed_ref(
+            "retained runtime activation ref",
+            &self.activation_ref,
+        )?;
+        if !self.activation_ref.starts_with("config:") {
+            anyhow::bail!("retained runtime content requires an activation config ref");
+        }
+        self.evidence.validate()?;
+        if self.evidence.result.subject_manifest_hash != self.runtime_manifest_hash
+            || crate::external_content::qualification_publication::coordinate_id(&self.evidence)?
+                != self.coordinate_id
+        {
+            anyhow::bail!("retained session-runtime content differs from its exact testimony");
+        }
+        if self.remote_testimony.is_some() != self.receiver_join.is_some() {
+            anyhow::bail!(
+                "retained runtime content carries a receiver join exactly for a remote testimony"
+            );
+        }
+        if let Some(join) = &self.receiver_join {
+            join.validate()?;
+        }
+        if let Some(testimony) = &self.remote_testimony {
+            testimony.validate()?;
+            let verified = testimony.acceptance.verify()?;
+            if verified.evidence.content()? != &self.evidence
+                || verified.body.qualification_attestation_hash != self.attestation_hash
+                || verified.coordinate_id != self.coordinate_id
+                || verified.body.activation_ref.as_deref() != Some(self.activation_ref.as_str())
+                || verified.testimony.issuer != self.evidence.purpose.owner_fingerprint
+            {
+                anyhow::bail!(
+                    "retained remote testimony differs from the retained runtime content"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -741,6 +948,9 @@ pub struct AdmittedPersistentSessionCapsule {
     /// Separate CAS-owned proof of the placement guest runtime, if applicable.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub retained_external_runtime_qualification: Option<RetainedExternalRuntimeQualification>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub retained_external_runtime_content_qualification:
+        Option<RetainedExternalRuntimeContentQualification>,
     pub lifecycle: PersistentSessionLifecycleContract,
     pub wire: PersistentSessionWireContract,
     pub artifact_identity: AdmittedLaunchArtifactIdentity,
@@ -825,16 +1035,21 @@ impl AdmittedPersistentSessionCapsule {
         if !self.exact_program.is_object() {
             anyhow::bail!("persistent-session exact program must be an object");
         }
-        let canonical = lillux::canonical_json(&self.exact_program)?;
+        let canonical = lillux::canonical_json_bounded(
+            &self.exact_program,
+            MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
+        )?;
         if canonical.len() > MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES {
             anyhow::bail!("persistent-session exact program exceeds its retained byte bound");
         }
-        let observed = lillux::sha256_hex(canonical.as_bytes());
+        let observed = lillux::sha256_hex(&canonical);
         if observed != self.exact_program_hash {
             anyhow::bail!("persistent-session exact program hash mismatch");
         }
         let retained = self.retained_exact_program()?;
-        if lillux::canonical_json(&retained)?.len() > MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES {
+        if lillux::canonical_json_bounded(&retained, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES)
+            .is_err()
+        {
             anyhow::bail!("persistent-session retained program exceeds its byte bound");
         }
         self.authority().validate()?;
@@ -843,6 +1058,24 @@ impl AdmittedPersistentSessionCapsule {
                 anyhow::bail!("external runtime proof has no external candidate");
             }
             proof.validate()?;
+        }
+        match (
+            &self.external_candidate,
+            &self.retained_external_runtime_content_qualification,
+        ) {
+            (Some(program), Some(proof)) => {
+                proof.validate()?;
+                program.require_content_qualification(&proof.evidence)?;
+                if proof.runtime_manifest_hash != program.runtime_manifest_hash {
+                    anyhow::bail!(
+                        "retained content qualification differs from admitted session runtime"
+                    );
+                }
+            }
+            (_, None) => {}
+            _ => anyhow::bail!(
+                "session-runtime content proof presence differs from external candidate"
+            ),
         }
         super::thread_snapshot::validate_canonical_hash(
             "persistent-session execution realization hash",
@@ -912,10 +1145,27 @@ impl AdmittedPersistentSessionCapsule {
                         &self.executable_search,
                         &self.process_environment,
                     )?;
-                requirement.resolve_for_use(
-                    self.retained_product_selections.as_ref(),
-                    &qualification_use,
-                )
+                // The program carries its placement whole; validation joins
+                // everything else to the profile and never rebuilds it.
+                let placement = self
+                    .external_candidate
+                    .as_ref()
+                    .map(|program| program.placement.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("external candidate requirement has no admitted program")
+                    })?;
+                match self.external_candidate.as_ref().map(|program| &program.runtime_source) {
+                    Some(crate::external_execution::admission::ExternalCandidateRuntimeSource::ActivatedContent { .. }) => {
+                        let retained = self.retained_external_runtime_content_qualification.as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("activated candidate has no retained content authority"))?;
+                        let program = requirement.resolve_for_content(retained, &qualification_use, placement)?;
+                        program.verify_runtime_authority(self.retained_product_selections.as_ref(), Some(retained))?;
+                        Ok(program)
+                    }
+                    _ => requirement.resolve_for_use(
+                        self.retained_product_selections.as_ref(), &qualification_use, placement,
+                    ),
+                }
             })
             .transpose()?;
         if self.external_candidate != expected {
@@ -953,27 +1203,44 @@ impl AdmittedPersistentSessionCapsule {
         }
         validate_session_process_environment(&self.process_environment)?;
         for value in self.process_environment.values() {
-            let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value
+            let SessionProcessEnvironmentValue::RealizationPath {
+                realization_id,
+                relative_path,
+                path_kind,
+            } = value
             else {
                 continue;
             };
-            if realized
+            let Some(realization) = realized
                 .as_ref()
                 .and_then(|set| set.iter().find(|item| item.id == *realization_id))
-                .is_none_or(|realization| {
-                    realization.kind != super::ExternalContentKind::Tree
-                        || realization.mode != super::ExternalContentMode::Pinned
-                })
+                .filter(|realization| realization.mode == super::ExternalContentMode::Pinned)
+            else {
+                anyhow::bail!(
+                    "session process environment realization `{realization_id}` is absent or not pinned"
+                );
+            };
+            // A file realization has no interior: its only addressable path
+            // is the file itself.
+            if realization.kind == super::ExternalContentKind::File
+                && (relative_path != "." || *path_kind != SessionProcessEnvironmentPathKind::File)
             {
                 anyhow::bail!(
-                    "session process environment realization `{realization_id}` is absent or not a pinned tree"
+                    "session process environment realization `{realization_id}` is a file and can be addressed only as the file itself"
                 );
             }
         }
+        lillux::canonical_json_bytes_bounded(self, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)
+            .context("persistent-session capsule exceeds bounded canonical byte ceiling")?;
         Ok(())
     }
 
     pub fn from_current_value(value: &Value) -> anyhow::Result<Self> {
+        let canonical =
+            lillux::canonical_json_bounded(value, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)?;
+        if canonical.len() > MAX_PERSISTENT_SESSION_CAPSULE_BYTES {
+            anyhow::bail!("persistent-session capsule exceeds its raw canonical byte ceiling");
+        }
         let object = value
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("persistent-session capsule must be an object"))?;
@@ -1006,10 +1273,14 @@ impl AdmittedPersistentSessionCapsule {
         Ok(serde_json::to_value(self)?)
     }
 
+    pub fn to_canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        self.validate()?;
+        lillux::canonical_json_bytes_bounded(self, MAX_PERSISTENT_SESSION_CAPSULE_BYTES)
+            .context("serialize persistent-session capsule under byte ceiling")
+    }
+
     pub fn content_hash(&self) -> anyhow::Result<String> {
-        Ok(lillux::sha256_hex(
-            lillux::canonical_json(&self.to_value()?)?.as_bytes(),
-        ))
+        Ok(lillux::sha256_hex(&self.to_canonical_bytes()?))
     }
 }
 
@@ -1028,6 +1299,38 @@ pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
 /// Leaves room for the 96 KiB external runtime recipe and other signed policy
 /// without accepting an unbounded document before parsing.
 pub const MAX_STRUCTURED_SESSION_PROFILE_BYTES: usize = 192 * 1024;
+/// Current signed source and retained compiled profile vocabulary.
+/// v13 makes the `result` flag a required boolean on every notification: at
+/// most one notification is the execution's result, carrying the
+/// turn-completion observation, and its durable payload is that result.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 13;
+
+/// A signed structured-session profile whose `schema_version` is not the
+/// current one. There is no compatibility reader: an older profile is refused
+/// and the message names the migration that cures it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructuredSessionProfileSchemaRefusal {
+    pub found: Option<u64>,
+}
+
+impl std::fmt::Display for StructuredSessionProfileSchemaRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let found = self
+            .found
+            .map_or_else(|| "missing".to_owned(), |version| version.to_string());
+        write!(
+            formatter,
+            "structured-session profile schema_version {found} is not admitted; current is \
+             {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION}. Cure: migrate the profile to \
+             schema_version {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION} (v13 requires a \
+             boolean `result` flag on every notification), then update its Worker's source \
+             digest and re-sign the Worker"
+        )
+    }
+}
+
+impl std::error::Error for StructuredSessionProfileSchemaRefusal {}
+
 pub const MAX_SESSION_AUXILIARY_CONFIGS: usize = 16;
 
 /// Immutable data from captured worker source, mounted at an exact path in
@@ -1042,7 +1345,7 @@ pub struct SessionRuntimeConfigurationFile {
 impl SessionRuntimeConfigurationFile {
     pub fn validate(&self) -> anyhow::Result<()> {
         super::validate_canonical_project_relative_path(&self.source)
-            .map_err(|error| anyhow::anyhow!("invalid runtime configuration source: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid runtime configuration source: {error:#}"))?;
         if self.source.len() > 4096 {
             anyhow::bail!("runtime configuration source exceeds its path bound");
         }
@@ -1143,6 +1446,87 @@ pub fn validate_session_auxiliary_configs(
     Ok(())
 }
 
+/// Signed candidates whose absence is checked in the actual workload filesystem
+/// before bootstrap. This is inert policy data, not a filesystem observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationAbsence {
+    pub absolute_paths: Vec<String>,
+    pub startup_ancestor_paths: Vec<String>,
+    pub route_ancestor_paths: Vec<String>,
+}
+
+pub const MAX_CONFIGURATION_ABSENCE_ENTRIES: usize = 16;
+pub const MAX_CONFIGURATION_ABSENCE_PATH_BYTES: usize = 4096;
+pub const MAX_CONFIGURATION_ABSENCE_ANCESTORS: usize = 64;
+pub const MAX_CONFIGURATION_ABSENCE_INSPECTIONS: usize = 1024;
+
+impl ConfigurationAbsence {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let count = self
+            .absolute_paths
+            .len()
+            .checked_add(self.startup_ancestor_paths.len())
+            .and_then(|count| count.checked_add(self.route_ancestor_paths.len()))
+            .ok_or_else(|| anyhow::anyhow!("configuration absence inventory overflows"))?;
+        if count > MAX_CONFIGURATION_ABSENCE_ENTRIES {
+            anyhow::bail!("configuration absence inventory exceeds its entry bound");
+        }
+        for (paths, absolute) in [
+            (&self.absolute_paths, true),
+            (&self.startup_ancestor_paths, false),
+            (&self.route_ancestor_paths, false),
+        ] {
+            let mut previous: Option<&str> = None;
+            for path in paths {
+                let components = if absolute {
+                    path.strip_prefix('/')
+                } else {
+                    Some(path.as_str())
+                };
+                if path.is_empty()
+                    || path.len() > MAX_CONFIGURATION_ABSENCE_PATH_BYTES
+                    || path.chars().any(char::is_control)
+                    || path.contains(['\\', '*', '?', '[', ']', '$', '`'])
+                    || components.is_none_or(|value| {
+                        value
+                            .split('/')
+                            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+                    })
+                    || previous.is_some_and(|prior| prior >= path.as_str())
+                {
+                    anyhow::bail!(
+                        "configuration absence paths must be bounded, canonical, sorted and unique"
+                    );
+                }
+                previous = Some(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Only absolute runtime-file destinations share a statically known root.
+    /// HOME baseline/auxiliary files and cwd-relative ancestry candidates must
+    /// instead be compared after expansion by the workload owner.
+    pub fn validate_runtime_configs(
+        &self,
+        configs: &[SessionRuntimeConfigurationFile],
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        validate_session_runtime_configs(configs)?;
+        for absent in &self.absolute_paths {
+            let absent = std::path::Path::new(absent);
+            for config in configs {
+                let present = std::path::Path::new(&config.destination);
+                if absent.starts_with(present) || present.starts_with(absent) {
+                    anyhow::bail!("configuration absence contradicts a positive runtime file");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedStructuredSessionProfile {
@@ -1155,6 +1539,7 @@ pub struct AdmittedStructuredSessionProfile {
     pub baseline_destination: String,
     pub auxiliary_configs: Vec<SessionConfigurationFile>,
     pub runtime_configs: Vec<SessionRuntimeConfigurationFile>,
+    pub configuration_absence: ConfigurationAbsence,
 }
 
 impl AdmittedStructuredSessionProfile {
@@ -1184,8 +1569,12 @@ impl AdmittedStructuredSessionProfile {
             .contract
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("structured-session contract is not an object"))?;
-        if contract.is_empty() {
-            anyhow::bail!("structured-session contract is empty");
+        if contract
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION))
+        {
+            anyhow::bail!("structured-session retained profile schema is not current");
         }
         let workload_client = contract.get("workload_client").ok_or_else(|| {
             anyhow::anyhow!("structured-session workload client contract is missing")
@@ -1225,6 +1614,14 @@ impl AdmittedStructuredSessionProfile {
             anyhow::bail!("structured-session runtime configuration contradicts its contract");
         }
         validate_session_runtime_configs(&self.runtime_configs)?;
+        let absence: ConfigurationAbsence =
+            serde_json::from_value(contract.get("configuration_absence").cloned().ok_or_else(
+                || anyhow::anyhow!("structured-session configuration absence inventory is missing"),
+            )?)?;
+        if absence != self.configuration_absence {
+            anyhow::bail!("structured-session configuration absence contradicts its contract");
+        }
+        absence.validate_runtime_configs(&self.runtime_configs)?;
         if let Some(contract) = self.portable_state_contract()? {
             contract.validate_configuration_exclusions(&self.auxiliary_configs)?;
             if let Some(external_candidate) = external_candidate.as_ref() {
@@ -1323,7 +1720,7 @@ mod tests {
             source: "policy/requirements.toml".into(),
             destination: "/etc/qualification/requirements.toml".into(),
         };
-        validate_session_runtime_configs(&[file.clone()]).unwrap();
+        validate_session_runtime_configs(std::slice::from_ref(&file)).unwrap();
         for destination in [
             "",
             "/",
@@ -1385,7 +1782,7 @@ mod tests {
             source: "admitted.conf".into(),
             destination: "runtime.conf".into(),
         };
-        validate_session_auxiliary_configs("baseline.conf", &[file.clone()]).unwrap();
+        validate_session_auxiliary_configs("baseline.conf", std::slice::from_ref(&file)).unwrap();
         for invalid in [
             "",
             ".",
@@ -1400,7 +1797,10 @@ mod tests {
             bad.destination = invalid.into();
             assert!(validate_session_auxiliary_configs("baseline.conf", &[bad]).is_err());
         }
-        assert!(validate_session_auxiliary_configs("runtime.conf", &[file.clone()]).is_err());
+        assert!(
+            validate_session_auxiliary_configs("runtime.conf", std::slice::from_ref(&file))
+                .is_err()
+        );
         assert!(
             validate_session_auxiliary_configs("baseline.conf", &[file.clone(), file.clone()])
                 .is_err()
@@ -1610,6 +2010,95 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configuration_absence_refuses_missing_open_noncanonical_and_unbounded_inputs() {
+        let empty = serde_json::json!({"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]});
+        let decode = |value| serde_json::from_value::<ConfigurationAbsence>(value);
+        decode(empty.clone()).unwrap().validate().unwrap();
+        for key in [
+            "absolute_paths",
+            "startup_ancestor_paths",
+            "route_ancestor_paths",
+        ] {
+            let mut missing = empty.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(decode(missing).is_err());
+            let mut null = empty.clone();
+            null[key] = serde_json::Value::Null;
+            assert!(decode(null).is_err());
+        }
+        let mut extra = empty.clone();
+        extra["ignore_errors"] = true.into();
+        assert!(decode(extra).is_err());
+        for path in [
+            "", "/", "relative", "/a//b", "/a/./b", "/a/../b", "/a/", "/a\\b", "/a\0b", "/a/*",
+            "/a/$HOME",
+        ] {
+            let mut value = empty.clone();
+            value["absolute_paths"] = serde_json::json!([path]);
+            assert!(decode(value).unwrap().validate().is_err(), "{path:?}");
+        }
+        for path in [
+            "/absolute",
+            "../config",
+            "a/../config",
+            "./config",
+            "a//config",
+        ] {
+            let mut value = empty.clone();
+            value["startup_ancestor_paths"] = serde_json::json!([path]);
+            assert!(decode(value).unwrap().validate().is_err(), "{path:?}");
+        }
+        for paths in [vec!["/b", "/a"], vec!["/a", "/a"]] {
+            let mut value = empty.clone();
+            value["absolute_paths"] = serde_json::json!(paths);
+            assert!(decode(value).unwrap().validate().is_err());
+        }
+        let mut value = empty.clone();
+        value["absolute_paths"] = serde_json::json!([format!("/{}", "x".repeat(4095))]);
+        decode(value.clone()).unwrap().validate().unwrap();
+        value["absolute_paths"] = serde_json::json!([format!("/{}", "x".repeat(4096))]);
+        assert!(decode(value).unwrap().validate().is_err());
+        let mut full = decode(empty).unwrap();
+        full.absolute_paths = (0..8).map(|n| format!("/a{n}")).collect();
+        full.startup_ancestor_paths = (0..8).map(|n| format!("b{n}")).collect();
+        full.validate().unwrap();
+        full.route_ancestor_paths.push("c".into());
+        assert!(full.validate().is_err());
+    }
+
+    #[test]
+    fn configuration_absence_only_compares_proven_common_roots() {
+        let mut absence = ConfigurationAbsence {
+            absolute_paths: vec!["/etc/fixture/policy".into()],
+            startup_ancestor_paths: vec!["config.toml".into()],
+            route_ancestor_paths: vec!["config.toml".into()],
+        };
+        for destination in [
+            "/etc/fixture/policy",
+            "/etc/fixture",
+            "/etc/fixture/policy/child",
+        ] {
+            assert!(
+                absence
+                    .validate_runtime_configs(&[SessionRuntimeConfigurationFile {
+                        source: "policy".into(),
+                        destination: destination.into(),
+                    }])
+                    .is_err()
+            );
+        }
+        absence
+            .validate_runtime_configs(&[SessionRuntimeConfigurationFile {
+                source: "policy".into(),
+                destination: "/etc/fixture/policy-other".into(),
+            }])
+            .unwrap();
+        // Same filename under HOME is not an ancestry-path alias by itself.
+        absence.absolute_paths.clear();
+        absence.validate_runtime_configs(&[]).unwrap();
+    }
+
+    #[test]
     fn lifecycle_refuses_unimplemented_process_multiplexing() {
         let contract = PersistentSessionLifecycleContract {
             max_processes: 1,
@@ -1620,8 +2109,31 @@ mod tests {
             ready_timeout_ms: 1,
             request_timeout_ms: 1,
             idle_timeout_ms: 1,
+            max_lifetime_seconds_ceiling: 603_600,
         };
         assert!(contract.validate().is_err());
+    }
+
+    #[test]
+    fn lifecycle_bounds_the_frozen_lifetime_ceiling_and_long_request_timeouts() {
+        let valid = PersistentSessionLifecycleContract {
+            max_processes: 1,
+            max_inflight_per_process: 1,
+            max_address_space_bytes: 64 * 1024 * 1024,
+            max_cpu_seconds: 1,
+            real_uid_process_limit: 1,
+            ready_timeout_ms: 1,
+            request_timeout_ms: 6 * 60 * 60 * 1000,
+            idle_timeout_ms: 1,
+            max_lifetime_seconds_ceiling: 603_600,
+        };
+        valid.validate().unwrap();
+        let mut zero = valid.clone();
+        zero.max_lifetime_seconds_ceiling = 0;
+        assert!(zero.validate().is_err());
+        let mut above = valid;
+        above.max_lifetime_seconds_ceiling = SESSION_TIME_SANITY_SECONDS + 1;
+        assert!(above.validate().is_err());
     }
 
     #[test]
@@ -1644,7 +2156,7 @@ mod tests {
 
     #[test]
     fn predecessor_capsule_schema_is_refused_without_translation() {
-        for schema in [1, 9, 10, 13] {
+        for schema in [1, 9, 10, 13, 20] {
             let value = serde_json::json!({
                 "schema": schema,
                 "kind": PERSISTENT_SESSION_CAPSULE_KIND
@@ -1734,5 +2246,53 @@ mod tests {
             },
         )]);
         assert!(validate_session_process_environment(&oversized).is_err());
+    }
+
+    #[test]
+    fn retained_remote_content_carries_a_receiver_join_exactly_when_remote() {
+        use super::*;
+        use crate::external_content::qualification_subject::ContentQualificationLocalJoin;
+        let capsule =
+            crate::external_execution::admission::test_support::content_candidate_capsule(
+                &"a".repeat(64),
+            )
+            .unwrap();
+        let local = capsule
+            .retained_external_runtime_content_qualification
+            .unwrap();
+        local.validate().unwrap();
+        assert!(local.remote_testimony.is_none() && local.receiver_join.is_none());
+        let join = ContentQualificationLocalJoin {
+            activation_receipt_hash: "b".repeat(64),
+            binding_hash: "c".repeat(64),
+            target_node_fingerprint: "d".repeat(64),
+        };
+        // A local qualification's evidence already names its own join.
+        let mut joined_local = local.clone();
+        joined_local.receiver_join = Some(join.clone());
+        let error = joined_local.validate().unwrap_err().to_string();
+        assert!(error.contains("receiver join"), "{error}");
+        // A remote testimony without the receiver's join is refused before
+        // its acceptance is read.
+        let mut unjoined_remote = local.clone();
+        unjoined_remote.remote_testimony = Some(RetainedRemoteQualificationTestimony {
+            acceptance_hash: "e".repeat(64),
+            acceptance:
+                crate::external_content::products::qualification_testimony::tests::product_acceptance_evidence(
+                    &"f".repeat(64),
+                ),
+        });
+        let error = unjoined_remote.validate().unwrap_err().to_string();
+        assert!(error.contains("receiver join"), "{error}");
+        // The field is required even when null.
+        let mut value = serde_json::to_value(&local).unwrap();
+        value.as_object_mut().unwrap().remove("receiver_join");
+        assert!(
+            serde_json::from_value::<RetainedExternalRuntimeContentQualification>(value).is_err()
+        );
+        // A noncanonical join is refused.
+        let mut bad = join;
+        bad.binding_hash = "x".into();
+        assert!(bad.validate().is_err());
     }
 }

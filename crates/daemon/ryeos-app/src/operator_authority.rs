@@ -9,8 +9,8 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
-use crate::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use crate::state::AppState;
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 
 /// Exact target-node operator grant retained by a remotely adopted execution.
 /// The node-signed grant remains revocable; this value binds admission and the
@@ -38,7 +38,7 @@ impl AdmittedOperatorAuthority {
         {
             bail!("admitted operator authority is not canonical");
         }
-        crate::identity::validate_canonical_site_id(&self.origin_site_id)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id)?;
         let mut scopes = self.scopes.clone();
         for scope in &scopes {
             ryeos_runtime::authorizer::validate_scope_pattern(scope)
@@ -58,7 +58,7 @@ impl AdmittedOperatorAuthority {
             self.scopes.clone(),
             true,
             Some(self.principal_class),
-            (self.principal_class == AuthorizedKeyPrincipalClass::RemoteOperator)
+            (self.principal_class == AuthorizedKeyPrincipalClass::RemotePrincipal)
                 .then(|| self.origin_site_id.clone()),
         )
     }
@@ -97,8 +97,9 @@ pub fn require_local_configured_operator(
     {
         bail!("action requires a local_client configured operator");
     }
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path)
-        .context("load configured local operator identity")?;
+    let operator =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
+            .context("load configured local operator identity")?;
     if context.fingerprint != operator.principal_id() {
         bail!("local action requires the configured local operator");
     }
@@ -106,7 +107,7 @@ pub fn require_local_configured_operator(
 }
 
 /// Require either the exact local operator or a verified, origin-bound
-/// `remote_operator`. Remote admission never reads the target-local private
+/// `remote_principal`. Remote admission never reads the target-local private
 /// key.
 pub fn require_admitted_operator(
     state: &AppState,
@@ -122,20 +123,20 @@ pub fn require_admitted_operator(
         (Some(AuthorizedKeyPrincipalClass::LocalClient), None) => {
             require_local_configured_operator(state, context)
         }
-        (Some(AuthorizedKeyPrincipalClass::RemoteOperator), Some(_)) => {
-            remote_operator_fingerprint(context)
+        (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), Some(_)) => {
+            remote_principal_fingerprint(context)
         }
         (Some(AuthorizedKeyPrincipalClass::RemoteNode), _) => {
             bail!("operator actions reject remote_node grants")
         }
-        (Some(AuthorizedKeyPrincipalClass::RemoteOperator), None) => {
-            bail!("remote_operator request has no authenticated source-node forwarding proof")
+        (Some(AuthorizedKeyPrincipalClass::RemotePrincipal), None) => {
+            bail!("remote_principal request has no authenticated source-node forwarding proof")
         }
         _ => bail!("action requires an authenticated admitted-operator class"),
     }
 }
 
-fn remote_operator_fingerprint(context: &HandlerContext) -> anyhow::Result<String> {
+fn remote_principal_fingerprint(context: &HandlerContext) -> anyhow::Result<String> {
     let fingerprint = context
         .fingerprint
         .strip_prefix("fp:")
@@ -148,12 +149,12 @@ fn remote_operator_fingerprint(context: &HandlerContext) -> anyhow::Result<Strin
 
 /// Resolve the exact current node-signed grant behind an operator-owned
 /// durable operation. Local-client grants remain bound to the app root's exact
-/// local key; remote-operator grants remain bound to their configured origin.
+/// local key; remote-principal grants remain bound to their configured origin.
 pub fn admitted_operator_authority_digest(
     state: &AppState,
     operator_fingerprint: &str,
 ) -> anyhow::Result<String> {
-    let grant = crate::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator_fingerprint,
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -161,13 +162,16 @@ pub fn admitted_operator_authority_digest(
     .ok_or_else(|| anyhow::anyhow!("operator grant was revoked"))?;
     match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
-            let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+            let local_operator =
+                ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+                    &state.config.app_root,
+                )
                 .context("load configured local operator identity")?;
             if local_operator.fingerprint() != operator_fingerprint {
                 bail!("local durable operation no longer belongs to the configured operator");
             }
         }
-        AuthorizedKeyPrincipalClass::RemoteOperator => {
+        AuthorizedKeyPrincipalClass::RemotePrincipal => {
             if grant.configured_origin_site_id.is_none() {
                 bail!("remote operator grant lost its configured origin site");
             }
@@ -216,7 +220,7 @@ fn admitted_operator_authority_for_named_role(
     {
         bail!("{role} principal is not canonical");
     }
-    let grant = crate::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator_fingerprint,
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -224,16 +228,19 @@ fn admitted_operator_authority_for_named_role(
     .ok_or_else(|| anyhow::anyhow!("{role} operator grant was revoked"))?;
     let origin_site_id = match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
-            let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+            let local_operator =
+                ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+                    &state.config.app_root,
+                )
                 .context("load configured local operator identity")?;
             if local_operator.fingerprint() != operator_fingerprint {
                 bail!("{role} local_client is not the configured operator");
             }
             state.threads.site_id().to_owned()
         }
-        AuthorizedKeyPrincipalClass::RemoteOperator => {
+        AuthorizedKeyPrincipalClass::RemotePrincipal => {
             grant.configured_origin_site_id.clone().with_context(|| {
-                format!("{role} remote_operator grant has no configured origin site")
+                format!("{role} remote_principal grant has no configured origin site")
             })?
         }
         AuthorizedKeyPrincipalClass::RemoteNode => {
@@ -282,7 +289,7 @@ pub fn retained_admitted_operator_authority(
     if !lillux::valid_hash(operator_fingerprint) {
         bail!("retained operator fingerprint is not canonical");
     }
-    let grant = crate::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator_fingerprint,
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -290,7 +297,10 @@ pub fn retained_admitted_operator_authority(
     .ok_or_else(|| anyhow::anyhow!("retained operator grant was revoked"))?;
     match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
-            let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+            let local_operator =
+                ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+                    &state.config.app_root,
+                )
                 .context("load configured local operator identity")?;
             if local_operator.fingerprint() != operator_fingerprint {
                 bail!("retained local owner is not the configured local operator");
@@ -299,7 +309,7 @@ pub fn retained_admitted_operator_authority(
                 bail!("retained local operator root has a remote origin");
             }
         }
-        AuthorizedKeyPrincipalClass::RemoteOperator => {
+        AuthorizedKeyPrincipalClass::RemotePrincipal => {
             if grant.configured_origin_site_id.as_deref() != Some(origin_site_id) {
                 bail!("retained remote operator origin differs from its current grant");
             }
@@ -327,32 +337,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_operator_identity_is_derived_without_the_target_local_key() {
+    fn remote_principal_identity_is_derived_without_the_target_local_key() {
         let fingerprint = "a".repeat(64);
         let remote = HandlerContext::new_with_authority(
             format!("fp:{fingerprint}"),
             vec!["ryeos.execute.service.fixture".to_owned()],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_owned()),
         );
         assert_eq!(
-            remote_operator_fingerprint(&remote).unwrap(),
+            remote_principal_fingerprint(&remote).unwrap(),
             fingerprint,
             "target admission must retain the source operator fingerprint"
         );
     }
 
     #[test]
-    fn remote_operator_requires_origin_and_canonical_principal() {
+    fn remote_principal_requires_origin_and_canonical_principal() {
         let invalid = HandlerContext::new_with_authority(
             "fp:not-a-hash".to_owned(),
             vec![],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_owned()),
         );
-        assert!(remote_operator_fingerprint(&invalid).is_err());
+        assert!(remote_principal_fingerprint(&invalid).is_err());
     }
 
     #[test]
@@ -360,7 +370,7 @@ mod tests {
         let authority = AdmittedOperatorAuthority {
             owner_principal: format!("fp:{}", "a".repeat(64)),
             origin_site_id: "site:source".to_owned(),
-            principal_class: AuthorizedKeyPrincipalClass::RemoteOperator,
+            principal_class: AuthorizedKeyPrincipalClass::RemotePrincipal,
             grant_digest: "b".repeat(64),
             scopes: vec![
                 "ryeos.execute.service.worker-executions/*".to_owned(),

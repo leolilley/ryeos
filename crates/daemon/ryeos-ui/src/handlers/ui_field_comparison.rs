@@ -107,7 +107,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         }
         (Err(error), _) | (_, Err(error)) => {
             tracing::error!(
-                error = %error,
+                error = %format!("{error:#}"),
                 "an execution comparison operand failed retained-evidence verification"
             );
             return refused_response(
@@ -133,10 +133,10 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         (Ok(left), Ok(right)) => (left, right),
         (left, right) => {
             if let Err(error) = left {
-                tracing::error!(error = %error, "left execution comparison cost is invalid");
+                tracing::error!(error = %format!("{error:#}"), "left execution comparison cost is invalid");
             }
             if let Err(error) = right {
-                tracing::error!(error = %error, "right execution comparison cost is invalid");
+                tracing::error!(error = %format!("{error:#}"), "right execution comparison cost is invalid");
             }
             return refused_response(
                 &request,
@@ -155,7 +155,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     ) {
         Ok(model) => model,
         Err(error) => {
-            tracing::error!(error = %error, "execution comparison identity preparation failed");
+            tracing::error!(error = %format!("{error:#}"), "execution comparison identity preparation failed");
             return refused_response(
                 &request,
                 "execution_identity_invalid",
@@ -167,7 +167,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let mut document = match assemble_document(&model, model.complete(), false) {
         Ok(document) => document,
         Err(error) => {
-            tracing::error!(error = %error, "execution comparison field assembly failed");
+            tracing::error!(error = %format!("{error:#}"), "execution comparison field assembly failed");
             return refused_response(
                 &request,
                 "comparison_field_invalid",
@@ -180,7 +180,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             Ok(document) => document,
             Err(error) => {
                 tracing::error!(
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "incomplete execution comparison field assembly failed"
                 );
                 return refused_response(

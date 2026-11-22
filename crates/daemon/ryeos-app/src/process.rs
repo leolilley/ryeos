@@ -12,15 +12,101 @@ use crate::env_contract::BASE_ALLOWLIST_NAMES;
 /// Poll interval (ms) when waiting for a process group to exit after SIGTERM.
 const KILL_POLL_INTERVAL_MS: u64 = 100;
 
-/// Wait time (ms) after SIGKILL before checking if the process group is dead.
-const POST_SIGKILL_WAIT_MS: u64 = 200;
-
 /// Workload-authored cancellation policy cannot control daemon availability.
 /// Grace remains cooperative, but the node owns this hard upper bound before
 /// escalating the exact process group.
 pub const MAX_GRACEFUL_SHUTDOWN_GRACE_SECS: u64 = 5;
 
-pub const PROCESS_IDENTITY_SCHEMA_VERSION: u32 = 5;
+/// Time reserved at the end of a graceful kill's budget for the SIGKILL and
+/// the death proof that follow it.
+pub const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
+
+/// The smallest window a supervisor is known to give a stopping daemon before
+/// it force-kills it: runit's `SERVICE_STOP_TIMEOUT` is 10 s. The windows of
+/// hosted platforms are not known here, so this is the conservative floor.
+const SMALLEST_KNOWN_FORCE_STOP_WINDOW_MILLIS: u64 = 10_000;
+
+/// Margin kept below the force-stop window for the work after the owner wait
+/// (store close, locks, exit).
+const FORCE_STOP_MARGIN_MILLIS: u64 = 2_000;
+
+/// What a launch owner needs to unwind after its runtime is killed: the
+/// longest attached grace plus the proof reserve.
+const LAUNCH_OWNER_UNWIND_NEEDED_MILLIS: u64 =
+    MAX_GRACEFUL_SHUTDOWN_GRACE_SECS * 1_000 + HARD_KILL_PROOF_RESERVE.as_millis() as u64;
+
+/// What is left of the force-stop window once the kill drain has used its own
+/// grace and the margin is held back.
+const LAUNCH_OWNER_UNWIND_CAP_MILLIS: u64 = SMALLEST_KNOWN_FORCE_STOP_WINDOW_MILLIS
+    - FORCE_STOP_MARGIN_MILLIS
+    - MAX_GRACEFUL_SHUTDOWN_GRACE_SECS * 1_000;
+
+/// Extra time, after the kill drain's deadline, to wait for in-process launch
+/// owners to unwind. A launch owner can only unwind after its runtime is
+/// killed, and the kill consumes the drain deadline, so the owner needs its
+/// own budget. It is the need, capped so the whole stop still ends before the
+/// smallest known force-stop window.
+pub const LAUNCH_OWNER_UNWIND_BUDGET: Duration = Duration::from_millis(
+    if LAUNCH_OWNER_UNWIND_NEEDED_MILLIS < LAUNCH_OWNER_UNWIND_CAP_MILLIS {
+        LAUNCH_OWNER_UNWIND_NEEDED_MILLIS
+    } else {
+        LAUNCH_OWNER_UNWIND_CAP_MILLIS
+    },
+);
+
+/// Bound on proving the pinned group empty after SIGKILL. The proof polls every
+/// [`KILL_POLL_INTERVAL_MS`], so a group that dies quickly returns quickly;
+/// the bound only lets slow kernel teardown (large unmaps, exit through
+/// uninterruptible I/O) finish before the stop is reported unsettled.
+pub const POST_SIGKILL_SETTLE_BOUND: Duration =
+    Duration::from_secs(MAX_GRACEFUL_SHUTDOWN_GRACE_SECS);
+
+/// [`KillResult::method`] when SIGKILL reached the exact pinned group but the
+/// group was still present at [`POST_SIGKILL_SETTLE_BOUND`]. The kill was
+/// delivered; only its settlement is not yet observed. Distinct from
+/// `sigkill_failed`, where no signal was delivered.
+pub const SIGKILL_DELIVERED_UNSETTLED: &str = "sigkill_delivered_unsettled";
+
+/// Grace for stopping a launch whose metadata records no stop policy. Every
+/// managed subprocess launch records one, resolved from the signed execution
+/// config; this applies only where none was recorded (in-process handlers and
+/// metadata-free attaches).
+pub const UNRECORDED_STOP_POLICY_GRACE_SECS: u64 = 3;
+
+/// Bound on waiting for the accounting outbox publisher's in-flight blocking
+/// work when the daemon stops.
+pub const ACCOUNTING_PUBLISHER_STOP_BOUND: Duration = Duration::from_secs(30);
+
+/// Bound on settling each daemon listener when the daemon stops.
+pub const LISTENER_SHUTDOWN_BOUND: Duration = Duration::from_secs(5);
+
+pub const PROCESS_IDENTITY_SCHEMA_VERSION: u32 = 6;
+
+/// Explicit retained settlement contract, independent of resource access.
+/// The trusted variant is not selected by an absent local scope. Admission
+/// must join its exact contract to both the signed product and node ceiling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProcessResourceSettlementAuthority {
+    LocalProcessScope {},
+    TrustedProcessGroup { cleanup_contract_digest: String },
+}
+
+impl ProcessResourceSettlementAuthority {
+    pub fn validate(&self) -> Result<()> {
+        if let Self::TrustedProcessGroup {
+            cleanup_contract_digest,
+        } = self
+            && (cleanup_contract_digest.len() != 64
+                || !cleanup_contract_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        {
+            bail!("trusted resource cleanup contract is not an exact canonical digest");
+        }
+        Ok(())
+    }
+}
 
 /// Durable identity for the exact target and its retained process-group leader.
 ///
@@ -39,6 +125,9 @@ pub struct ExecutionProcessIdentity {
     /// The process-group leader PID, equal to the signalable PGID.
     pub group_leader_pid: i64,
     pub group_leader_start_time_ticks: i64,
+    /// The pid namespace (`pid:[<inode>]`) in which the numeric coordinates
+    /// above were observed; see [`lillux::ExactProcessIdentity`]. Required.
+    pub pid_namespace: String,
     /// Exact whole-execution authority when one was reserved at admission.
     /// Absence explicitly denotes the enforced no-group-escape contract, not
     /// permission to downgrade a failed scoped launch or recovery.
@@ -47,6 +136,10 @@ pub struct ExecutionProcessIdentity {
     /// Exact node-selected resource evidence owned by this process
     /// incarnation. Empty means no constrained resource was selected.
     pub resource_selections: Vec<ryeos_engine::contracts::ExecutionResourceSelection>,
+    /// Required nullable: resource-free owners have null authority. Missing
+    /// predecessor fields cannot acquire current trusted cleanup permission.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub resource_settlement_authority: Option<ProcessResourceSettlementAuthority>,
     /// Exact financial operations issued for the selected resources. Empty is
     /// valid only for a process with no selected resources.
     pub resource_operations: Vec<ryeos_accounting::ResourceOperationBinding>,
@@ -80,6 +173,22 @@ impl ExecutionProcessIdentity {
             .incarnation_digest()
             .map_err(anyhow::Error::msg)
     }
+
+    /// Canonical selected-resource identity for an admitted retirement join.
+    /// Dynamic free capacity is not part of these retained selections.
+    pub fn resource_set_digest(&self) -> Result<String> {
+        validate_execution_process_identity_shape(self)?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(&self.resource_selections)?)?.as_bytes(),
+        ))
+    }
+
+    pub fn belongs_to_host_lifetime(&self, lifetime: &lillux::ProcessHostLifetime) -> Result<bool> {
+        validate_execution_process_identity_shape(self)?;
+        lifetime
+            .contains_process(&lillux_process_identity(self)?)
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 /// Fail-closed service-window observation for the exact captured resource
@@ -108,6 +217,12 @@ pub fn execution_process_identity_from_lillux(
     identity: lillux::ExactProcessIdentity,
     process_scope: Option<lillux::ProcessScopeRecovery>,
 ) -> Result<ExecutionProcessIdentity> {
+    // An execution identity drives group signals and group liveness. An
+    // identity captured by containment membership names no group.
+    anyhow::ensure!(
+        identity.group_basis == lillux::GroupBasis::ProcessGroup,
+        "a containment-membership identity cannot become an execution process identity"
+    );
     let identity = ExecutionProcessIdentity {
         schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
         boot_id: identity.boot_id,
@@ -117,8 +232,10 @@ pub fn execution_process_identity_from_lillux(
         group_leader_pid: i64::from(identity.group_leader_pid),
         group_leader_start_time_ticks: i64::try_from(identity.group_leader_start_time_ticks)
             .context("Lillux group birth is outside RyeOS durable range")?,
+        pid_namespace: identity.pid_namespace,
         process_scope,
         resource_selections: Vec::new(),
+        resource_settlement_authority: None,
         resource_operations: Vec::new(),
         resource_allocation_limit: None,
         resource_occupancy_start: None,
@@ -134,6 +251,23 @@ pub fn validate_execution_process_identity_shape(
 ) -> Result<()> {
     if identity.schema_version != PROCESS_IDENTITY_SCHEMA_VERSION {
         anyhow::bail!("unsupported process identity schema version");
+    }
+    match (
+        &identity.resource_settlement_authority,
+        identity.resource_selections.is_empty(),
+    ) {
+        (None, true) => {}
+        (Some(authority), false) => {
+            authority.validate()?;
+            if matches!(
+                authority,
+                ProcessResourceSettlementAuthority::TrustedProcessGroup { .. }
+            ) && identity.process_scope.is_some()
+            {
+                bail!("trusted resource owner contradicts its local process scope");
+            }
+        }
+        _ => bail!("process resource settlement authority differs from its selected resources"),
     }
     if identity.boot_id.is_empty()
         || identity.target_start_time_ticks <= 0
@@ -247,19 +381,32 @@ impl ExecutionProcessIdentity {
         cleanup_allowance_ms: Option<u64>,
     ) -> Result<()> {
         if !self.resource_selections.is_empty()
+            || self.resource_settlement_authority.is_some()
+            || !self.resource_operations.is_empty()
+            || self.resource_allocation_limit.is_some()
             || self.resource_occupancy_start.is_some()
             || self.resource_occupancy_limit.is_some()
             || self.resource_cleanup_allowance_ms.is_some()
         {
             bail!("process identity resource authority is already bound");
         }
-        self.resource_selections = selections;
-        self.resource_operations = operations;
-        self.resource_allocation_limit = allocation_limit;
-        self.resource_occupancy_start = occupancy_start;
-        self.resource_occupancy_limit = occupancy_limit;
-        self.resource_cleanup_allowance_ms = cleanup_allowance_ms;
-        validate_execution_process_identity_shape(self)
+        validate_execution_process_identity_shape(self)?;
+        // Validation can fail after examining financial and clock bindings.
+        // Publish the complete candidate only on success, leaving the original
+        // held incarnation and every retained obligation intact on refusal.
+        // This existing entry point continues to select ONLY local authority.
+        let mut candidate = self.clone();
+        candidate.resource_selections = selections;
+        candidate.resource_settlement_authority = (!candidate.resource_selections.is_empty())
+            .then_some(ProcessResourceSettlementAuthority::LocalProcessScope {});
+        candidate.resource_operations = operations;
+        candidate.resource_allocation_limit = allocation_limit;
+        candidate.resource_occupancy_start = occupancy_start;
+        candidate.resource_occupancy_limit = occupancy_limit;
+        candidate.resource_cleanup_allowance_ms = cleanup_allowance_ms;
+        validate_execution_process_identity_shape(&candidate)?;
+        *self = candidate;
+        Ok(())
     }
 }
 
@@ -297,11 +444,34 @@ struct PinnedProcess {
 }
 
 pub fn remove_stale_socket(path: &Path) -> Result<()> {
+    remove_stale_sockets(&[path])
+}
+
+/// Prove every path is absent or a refused (stale) socket before unlinking any
+/// of them, so a live or foreign occupant of a later path cannot leave an
+/// earlier path already removed.
+pub fn remove_stale_sockets(paths: &[&Path]) -> Result<()> {
+    let mut stale = Vec::new();
+    for path in paths {
+        if let Some(inode) = probe_stale_socket(path)? {
+            stale.push((*path, inode));
+        }
+    }
+    for (path, inode) in stale {
+        unlink_probed_socket(path, inode)?;
+    }
+    Ok(())
+}
+
+/// Device and inode of a socket proven stale by a refused connect.
+type ProbedSocket = (u64, u64);
+
+fn probe_stale_socket(path: &Path) -> Result<Option<ProbedSocket>> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("inspect daemon socket {}", path.display()));
         }
@@ -319,28 +489,9 @@ pub fn remove_stale_socket(path: &Path) -> Result<()> {
             path.display()
         ),
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-            // Re-check the directory entry after the liveness probe. A process
-            // may have replaced the refused inode while we were connecting;
-            // unlinking that replacement would orphan its live listener.
-            let current = match std::fs::symlink_metadata(path) {
-                Ok(current) => current,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("reinspect daemon socket {}", path.display()));
-                }
-            };
-            if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
-                bail!(
-                    "daemon control socket changed during stale probe at {}; refusing replacement",
-                    path.display()
-                );
-            }
-            std::fs::remove_file(path)
-                .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
-            Ok(())
+            Ok(Some((metadata.dev(), metadata.ino())))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| {
             format!(
                 "daemon socket ownership is uncertain at {}; refusing replacement",
@@ -350,29 +501,54 @@ pub fn remove_stale_socket(path: &Path) -> Result<()> {
     }
 }
 
+fn unlink_probed_socket(path: &Path, probed: ProbedSocket) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    // Re-check the directory entry after the liveness probe. A process may
+    // have replaced the refused inode while we were connecting; unlinking that
+    // replacement would orphan its live listener.
+    let current = match std::fs::symlink_metadata(path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reinspect daemon socket {}", path.display()));
+        }
+    };
+    if (current.dev(), current.ino()) != probed {
+        bail!(
+            "daemon control socket changed during stale probe at {}; refusing replacement",
+            path.display()
+        );
+    }
+    std::fs::remove_file(path)
+        .with_context(|| format!("failed to remove stale socket {}", path.display()))
+}
+
 /// Check if a process group is alive.
 pub fn pgid_alive(pgid: i64) -> bool {
     process_group_presence(pgid) == IdentityLiveness::Alive
 }
 
-/// Read-only numeric process-group absence probe. This never signals the
-/// group: signal 0 asks the kernel only whether any member exists. EPERM means
-/// present, ESRCH means absent, and every other outcome is unavailable so
-/// recovery fails closed.
+/// Numeric process-group presence, decided by Lillux's single group rule.
+///
+/// This never signals the group. It may reap, by exact pid, zombie members
+/// that this process adopted as orphans; it never reaps the group leader and
+/// passes no owned pids, so a leader or child handle someone still waits on
+/// keeps its exit status. A zombie parented elsewhere counts as absent; a
+/// zombie still parented by this process counts as present. Membership that
+/// cannot be read or parsed is unavailable, so recovery fails closed.
+///
+/// A group that settles absent has its record retired and nothing signals that
+/// pgid again.
 pub fn process_group_presence(pgid: i64) -> IdentityLiveness {
-    let Ok(pgid) = i32::try_from(pgid) else {
-        return IdentityLiveness::Unavailable;
-    };
-    if pgid <= 1 {
+    if pgid <= 1 || i32::try_from(pgid).is_err() {
         return IdentityLiveness::Unavailable;
     }
-    if unsafe { libc::kill(-pgid, 0) } == 0 {
-        return IdentityLiveness::Alive;
-    }
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(libc::ESRCH) => IdentityLiveness::DeadOrStale,
-        Some(libc::EPERM) => IdentityLiveness::Alive,
-        _ => IdentityLiveness::Unavailable,
+    match lillux::group_presence(pgid, None, &[]) {
+        lillux::GroupPresence::Present => IdentityLiveness::Alive,
+        lillux::GroupPresence::Absent => IdentityLiveness::DeadOrStale,
+        lillux::GroupPresence::Undecidable => IdentityLiveness::Unavailable,
     }
 }
 
@@ -576,6 +752,10 @@ fn capture_execution_process_identity_from_pin(
     let boot_id = read_boot_id()
         .context("read kernel boot identity")
         .map_err(ExecutionProcessIdentityCaptureError::CaptureFailed)?;
+    let pid_namespace = lillux::process_control::current_pid_namespace()
+        .map_err(anyhow::Error::msg)
+        .context("read pid namespace")
+        .map_err(ExecutionProcessIdentityCaptureError::CaptureFailed)?;
 
     // Re-probe both pidfds after collecting every numeric/procfs field. If a
     // process exited and its numeric ID was recycled during capture, the old
@@ -592,7 +772,9 @@ fn capture_execution_process_identity_from_pin(
         target_start_time_ticks: target_stat.start_time_ticks,
         group_leader_pid: pgid,
         group_leader_start_time_ticks: group_stat.start_time_ticks,
+        pid_namespace,
         resource_selections: Vec::new(),
+        resource_settlement_authority: None,
         resource_operations: Vec::new(),
         resource_allocation_limit: None,
         resource_occupancy_start: None,
@@ -615,12 +797,13 @@ pub enum ShutdownAction {
     Graceful(std::time::Duration),
 }
 
-/// Map a tool-declared `CancellationMode` to a `ShutdownAction`.
+/// Map a launch's recorded stop policy to a `ShutdownAction`.
 ///
 /// - `Some(Hard)` → SIGKILL only.
 /// - `Some(Graceful { grace_secs })` → SIGTERM, wait up to the node-owned cap,
 ///   then SIGKILL.
-/// - `None` → default 3-second graceful.
+/// - `None` (no recorded policy) → graceful with
+///   [`UNRECORDED_STOP_POLICY_GRACE_SECS`].
 pub fn resolve_shutdown_action(
     mode: Option<ryeos_engine::contracts::CancellationMode>,
 ) -> ShutdownAction {
@@ -630,7 +813,15 @@ pub fn resolve_shutdown_action(
         Some(CancellationMode::Graceful { grace_secs }) => ShutdownAction::Graceful(
             std::time::Duration::from_secs(grace_secs.min(MAX_GRACEFUL_SHUTDOWN_GRACE_SECS)),
         ),
-        None => ShutdownAction::Graceful(std::time::Duration::from_secs(3)),
+        None => {
+            tracing::warn!(
+                grace_secs = UNRECORDED_STOP_POLICY_GRACE_SECS,
+                "launch recorded no stop policy; using the node fallback grace"
+            );
+            ShutdownAction::Graceful(std::time::Duration::from_secs(
+                UNRECORDED_STOP_POLICY_GRACE_SECS,
+            ))
+        }
     }
 }
 
@@ -639,6 +830,12 @@ pub fn resolve_shutdown_action(
 /// Graceful shutdown signals only the reported target. This leaves the retained
 /// launcher group leader alive while the target uses its declared grace. If the
 /// target/group survives the deadline, the already-pinned group is killed.
+///
+/// This is the graceful-stop contract for runtime authors: the target owns
+/// cooperative cancellation of its own children (forwarding SIGTERM, or
+/// stopping them at its own boundary). The node never SIGTERMs descendants;
+/// it guarantees only the SIGKILL of the whole pinned group or scope at the
+/// grace deadline.
 pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownAction) -> KillResult {
     if let Some(scope) = &identity.process_scope {
         if validate_execution_process_identity_shape(identity).is_err() {
@@ -647,16 +844,34 @@ pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownActio
                 method: "identity_unavailable",
             };
         }
+        // A PID-namespace init holds only the target's tree. The launcher
+        // (wrapper) that owns the group keeps running after the init exits:
+        // it reaps the init, publishes the native terminal record and only
+        // then exits. So its pinned group is also settled, after the init.
+        let wrapper_group_wait = |wait: Duration| -> Option<KillResult> {
+            scope
+                .is_pid_namespace_init()
+                .then(|| settle_wrapper_group_after_containment(identity, wait))
+        };
         if let ShutdownAction::Graceful(grace) = action {
-            let delivered = signal_exact_target(identity, libc::SIGTERM);
+            let delivered = signal_exact_target(identity, lillux::signal::SIGTERM);
             if delivered == SignalResult::Delivered && scope.wait_empty(grace).is_ok() {
-                return KillResult {
-                    success: true,
-                    method: "scope_graceful",
+                return match wrapper_group_wait(grace) {
+                    Some(group) if !group.success => group,
+                    _ => KillResult {
+                        success: true,
+                        method: "scope_graceful",
+                    },
                 };
             }
         }
         let success = scope.terminate_and_wait(scope.control_timeout()).is_ok();
+        if success
+            && let Some(group) = wrapper_group_wait(Duration::ZERO)
+            && !group.success
+        {
+            return group;
+        }
         return KillResult {
             success,
             method: if success {
@@ -690,6 +905,55 @@ pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownActio
         match action {
             ShutdownAction::Hard => hard_kill_pinned_group(identity, &group, "hard_killed"),
             ShutdownAction::Graceful(grace) => graceful_kill(identity, &group, grace),
+        }
+    }
+}
+
+/// Longest a launcher group is given, after its PID-namespace init is gone, to
+/// publish the init's terminal record and exit by itself before it is killed.
+/// Deliberately small: the publication is a bounded write that follows the
+/// reap, so a launcher still running after this is stuck, not slow.
+const WRAPPER_PUBLISH_SETTLE: Duration = Duration::from_secs(3);
+
+/// End the pinned launcher group of an execution whose descendants a
+/// PID-namespace init holds. Wait up to the longer of `wait` and
+/// [`WRAPPER_PUBLISH_SETTLE`] for it to leave on its own (it is publishing the
+/// init's terminal record), then hard-kill what remains. Success comes only
+/// from the exact group being absent or killed.
+/// Success means the exact group is gone or was killed; a lost leader with a
+/// still-populated numeric group is not success.
+fn settle_wrapper_group_after_containment(
+    identity: &ExecutionProcessIdentity,
+    wait: Duration,
+) -> KillResult {
+    // The launcher publishes the init's terminal record before it exits, so
+    // every path gives it this bounded window, whatever the caller's own wait.
+    let wait = wait.max(WRAPPER_PUBLISH_SETTLE);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (identity, wait);
+        return KillResult {
+            success: false,
+            method: "identity_unavailable",
+        };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if identity.group_leader_pid == daemon_pgid() {
+            return KillResult {
+                success: false,
+                method: "skipped_daemon_pgid",
+            };
+        }
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match pin_group_leader(identity) {
+                Err(error) => return group_pin_failure(identity, error),
+                Ok(group) if std::time::Instant::now() >= deadline => {
+                    return hard_kill_pinned_group(identity, &group, "wrapper_group_killed");
+                }
+                Ok(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
         }
     }
 }
@@ -748,7 +1012,7 @@ impl SignalResult {
 /// Its handler sets the interrupt flag, cutting the in-flight cognition so the
 /// queued input folds into a fresh one.
 pub fn interrupt_process(identity: &ExecutionProcessIdentity) -> SignalResult {
-    signal_exact_target(identity, libc::SIGUSR1)
+    signal_exact_target(identity, lillux::signal::SIGUSR1)
 }
 
 /// Send one signal to the exact target process through a verified pidfd.
@@ -774,15 +1038,33 @@ pub fn signal_exact_target(identity: &ExecutionProcessIdentity, signal: i32) -> 
 
 /// Send one signal to the exact, verified process group. Used by cascade hard
 /// cancellation; graceful cascade targets only the runtime PID.
+///
+/// For an execution held by a retained scope (cgroup scope or PID-namespace
+/// init) the only meaningful group-wide signal is the kernel-backed
+/// termination of the whole containment, which is `SIGKILL`: that argument
+/// terminates the scope (and, for a PID-namespace init, the pinned launcher
+/// group after it). Any other signal is refused with `IdentityUnavailable`
+/// rather than being reinterpreted as termination.
 pub fn signal_exact_group(identity: &ExecutionProcessIdentity, signal: i32) -> SignalResult {
     if let Some(scope) = &identity.process_scope {
         // Scope-wide cancellation has a kernel-backed termination operation,
         // not an arbitrary numeric group signal. Cooperative policy still
         // addresses the exact runtime target through signal_exact_target.
-        if signal != libc::SIGKILL || validate_execution_process_identity_shape(identity).is_err() {
+        if signal != lillux::signal::SIGKILL
+            || validate_execution_process_identity_shape(identity).is_err()
+        {
             return SignalResult::IdentityUnavailable;
         }
         return match scope.terminate_and_wait(scope.control_timeout()) {
+            Ok(()) if scope.is_pid_namespace_init() => {
+                // The init is gone; the launcher's pinned group still owes
+                // its terminal publication and reap, so end it too.
+                if settle_wrapper_group_after_containment(identity, Duration::ZERO).success {
+                    SignalResult::Delivered
+                } else {
+                    SignalResult::IdentityUnavailable
+                }
+            }
             Ok(()) => SignalResult::Delivered,
             Err(_) => SignalResult::IdentityUnavailable,
         };
@@ -806,14 +1088,45 @@ pub fn signal_exact_group(identity: &ExecutionProcessIdentity, signal: i32) -> S
     }
 }
 
+/// Refuse unless this node's process-scope provider qualified its kernel
+/// freeze barrier. Qualification exercises the barrier only when the signed
+/// floor names `quiescence:scope`, so a scope freeze on any other node would
+/// be the barrier's first, untested use.
+pub fn require_scope_quiescence_qualified(
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
+) -> Result<()> {
+    if !qualified.contains(&lillux::ProcessScopeCapability::Quiescence) {
+        bail!(
+            "this node did not qualify scope quiescence ({}); an execution scope cannot be frozen until its node policy requires that guarantee and the process-scope provider qualifies it",
+            lillux::ProcessScopeCapability::Quiescence.capability_name()
+        );
+    }
+    Ok(())
+}
+
 /// Stop the exact execution group and retain a descriptor-pinned Lillux
 /// authority only after every live member has crossed the stop barrier.
 /// Application code supplies durable coordinates; Lillux exclusively owns
 /// procfs enumeration, pidfds, signals, clocks, and settle waits.
+///
+/// `qualified` is the node's qualified process-scope guarantee set. A scoped
+/// execution is frozen only when it names quiescence; a strict process group
+/// is stopped by signal and needs no scope guarantee.
 pub fn quiesce_exact_process_group(
     identity: &ExecutionProcessIdentity,
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
     timeout: lillux::time::Duration,
 ) -> Result<lillux::QuiescedProcesses> {
+    if let Some(refusal) = identity
+        .process_scope
+        .as_ref()
+        .and_then(lillux::ProcessScopeRecovery::quiescence_refusal)
+    {
+        bail!("{refusal}");
+    }
+    if identity.process_scope.is_some() {
+        require_scope_quiescence_qualified(qualified)?;
+    }
     validate_execution_process_identity_shape(identity)?;
     if let Some(scope) = &identity.process_scope {
         return scope
@@ -821,6 +1134,13 @@ pub fn quiesce_exact_process_group(
             .map(Into::into)
             .map_err(anyhow::Error::msg);
     }
+    quiesce_strict_process_group(identity, timeout)
+}
+
+fn quiesce_strict_process_group(
+    identity: &ExecutionProcessIdentity,
+    timeout: lillux::time::Duration,
+) -> Result<lillux::QuiescedProcesses> {
     lillux::quiesce_exact_process_group(&lillux_process_identity(identity)?, timeout)
         .map(Into::into)
         .map_err(anyhow::Error::msg)
@@ -835,13 +1155,20 @@ pub fn recover_quiesced_execution(
     timeout: lillux::time::Duration,
 ) -> Result<lillux::QuiescedProcesses> {
     validate_execution_process_identity_shape(identity)?;
+    if let Some(refusal) = identity
+        .process_scope
+        .as_ref()
+        .and_then(lillux::ProcessScopeRecovery::quiescence_refusal)
+    {
+        bail!("{refusal}");
+    }
     if let Some(scope) = &identity.process_scope {
         return scope
             .recover_quiesced(timeout)
             .map(Into::into)
             .map_err(anyhow::Error::msg);
     }
-    quiesce_exact_process_group(identity, timeout)
+    quiesce_strict_process_group(identity, timeout)
 }
 
 fn lillux_process_identity(
@@ -861,7 +1188,105 @@ fn lillux_process_identity(
         target_start_time_ticks,
         group_leader_pid,
         group_leader_start_time_ticks,
+        group_basis: lillux::GroupBasis::ProcessGroup,
+        pid_namespace: identity.pid_namespace.clone(),
     })
+}
+
+/// Liveness of one exact process identity captured by Lillux, such as a
+/// connector peer: the PID must still name the same incarnation of the same
+/// boot, and a process-group peer must still sit in its recorded group. A
+/// reused PID or another boot is dead; a host without pidfd evidence is
+/// unavailable and never counts as dead.
+pub fn exact_process_liveness(identity: &lillux::ExactProcessIdentity) -> IdentityLiveness {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = identity;
+        IdentityLiveness::Unavailable
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        pin_liveness(pin_exact(identity))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pin_exact(
+    identity: &lillux::ExactProcessIdentity,
+) -> std::result::Result<PinnedProcess, IdentityPinError> {
+    let pid = i64::from(identity.target_pid);
+    require_comparable_coordinate(identity)?;
+    let pin = open_pidfd(pid)?;
+    let boot_id = read_boot_id().map_err(|_| IdentityPinError::Unavailable)?;
+    if boot_id != identity.boot_id {
+        return Err(IdentityPinError::Stale);
+    }
+    let stat = read_verified_process_stat(pid, pin.pidfd.as_fd())?;
+    let same_incarnation =
+        u64::try_from(stat.start_time_ticks).ok() == Some(identity.target_start_time_ticks);
+    let same_group = !identity.group_basis.is_process_group()
+        || stat.pgrp == i64::from(identity.group_leader_pid);
+    if !same_incarnation || !same_group {
+        return Err(IdentityPinError::Stale);
+    }
+    Ok(pin)
+}
+
+/// The shared pid-namespace gate for every pin of a recorded coordinate. A
+/// numeric pid and birth ticks recorded in another pid namespace name no
+/// process here, so they must never be pinned, judged, or signalled: a foreign
+/// or unreadable namespace is `Unavailable` (fail closed, never dead). A boot
+/// that ended the incarnation is `Stale`. The rule itself lives in Lillux.
+#[cfg(target_os = "linux")]
+fn require_comparable_coordinate(
+    identity: &lillux::ExactProcessIdentity,
+) -> std::result::Result<(), IdentityPinError> {
+    comparable_gate(identity.end_precheck())
+}
+
+/// Map Lillux's boot/namespace decision onto a pin outcome. `Ok(false)` has
+/// no meaning for a precheck and fails closed with every error.
+#[cfg(target_os = "linux")]
+fn comparable_gate(
+    decision: Option<std::result::Result<bool, lillux::ProcessEndError>>,
+) -> std::result::Result<(), IdentityPinError> {
+    match decision {
+        None => Ok(()),
+        Some(Ok(true)) => Err(IdentityPinError::Stale),
+        Some(Ok(false) | Err(_)) => Err(IdentityPinError::Unavailable),
+    }
+}
+
+/// [`exact_process_liveness`] for a caller that holds the node's exclusive
+/// state lock (the witness is the proof, not a flag). An incarnation recorded
+/// in another pid namespace is then `DeadOrStale`: the lock is exclusive for
+/// its volume, so the daemon that recorded it has exited. Every other
+/// classification, including an untrusted observer namespace, is unchanged.
+/// Callers without the lock must use [`exact_process_liveness`].
+pub fn exact_process_liveness_holding_exclusive_lock(
+    identity: &lillux::ExactProcessIdentity,
+    state_lock: &lillux::ExclusiveLockWitness<'_>,
+) -> IdentityLiveness {
+    match identity.end_precheck_holding_exclusive_lock(state_lock) {
+        Some(Ok(true)) => IdentityLiveness::DeadOrStale,
+        _ => exact_process_liveness(identity),
+    }
+}
+
+/// [`execution_liveness`] for a caller that holds the node's exclusive state
+/// lock; see [`exact_process_liveness_holding_exclusive_lock`].
+pub fn execution_liveness_holding_exclusive_lock(
+    identity: &ExecutionProcessIdentity,
+    state_lock: &lillux::ExclusiveLockWitness<'_>,
+) -> IdentityLiveness {
+    let Ok(exact) = lillux_process_identity(identity) else {
+        return IdentityLiveness::Unavailable;
+    };
+    match exact.end_precheck_holding_exclusive_lock(state_lock) {
+        Some(Ok(true)) => IdentityLiveness::DeadOrStale,
+        _ => execution_liveness(identity),
+    }
 }
 
 /// Whether the persisted target still names the exact live incarnation.
@@ -887,13 +1312,33 @@ pub fn execution_liveness(identity: &ExecutionProcessIdentity) -> IdentityLivene
 /// gone and either the host boot ended or the whole numeric group is absent.
 /// Unavailable evidence never authorizes clearing a durable attachment.
 pub fn assert_reaped_process_group_absent(identity: &ExecutionProcessIdentity) -> Result<()> {
+    assert_reaped_process_group_absent_as(identity, "owned subprocess")
+}
+
+/// As [`assert_reaped_process_group_absent`], naming which identity is meant
+/// (for example the root runtime or a dedicated worker) in every refusal.
+pub fn assert_reaped_process_group_absent_as(
+    identity: &ExecutionProcessIdentity,
+    label: &str,
+) -> Result<()> {
+    let pgid = identity.pgid();
     if let Some(scope) = &identity.process_scope {
         validate_execution_process_identity_shape(identity)?;
         scope
             .wait_empty(scope.control_timeout())
             .map_err(anyhow::Error::msg)?;
         if execution_liveness(identity) != IdentityLiveness::DeadOrStale {
-            anyhow::bail!("owned subprocess wait did not prove exact target absence");
+            anyhow::bail!("{label} (pgid {pgid}) wait did not prove exact target absence");
+        }
+        // A PID-namespace init proves only the target's tree empty. Its
+        // launcher group may still be publishing the terminal record, so the
+        // pinned group must be absent too, exactly as for a strict group.
+        if scope.is_pid_namespace_init()
+            && execution_group_liveness_of_wrapper(identity) != IdentityLiveness::DeadOrStale
+        {
+            anyhow::bail!(
+                "{label} (pgid {pgid}) PID-namespace containment is empty but its launcher group is not"
+            );
         }
         return Ok(());
     }
@@ -901,7 +1346,7 @@ pub fn assert_reaped_process_group_absent(identity: &ExecutionProcessIdentity) -
         || (execution_identity_is_current_boot(identity)?
             && process_group_presence(identity.pgid()) != IdentityLiveness::DeadOrStale)
     {
-        anyhow::bail!("owned subprocess wait did not prove exact target and group absence");
+        anyhow::bail!("{label} (pgid {pgid}) wait did not prove exact target and group absence");
     }
     Ok(())
 }
@@ -919,10 +1364,22 @@ pub fn execution_group_liveness(identity: &ExecutionProcessIdentity) -> Identity
         if validate_execution_process_identity_shape(identity).is_err() {
             return IdentityLiveness::Unavailable;
         }
-        return match scope.is_empty(scope.control_timeout()) {
+        let contained = match scope.is_empty(scope.control_timeout()) {
             Ok(true) => IdentityLiveness::DeadOrStale,
             Ok(false) => IdentityLiveness::Alive,
             Err(_) => IdentityLiveness::Unavailable,
+        };
+        if !scope.is_pid_namespace_init() {
+            return contained;
+        }
+        // The init's tree is only part of the execution: the launcher group
+        // outlives it while it reaps and publishes. Alive if either is.
+        return match (contained, execution_group_liveness_of_wrapper(identity)) {
+            (IdentityLiveness::Alive, _) | (_, IdentityLiveness::Alive) => IdentityLiveness::Alive,
+            (IdentityLiveness::Unavailable, _) | (_, IdentityLiveness::Unavailable) => {
+                IdentityLiveness::Unavailable
+            }
+            _ => IdentityLiveness::DeadOrStale,
         };
     }
     #[cfg(not(target_os = "linux"))]
@@ -934,6 +1391,29 @@ pub fn execution_group_liveness(identity: &ExecutionProcessIdentity) -> Identity
     #[cfg(target_os = "linux")]
     {
         pin_liveness(pin_group_leader(identity))
+    }
+}
+
+/// Liveness of the pinned launcher group leader alone (the strict-group view).
+fn execution_group_liveness_of_wrapper(identity: &ExecutionProcessIdentity) -> IdentityLiveness {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = identity;
+        IdentityLiveness::Unavailable
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // A dead leader does not empty its group: orphaned members keep the
+        // numeric group. On the current boot the group must be absent too.
+        let leader = pin_liveness(pin_group_leader(identity));
+        if leader != IdentityLiveness::DeadOrStale {
+            return leader;
+        }
+        match execution_identity_is_current_boot(identity) {
+            Ok(true) => process_group_presence(identity.pgid()),
+            Ok(false) => IdentityLiveness::DeadOrStale,
+            Err(_) => IdentityLiveness::Unavailable,
+        }
     }
 }
 
@@ -1085,6 +1565,9 @@ fn pin_process(
     expected_pgrp: Option<i64>,
 ) -> std::result::Result<PinnedProcess, IdentityPinError> {
     validate_identity_shape(identity)?;
+    require_comparable_coordinate(
+        &lillux_process_identity(identity).map_err(|_| IdentityPinError::Unavailable)?,
+    )?;
     let pin = open_pidfd(pid)?;
     let boot_id = read_boot_id().map_err(|_| IdentityPinError::Unavailable)?;
     if boot_id != identity.boot_id {
@@ -1273,7 +1756,7 @@ fn graceful_kill(
     };
 
     if let Some(target) = target.as_ref() {
-        match pidfd_send_signal(target, libc::SIGTERM) {
+        match pidfd_send_signal(target, lillux::signal::SIGTERM) {
             SignalResult::Delivered | SignalResult::AlreadyDead => {}
             _ => {
                 return KillResult {
@@ -1314,11 +1797,24 @@ fn graceful_kill(
 
 #[cfg(target_os = "linux")]
 fn hard_kill_pinned_group(
-    _identity: &ExecutionProcessIdentity,
+    identity: &ExecutionProcessIdentity,
     group: &PinnedProcess,
     method: &'static str,
 ) -> KillResult {
-    match signal_pinned_group(group, libc::SIGKILL) {
+    hard_kill_pinned_group_within(identity, group, method, POST_SIGKILL_SETTLE_BOUND)
+}
+
+/// SIGKILL the pinned group and prove it empty within `settle`. `method`
+/// names a proved kill; a delivered kill whose group is still present at the
+/// bound reports [`SIGKILL_DELIVERED_UNSETTLED`].
+#[cfg(target_os = "linux")]
+fn hard_kill_pinned_group_within(
+    _identity: &ExecutionProcessIdentity,
+    group: &PinnedProcess,
+    method: &'static str,
+    settle: Duration,
+) -> KillResult {
+    match signal_pinned_group(group, lillux::signal::SIGKILL) {
         SignalResult::AlreadyDead => {
             return KillResult {
                 success: true,
@@ -1334,10 +1830,17 @@ fn hard_kill_pinned_group(
         }
     }
     let deadline = std::time::Instant::now()
-        .checked_add(Duration::from_millis(POST_SIGKILL_WAIT_MS))
+        .checked_add(settle)
         .unwrap_or_else(std::time::Instant::now);
     match wait_for_group_exit(group, deadline) {
-        Ok(success) => KillResult { success, method },
+        Ok(true) => KillResult {
+            success: true,
+            method,
+        },
+        Ok(false) => KillResult {
+            success: false,
+            method: SIGKILL_DELIVERED_UNSETTLED,
+        },
         Err(()) => KillResult {
             success: false,
             method: "group_wait_failed",
@@ -1409,20 +1912,374 @@ mod tests {
     use std::process::{Command, Stdio};
     use tempfile::TempDir;
 
+    /// The observer's own pid namespace: a recorded coordinate is only judged
+    /// by pid evidence when it was observed in this namespace.
+    fn own_namespace() -> String {
+        lillux::process_control::current_pid_namespace().unwrap()
+    }
+
+    /// An identity retained by its PID-namespace init whose init no longer
+    /// exists (a PID no kernel can allocate), so settlement is decided by the
+    /// containment record rather than by any numeric group.
+    fn exited_pid_namespace_identity() -> ExecutionProcessIdentity {
+        let boot = read_boot_id().unwrap();
+        let gone = i64::from(i32::MAX) - 1;
+        serde_json::from_value(serde_json::json!({
+            "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
+            "boot_id": boot, "target_pid": gone,
+            "target_start_time_ticks": 200, "group_leader_pid": gone,
+            "group_leader_start_time_ticks": 190, "pid_namespace": own_namespace(),
+            "process_scope": {
+                "version": 5, "control_timeout": {"secs": 5, "nanos": 0},
+                "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+                "backend": {
+                    "implementation": "pid_namespace_init", "boot_id": boot,
+                    "init_pid": gone, "init_start_time_ticks": 200,
+                    "namespace": {"device": 4, "inode": 9}
+                }
+            },
+            "resource_selections": [], "resource_operations": [],
+            "resource_settlement_authority": null,
+            "resource_allocation_limit": null,
+            "resource_occupancy_start": null, "resource_occupancy_limit": null,
+            "resource_cleanup_allowance_ms": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn pid_namespace_contained_identity_settles_through_its_containment() {
+        let identity = exited_pid_namespace_identity();
+        validate_execution_process_identity_shape(&identity).unwrap();
+        // Stored shape: the new backend is only a variant of the existing
+        // nullable `process_scope` field and round-trips canonically.
+        let json = lillux::canonical_json(&serde_json::to_value(&identity).unwrap()).unwrap();
+        let back: ExecutionProcessIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, identity);
+        assert_eq!(
+            lillux::canonical_json(&serde_json::to_value(&back).unwrap()).unwrap(),
+            json
+        );
+        // The init is gone, so the kernel tore the namespace down with it.
+        assert_eq!(
+            execution_group_liveness(&identity),
+            IdentityLiveness::DeadOrStale
+        );
+        assert!(!execution_alive(&identity));
+        assert_reaped_process_group_absent(&identity).unwrap();
+        let killed = kill_by_action(&identity, ShutdownAction::Hard);
+        assert!(killed.success, "{}", killed.method);
+        assert_eq!(killed.method, "scope_terminated");
+        // Containment never quiesces; the refusal names why, whatever the
+        // node qualified for cgroup scopes.
+        let qualified = lillux::ProcessScopeCapability::ALL.into_iter().collect();
+        let error = quiesce_exact_process_group(
+            &identity,
+            &qualified,
+            lillux::time::Duration::from_secs(1),
+        )
+        .err()
+        .expect("PID-namespace containment cannot be frozen");
+        assert!(error.to_string().contains("cannot quiesce"), "{error:#}");
+        let error = recover_quiesced_execution(&identity, lillux::time::Duration::from_secs(1))
+            .err()
+            .expect("a lost freeze cannot be recovered on a containment that never froze");
+        assert!(error.to_string().contains("cannot quiesce"), "{error:#}");
+    }
+
+    /// The launcher (wrapper) group is a real running process; the namespace
+    /// init recorded for it is already gone. This is the interval in which
+    /// the wrapper still reaps the init and publishes its terminal record.
+    fn live_wrapper_gone_init_identity(
+        wrapper: ExecutionProcessIdentity,
+    ) -> ExecutionProcessIdentity {
+        let mut identity = exited_pid_namespace_identity();
+        identity.group_leader_pid = wrapper.group_leader_pid;
+        identity.group_leader_start_time_ticks = wrapper.group_leader_start_time_ticks;
+        identity
+    }
+
+    #[test]
+    fn pid_namespace_identity_is_not_settled_while_its_launcher_group_runs() {
+        let tmp = TempDir::new().unwrap();
+        let (mut child, wrapper, _marker) = spawn_signal_target(&tmp);
+        let identity = live_wrapper_gone_init_identity(wrapper);
+        validate_execution_process_identity_shape(&identity).unwrap();
+        // The init is gone, but the pinned launcher group is alive: not dead,
+        // not reaped, and the next owner must not clear its attachment.
+        assert_eq!(execution_group_liveness(&identity), IdentityLiveness::Alive);
+        let error = assert_reaped_process_group_absent(&identity)
+            .expect_err("a running launcher group is not settled");
+        assert!(error.to_string().contains("launcher group"), "{error:#}");
+        // Cleanup ends the init's tree and then the pinned launcher group.
+        let (killed, _status) = run_kill_with_reaper(
+            move || kill_by_action(&identity, ShutdownAction::Hard),
+            &mut child,
+        );
+        assert!(killed.success, "{}", killed.method);
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn containment_membership_identity_cannot_become_an_execution_identity() {
+        let boot = read_boot_id().unwrap();
+        let mut contained = lillux::ExactProcessIdentity {
+            boot_id: boot,
+            target_pid: 77,
+            target_start_time_ticks: 5,
+            group_leader_pid: 77,
+            group_leader_start_time_ticks: 5,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
+            group_basis: lillux::GroupBasis::Contained,
+        };
+        let error = execution_process_identity_from_lillux(contained.clone(), None)
+            .expect_err("no group signal may be built from a contained identity");
+        assert!(
+            error.to_string().contains("containment-membership"),
+            "{error:#}"
+        );
+        contained.group_basis = lillux::GroupBasis::ProcessGroup;
+        execution_process_identity_from_lillux(contained, None).unwrap();
+    }
+
+    #[test]
+    fn a_slow_launcher_publishes_its_terminal_record_before_it_is_killed() {
+        let tmp = TempDir::new().unwrap();
+        let record = tmp.path().join("terminal_record");
+        // Stand-in for the launcher: it outlives the init for a moment, then
+        // publishes the record and exits on its own.
+        let script = format!(r#"sleep 1; echo published > "{}""#, record.display());
+        let mut child = unsafe {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn slow launcher")
+        };
+        let pgid = child.id() as i64;
+        let wrapper = capture_execution_process_identity(pgid, Some(pgid)).expect("capture");
+        let identity = live_wrapper_gone_init_identity(wrapper);
+        let (killed, _status) = run_kill_with_reaper(
+            move || kill_by_action(&identity, ShutdownAction::Hard),
+            &mut child,
+        );
+        // Success only because the exact group is gone, after the record.
+        assert!(killed.success, "{}", killed.method);
+        assert_eq!(read_marker(&record).as_deref(), Some("published\n"));
+        assert_eq!(killed.method, "scope_terminated");
+    }
+
+    #[test]
+    fn pid_namespace_group_signal_also_ends_the_launcher_group() {
+        let tmp = TempDir::new().unwrap();
+        let (mut child, wrapper, _marker) = spawn_signal_target(&tmp);
+        let identity = live_wrapper_gone_init_identity(wrapper);
+        let (delivered, _status) = run_kill_with_reaper(
+            move || signal_exact_group(&identity, lillux::signal::SIGKILL),
+            &mut child,
+        );
+        assert_eq!(delivered, SignalResult::Delivered);
+        let _ = child.wait();
+    }
+
+    fn resource_binding_bare_identity() -> ExecutionProcessIdentity {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
+            "boot_id": "fixture-boot", "target_pid": 40,
+            "target_start_time_ticks": 200, "group_leader_pid": 39,
+            "group_leader_start_time_ticks": 190, "pid_namespace": lillux::current_pid_namespace().unwrap(), "process_scope": null,
+            "resource_selections": [], "resource_operations": [],
+            "resource_settlement_authority": null,
+            "resource_allocation_limit": null,
+            "resource_occupancy_start": null, "resource_occupancy_limit": null,
+            "resource_cleanup_allowance_ms": null,
+        }))
+        .unwrap()
+    }
+
+    // Shape-only bindings; these fixtures open no ledger, device or process.
+    fn resource_binding_fixture(
+        identity: &ExecutionProcessIdentity,
+    ) -> (
+        ryeos_engine::contracts::ExecutionResourceSelection,
+        ryeos_accounting::ResourceOperationBinding,
+        lillux::time::OccupancyCoordinate,
+        lillux::time::OccupancyLimit,
+    ) {
+        let start = lillux::time::occupancy_now().unwrap();
+        let limit = lillux::time::OccupancyLimit::new(start.clone(), 60_000_000_000).unwrap();
+        let selection = ryeos_engine::contracts::ExecutionResourceSelection {
+            stable_id: "accelerator-fixture".to_owned(),
+            class: "accelerator".to_owned(),
+            matched_facts: std::collections::BTreeMap::new(),
+            observation_contract_digest: "a".repeat(64),
+            device_binding_digest: "b".repeat(64),
+            access: ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+            enforcement: ryeos_engine::contracts::ExecutionResourceEnforcement::DeploymentVisible,
+            character_devices: Vec::new(),
+        };
+        let operation = ryeos_accounting::ResourceOperationBinding {
+            version: ryeos_accounting::RESOURCE_OPERATION_BINDING_VERSION,
+            owner_gate_id: ryeos_accounting::HexDigest::new("9".repeat(64)).unwrap(),
+            operation_id: ryeos_accounting::HexDigest::new("c".repeat(64)).unwrap(),
+            request_digest: ryeos_accounting::HexDigest::new("d".repeat(64)).unwrap(),
+            owner_incarnation: ryeos_accounting::HexDigest::new(
+                identity.owner_incarnation_digest().unwrap(),
+            )
+            .unwrap(),
+            stable_resource_id: selection.stable_id.clone(),
+            authority_digest: ryeos_accounting::HexDigest::new("e".repeat(64)).unwrap(),
+            meter_contract_digest: ryeos_accounting::HexDigest::new("f".repeat(64)).unwrap(),
+            clock_contract_digest: ryeos_accounting::HexDigest::new(start.contract_digest.clone())
+                .unwrap(),
+            maximum_occupancy_milliseconds: Some(60_000),
+        };
+        (selection, operation, start, limit)
+    }
+
+    #[test]
+    fn resource_binding_refusal_preserves_complete_original_identity() {
+        for mismatch in ["allocation", "cleanup", "owner", "clock", "limit"] {
+            let mut identity = resource_binding_bare_identity();
+            let original = identity.clone();
+            let (selection, mut operation, start, mut limit) = resource_binding_fixture(&identity);
+            let mut allocation = Some(1);
+            let mut cleanup = Some(1_000);
+            match mismatch {
+                "allocation" => allocation = Some(0),
+                "cleanup" => cleanup = Some(60_000),
+                "owner" => {
+                    operation.owner_incarnation =
+                        ryeos_accounting::HexDigest::new("1".repeat(64)).unwrap();
+                }
+                "clock" => {
+                    operation.clock_contract_digest =
+                        ryeos_accounting::HexDigest::new("2".repeat(64)).unwrap();
+                }
+                "limit" => {
+                    limit =
+                        lillux::time::OccupancyLimit::new(start.clone(), 59_000_000_000).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                identity
+                    .bind_execution_resources(
+                        vec![selection],
+                        vec![operation],
+                        allocation,
+                        Some(start),
+                        Some(limit),
+                        cleanup,
+                    )
+                    .is_err(),
+                "{mismatch}"
+            );
+            assert_eq!(identity, original, "{mismatch}");
+        }
+    }
+
+    #[test]
+    fn resource_binding_never_overwrites_retained_operations_or_ceiling() {
+        for retained in ["operation", "allocation"] {
+            let mut identity = resource_binding_bare_identity();
+            match retained {
+                "operation" => identity
+                    .resource_operations
+                    .push(resource_binding_fixture(&identity).1),
+                "allocation" => identity.resource_allocation_limit = Some(1),
+                _ => unreachable!(),
+            }
+            let original = identity.clone();
+            assert!(
+                identity
+                    .bind_execution_resources(Vec::new(), Vec::new(), None, None, None, None,)
+                    .is_err()
+            );
+            assert_eq!(identity, original, "{retained}");
+        }
+    }
+
+    #[test]
+    fn resource_binding_preserves_incarnation_and_existing_local_contract() {
+        let mut identity = resource_binding_bare_identity();
+        let bare = identity.clone();
+        let incarnation = identity.owner_incarnation_digest().unwrap();
+        identity
+            .bind_execution_resources(Vec::new(), Vec::new(), None, None, None, None)
+            .unwrap();
+        assert_eq!(
+            identity, bare,
+            "resource-free owners acquire no resource authority"
+        );
+        let (selection, operation, start, limit) = resource_binding_fixture(&identity);
+        identity
+            .bind_execution_resources(
+                vec![selection],
+                vec![operation],
+                Some(1),
+                Some(start),
+                Some(limit),
+                Some(1_000),
+            )
+            .unwrap();
+        assert_eq!(identity.owner_incarnation_digest().unwrap(), incarnation);
+        assert_eq!(
+            identity.resource_settlement_authority,
+            Some(ProcessResourceSettlementAuthority::LocalProcessScope {})
+        );
+        validate_execution_process_identity_shape(&identity).unwrap();
+        let bound = identity.clone();
+        assert!(
+            identity
+                .bind_execution_resources(Vec::new(), Vec::new(), None, None, None, None)
+                .is_err()
+        );
+        assert_eq!(identity, bound);
+    }
+
     #[test]
     fn process_identity_requires_explicit_scope_contract() {
         let mut value = serde_json::json!({
             "schema_version": PROCESS_IDENTITY_SCHEMA_VERSION,
             "boot_id": "fixture-boot", "target_pid": 40,
             "target_start_time_ticks": 200, "group_leader_pid": 39,
-            "group_leader_start_time_ticks": 190, "process_scope": null,
+            "group_leader_start_time_ticks": 190, "pid_namespace": lillux::current_pid_namespace().unwrap(), "process_scope": null,
             "resource_selections": [], "resource_operations": [],
+            "resource_settlement_authority": null,
             "resource_allocation_limit": null,
             "resource_occupancy_start": null, "resource_occupancy_limit": null,
             "resource_cleanup_allowance_ms": null,
         });
         let identity: ExecutionProcessIdentity = serde_json::from_value(value.clone()).unwrap();
         validate_execution_process_identity_shape(&identity).unwrap();
+        let mut missing_settlement = value.clone();
+        missing_settlement
+            .as_object_mut()
+            .unwrap()
+            .remove("resource_settlement_authority");
+        assert!(
+            serde_json::from_value::<ExecutionProcessIdentity>(missing_settlement).is_err(),
+            "absence cannot infer local or trusted settlement authority"
+        );
+        let mut extra_settlement = value.clone();
+        extra_settlement["resource_settlement_authority"] =
+            serde_json::json!({"authority": "local_process_scope"});
+        let extra: ExecutionProcessIdentity = serde_json::from_value(extra_settlement).unwrap();
+        assert!(
+            validate_execution_process_identity_shape(&extra).is_err(),
+            "a resource-free identity has no resource settlement authority"
+        );
         let mut missing_resource_authority = value.clone();
         missing_resource_authority
             .as_object_mut()
@@ -1438,6 +2295,184 @@ mod tests {
         value["schema_version"] = (PROCESS_IDENTITY_SCHEMA_VERSION - 1).into();
         let old: ExecutionProcessIdentity = serde_json::from_value(value).unwrap();
         assert!(validate_execution_process_identity_shape(&old).is_err());
+    }
+
+    /// A running process in its own group, with both identity forms of it.
+    fn running_group_leader() -> (
+        std::process::Child,
+        ExecutionProcessIdentity,
+        lillux::ExactProcessIdentity,
+    ) {
+        let child = unsafe {
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn sleeper")
+        };
+        let pgid = i64::from(child.id());
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
+        let exact = lillux_process_identity(&identity).unwrap();
+        (child, identity, exact)
+    }
+
+    fn end_sleeper(mut child: std::process::Child) {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    fn lock_in(directory: &TempDir) -> lillux::ExactExclusiveFileLock {
+        lillux::ExactExclusiveFileLock::acquire(&directory.path().join("state.lock")).unwrap()
+    }
+
+    const FOREIGN_NS: &str = "pid:[1]";
+
+    #[test]
+    fn same_namespace_liveness_is_unchanged() {
+        let (child, identity, exact) = running_group_leader();
+        assert_eq!(exact_process_liveness(&exact), IdentityLiveness::Alive);
+        assert_eq!(execution_liveness(&identity), IdentityLiveness::Alive);
+        // A reused birth in the same namespace is dead, as before.
+        let mut reborn = exact.clone();
+        reborn.target_start_time_ticks += 1;
+        assert_eq!(
+            exact_process_liveness(&reborn),
+            IdentityLiveness::DeadOrStale
+        );
+        let mut reborn_exec = identity.clone();
+        reborn_exec.target_start_time_ticks += 1;
+        assert_eq!(
+            execution_liveness(&reborn_exec),
+            IdentityLiveness::DeadOrStale
+        );
+        // The lock proof changes nothing for a comparable coordinate.
+        let directory = TempDir::new().unwrap();
+        let lock = lock_in(&directory);
+        let witness = lock.witness().unwrap();
+        assert_eq!(
+            exact_process_liveness_holding_exclusive_lock(&exact, &witness),
+            IdentityLiveness::Alive
+        );
+        assert_eq!(
+            execution_liveness_holding_exclusive_lock(&identity, &witness),
+            IdentityLiveness::Alive
+        );
+        assert_eq!(
+            exact_process_liveness_holding_exclusive_lock(&reborn, &witness),
+            IdentityLiveness::DeadOrStale
+        );
+        end_sleeper(child);
+    }
+
+    #[test]
+    fn foreign_namespace_without_the_lock_is_never_dead() {
+        let (child, mut identity, mut exact) = running_group_leader();
+        identity.pid_namespace = FOREIGN_NS.into();
+        exact.pid_namespace = FOREIGN_NS.into();
+        // The numeric coordinate matches a live local process, and a
+        // mismatching birth would otherwise read as dead: neither is judged.
+        assert_eq!(
+            exact_process_liveness(&exact),
+            IdentityLiveness::Unavailable
+        );
+        assert_eq!(execution_liveness(&identity), IdentityLiveness::Unavailable);
+        assert_eq!(
+            execution_group_liveness(&identity),
+            IdentityLiveness::Unavailable
+        );
+        let mut mismatched = identity.clone();
+        mismatched.target_start_time_ticks += 1;
+        assert_eq!(
+            execution_liveness(&mismatched),
+            IdentityLiveness::Unavailable
+        );
+        // And no signal is sent through a foreign coordinate.
+        let killed = kill_by_action(&identity, ShutdownAction::Hard);
+        assert!(!killed.success, "{}", killed.method);
+        assert!(
+            lillux::diagnostic_process_is_live(child.id()),
+            "a foreign-namespace identity must not signal a local pid"
+        );
+        // A different boot still proves the incarnation ended.
+        exact.boot_id = "00000000-0000-4000-8000-000000000000".into();
+        assert_eq!(
+            exact_process_liveness(&exact),
+            IdentityLiveness::DeadOrStale
+        );
+        end_sleeper(child);
+    }
+
+    #[test]
+    fn foreign_namespace_with_the_lock_witness_is_ended() {
+        let (child, mut identity, mut exact) = running_group_leader();
+        identity.pid_namespace = FOREIGN_NS.into();
+        exact.pid_namespace = FOREIGN_NS.into();
+        let directory = TempDir::new().unwrap();
+        let lock = lock_in(&directory);
+        let witness = lock.witness().unwrap();
+        assert_eq!(
+            exact_process_liveness_holding_exclusive_lock(&exact, &witness),
+            IdentityLiveness::DeadOrStale
+        );
+        assert_eq!(
+            execution_liveness_holding_exclusive_lock(&identity, &witness),
+            IdentityLiveness::DeadOrStale
+        );
+        // The proof is per call: the unproven functions still fail closed.
+        assert_eq!(
+            exact_process_liveness(&exact),
+            IdentityLiveness::Unavailable
+        );
+        end_sleeper(child);
+    }
+
+    #[test]
+    fn an_untrusted_or_foreign_namespace_decision_never_reads_as_dead() {
+        use lillux::ProcessEndError::{ForeignPidNamespace, Unclassified};
+        // Comparable coordinate: the caller's own pidfd evidence decides.
+        assert!(comparable_gate(None).is_ok());
+        // A boot that ended the incarnation is stale (dead).
+        assert_eq!(
+            comparable_gate(Some(Ok(true))),
+            Err(IdentityPinError::Stale)
+        );
+        // Foreign namespace and an observer whose procfs cannot be trusted
+        // (unreadable or not its own namespace view) both fail closed.
+        assert_eq!(
+            comparable_gate(Some(Err(ForeignPidNamespace {
+                recorded: FOREIGN_NS.into(),
+                observer: "pid:[2]".into(),
+            }))),
+            Err(IdentityPinError::Unavailable)
+        );
+        assert_eq!(
+            comparable_gate(Some(Err(Unclassified(
+                "cannot read the observer's pid namespace".into()
+            )))),
+            Err(IdentityPinError::Unavailable)
+        );
+        // The lock proof resolves only the foreign case, in Lillux, never an
+        // unreadable observer namespace.
+        let directory = TempDir::new().unwrap();
+        let lock = lock_in(&directory);
+        let witness = lock.witness().unwrap();
+        let (child, _, mut exact) = running_group_leader();
+        exact.pid_namespace = FOREIGN_NS.into();
+        assert_eq!(
+            exact.end_precheck_holding_exclusive_lock(&witness),
+            Some(Ok(true))
+        );
+        end_sleeper(child);
     }
 
     #[test]
@@ -1460,6 +2495,22 @@ mod tests {
 
         remove_stale_socket(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_socket_cleanup_removes_nothing_when_a_later_path_is_live() {
+        let tmp = TempDir::new().unwrap();
+        let stale = tmp.path().join("ryeosd.sock");
+        let live = tmp.path().join("ryeosd-runtime.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+
+        remove_stale_sockets(&[&stale, &live]).unwrap_err();
+        assert!(
+            stale.exists(),
+            "the stale path is kept when any path is live"
+        );
+        assert!(live.exists());
     }
 
     #[test]
@@ -1493,7 +2544,7 @@ mod tests {
             std::thread::sleep(remaining.min(Duration::from_millis(10)));
         }
 
-        let signal_result = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let signal_result = unsafe { libc::kill(-(child.id() as i32), lillux::signal::SIGKILL) };
         let signal_detail = if signal_result == 0 {
             "SIGKILL delivered to owned process group".to_string()
         } else {
@@ -1639,7 +2690,7 @@ mod tests {
         }
 
         let cleanup_signal = if status.is_none() {
-            let result = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let result = unsafe { libc::kill(-(child.id() as i32), lillux::signal::SIGKILL) };
             if result == 0 {
                 "SIGKILL delivered to owned process group".to_string()
             } else {
@@ -1733,7 +2784,7 @@ mod tests {
         );
         assert_eq!(
             status.signal(),
-            Some(libc::SIGKILL),
+            Some(lillux::signal::SIGKILL),
             "expected SIGKILL, got {:?}",
             status.signal()
         );
@@ -1798,10 +2849,135 @@ mod tests {
         // …and SIGKILL ultimately delivered the death blow.
         assert_eq!(
             status.signal(),
-            Some(libc::SIGKILL),
+            Some(lillux::signal::SIGKILL),
             "expected SIGKILL fallback, got {:?}",
             status.signal()
         );
+    }
+
+    /// The graceful-stop contract: SIGTERM goes to the exact target only, and
+    /// the runtime owns cooperative cancellation of its own children. The node
+    /// guarantees the pinned group SIGKILL at the grace deadline, which is what
+    /// reaches a descendant the target never forwarded SIGTERM to.
+    #[test]
+    fn graceful_stop_terms_target_and_kills_unresponsive_descendant_at_deadline() {
+        use std::os::unix::process::ExitStatusExt;
+        let tmp = TempDir::new().unwrap();
+        let target_marker = tmp.path().join("target_got_term");
+        let child_marker = tmp.path().join("child_got_term");
+        let child_pid_path = tmp.path().join("child_pid");
+        let child_ready = tmp.path().join("child_ready");
+        let ready = tmp.path().join("target_ready");
+        // The target traps SIGTERM without exiting and does not forward it.
+        // Its child, in the same process group, would record any SIGTERM it
+        // received. Neither exits on SIGTERM, so only the deadline SIGKILL to
+        // the whole pinned group can end them.
+        let script = format!(
+            r#"trap 'echo term > "{tm}"' TERM; ( trap 'echo term > "{cm}"' TERM; : > "{cr}"; while true; do sleep 0.05; done ) & printf %s $! > "{cp}"; while [ ! -e "{cr}" ]; do sleep 0.01; done; : > "{r}"; while true; do sleep 0.05; done"#,
+            tm = target_marker.display(),
+            cm = child_marker.display(),
+            cr = child_ready.display(),
+            cp = child_pid_path.display(),
+            r = ready.display(),
+        );
+        let mut child = unsafe {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn target with descendant")
+        };
+        let pgid = child.id() as i64;
+        wait_for_signal_target_ready(&mut child, &ready);
+        let descendant_pid: i32 = std::fs::read_to_string(&child_pid_path)
+            .expect("read descendant PID")
+            .parse()
+            .expect("parse descendant PID");
+        assert_eq!(unsafe { libc::getpgid(descendant_pid) }, pgid as i32);
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
+
+        let (result, status) = run_kill_with_reaper(
+            move || kill_by_action(&identity, ShutdownAction::Graceful(Duration::from_secs(1))),
+            &mut child,
+        );
+
+        assert!(
+            result.success,
+            "group kill was not proved: {}",
+            result.method
+        );
+        assert_eq!(result.method, "killed");
+        assert_eq!(read_marker(&target_marker).as_deref(), Some("term\n"));
+        assert!(
+            !child_marker.exists(),
+            "the descendant received SIGTERM; graceful stop must signal only the target"
+        );
+        assert_eq!(status.signal(), Some(lillux::signal::SIGKILL));
+        // The descendant was reparented when the target died and its new
+        // parent reaps it. Dead means gone or a zombie, never still running.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = std::fs::read_to_string(format!("/proc/{descendant_pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(") ")
+                        .and_then(|(_, rest)| rest.chars().next())
+                });
+            match state {
+                None | Some('Z') | Some('X') => break,
+                Some(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Some(state) => panic!("descendant survived the group SIGKILL in state {state}"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hard_kill_reports_unsettled_group_distinctly() {
+        let mut leader = unsafe {
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn group leader")
+        };
+        let pgid = i64::from(leader.id());
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
+        let group = pin_group_leader(&identity).expect("pin group leader");
+
+        // The test has not reaped the killed leader, so its zombie keeps the
+        // group present: SIGKILL was delivered, settlement is unobserved.
+        let unsettled = hard_kill_pinned_group_within(&identity, &group, "killed", Duration::ZERO);
+        assert!(!unsettled.success);
+        assert_eq!(unsettled.method, SIGKILL_DELIVERED_UNSETTLED);
+
+        leader.wait().expect("reap group leader");
+        let settled = hard_kill_pinned_group_within(&identity, &group, "killed", Duration::ZERO);
+        assert!(settled.success);
+        assert_eq!(settled.method, "already_dead");
     }
 
     #[test]
@@ -1809,7 +2985,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (mut child, identity, _marker) = spawn_signal_target(&tmp);
         // Reap it ourselves so the PGID is gone.
-        let _ = unsafe { libc::kill(-(identity.pgid() as i32), libc::SIGKILL) };
+        let _ = unsafe { libc::kill(-(identity.pgid() as i32), lillux::signal::SIGKILL) };
         let _ = child.wait();
         std::thread::sleep(Duration::from_millis(50));
 
@@ -1861,7 +3037,10 @@ mod tests {
         let identity =
             capture_execution_process_identity(pgid, Some(pgid)).expect("capture leader identity");
 
-        assert_eq!(unsafe { libc::kill(pgid as i32, libc::SIGKILL) }, 0);
+        assert_eq!(
+            unsafe { libc::kill(pgid as i32, lillux::signal::SIGKILL) },
+            0
+        );
         let _ = leader.wait().expect("reap group leader");
         assert_eq!(process_group_presence(pgid), IdentityLiveness::Alive);
 
@@ -1875,7 +3054,7 @@ mod tests {
         // Test-only cleanup is safe here: the still-present PGID is the one
         // created above and the numeric leader cannot be reused while the
         // descendant retains that group.
-        let _ = unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+        let _ = unsafe { libc::kill(-(pgid as i32), lillux::signal::SIGKILL) };
     }
 
     /// Spawn a target whose SIGUSR1 trap writes a marker then exits, in its own
@@ -1942,11 +3121,43 @@ mod tests {
     fn signal_dead_identity_reports_already_dead() {
         let tmp = TempDir::new().unwrap();
         let (mut child, identity, _marker) = spawn_usr1_target(&tmp);
-        let _ = unsafe { libc::kill(-(identity.pgid() as i32), libc::SIGKILL) };
+        let _ = unsafe { libc::kill(-(identity.pgid() as i32), lillux::signal::SIGKILL) };
         let _ = child.wait();
         std::thread::sleep(Duration::from_millis(50));
 
         assert_eq!(interrupt_process(&identity), SignalResult::AlreadyDead);
+    }
+
+    #[test]
+    fn exact_identity_liveness_follows_the_pidfd_and_the_boot() {
+        let tmp = TempDir::new().unwrap();
+        let (mut child, identity, _marker) = spawn_usr1_target(&tmp);
+        let exact = lillux_process_identity(&identity).unwrap();
+        assert_eq!(exact_process_liveness(&exact), IdentityLiveness::Alive);
+        let other_boot = lillux::ExactProcessIdentity {
+            boot_id: "not-this-boot".to_string(),
+            ..exact.clone()
+        };
+        assert_eq!(
+            exact_process_liveness(&other_boot),
+            IdentityLiveness::DeadOrStale
+        );
+        let other_incarnation = lillux::ExactProcessIdentity {
+            target_start_time_ticks: exact.target_start_time_ticks + 1,
+            ..exact.clone()
+        };
+        assert_eq!(
+            exact_process_liveness(&other_incarnation),
+            IdentityLiveness::DeadOrStale
+        );
+
+        let _ = unsafe { libc::kill(-(identity.pgid() as i32), lillux::signal::SIGKILL) };
+        let _ = child.wait();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            exact_process_liveness(&exact),
+            IdentityLiveness::DeadOrStale
+        );
     }
 
     #[test]
@@ -1957,7 +3168,7 @@ mod tests {
 
         assert_eq!(interrupt_process(&identity), SignalResult::StaleIdentity);
 
-        let _ = unsafe { libc::kill(-(identity.pgid() as i32), libc::SIGKILL) };
+        let _ = unsafe { libc::kill(-(identity.pgid() as i32), lillux::signal::SIGKILL) };
         let _ = child.wait();
     }
 }

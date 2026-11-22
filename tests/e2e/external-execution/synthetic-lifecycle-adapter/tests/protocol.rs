@@ -32,9 +32,9 @@ use ryeos_state::external_execution::admission::{
     PROTOCOL,
 };
 use ryeos_state::external_execution::transport::{
-    EXTERNAL_CHANNEL_ROUTE_CONTRACT, ExternalControllerTransportContract,
-    ExternalNetworkInputPolicy, ExternalNetworkInputSelection, ExternalSupervisorBootstrap,
-    external_tls_root_bundle_digest,
+    EXTERNAL_CHANNEL_ROUTE_CONTRACT, EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
+    ExternalControllerTransportContract, ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
+    ExternalSupervisorBootstrap, external_tls_root_bundle_digest,
 };
 
 #[path = "../../support/signed_bundle.rs"]
@@ -44,19 +44,37 @@ mod signed_bundle;
 mod admitted_worker_evidence;
 #[path = "../../support/candidate_authoring.rs"]
 mod candidate_authoring;
+#[path = "../../support/candidate_operation_sources.rs"]
+mod candidate_operation_sources;
+#[path = "../../support/candidate_requirement.rs"]
+mod candidate_requirement;
 #[path = "../../support/independent_verifier_scenario.rs"]
 mod independent_verifier_scenario;
+#[path = "../../support/node_capability_report.rs"]
+mod node_capability_report;
+#[path = "../../support/qualification_node.rs"]
+mod qualification_node;
+#[path = "../../support/runtime_qualification.rs"]
+mod runtime_qualification;
+#[path = "../../support/runtime_qualification_placement.rs"]
+mod runtime_qualification_placement;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[path = "routed_verifier/mod.rs"]
 mod routed_verifier;
 
 use candidate_authoring::{
-    CandidateAuthoringBundle, authored_codex_hosted_sources,
-    configure_real_codex_scripted_turn_profile, joined_external_candidate_requirement,
-    real_codex_requirement, sign_candidate_qualification_inputs,
-    signed_candidate_operation_sources, write_candidate_authoring_bundle,
+    authored_codex_hosted_sources, configure_real_codex_scripted_turn_profile,
+    joined_external_candidate_requirement, real_codex_requirement,
+    sign_candidate_qualification_inputs, write_candidate_authoring_bundle,
 };
+use candidate_operation_sources::signed_candidate_operation_sources;
+
+/// Ceilings, not expectations: an adapter operation or controller request that
+/// would pass in milliseconds on an idle host can take seconds on a loaded CI
+/// runner, and these fixtures assert completion, never expiry.
+const ADAPTER_OPERATION_CEILING: lillux::time::Duration = lillux::time::Duration::from_secs(60);
+const CONTROLLER_REQUEST_CEILING_MS: u32 = 15_000;
 
 /// Observe the signed Worker source before selecting its subject product. This
 /// authoring preview cannot borrow an identity from D1 qualification or a
@@ -77,8 +95,36 @@ fn admit_external_worker_evidence(
     evidence
 }
 
+/// The placement requirements of the shipped external-authoring codex profile:
+/// the real controller, credential, lease and guest floors a hosted session
+/// is judged with.
+fn real_codex_placement_requires(repository_source_root: &Path) -> serde_json::Value {
+    let profile: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            repository_source_root
+                .join("bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    profile["requires"].clone()
+}
+
+/// The placement the real admission derives for the test Worker: its
+/// profile's `requires` and the Worker kind's readiness budget.
+fn admitted_placement(
+    state: &ryeos_app::state::AppState,
+) -> ryeos_state::external_execution::admission::ExternalProgramPlacement {
+    let evidence = admit_external_worker_evidence(state);
+    ryeos_engine::structured_session_profile::external_program_placement(
+        &evidence.profile.contract,
+        ryeos_app::source_closure_admission::worker_ready_timeout_ms(&state.engine).unwrap(),
+    )
+    .unwrap()
+}
+
 fn fixture_qualification_use(
-    bundle: &CandidateAuthoringBundle,
+    provider_runtime_manifest_hash: &str,
     evidence: &admitted_worker_evidence::AdmittedWorkerEvidence,
     runtime: &ryeos_state::objects::ExternalLargeContentManifestObject,
     real_codex: bool,
@@ -106,7 +152,7 @@ fn fixture_qualification_use(
             id: "auxiliary".into(),
             kind: ExternalContentKind::Tree,
             mode: ExternalContentMode::Pinned,
-            manifest_hash: bundle.provider_runtime_manifest_hash.clone(),
+            manifest_hash: provider_runtime_manifest_hash.to_owned(),
             entry_count: runtime.entry_count,
             total_bytes: runtime.total_bytes,
             mount_root: ExternalContentMountRoot::ExecutionRuntime,
@@ -116,7 +162,7 @@ fn fixture_qualification_use(
             id: "provider-runtime".into(),
             kind: ExternalContentKind::Tree,
             mode: ExternalContentMode::Pinned,
-            manifest_hash: bundle.provider_runtime_manifest_hash.clone(),
+            manifest_hash: provider_runtime_manifest_hash.to_owned(),
             entry_count: runtime.entry_count,
             total_bytes: runtime.total_bytes,
             mount_root: ExternalContentMountRoot::ExecutionRuntime,
@@ -166,12 +212,18 @@ fn changed_hosted_worker_bundles_pass_signed_source_preflight() {
     .unwrap();
     let public_fixture = trust_document.decode_verifying_key().unwrap();
     let config = tempfile::tempdir().unwrap();
-    let trusted = config.path().join("keys/trusted");
-    std::fs::create_dir_all(&trusted).unwrap();
-    ryeos_engine::trust::pin_key(&public_fixture, "development-publisher", &trusted, None).unwrap();
+    ryeos_engine::test_support::pin_signer(
+        config.path(),
+        &public_fixture,
+        "development-publisher",
+        ryeos_engine::trust::SignerRole::Publisher,
+        ryeos_engine::trust::SignerScope::publisher_default(),
+    );
     let dependencies = [
         repository.join("bundles/core"),
-        repository.join("bundles/standard"),
+        repository.join("bundles/knowledge"),
+        repository.join("bundles/directive"),
+        repository.join("bundles/graph"),
     ];
     let isolation = Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring());
     for bundle in ["codex", "opencode"] {
@@ -186,45 +238,70 @@ fn changed_hosted_worker_bundles_pass_signed_source_preflight() {
     }
 }
 
+fn daemon_isolation_roots() -> Vec<PathBuf> {
+    let mut roots = vec![ryeos_engine::test_support::core_bundle_root()];
+    roots.extend(ryeos_engine::test_support::workflow_bundle_roots());
+    roots
+}
+
 fn live_bundle_engine(
     candidate_authoring_bundle: PathBuf,
-    identity: &ryeos_app::identity::NodeIdentity,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> ryeos_engine::engine::Engine {
-    let mut trust = ryeos_engine::test_support::live_trust_store();
-    trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+    let platform_key = ryeos_engine::test_support::platform_author_verifying_key();
+    let publisher_key = ryeos_engine::test_support::dev_publisher_verifying_key();
+    let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+        ryeos_engine::trust::TrustedSigner {
+            fingerprint: lillux::signature::compute_fingerprint(&platform_key),
+            verifying_key: platform_key,
+            label: Some("test-support: platform author".into()),
+        },
+        ryeos_engine::trust::TrustedSigner {
+            fingerprint: lillux::signature::compute_fingerprint(&publisher_key),
+            verifying_key: publisher_key,
+            label: Some("test-support: dev publisher".into()),
+        },
         ryeos_engine::trust::TrustedSigner {
             fingerprint: identity.fingerprint().to_owned(),
             verifying_key: *identity.verifying_key(),
             label: Some("external candidate E2E authoring bundle".into()),
         },
-    ]));
+    ]);
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )
-    .unwrap();
-    let roots = vec![core, standard, candidate_authoring_bundle];
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust).unwrap();
+    let mut roots = vec![core];
+    roots.extend(workflow);
+    roots.push(candidate_authoring_bundle);
     let tagged_roots = roots
         .iter()
         .cloned()
         .map(|root| (root, ryeos_engine::resolution::TrustClass::TrustedBundle))
         .collect::<Vec<_>>();
-    let registered_roots: Vec<_> = ["core", "standard", "external-candidate-authoring"]
-        .into_iter()
-        .zip(roots.iter().cloned())
-        .map(
-            |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
-                name: name.to_owned(),
-                canonical_root,
-            },
-        )
-        .collect();
+    let registered_roots: Vec<_> = [
+        "core",
+        "knowledge",
+        "directive",
+        "graph",
+        "external-candidate-authoring",
+    ]
+    .into_iter()
+    .zip(roots.iter().cloned())
+    .map(
+        |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
+            name: name.to_owned(),
+            canonical_root,
+        },
+    )
+    .collect();
     let isolation = Arc::new((*isolation).clone().retain_registered_generation(
         Arc::new(TestBundleGenerationLifeline),
         trust.clone(),
@@ -274,9 +351,6 @@ fn composed_isolation_policy() -> ryeos_engine::isolation::IsolationPolicy {
     });
     policy.filesystem.proc_filesystem =
         ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace;
-    // Deterministic signed fixtures use the explicit trusted process-group
-    // contract, not a claim of provisioned hard process-scope containment.
-    policy.trusted_process_group_sessions = true;
     policy
 }
 
@@ -295,17 +369,47 @@ fn install_live_engine(
     candidate_authoring_bundle: PathBuf,
     large_runtime: bool,
     isolation_policy: ryeos_engine::isolation::IsolationPolicy,
+    activation: Option<&qualification_node::ManagedActivationGrant>,
+    lease_budget: Option<ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget>,
 ) {
-    use ryeos_app::node_policy::sections::external_content::{
-        ExternalContentImportLimits, ExternalContentImportPolicyRecord,
+    use ryeos_node_runtime::node_policy::sections::external_content::{
+        ExternalContentImportLimits, ExternalContentImportPolicyRecord, ExternalContentImportRoot,
         ManagedExternalContentPolicy,
     };
 
     // Retained-product composition still uses ordinary bounded import staging.
-    // This fixture grants no ambient import roots or online activation.
+    // Only a fixture that qualifies an activated runtime grants the one
+    // offline archive root and its sized acquisition limits; none grants
+    // online activation.
+    let mut roots = BTreeMap::new();
+    let managed_activation = match activation {
+        Some(grant) => {
+            let archive_root = lillux::PinnedDirectory::open(&grant.archive_root)
+                .unwrap()
+                .unwrap();
+            let root_identity = archive_root.identity().unwrap();
+            roots.insert(
+                grant.archive_root_name.clone(),
+                ExternalContentImportRoot {
+                    path: grant.archive_root.clone(),
+                    root_identity,
+                    in_place: None,
+                },
+            );
+            ManagedExternalContentPolicy {
+                enabled: true,
+                limits: Some(grant.limits.clone()),
+            }
+        }
+        None => ManagedExternalContentPolicy {
+            enabled: false,
+            limits: None,
+        },
+    };
     let import_policy = ExternalContentImportPolicyRecord {
-        schema: 1,
-        roots: BTreeMap::new(),
+        schema: 2,
+        roots,
+        declared_roots: std::collections::BTreeMap::new(),
         limits: ExternalContentImportLimits {
             max_depth: 8,
             max_entries: 16,
@@ -326,18 +430,17 @@ fn install_live_engine(
             },
             minimum_free_bytes: 64 * 1024 * 1024,
         },
-        managed_activation: ManagedExternalContentPolicy {
-            enabled: false,
-            limits: None,
-        },
+        managed_activation,
     };
     import_policy.validate().unwrap();
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let mut isolation_roots = vec![core];
+    isolation_roots.extend(ryeos_engine::test_support::workflow_bundle_roots());
+    isolation_roots.push(candidate_authoring_bundle.clone());
     let trust = ryeos_engine::test_support::live_trust_store();
-    let isolation = ryeos_app::engine_init::load_test_execution_isolation(
+    let isolation = ryeos_node_runtime::engine_init::load_test_execution_isolation(
         &state.config.app_root,
-        &[core, standard, candidate_authoring_bundle.clone()],
+        &isolation_roots,
         &trust,
         isolation_policy,
     )
@@ -349,14 +452,14 @@ fn install_live_engine(
     ));
     state.isolation = isolation;
     let trust = ryeos_engine::test_support::live_trust_store();
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            ryeos_engine::test_support::core_bundle_root().join(".ai/node/engine/kinds"),
-            ryeos_engine::test_support::standard_bundle_root().join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )
-    .unwrap();
+    let mut kind_roots =
+        vec![ryeos_engine::test_support::core_bundle_root().join(".ai/node/engine/kinds")];
+    kind_roots.extend(
+        ryeos_engine::test_support::workflow_bundle_roots()
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust).unwrap();
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
         &kinds,
     )));
@@ -379,37 +482,55 @@ fn install_live_engine(
     state.engine = engine;
     state.services = Arc::new(ryeos_api::registry::build_service_registry());
     state.service_descriptors = ryeos_api::handlers::ALL;
-    state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
-            Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
-            Arc::new(import_policy),
-            Arc::new(
-                ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy {
-                    schema: 1,
-                    max_roots: 256,
-                    max_objects: 32_768,
-                    max_blobs: 32_768,
-                    max_object_bytes: 32 * 1024 * 1024,
-                    max_total_object_bytes: 64 * 1024 * 1024,
-                    // The large runtime is retained by the large-object
-                    // store, not transported as a single small-CAS blob.
-                    max_blob_bytes: 128 * 1024 * 1024,
-                    max_total_blob_bytes: if large_runtime {
-                        640 * 1024 * 1024
-                    } else {
-                        128 * 1024 * 1024
-                    },
-                    max_response_bytes: if large_runtime {
-                        1024 * 1024 * 1024
-                    } else {
-                        256 * 1024 * 1024
-                    },
-                    max_links_per_object: 100_000,
-                    local_verification: None,
+    let mut fixed: Vec<Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy>> = vec![
+        Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
+        Arc::new(import_policy),
+        Arc::new(
+            ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+                schema: 1,
+                max_roots: 256,
+                max_objects: 32_768,
+                max_blobs: 32_768,
+                max_object_bytes: 32 * 1024 * 1024,
+                max_total_object_bytes: 64 * 1024 * 1024,
+                // The large runtime is retained by the large-object
+                // store, not transported as a single small-CAS blob.
+                max_blob_bytes: 128 * 1024 * 1024,
+                max_total_blob_bytes: if large_runtime {
+                    640 * 1024 * 1024
+                } else {
+                    128 * 1024 * 1024
                 },
-            ),
-        ]),
-    );
+                max_response_bytes: if large_runtime {
+                    1024 * 1024 * 1024
+                } else {
+                    256 * 1024 * 1024
+                },
+                max_links_per_object: 100_000,
+                local_verification: None,
+            },
+        ),
+    ];
+    if let Some(budget) = lease_budget {
+        // The node's execution policy with a lease budget: the rest of the
+        // policy is what the profile already gives it.
+        let current = qualification_node::node_policy_snapshot(
+            &state.config.app_root,
+            state.identity.fingerprint(),
+            fixed.clone(),
+        );
+        let mut execution = current
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            .unwrap()
+            .clone();
+        execution.external_lease_budget = Some(budget);
+        fixed.push(Arc::new(execution));
+    }
+    state.node_policy = Arc::new(qualification_node::node_policy_snapshot(
+        &state.config.app_root,
+        state.identity.fingerprint(),
+        fixed,
+    ));
 }
 
 #[test]
@@ -434,7 +555,7 @@ fn shipped_external_codex_profile_is_explicit_and_closed() {
     let bytes = sources.get("external-authoring.profile.json").unwrap();
     ryeos_engine::structured_session_profile::compile(bytes, &sources).unwrap();
     let profile: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-    assert_eq!(profile["external_candidate"]["schema"], 6);
+    assert_eq!(profile["external_candidate"]["schema"], 7);
     assert_eq!(
         profile["external_candidate"]["required_lifecycle_capabilities"],
         serde_json::json!(["exact_terminal_observation"])
@@ -452,31 +573,21 @@ fn shipped_external_codex_profile_is_explicit_and_closed() {
 }
 
 fn install_joined_runtime_files(runtime: &Path) {
-    for directory in ["bin", "lib64", "usr/lib"] {
-        std::fs::create_dir_all(runtime.join(directory)).unwrap();
-    }
+    std::fs::create_dir_all(runtime.join("bin")).unwrap();
+    let candidate = Path::new(env!(
+        "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-runtime"
+    ));
+    let provider = Path::new(env!(
+        "CARGO_BIN_EXE_ryeos-synthetic-external-provider-runtime"
+    ));
     for (source, destination) in [
-        (
-            env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-runtime"),
-            runtime.join("bin/candidate"),
-        ),
-        (
-            env!("CARGO_BIN_EXE_ryeos-synthetic-external-provider-runtime"),
-            runtime.join("bin/provider"),
-        ),
-        (
-            "/usr/lib/ld-linux-x86-64.so.2",
-            runtime.join("lib64/ld-linux-x86-64.so.2"),
-        ),
-        ("/usr/lib/libc.so.6", runtime.join("usr/lib/libc.so.6")),
-        (
-            "/usr/lib/libgcc_s.so.1",
-            runtime.join("usr/lib/libgcc_s.so.1"),
-        ),
+        (candidate, runtime.join("bin/candidate")),
+        (provider, runtime.join("bin/provider")),
     ] {
         std::fs::copy(source, &destination).unwrap();
         std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
+    lillux::platform::install_native_runtime_libraries(runtime, &[candidate, provider]).unwrap();
 }
 
 fn store_project_file(
@@ -502,9 +613,10 @@ fn store_project_file(
 
 fn install_test_operator_grant(state: &ryeos_app::state::AppState) {
     let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let scopes = vec!["*".to_owned()];
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -512,11 +624,12 @@ fn install_test_operator_grant(state: &ryeos_app::state::AppState) {
         "joined external candidate test operator",
         state.identity.fingerprint(),
         "2026-09-22T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )
     .unwrap();
-    ryeos_app::identity::load_verified_authorized_key(
+    ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -527,7 +640,8 @@ fn install_test_operator_grant(state: &ryeos_app::state::AppState) {
 
 fn install_active_test_credential_profile(state: &ryeos_app::state::AppState) {
     let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let profile_id = "credential:fixture";
     let home_id = "external-candidate-fixture-home";
     let lock_owner = "fixture-credential-enrollment";
@@ -541,6 +655,7 @@ fn install_active_test_credential_profile(state: &ryeos_app::state::AppState) {
     state
         .state_store
         .create_credential_profile(ryeos_app::runtime_db::NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id,
             owner_principal: &operator.principal_id(),
             home_id,
@@ -694,6 +809,7 @@ fn publish_external_runtime_product_witness(
     let relationship_resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                 "config:fixtures/build_recipe",
             )
@@ -740,7 +856,8 @@ fn publish_external_runtime_product_witness(
         admitted_parameters_digest: relationship.producer.admitted_parameters_digest().unwrap(),
     };
     let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let manifest_hash = declaration.expected_manifest_hash.clone().unwrap();
     let evidence = ProductCaptureEvidence {
         schema: PRODUCT_CAPTURE_EVIDENCE_SCHEMA,
@@ -780,7 +897,7 @@ fn publish_external_runtime_product_witness(
         &attestation,
         state
             .node_policy
-            .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+            .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
             .unwrap()
             .closure_limits()
             .unwrap(),
@@ -805,6 +922,7 @@ fn bind_external_runtimes_to_qualification_verifier(
     let mut resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: canonical,
             expected_kind: Some("tool".into()),
             project_root: None,
@@ -832,8 +950,9 @@ fn bind_external_runtimes_to_qualification_verifier(
     )
     .unwrap();
     let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
-    let operator_grant = ryeos_app::identity::load_verified_authorized_key(
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
+    let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -876,6 +995,162 @@ fn bind_external_runtimes_to_qualification_verifier(
     }
 }
 
+/// What a node needs to qualify the two runtimes a placement binding selects:
+/// the guest owner runtime the lifecycle adapter admits independently, and the
+/// session runtime acquired by a managed activation.
+struct RuntimeQualificationInputs {
+    _guest_tree: tempfile::TempDir,
+    guest_manifest: ryeos_state::objects::ExternalContentManifestObject,
+    guest_manifest_hash: String,
+    archive: runtime_qualification::RuntimeArchive,
+    grant: qualification_node::ManagedActivationGrant,
+    /// The launch shape the guest-runtime policy declares and the lane's
+    /// binding launches under.
+    launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+}
+
+/// Lay the guest owner runtime into the node's object store and pack the
+/// session runtime as the offline archive its activation acquires.
+fn prepare_runtime_qualification_inputs(
+    node_root: &Path,
+    state: &ryeos_app::state::AppState,
+    session_runtime: &Path,
+    installed_owner: Option<&Path>,
+    launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+) -> RuntimeQualificationInputs {
+    let guest_tree = tempfile::tempdir().unwrap();
+    lillux::PinnedDirectory::open(guest_tree.path())
+        .unwrap()
+        .unwrap()
+        .tighten_owner_private_directory()
+        .unwrap();
+    match installed_owner {
+        // A provider whose snapshot really holds the guest owner: its tree
+        // carries the real executable and a lifetime that outlives the lease.
+        Some(executable) => {
+            // A debug build exceeds the owner executable's admitted size
+            // bound; the installed product is its stripped form.
+            let stripped = tempfile::NamedTempFile::new().unwrap();
+            let status = std::process::Command::new("strip")
+                .arg("-o")
+                .arg(stripped.path())
+                .arg(executable)
+                .status()
+                .unwrap();
+            assert!(status.success(), "strip of the guest owner failed");
+            runtime_qualification_placement::write_installed_owner_runtime_tree(
+                guest_tree.path(),
+                &std::fs::read(stripped.path()).unwrap(),
+            )
+        }
+        None => runtime_qualification_placement::write_owner_runtime_tree(
+            guest_tree.path(),
+            b"synthetic guest owner executable",
+        ),
+    }
+    let guest_manifest =
+        runtime_qualification_placement::install_ordinary_runtime_content(state, guest_tree.path());
+    let guest_manifest_hash =
+        ryeos_state::external_content_manifest_digest(&guest_manifest).unwrap();
+    let archive = runtime_qualification::RuntimeArchive::from_tree(session_runtime);
+    let archives = runtime_qualification::archive_root(node_root);
+    archive.write_into(&archives);
+    let grant = archive.activation_grant(&archives);
+    RuntimeQualificationInputs {
+        _guest_tree: guest_tree,
+        guest_manifest,
+        guest_manifest_hash,
+        archive,
+        grant,
+        launch_shape,
+    }
+}
+
+/// Sign the guest runtime's recipe, policy and verifier into the authoring
+/// bundle. They name only identities known before the Worker is admitted.
+fn author_guest_runtime_sources(
+    inputs: &RuntimeQualificationInputs,
+    bundle_root: &Path,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+    verifier_runtime_manifest_hash: &str,
+) {
+    runtime_qualification::write_guest_runtime_sources_for(
+        bundle_root,
+        identity,
+        &inputs.guest_manifest_hash,
+        verifier_runtime_manifest_hash,
+        &runtime_qualification::GUEST_RUNTIME_REQUIRED_CLAIMS,
+        &runtime_qualification_placement::OWNER_GUEST_PRODUCT,
+        &inputs.launch_shape,
+    );
+}
+
+/// Sign the activation, consumer, content policy and verifier. The policy's
+/// verifier parameters are the admission's own qualification-use parameters,
+/// so the proof it yields admits that program and no other.
+fn author_activated_runtime_sources(
+    inputs: &RuntimeQualificationInputs,
+    bundle_root: &Path,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+    runtime_manifest_hash: &str,
+    verifier_runtime_manifest_hash: &str,
+    qualification_use: &ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+) {
+    runtime_qualification::write_activated_runtime_sources(
+        bundle_root,
+        identity,
+        &runtime_qualification::ActivatedRuntimeSources {
+            runtime_manifest_hash,
+            verifier_runtime_manifest_hash,
+            archive: &inputs.archive,
+            verifier_parameters: &qualification_use.parameters().unwrap(),
+            required_claims: runtime_qualification::CONTENT_RUNTIME_CLAIMS,
+        },
+    );
+}
+
+/// Qualify both runtimes through the production owners and return the node
+/// together with the signed selection a placement binding carries. Every
+/// program these flows admit takes its runtime from a captured product, so
+/// the selection carries the guest proof only; the acquired-content
+/// qualification is still produced and accepted through its production owner
+/// but is never selected into a product-sourced binding.
+async fn qualify_runtime_selection(
+    state: ryeos_app::state::AppState,
+    inputs: &RuntimeQualificationInputs,
+    runtime_manifest_hash: &str,
+    verifier_runtime_manifest_hash: &str,
+) -> (
+    ryeos_app::state::AppState,
+    ryeos_app::external_placement::test_support::PlacementQualificationSelection,
+) {
+    let state = Arc::new(state);
+    let guest = runtime_qualification_placement::qualify_guest_runtime_subject(
+        &state,
+        &runtime_qualification::GuestProductSubject::ordinary(&inputs.guest_manifest),
+        verifier_runtime_manifest_hash,
+        &runtime_qualification::GUEST_RUNTIME_REQUIRED_CLAIMS,
+    )
+    .await;
+    assert_eq!(
+        guest.guest_runtime_manifest_hash,
+        inputs.guest_manifest_hash
+    );
+    let _content = runtime_qualification_placement::activate_and_qualify_runtime(
+        &state,
+        runtime_manifest_hash,
+        verifier_runtime_manifest_hash,
+        runtime_qualification::CONTENT_RUNTIME_CLAIMS,
+    )
+    .await;
+    let selection = runtime_qualification_placement::placement_selection(&guest, None);
+    let state = match Arc::try_unwrap(state) {
+        Ok(state) => state,
+        Err(_) => panic!("runtime qualification retained unexpected daemon state ownership"),
+    };
+    (state, selection)
+}
+
 async fn prepare_external_worker_program_and_binding(
     state: &Arc<ryeos_app::state::AppState>,
     engine: &Arc<ryeos_engine::engine::Engine>,
@@ -888,6 +1163,7 @@ async fn prepare_external_worker_program_and_binding(
     let roots = engine.resolution_roots(Some(project_root.to_path_buf()));
     let mut resolution = engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                 "worker:test/external-candidate",
             )
@@ -920,12 +1196,13 @@ async fn prepare_external_worker_program_and_binding(
     let pre_selection_digest =
         ryeos_engine::external_content::pre_product_selection_consumer_digest(&resolution).unwrap();
     let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let context = ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),
         vec!["*".into()],
         true,
-        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
         None,
     );
     // Static qualification consumption must not dispatch another verifier.
@@ -1000,7 +1277,11 @@ async fn prepare_external_worker_program_and_binding(
         "selection must retain the original verifier artifact and execution substrate"
     );
     let program = requirement
-        .resolve_for_use(Some(&selected), &qualification_use)
+        .resolve_for_use(
+            Some(&selected),
+            &qualification_use,
+            admitted_placement(state),
+        )
         .unwrap();
     let consumer = ryeos_app::external_content_admission::derive_consumer_authority_for_test(
         &resolution,
@@ -1015,17 +1296,19 @@ async fn prepare_external_worker_program_and_binding(
     else {
         panic!("external worker composition requires the exact pinned consumer generation")
     };
+    // A bundle consumer whose selection uses a bundle-owned relationship does
+    // not depend on the project: it keeps installed-bundle authority under a
+    // pinned generation, and its selection identity is pinned by the admitted
+    // program instead.
     assert!(
         matches!(
             &consumer,
-            ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject {
-                project_snapshot_hash, ..
-            } if project_snapshot_hash == snapshot_hash
+            ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. }
         ),
-        "selected external worker consumer must retain the exact base generation"
+        "selected bundle consumer with a bundle-owned relationship keeps installed-bundle authority"
     );
     let maximum_bytes = state.node_policy
-        .require::<ryeos_app::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
         .unwrap().limits.max_total_bytes;
     let response = ryeos_api::handlers::external_content_products::compose(
         ryeos_app::operator_external_content::product_composition::ComposeRetainedProductsRequest {
@@ -1133,8 +1416,8 @@ fn signed_worker_admission_produces_real_external_candidate_capsule() {
 }
 
 #[test]
-fn signed_worker_admission_refuses_unsupported_connector_process_group() {
-    run_signed_worker_admission(SignedAdmissionCase::UnsupportedConnectorProcessGroup);
+fn signed_worker_admission_answers_contained_connector_descendants_from_reported_guarantees() {
+    run_signed_worker_admission(SignedAdmissionCase::ContainedConnectorDescendants);
 }
 
 #[test]
@@ -1150,17 +1433,64 @@ fn signed_runtime_selection_refuses_missing_claim_before_allocation() {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SignedAdmissionCase {
     Ready,
-    UnsupportedConnectorProcessGroup,
+    ContainedConnectorDescendants,
     MissingConnector,
     MissingRuntimeClaim,
 }
 
 fn run_signed_worker_admission(case: SignedAdmissionCase) {
+    // The qualifications the binding selects run real verifiers; give them
+    // the same bounded stack and runtime shape the end-to-end fixtures use.
+    std::thread::Builder::new()
+        .name("external-worker-admission".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap();
+            // A failing case must still end the runtime's tasks and close the
+            // Store, so one failure does not leave the native host dirty.
+            // The node root outlives the Store: removing it first would leak
+            // the Store's native arena.
+            let root = tempfile::tempdir().unwrap();
+            let mut store = None;
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_signed_worker_admission_on(case, &runtime, &root, &mut store)
+            }));
+            match outcome {
+                // A completed case closed its own Store while its runtime was
+                // alive, or ended at a refusal before the Store had work.
+                Ok(()) => {
+                    drop(store);
+                    drop(runtime);
+                }
+                Err(panic) => {
+                    drop(runtime);
+                    if let Some(store) = store {
+                        let _ = store.close();
+                    }
+                    std::panic::resume_unwind(panic)
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn run_signed_worker_admission_on(
+    case: SignedAdmissionCase,
+    runtime_host: &tokio::runtime::Runtime,
+    root: &tempfile::TempDir,
+    store_slot: &mut Option<ryeos_app::test_support::TestStateStore>,
+) {
     use ryeos_state::objects::{
         AdmittedPersistentSessionCapsule, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree,
     };
 
-    let root = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -1173,9 +1503,20 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
     let runtime_directory = lillux::PinnedDirectory::open(runtime.path())
         .unwrap()
         .unwrap();
-    let mut state = ryeos_app::state::test_support::build(root.path()).unwrap();
+    // The caller closes the Store after this returns, so every early return
+    // and unwind drops the application, and with it the Store handle, first.
+    let (store_owner, mut state) =
+        ryeos_app::state::test_support::build_bound(root.path()).unwrap();
+    *store_slot = Some(store_owner);
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
+    node_capability_report::install(
+        &state,
+        &node_capability_report::FixtureEnvironment {
+            provided: &["time", "credential:private_home"],
+            missing: &[],
+        },
+    );
     let runtime_manifest = install_external_large_runtime_content(&state, &runtime_directory);
     let runtime_manifest_hash = lillux::sha256_hex(
         lillux::canonical_json(&runtime_manifest.to_value().unwrap())
@@ -1185,11 +1526,13 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
     state.started_at_iso = lillux::time::iso8601_now();
     let (external_bundle, external_trust, _) = install_signed_test_bundle(
         root.path(),
-        case == SignedAdmissionCase::UnsupportedConnectorProcessGroup,
+        case == SignedAdmissionCase::ContainedConnectorDescendants,
+        true,
     );
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
         &external_trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .unwrap();
     state.external_candidate_connectors = Arc::new(external_artifacts.connectors);
@@ -1205,8 +1548,7 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
                 .join("identity/public-identity.json"),
         )
         .unwrap();
-    std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
-    let candidate_authoring_bundle = write_candidate_authoring_bundle(
+    let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
         &state.identity,
@@ -1216,24 +1558,36 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
         true,
         None,
         None,
+        None,
+    );
+    let qualification_inputs = prepare_runtime_qualification_inputs(
+        root.path(),
+        &state,
+        runtime.path(),
+        None,
+        runtime_qualification::ordinary_launch_shape(),
+    );
+    author_guest_runtime_sources(
+        &qualification_inputs,
+        &candidate_authoring_bundle.root,
+        &state.identity,
+        &runtime_manifest_hash,
     );
     install_live_engine(
         &mut state,
         candidate_authoring_bundle.root.clone(),
         true,
         composed_isolation_policy(),
+        Some(&qualification_inputs.grant),
+        None,
     );
     let admitted = admit_external_worker_evidence(&state);
     assert_eq!(
-        admitted.profile, candidate_authoring_bundle.profile,
+        admitted.profile, authored_profile,
         "signed Worker capture compiled a different profile than authoring"
     );
-    let qualification_use = fixture_qualification_use(
-        &candidate_authoring_bundle,
-        &admitted,
-        &runtime_manifest,
-        false,
-    );
+    let qualification_use =
+        fixture_qualification_use(&runtime_manifest_hash, &admitted, &runtime_manifest, false);
     sign_candidate_qualification_inputs(
         &candidate_authoring_bundle.root,
         &state.identity,
@@ -1242,24 +1596,67 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
         &qualification_use.parameters().unwrap(),
         true,
     );
+    author_activated_runtime_sources(
+        &qualification_inputs,
+        &candidate_authoring_bundle.root,
+        &state.identity,
+        &runtime_manifest_hash,
+        &runtime_manifest_hash,
+        &qualification_use,
+    );
     install_live_engine(
         &mut state,
         candidate_authoring_bundle.root.clone(),
         true,
         composed_isolation_policy(),
+        Some(&qualification_inputs.grant),
+        None,
     );
     let after = admit_external_worker_evidence(&state);
     assert_eq!(admitted.source, after.source);
     assert_eq!(admitted.profile, after.profile);
-    let execution_identity = ryeos_app::execution_identity_probe::boot_node_execution_identity(
-        &state.state_store,
-        &state.identity,
-        &state.daemon_build,
-    )
-    .unwrap();
-    let mut extensions = (*state.extensions).clone();
-    extensions.insert(execution_identity);
-    state.extensions = Arc::new(extensions);
+    let placement_qualification = if case == SignedAdmissionCase::MissingRuntimeClaim {
+        // This case is refused while assembling the selections, before any
+        // placement binding exists.
+        ryeos_app::external_placement::test_support::PlacementQualificationSelection::unselected()
+    } else {
+        // Qualification verifiers run under the daemon's enforced isolation
+        // and call back over its socket. The admission under test keeps the
+        // engine isolation installed above.
+        let admission_isolation = state.isolation.clone();
+        std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
+        let _daemon_socket = {
+            let _enter = runtime_host.enter();
+            tokio::net::UnixListener::bind(state.config.runtime_uds_path())
+                .unwrap_or_else(|error| panic!("bind daemon socket: {error}"))
+        };
+        state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
+            root.path(),
+            &state.config.runtime_uds_path(),
+            &daemon_isolation_roots(),
+            &ryeos_engine::test_support::live_trust_store(),
+            composed_isolation_policy(),
+        )
+        .unwrap();
+        let execution_identity = ryeos_app::execution_identity_probe::boot_node_execution_identity(
+            &state.state_store,
+            &state.identity,
+            &state.daemon_build,
+        )
+        .unwrap();
+        let extensions = (*state.extensions).clone();
+        extensions.insert(execution_identity);
+        state.extensions = Arc::new(extensions);
+        let (qualified, selection) = runtime_host.block_on(qualify_runtime_selection(
+            state,
+            &qualification_inputs,
+            &runtime_manifest_hash,
+            &runtime_manifest_hash,
+        ));
+        state = qualified;
+        state.isolation = admission_isolation;
+        selection
+    };
     let authority = state.state_store.pinned_state_authority().unwrap();
     let guard = authority.acquire_shared_guard().unwrap();
     let cas = authority.cas_store().unwrap();
@@ -1341,6 +1738,7 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
         return;
     }
     let selections = selections.unwrap();
+    let placement = admitted_placement(&state);
     let admission = ryeos_executor::test_support::admit_worker_session_with_selected_products(
         &mut state,
         "worker_execution:test/external-candidate",
@@ -1349,18 +1747,42 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
         selections,
         joined_external_candidate_requirement(),
         qualification_use.clone(),
+        placement,
+        &placement_qualification,
     );
-    if case == SignedAdmissionCase::UnsupportedConnectorProcessGroup {
-        let error = admission.unwrap_err();
-        assert!(
-            format!("{error:#}").contains("trusted controller process-group session"),
-            "unexpected refusal: {error:#}"
-        );
+    if case == SignedAdmissionCase::ContainedConnectorDescendants {
+        // The declared `contained` requirement is answered by what this
+        // enforced node reports, and a candidate launch binds no retained
+        // containment of its own (only the qualification Worker launch does):
+        // with a qualified mechanism it is refused for that missing binding,
+        // without one it is refused naming the missing guarantee.
+        let reported = state
+            .isolation
+            .inspection()
+            .process_scope_readiness
+            .descendant_containment
+            .enforced_guarantee();
+        match reported {
+            Some(_) => {
+                let error = admission.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("binds no retained containment"),
+                    "unexpected refusal: {error:#}"
+                );
+            }
+            None => {
+                let error = admission.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("no qualified descendant containment"),
+                    "unexpected refusal: {error:#}"
+                );
+            }
+        }
         return;
     }
     let capsule_hash = admission.unwrap();
     let authority = state.state_store.pinned_state_authority().unwrap();
-    let _guard = authority.acquire_shared_guard().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
     let value = authority
         .cas_store()
         .unwrap()
@@ -1368,6 +1790,10 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
         .unwrap()
         .unwrap();
     let capsule = AdmittedPersistentSessionCapsule::from_current_value(&value).unwrap();
+    // Qualification checks start handler processes and refuse while this
+    // thread holds a CAS guard; the capsule is read, so release it here.
+    drop(guard);
+    drop(authority);
     assert_eq!(capsule.content_hash().unwrap(), capsule_hash);
     assert!(capsule.source_binding_hash.is_some());
     assert!(capsule.structured_session_profile.is_some());
@@ -1406,6 +1832,12 @@ fn run_signed_worker_admission(case: SignedAdmissionCase) {
         runtime_manifest_hash
     );
     ryeos_app::external_placement::preflight_external_candidate_program(&state, program).unwrap();
+    drop(state);
+    store_slot
+        .take()
+        .expect("scenario holds its Store")
+        .close()
+        .unwrap();
 }
 
 async fn execute_recorded_service(
@@ -1454,6 +1886,7 @@ async fn try_execute_recorded_service(
         caller_scopes: scopes.clone(),
         engine: state.engine.clone(),
         plan_ctx: PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: owner.to_owned(),
                 scopes: scopes.clone(),
@@ -1478,7 +1911,7 @@ async fn try_execute_recorded_service(
         owner.to_owned(),
         scopes,
         true,
-        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
         None,
     );
     let result = ryeos_executor::executor::execute_service_verified(
@@ -1552,14 +1985,13 @@ fn dispatch_pinned_public_worker(
                         project_authority,
                     )
                     .unwrap();
-                let operator = ryeos_app::identity::NodeIdentity::load(
-                    &state.config.operator_signing_key_path,
-                )
+                let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
                 .unwrap();
                 let principal = operator.principal_id();
                 let scopes = vec!["*".to_owned()];
                 let site = state.threads.site_id().to_owned();
                 let plan_ctx = ryeos_engine::contracts::PlanContext {
+                    logical_project_root: None,
                     requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                         ryeos_engine::contracts::Principal {
                             fingerprint: principal.clone(),
@@ -1588,7 +2020,7 @@ fn dispatch_pinned_public_worker(
                         principal,
                         scopes,
                         true,
-                        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+                        Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
                         None,
                     );
                 let binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
@@ -1680,6 +2112,7 @@ fn dispatch_pinned_public_worker(
                         usage_subject: None,
                         usage_subject_asserted_by: None,
                         previous_thread_id: None,
+                        initial_facets: Default::default(),
                         root_admission: Some(root_admission),
                         root_dispatch_evidence: Some(preflight.root_dispatch_evidence),
                         parent_execution_context: None,
@@ -1828,7 +2261,7 @@ fn https_json_response(status: &str, body: &[u8]) -> Vec<u8> {
 }
 
 const SCRIPTED_MODEL_REQUESTS: usize =
-    ryeos_independent_runtime_verifier::scripted_provider::REQUEST_COUNT;
+    ryeos_codex_runtime_verifier::scripted_provider::REQUEST_COUNT;
 const CONTROLLER_CANARY: &[u8] = b"synthetic controller canary unchanged\n";
 const CONTROLLER_CANARY_DENIAL: &str = "controller-canary-read-denied";
 
@@ -1854,12 +2287,20 @@ fn scripted_canary_read_command(path: &Path) -> String {
 // app-server notification transcript or runtime-qualification evidence. The
 // independent routed verifier must also apply routing_observation to its own
 // exact Codex notification stream and check guest/candidate evidence.
+fn scripted_candidate_fixture() -> ryeos_codex_runtime_verifier::CandidateFixture {
+    ryeos_codex_runtime_verifier::CandidateFixture {
+        relative_path: "candidate-strategy.txt".into(),
+        content: "composed external candidate C\n".into(),
+    }
+}
+
 fn verify_scripted_routing_results(
     requests: &[serde_json::Value],
     canary_bytes: &[u8],
 ) -> anyhow::Result<()> {
-    ryeos_independent_runtime_verifier::scripted_provider::check_requests(
+    ryeos_codex_runtime_verifier::scripted_provider::check_requests(
         requests,
+        &scripted_candidate_fixture(),
         CONTROLLER_CANARY,
         canary_bytes,
         CONTROLLER_CANARY_DENIAL,
@@ -1957,13 +2398,14 @@ fn start_scripted_responses_fixture(
             assert!(!headers.to_ascii_lowercase().contains("authorization:"));
             let model_request: serde_json::Value = serde_json::from_slice(body).unwrap();
             requests.push(model_request);
-            let response_body =
-                ryeos_independent_runtime_verifier::scripted_provider::response_sse(
-                    number,
-                    &forbidden_command,
-                    &secret_read_command,
-                )
-                .unwrap();
+            let response_body = ryeos_codex_runtime_verifier::scripted_provider::response_sse(
+                number,
+                ryeos_codex_runtime_verifier::GuestCommandFixture::WorkspaceRgVersion,
+                &scripted_candidate_fixture(),
+                &forbidden_command,
+                &secret_read_command,
+            )
+            .unwrap();
             let mut response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 response_body.len(),
@@ -2148,15 +2590,100 @@ fn serve_production_controller_tls(
     })
 }
 
+/// Refuse a clean run whose fixture controller recorded a connection-level
+/// failure: a request that could not be read, a response that could not be
+/// written, or a connection that could not be set up.
+fn assert_controller_connections_clean(evidence: &Mutex<Vec<String>>) {
+    let evidence = evidence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let broken: Vec<_> = evidence
+        .iter()
+        .filter(|line| {
+            [
+                "request read failed",
+                "response write failed",
+                "connection setup failed",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        })
+        .collect();
+    assert!(
+        broken.is_empty(),
+        "candidate controller connection failures: {broken:#?}"
+    );
+}
+
+/// Append a fixture evidence line, tolerating a lock poisoned by a failed
+/// handler so the original failure is not replaced.
+fn record(evidence: &Mutex<Vec<String>>, line: String) {
+    evidence
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(line);
+}
+
+/// Describe what the detached supervisor of every retained occurrence under
+/// the adapter's state root recorded when it ended. The supervisor's fate is
+/// otherwise visible only in its occurrence's terminal record, which nothing
+/// on the daemon side reads while a startup wait is still pending. Read-only
+/// and bounded; every failure to read is itself reported as text.
+fn supervisor_terminal_evidence(provider_state_root: &Path) -> String {
+    const STDERR_TAIL_BYTES: usize = 4096;
+    let entries = match std::fs::read_dir(provider_state_root) {
+        Ok(entries) => entries,
+        Err(error) => return format!("provider state unreadable: {error}"),
+    };
+    let mut lines = Vec::new();
+    for entry in entries.flatten() {
+        let occurrence = entry.path();
+        if !occurrence.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let terminal = occurrence.join("terminal.json");
+        let line = match std::fs::read(&terminal) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                format!("occurrence {name}: no terminal record (supervisor not ended)")
+            }
+            Err(error) => format!("occurrence {name}: terminal record unreadable: {error}"),
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Err(error) => format!("occurrence {name}: terminal record undecodable: {error}"),
+                Ok(record) => {
+                    let stderr = record["supervisor_stderr"].as_str().unwrap_or("");
+                    let mut start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+                    while !stderr.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    format!(
+                        "occurrence {name}: supervisor_exit_code={}; supervisor_timed_out={}; \
+                         supervisor_stderr_tail={:?}",
+                        record["supervisor_exit_code"],
+                        record["supervisor_timed_out"],
+                        &stderr[start..]
+                    )
+                }
+            },
+        };
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        "no retained occurrence directories".to_owned()
+    } else {
+        lines.join("; ")
+    }
+}
+
 fn serve_candidate_controller_tls(
     listener: TcpListener,
     state: Arc<ryeos_app::state::AppState>,
     stop: Arc<AtomicBool>,
     evidence: Arc<Mutex<Vec<String>>>,
+    tls_config: Arc<rustls::ServerConfig>,
 ) -> std::thread::JoinHandle<usize> {
     listener.set_nonblocking(true).unwrap();
     std::thread::spawn(move || {
-        let tls_config = production_tls_config();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2164,59 +2691,136 @@ fn serve_candidate_controller_tls(
         // A real Codex turn may run between channel frames. Keep the fixture
         // listener alive until the explicit stop signal, with a bounded idle
         // deadline that resets after each authenticated exchange.
-        let mut idle_deadline = Instant::now() + Duration::from_secs(120);
-        let mut handled = 0;
-        loop {
-            let stream = match listener.accept() {
-                Ok((stream, _)) => stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stop.load(Ordering::Acquire) {
-                        break;
+        let idle_deadline = Mutex::new(Instant::now() + Duration::from_secs(120));
+        let handled = AtomicUsize::new(0);
+        // The request line of every request served, so a stalled run names
+        // which requests arrived instead of only how many.
+        let served = Mutex::new(Vec::<String>::new());
+        // Connections accepted whose handler has not finished; the
+        // controller is idle only when none is in flight.
+        let in_flight = AtomicUsize::new(0);
+        // The accept loop only accepts. Each connection performs its TLS
+        // handshake and reads its request on its own thread, so a client
+        // connecting while another request is being handled is not left in
+        // the kernel backlog against the supervisor's connect and request
+        // bounds. Only the daemon handler is serialized, behind this lock.
+        let dispatch_lock = Mutex::new(());
+        std::thread::scope(|scope| {
+            loop {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if in_flight.load(Ordering::Acquire) == 0
+                            && Instant::now()
+                                >= *idle_deadline
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        {
+                            record(
+                                &evidence,
+                                format!(
+                                    "controller timed out after {} requests: {:?}",
+                                    handled.load(Ordering::Acquire),
+                                    served
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                ),
+                            );
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
                     }
-                    if Instant::now() >= idle_deadline {
-                        evidence
-                            .lock()
-                            .unwrap()
-                            .push(format!("controller timed out after {handled} requests"));
-                        break;
+                    Err(error) => panic!("candidate controller listener failed: {error}"),
+                };
+                in_flight.fetch_add(1, Ordering::AcqRel);
+                let in_flight = &in_flight;
+                let (tls_config, runtime, state, evidence) =
+                    (&tls_config, &runtime, &state, &evidence);
+                let (idle_deadline, handled, dispatch_lock, served) =
+                    (&idle_deadline, &handled, &dispatch_lock, &served);
+                scope.spawn(move || {
+                    // An accepted socket may inherit the listener's
+                    // non-blocking mode; the handshake needs blocking reads
+                    // bounded by the read timeout.
+                    if let Err(error) = stream
+                        .set_nonblocking(false)
+                        .and_then(|()| stream.set_read_timeout(Some(Duration::from_secs(5))))
+                    {
+                        record(evidence, format!("connection setup failed: {error}"));
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        return;
                     }
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(error) => panic!("candidate controller listener failed: {error}"),
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let connection = rustls::ServerConnection::new(tls_config.clone()).unwrap();
-            let mut tls = rustls::StreamOwned::new(connection, stream);
-            let request = read_http_request(&mut tls).unwrap();
-            let result = dispatch_production_controller_request(&runtime, &state, &request)
-                // Production start/termination own readiness, release and
-                // completion. The TLS fixture only carries protocol bytes.
-                .map(|(body, _, _)| body);
-            let response = match result {
-                Ok(body) => https_json_response("200 OK", &body),
-                Err(error) => {
-                    let diagnostic = format!("{error:#}");
-                    evidence
-                        .lock()
-                        .unwrap()
-                        .push(format!("request {} failed: {diagnostic}", handled + 1));
-                    https_json_response(
-                        "500 Internal Server Error",
-                        serde_json::json!({"error":diagnostic})
-                            .to_string()
-                            .as_bytes(),
+                    let connection = rustls::ServerConnection::new(tls_config.clone()).unwrap();
+                    let mut tls = rustls::StreamOwned::new(connection, stream);
+                    let request = match read_http_request(&mut tls) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            record(evidence, format!("request read failed: {error:#}"));
+                            in_flight.fetch_sub(1, Ordering::AcqRel);
+                            return;
+                        }
+                    };
+                    let request_line = String::from_utf8_lossy(
+                        request
+                            .split(|byte| *byte == b'\r')
+                            .next()
+                            .unwrap_or_default(),
                     )
-                }
-            };
-            tls.write_all(&response).unwrap();
-            tls.flush().unwrap();
-            handled += 1;
-            idle_deadline = Instant::now() + Duration::from_secs(120);
-        }
-        handled
+                    .into_owned();
+                    served
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(request_line.clone());
+                    let result = {
+                        let _serialized = dispatch_lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        dispatch_production_controller_request(runtime, state, &request)
+                            // Production start/termination own readiness,
+                            // release and completion. The TLS fixture only
+                            // carries protocol bytes.
+                            .map(|(body, _, _)| body)
+                    };
+                    let response = match result {
+                        Ok(body) => https_json_response("200 OK", &body),
+                        Err(error) => {
+                            let diagnostic = format!("{error:#}");
+                            record(
+                                evidence,
+                                format!(
+                                    "request {} ({request_line}) failed: {diagnostic}",
+                                    handled.load(Ordering::Acquire) + 1
+                                ),
+                            );
+                            https_json_response(
+                                "500 Internal Server Error",
+                                serde_json::json!({"error":diagnostic})
+                                    .to_string()
+                                    .as_bytes(),
+                            )
+                        }
+                    };
+                    match tls.write_all(&response).and_then(|()| tls.flush()) {
+                        Ok(()) => {
+                            handled.fetch_add(1, Ordering::AcqRel);
+                        }
+                        Err(error) => {
+                            record(evidence, format!("response write failed: {error}"));
+                        }
+                    }
+                    *idle_deadline
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Instant::now() + Duration::from_secs(120);
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                });
+            }
+        });
+        handled.load(Ordering::Acquire)
     })
 }
 
@@ -2249,25 +2853,84 @@ fn artifact(
 fn install_signed_test_bundle(
     root: &Path,
     connector_new_group: bool,
+    independent_guest_runtime_admission: bool,
 ) -> (PathBuf, ryeos_engine::trust::TrustStore, PathBuf) {
-    let key = lillux::crypto::SigningKey::from_bytes(&[61; 32]);
-    signed_bundle::install_signed_test_bundle(
+    install_signed_test_bundle_with_guests(
         root,
         connector_new_group,
+        independent_guest_runtime_admission,
+        false,
+    )
+}
+
+/// The statically linked build of one guest executable. A guest sandbox holds
+/// no host libraries, so a provider that really runs the installed owner can
+/// only start static guests. Build them first with
+/// `RUSTFLAGS='-C target-feature=+crt-static' cargo build --target
+/// x86_64-unknown-linux-gnu -p ryeos-synthetic-external-lifecycle-adapter
+/// --bin ryeos-synthetic-mounted-candidate-supervisor --bin
+/// ryeos-synthetic-external-candidate-launcher --bin
+/// ryeos-synthetic-external-candidate-connector`.
+fn static_guest(dynamic: &str, name: &str) -> PathBuf {
+    let path = Path::new(dynamic)
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("x86_64-unknown-linux-gnu/debug")
+        .join(name);
+    assert!(
+        path.is_file(),
+        "the static guest executable {} is not built; see `static_guest`",
+        path.display()
+    );
+    path
+}
+
+fn install_signed_test_bundle_with_guests(
+    root: &Path,
+    connector_new_group: bool,
+    independent_guest_runtime_admission: bool,
+    static_guests: bool,
+) -> (PathBuf, ryeos_engine::trust::TrustStore, PathBuf) {
+    let key = lillux::crypto::SigningKey::from_bytes(&[61; 32]);
+    let supervisor_dynamic = env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-supervisor");
+    let launcher_dynamic = env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-launcher");
+    let connector_dynamic = env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-connector");
+    let (supervisor, launcher, connector) = if static_guests {
+        (
+            // The guest sandbox starts the production held-launch entry.
+            static_guest(
+                supervisor_dynamic,
+                "ryeos-synthetic-mounted-candidate-supervisor",
+            ),
+            static_guest(
+                launcher_dynamic,
+                "ryeos-synthetic-external-candidate-launcher",
+            ),
+            static_guest(
+                connector_dynamic,
+                "ryeos-synthetic-external-candidate-connector",
+            ),
+        )
+    } else {
+        (
+            PathBuf::from(supervisor_dynamic),
+            PathBuf::from(launcher_dynamic),
+            PathBuf::from(connector_dynamic),
+        )
+    };
+    signed_bundle::install_signed_test_bundle_with_guest_admission(
+        root,
+        connector_new_group,
+        independent_guest_runtime_admission,
         &key,
         &signed_bundle::SyntheticExternalArtifacts {
             adapter: Path::new(env!(
                 "CARGO_BIN_EXE_ryeos-synthetic-external-lifecycle-adapter"
             )),
-            supervisor: Path::new(env!(
-                "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-supervisor"
-            )),
-            launcher: Path::new(env!(
-                "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-launcher"
-            )),
-            connector: Path::new(env!(
-                "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-connector"
-            )),
+            supervisor: &supervisor,
+            launcher: &launcher,
+            connector: &connector,
             configuration: Path::new(env!(
                 "CARGO_BIN_EXE_ryeos-synthetic-codex-external-configuration"
             )),
@@ -2294,12 +2957,11 @@ fn invoke_operation(
         request,
         bootstrap,
         inherited,
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
     )
     .unwrap()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn try_invoke_operation(
     adapter: &lillux::InheritedDescriptorAuthority,
     supervisor: &lillux::InheritedDescriptorAuthority,
@@ -2433,7 +3095,7 @@ fn exact_protocol_boundary_allocates_and_reconciles_one_occurrence() {
         &inspection_request,
         vec![supervisor.clone(), launcher.clone(), provider_spec.clone()],
         Vec::new(),
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
     )
     .unwrap();
     assert!(!response.deadline_exceeded);
@@ -2514,10 +3176,11 @@ fn exact_protocol_boundary_allocates_and_reconciles_one_occurrence() {
 #[test]
 fn production_loader_resolves_the_fixture_only_from_signed_bundle_authority() {
     let root = tempfile::tempdir().unwrap();
-    let (bundle, trust, adapter_path) = install_signed_test_bundle(root.path(), false);
+    let (bundle, trust, adapter_path) = install_signed_test_bundle(root.path(), false, false);
     ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         std::slice::from_ref(&bundle),
         &trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .expect("signed test lifecycle generation should resolve and self-inspect");
 
@@ -2525,6 +3188,7 @@ fn production_loader_resolves_the_fixture_only_from_signed_bundle_authority() {
     let error = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         std::slice::from_ref(&bundle),
         &trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .expect_err("changed lifecycle bytes must not retain signed executable authority");
     let message = format!("{error:#}");
@@ -2536,9 +3200,55 @@ fn production_loader_resolves_the_fixture_only_from_signed_bundle_authority() {
 
 #[test]
 fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
+    // The runtime qualifications the binding selects run real verifiers; give
+    // them the bounded stack and runtime shape the end-to-end fixtures use.
+    std::thread::Builder::new()
+        .name("external-controller-attachment".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap();
+            // A failing scenario must still end the runtime's tasks and close
+            // the Store, so one failure does not leave the native host dirty.
+            // The node root outlives the Store: removing it first would leak
+            // the Store's native arena.
+            let root = tempfile::tempdir().unwrap();
+            let mut store = None;
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                composed_controller_attachment_on(&runtime, &root, &mut store)
+            }));
+            match outcome {
+                // A completed case closed its own Store while its runtime was
+                // alive, or ended at a refusal before the Store had work.
+                Ok(()) => {
+                    drop(store);
+                    drop(runtime);
+                }
+                Err(panic) => {
+                    drop(runtime);
+                    if let Some(store) = store {
+                        let _ = store.close();
+                    }
+                    std::panic::resume_unwind(panic)
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn composed_controller_attachment_on(
+    runtime_host: &tokio::runtime::Runtime,
+    root: &tempfile::TempDir,
+    store_slot: &mut Option<ryeos_app::test_support::TestStateStore>,
+) {
     use ryeos_state::objects::{ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 
-    let root = tempfile::tempdir().unwrap();
     let base = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     for path in [base.path(), runtime.path()] {
@@ -2564,11 +3274,17 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
     let runtime_manifest_hash =
         ryeos_state::external_content_manifest_digest(&runtime_manifest).unwrap();
 
-    let mut state = ryeos_app::state::test_support::build(root.path()).unwrap();
-    let (external_bundle, external_trust, _) = install_signed_test_bundle(root.path(), false);
+    let session_manifest_hash = qualification_node::manifest_hash(
+        &qualification_node::predict_large_manifest(runtime.path()),
+    );
+    let (store_owner, mut state) =
+        ryeos_app::state::test_support::build_bound(root.path()).unwrap();
+    *store_slot = Some(store_owner);
+    let (external_bundle, external_trust, _) = install_signed_test_bundle(root.path(), false, true);
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
         &external_trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .unwrap();
     state.external_candidate_connectors = Arc::new(external_artifacts.connectors);
@@ -2616,7 +3332,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
         nested_sandbox: true,
     };
     let requirement = ExternalCandidateRequirement {
-        schema: 6,
+        schema: 7,
         required_lifecycle_capabilities: Default::default(),
         protocol: PROTOCOL.into(),
         connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
@@ -2624,13 +3340,84 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
         provider_declaration_id: "codex-hosted".into(),
         provider_configuration_destination: "environments.toml".into(),
         runtime_product_declaration_id: "auxiliary".into(),
+        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
         runtime_recipe: recipe,
     };
     let capsule = ryeos_state::external_execution::admission::test_support::qualified_external_candidate_capsule(
         requirement,
-        &runtime_manifest_hash,
+        &session_manifest_hash,
     )
     .unwrap();
+    // The binding selects the guest owner runtime and the activated session
+    // runtime; qualify both through the production owners on a live node.
+    let verifier_runtime = tempfile::tempdir().unwrap();
+    lillux::PinnedDirectory::open(verifier_runtime.path())
+        .unwrap()
+        .unwrap()
+        .tighten_owner_private_directory()
+        .unwrap();
+    install_joined_runtime_files(verifier_runtime.path());
+    let verifier_manifest = install_external_large_runtime_content(
+        &state,
+        &lillux::PinnedDirectory::open(verifier_runtime.path())
+            .unwrap()
+            .unwrap(),
+    );
+    let verifier_manifest_hash = qualification_node::manifest_hash(&verifier_manifest);
+    let qualification_inputs = prepare_runtime_qualification_inputs(
+        root.path(),
+        &state,
+        runtime.path(),
+        None,
+        runtime_qualification::ordinary_launch_shape(),
+    );
+    let (authoring, _) = write_candidate_authoring_bundle(
+        fixture_repository_source_root(),
+        root.path(),
+        &state.identity,
+        &session_manifest_hash,
+        &verifier_manifest_hash,
+        false,
+        true,
+        None,
+        None,
+        None,
+    );
+    author_guest_runtime_sources(
+        &qualification_inputs,
+        &authoring.root,
+        &state.identity,
+        &verifier_manifest_hash,
+    );
+    author_activated_runtime_sources(
+        &qualification_inputs,
+        &authoring.root,
+        &state.identity,
+        &session_manifest_hash,
+        &verifier_manifest_hash,
+        &capsule
+            .external_candidate
+            .as_ref()
+            .unwrap()
+            .qualification_use,
+    );
+    let _daemon_socket = {
+        let _enter = runtime_host.enter();
+        qualification_node::start_bundle_node(
+            &mut state,
+            &authoring.root,
+            "external-candidate-authoring",
+            Some(&qualification_inputs.grant),
+            None,
+        )
+    };
+    let (qualified, placement_qualification) = runtime_host.block_on(qualify_runtime_selection(
+        state,
+        &qualification_inputs,
+        &session_manifest_hash,
+        &verifier_manifest_hash,
+    ));
+    state = qualified;
     let base_authority = base_directory.inherited_descriptor_authority().unwrap();
     let runtime_authority = runtime_directory.inherited_descriptor_authority().unwrap();
     let runtime_manifest_bytes =
@@ -2641,6 +3428,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
     )
     .unwrap();
     let guest_inputs = ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: base_authority.inherited_descriptor().unwrap(),
@@ -2677,21 +3465,24 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
     let roots =
         vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()];
     let controller = ExternalControllerTransportContract {
-        schema: 2,
+        schema: 3,
         https_origin: format!("https://localhost:{controller_port}"),
         route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
         tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
         connect_timeout_ms: 1_000,
-        request_timeout_ms: 2_000,
+        request_timeout_ms: CONTROLLER_REQUEST_CEILING_MS,
         maximum_response_bytes: 64 * 1024,
+        max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 64 * 1024,
+                required: false,
             },
         },
     };
@@ -2714,6 +3505,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
             ))
             .unwrap(),
         ),
+        &placement_qualification,
     )
     .unwrap();
     let state = Arc::new(state);
@@ -2732,7 +3524,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
             &bootstrap,
             &supervisor,
             &ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs::from_bytes(
-                &bootstrap.controller.network_inputs,
+                &bootstrap.controller.http().unwrap().network_inputs,
                 b"nameserver 127.0.0.1\n",
                 b"127.0.0.1 localhost\n",
             )
@@ -2753,6 +3545,7 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
             payload: ryeos_state::external_execution::ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                boot: None,
             },
         },
         &binding,
@@ -2814,6 +3607,12 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
             .unwrap(),
         binding
     );
+    drop(state);
+    store_slot
+        .take()
+        .expect("scenario holds its Store")
+        .close()
+        .unwrap();
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -2832,11 +3631,46 @@ fn run_production_tls_candidate_with_test_stack(
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(run_production_tls_candidate(
-                codex,
-                scripted_turn,
-                publication,
-            ));
+            // The Store is opened on this thread, which drives the scenario,
+            // and closes here only after the runtime has ended every task
+            // that could still hold the application.
+            let mut root = tempfile::tempdir().unwrap();
+            let (store_owner, state) =
+                ryeos_app::state::test_support::build_bound(root.path()).unwrap();
+            // A failing scenario must still end its runtime's tasks and close
+            // the Store, so one failure does not leave the process-wide
+            // native host dirty and fail every later case.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(run_production_tls_candidate(
+                    &mut root,
+                    state,
+                    codex,
+                    scripted_turn,
+                    publication,
+                ))
+            }));
+            match outcome {
+                Ok(()) => {
+                    drop(runtime);
+                    store_owner.close().unwrap();
+                }
+                Err(panic) => {
+                    // A failed scenario can have tasks parked on a blocking
+                    // call or an expired store deadline; waiting for them
+                    // would hold the failure report for the whole window.
+                    // Give them a short grace period, then abandon them.
+                    runtime.shutdown_timeout(Duration::from_secs(5));
+                    // The Store's close waits on the same stalled runtime
+                    // connection, so it is abandoned rather than closed: the
+                    // thread's shared host is parked as leaked, which keeps
+                    // its destructor quiet at thread exit. The tempdir is
+                    // still removed when this closure ends; evidence is what
+                    // the scenario retained with `retain_failed_node` and
+                    // `provider_state.keep()`.
+                    store_owner.abandon();
+                    std::panic::resume_unwind(panic)
+                }
+            }
         })
         .unwrap()
         .join()
@@ -2853,6 +3687,68 @@ fn production_tls_supervisor_exports_and_imports_exact_candidate_c() {
 #[test]
 fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
     run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::PublicDispatch);
+}
+
+/// The no-spend lease lane: the real codex placement requirements, a lease the
+/// synthetic adapter admits through the shared lease core, the real guest
+/// owner and held supervisor in a local enclosure on the daemon's signed
+/// inputs, and the production controller routes over https. Needs the static
+/// guest executables of `static_guest`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn production_tls_candidate_on_a_remote_lease() {
+    run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::Lease);
+}
+
+/// The lease lane's test-owned resolver and hosts files, parsed as the guest's
+/// network context parses them, put the controller name on the loopback the
+/// fixture listens on.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn lease_lane_network_inputs_reach_the_controller_name() {
+    let lane = LeaseLaneController::new(PublicationScenario::Lease);
+    let context = lillux::network::NetworkContext::from_config_bytes(
+        &std::fs::read(lane.resolver_source()).unwrap(),
+        &std::fs::read(lane.hosts_source()).unwrap(),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
+    let stream = context
+        .connect(
+            LEASE_LANE_CONTROLLER_HOST,
+            port,
+            deadline,
+            deadline,
+            lillux::time::Duration::from_secs(5),
+            lillux::network::NetworkCancellation::default(),
+        )
+        .unwrap();
+    drop(stream);
+}
+
+/// With the fixture's 60 s binding and the real codex requirements, launch
+/// refuses on the lease-fit rule.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn production_tls_lease_shorter_than_the_session_deadline_is_refused() {
+    run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::LeaseTooShort);
+}
+
+/// A lease guarantee name no provider spec of this adapter derives.
+const UNDERIVED_LEASE_GUARANTEE: &str = "lease.fenced_exclusive";
+
+/// A profile that requires a lease guarantee the synthetic spec does not
+/// derive is refused at launch, naming that entry, before any guest runs.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn production_tls_lease_guarantee_the_spec_does_not_derive_is_refused() {
+    run_production_tls_candidate_with_test_stack(
+        None,
+        false,
+        PublicationScenario::LeaseUnmetGuarantee,
+    );
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -2883,9 +3779,210 @@ fn pinned_codex_turn_freezes_remote_candidate_and_evaluates_from_base() {
     );
 }
 
+/// The node's lease budget for the lease lane; every other scenario declares none.
+fn lease_lane_budget(
+    publication: PublicationScenario,
+) -> Option<ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget> {
+    matches!(
+        publication,
+        PublicationScenario::Lease
+            | PublicationScenario::LeaseTooShort
+            | PublicationScenario::LeaseUnmetGuarantee
+    )
+    .then_some(
+        ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+            max_concurrent_leases: 2,
+            max_lease_lifetime_seconds: 4 * 60 * 60,
+            daily_lease_seconds: 8 * 60 * 60,
+            turn_end_margin_seconds: 30,
+        },
+    )
+}
+
+/// The capability names the real codex profile's controller and credential
+/// requirements need, one per entry: the environment the lease-lane node states.
+fn lease_lane_environment_names() -> Vec<String> {
+    let requires = real_codex_placement_requires(fixture_repository_source_root());
+    let requirements = ryeos_engine::structured_session_profile::placement_requirements(
+        &serde_json::json!({"external_candidate": {}, "requires": requires}),
+    )
+    .unwrap()
+    .unwrap();
+    requirements
+        .controller
+        .iter()
+        .chain(requirements.credential_kinds.values().flatten())
+        .map(|entry| entry.names()[0].clone())
+        .collect()
+}
+
+/// The binding's execution timeout, which is the lease lifetime: the lease
+/// lane states 900 s: the real codex profile's 600 s Ready deadline must leave
+/// lease time after Ready (journal window 60+60+900+60+120 = 1200 s); every other
+/// scenario keeps the fixture's 60 s.
+fn lease_lane_binding_timeout_seconds(publication: PublicationScenario) -> u32 {
+    if matches!(
+        publication,
+        PublicationScenario::Lease | PublicationScenario::LeaseUnmetGuarantee
+    ) {
+        900
+    } else {
+        60
+    }
+}
+
+/// The controller of a lease-lane scenario: a real two-label DNS name the
+/// guest resolves through its captured hosts input and verifies TLS against by
+/// name, served with a test certificate for that name. Every other scenario
+/// keeps the `localhost` controller and the machine's resolver inputs.
+struct LeaseLaneController {
+    inputs: Option<tempfile::TempDir>,
+}
+
+const LEASE_LANE_CONTROLLER_HOST: &str = "controller.test";
+
+impl LeaseLaneController {
+    fn new(publication: PublicationScenario) -> Self {
+        let inputs = matches!(
+            publication,
+            PublicationScenario::Lease
+                | PublicationScenario::LeaseTooShort
+                | PublicationScenario::LeaseUnmetGuarantee
+        )
+        .then(|| {
+            // Not under `/tmp`: the guest owner hides its old `/tmp`, and the
+            // inputs must exist at the same path on the controller and in
+            // the guest.
+            // A test archive unpacked on another machine does not carry this
+            // directory, only its compiled path.
+            std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).unwrap();
+            let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+            std::fs::write(
+                dir.path().join("hosts"),
+                // Both address families come from this file: the captured resolver
+                // queries IPv6 and IPv4 together, and a nameserver that is not
+                // there would hold the lookup past the connect window.
+                format!(
+                    "127.0.0.1 localhost\n::1 localhost\n\
+                     127.0.0.1 {LEASE_LANE_CONTROLLER_HOST}\n::1 {LEASE_LANE_CONTROLLER_HOST}\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("resolv.conf"), b"nameserver 127.0.0.1\n").unwrap();
+            dir
+        });
+        Self { inputs }
+    }
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../fixtures")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    fn pem_der(pem: &str) -> Vec<u8> {
+        let body: String = pem
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
+        STANDARD.decode(body).unwrap()
+    }
+
+    fn roots(&self) -> Vec<String> {
+        if self.inputs.is_some() {
+            vec![STANDARD.encode(Self::pem_der(&Self::fixture("lease-controller-ca.pem")))]
+        } else {
+            vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()]
+        }
+    }
+
+    fn origin(&self, port: u16) -> String {
+        let host = if self.inputs.is_some() {
+            LEASE_LANE_CONTROLLER_HOST
+        } else {
+            "localhost"
+        };
+        format!("https://{host}:{port}")
+    }
+
+    /// The sources the lane's binding captures, as a launch shape declares them.
+    fn network_inputs(
+        &self,
+    ) -> ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInput, LaunchNetworkInputs,
+        };
+        LaunchNetworkInputs {
+            resolver: LaunchNetworkInput {
+                source: self.resolver_source(),
+                max_bytes: 64 * 1024,
+                required: true,
+            },
+            hosts: LaunchNetworkInput {
+                source: self.hosts_source(),
+                max_bytes: 64 * 1024,
+                required: false,
+            },
+        }
+    }
+
+    fn resolver_source(&self) -> String {
+        match &self.inputs {
+            Some(dir) => dir
+                .path()
+                .join("resolv.conf")
+                .to_string_lossy()
+                .into_owned(),
+            None => "/etc/resolv.conf".into(),
+        }
+    }
+
+    fn hosts_source(&self) -> String {
+        match &self.inputs {
+            Some(dir) => dir.path().join("hosts").to_string_lossy().into_owned(),
+            None => "/etc/hosts".into(),
+        }
+    }
+
+    fn tls_config(&self) -> Arc<rustls::ServerConfig> {
+        if self.inputs.is_none() {
+            return production_tls_config();
+        }
+        let certificate = rustls::pki_types::CertificateDer::from(Self::pem_der(&Self::fixture(
+            "lease-controller-server.pem",
+        )));
+        let private_key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                Self::pem_der(&Self::fixture("lease-controller-server.key.pem")),
+            ));
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate], private_key)
+                .unwrap(),
+        )
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PublicationScenario {
     Publish,
+    /// The lease lane with the fixture's 60 s binding: launch refuses, as the
+    /// lease cannot outlive the session deadline.
+    LeaseTooShort,
+    /// Publish, with the session placed on a remote lease: the worker profile
+    /// carries the real codex placement requirements.
+    Lease,
+    /// The lease lane at the lease binding's lifetime, with the worker
+    /// profile also requiring a lease guarantee the synthetic spec does not
+    /// derive: launch refuses naming it, before any guest runs.
+    LeaseUnmetGuarantee,
     StaleBase,
     PublicDispatch,
 }
@@ -3108,8 +4205,19 @@ fn stage_pinned_codex_command_tools(codex: &Path, closed_guest_shell: bool) -> t
     tools
 }
 
+/// Keep a failed scenario's node root on disk for diagnosis. The root stays
+/// owned by the thread that opened its Store, which closes the Store before
+/// the root's owner drops; with cleanup disabled that drop leaves it in place.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn retain_failed_node(root: &mut tempfile::TempDir) -> PathBuf {
+    root.disable_cleanup(true);
+    root.path().to_path_buf()
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 async fn run_production_tls_candidate(
+    root: &mut tempfile::TempDir,
+    mut state: ryeos_app::state::AppState,
     codex: Option<(PathBuf, String)>,
     scripted_turn: bool,
     publication: PublicationScenario,
@@ -3142,7 +4250,6 @@ async fn run_production_tls_candidate(
     })
     .unwrap();
 
-    let root = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
     let qualification_runtime = tempfile::tempdir().unwrap();
     let provider_state = tempfile::tempdir().unwrap();
@@ -3181,9 +4288,28 @@ async fn run_production_tls_candidate(
     let runtime_directory = lillux::PinnedDirectory::open(runtime.path())
         .unwrap()
         .unwrap();
-    let mut state = ryeos_app::state::test_support::build(root.path()).unwrap();
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
+    let environment_names: Vec<String> = if matches!(
+        publication,
+        PublicationScenario::Lease
+            | PublicationScenario::LeaseTooShort
+            | PublicationScenario::LeaseUnmetGuarantee
+    ) {
+        lease_lane_environment_names()
+    } else {
+        vec!["time".into(), "credential:private_home".into()]
+    };
+    node_capability_report::install(
+        &state,
+        &node_capability_report::FixtureEnvironment {
+            provided: &environment_names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            missing: &[],
+        },
+    );
     let (project, project_lifeline) = ryeos_app::temp_dir_guard::create_runtime_workspace(
         &root.path().join(".ai/state/cache"),
         "W-external-admission-base",
@@ -3211,11 +4337,16 @@ async fn run_production_tls_candidate(
         .map(|(path, _)| install_pinned_codex_command_tools(&state, path, scripted_turn));
     let command_tools_manifest_hash = command_tools.as_ref().map(|(_, hash)| hash.as_str());
     state.started_at_iso = lillux::time::iso8601_now();
-    let (external_bundle, external_trust, _) =
-        install_signed_test_bundle(root.path(), codex.is_some());
+    let (external_bundle, external_trust, _) = install_signed_test_bundle_with_guests(
+        root.path(),
+        codex.is_some(),
+        true,
+        publication == PublicationScenario::Lease,
+    );
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
         &external_trust,
+        &ryeos_app::private_artifact_home::root(root.path()),
     )
     .unwrap();
     state.external_candidate_connectors = Arc::new(external_artifacts.connectors);
@@ -3231,10 +4362,9 @@ async fn run_production_tls_candidate(
                 .join("identity/public-identity.json"),
         )
         .unwrap();
-    std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
-    std::fs::create_dir_all(state.config.uds_path.parent().unwrap()).unwrap();
-    let uds_listener = tokio::net::UnixListener::bind(&state.config.uds_path).unwrap();
-    let candidate_authoring_bundle = write_candidate_authoring_bundle(
+    std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
+    let uds_listener = tokio::net::UnixListener::bind(state.config.runtime_uds_path()).unwrap();
+    let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
         &state.identity,
@@ -3244,6 +4374,42 @@ async fn run_production_tls_candidate(
         true,
         scripted_model_origin.as_deref(),
         command_tools_manifest_hash,
+        matches!(
+            publication,
+            PublicationScenario::Lease
+            | PublicationScenario::LeaseTooShort
+            | PublicationScenario::LeaseUnmetGuarantee
+        )
+        .then(|| {
+            let mut requires =
+                real_codex_placement_requires(fixture_repository_source_root());
+            if publication == PublicationScenario::LeaseUnmetGuarantee {
+                let entries = requires["lease"].as_array_mut().unwrap();
+                entries.push(
+                    serde_json::json!({"name": UNDERIVED_LEASE_GUARANTEE, "accept": ["provider_attested"]}),
+                );
+                // `requires.lease` entries must be sorted by name.
+                entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            }
+            requires
+        }),
+    );
+    // The lane's own resolver and hosts sources: its guest-runtime policy
+    // declares them, so the lane's binding matches the proof it launches on.
+    let lease_lane = LeaseLaneController::new(publication);
+    let qualification_inputs = prepare_runtime_qualification_inputs(
+        root.path(),
+        &state,
+        runtime.path(),
+        (publication == PublicationScenario::Lease)
+            .then(|| Path::new(env!("CARGO_BIN_EXE_ryeos-synthetic-guest-occurrence-owner"))),
+        runtime_qualification::launch_shape_with_sources(lease_lane.network_inputs()),
+    );
+    author_guest_runtime_sources(
+        &qualification_inputs,
+        &candidate_authoring_bundle.root,
+        &state.identity,
+        &qualification_runtime_manifest_hash,
     );
     // Independent product qualification always uses enforced descriptor-bound
     // realization mounts. The Codex hosted-controller phase selects its own
@@ -3254,11 +4420,13 @@ async fn run_production_tls_candidate(
         candidate_authoring_bundle.root.clone(),
         true,
         isolation_policy.clone(),
+        Some(&qualification_inputs.grant),
+        lease_lane_budget(publication),
     );
     let admitted = admit_external_worker_evidence(&state);
-    assert_eq!(admitted.profile, candidate_authoring_bundle.profile);
+    assert_eq!(admitted.profile, authored_profile);
     let qualification_use = fixture_qualification_use(
-        &candidate_authoring_bundle,
+        &runtime_manifest_hash,
         &admitted,
         &runtime_manifest,
         codex.is_some(),
@@ -3271,23 +4439,30 @@ async fn run_production_tls_candidate(
         &qualification_use.parameters().unwrap(),
         true,
     );
+    author_activated_runtime_sources(
+        &qualification_inputs,
+        &candidate_authoring_bundle.root,
+        &state.identity,
+        &runtime_manifest_hash,
+        &qualification_runtime_manifest_hash,
+        &qualification_use,
+    );
     install_live_engine(
         &mut state,
         candidate_authoring_bundle.root.clone(),
         true,
         isolation_policy.clone(),
+        Some(&qualification_inputs.grant),
+        lease_lane_budget(publication),
     );
     let after = admit_external_worker_evidence(&state);
     assert_eq!(admitted.source, after.source);
     assert_eq!(admitted.profile, after.profile);
     let trust = ryeos_engine::test_support::live_trust_store();
-    state.isolation = ryeos_app::engine_init::load_test_daemon_execution_isolation(
+    state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
         root.path(),
-        &state.config.uds_path,
-        &[
-            ryeos_engine::test_support::core_bundle_root(),
-            ryeos_engine::test_support::standard_bundle_root(),
-        ],
+        &state.config.runtime_uds_path(),
+        &daemon_isolation_roots(),
         &trust,
         isolation_policy,
     )
@@ -3298,7 +4473,7 @@ async fn run_production_tls_candidate(
         &state.daemon_build,
     )
     .unwrap();
-    let mut extensions = (*state.extensions).clone();
+    let extensions = (*state.extensions).clone();
     extensions.insert(execution_identity);
     state.extensions = Arc::new(extensions);
     let runtime_witness_hash = publish_external_runtime_product_witness(&state, &runtime_manifest);
@@ -3307,12 +4482,13 @@ async fn run_production_tls_candidate(
         &[&runtime_manifest_hash, &qualification_runtime_manifest_hash],
     );
     let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let handler_context = ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),
         vec!["*".into()],
         true,
-        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
         None,
     );
     let qualification_state = Arc::new(state);
@@ -3337,10 +4513,13 @@ async fn run_production_tls_candidate(
             let launch = runtime
                 .block_on(ryeos_api::handlers::product_qualification_launch::handle(
                     ryeos_api::handlers::product_qualification_launch::Request {
+                        consumer_invocation: None,
                         launch_id: format!("L-{}", "a".repeat(32)),
                         witness_hash: launch_witness,
                         witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                         relationship_name: "auxiliary_to_verifier".into(),
+                        project_context: None,
+                        auxiliary_product_selections: Vec::new(),
                     },
                     launch_context,
                     launch_state,
@@ -3367,7 +4546,7 @@ async fn run_production_tls_candidate(
             .is_some_and(|status| status.is_terminal())
         {
             if thread.status != "completed" {
-                let retained_node = root.keep();
+                let retained_node = retain_failed_node(root);
                 panic!(
                     "qualification verifier failed; root={verifier_thread_id}; retained_node={}; detail={thread:#?}",
                     retained_node.display()
@@ -3376,7 +4555,7 @@ async fn run_production_tls_candidate(
             break;
         }
         if Instant::now() >= qualification_deadline {
-            let retained_node = root.keep();
+            let retained_node = retain_failed_node(root);
             panic!(
                 "qualification verifier did not settle; root={verifier_thread_id}; retained_node={}; detail={thread:#?}",
                 retained_node.display()
@@ -3397,10 +4576,21 @@ async fn run_production_tls_candidate(
     )
     .await
     .unwrap();
-    let mut state = match Arc::try_unwrap(qualification_state) {
+    let state = match Arc::try_unwrap(qualification_state) {
         Ok(state) => state,
         Err(_) => panic!("qualification verifier retained unexpected daemon state ownership"),
     };
+    // The placement binding selects two further proofs: the guest owner
+    // runtime the adapter admits independently, and the session runtime as
+    // acquired by a managed activation. Both are qualified while the enforced
+    // verifier isolation is still installed.
+    let (mut state, placement_qualification) = qualify_runtime_selection(
+        state,
+        &qualification_inputs,
+        &runtime_manifest_hash,
+        &qualification_runtime_manifest_hash,
+    )
+    .await;
     if codex.is_some() {
         // Product qualification and candidate execution are distinct
         // authorities. The verifier above runs with enforced descriptor-bound
@@ -3413,14 +4603,13 @@ async fn run_production_tls_candidate(
             candidate_authoring_bundle.root.clone(),
             true,
             hosted_policy.clone(),
+            Some(&qualification_inputs.grant),
+            lease_lane_budget(publication),
         );
-        state.isolation = ryeos_app::engine_init::load_test_daemon_execution_isolation(
+        state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
             root.path(),
-            &state.config.uds_path,
-            &[
-                ryeos_engine::test_support::core_bundle_root(),
-                ryeos_engine::test_support::standard_bundle_root(),
-            ],
+            &state.config.runtime_uds_path(),
+            &daemon_isolation_roots(),
             &trust,
             hosted_policy,
         )
@@ -3437,6 +4626,7 @@ async fn run_production_tls_candidate(
                 witness_hash: runtime_witness_hash,
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: Some(qualification.qualification_hash),
+                remote_testimony: None,
             },
         };
     let state_authority = state.state_store.pinned_state_authority().unwrap();
@@ -3527,6 +4717,7 @@ async fn run_production_tls_candidate(
         let scopes = vec!["*".to_owned()];
         let principal = format!("fp:{}", state.identity.fingerprint());
         let plan_ctx = ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: principal.clone(),
@@ -3620,6 +4811,7 @@ async fn run_production_tls_candidate(
                             usage_subject: None,
                             usage_subject_asserted_by: None,
                             previous_thread_id: None,
+                            initial_facets: Default::default(),
                             root_admission: Some(root_admission),
                             root_dispatch_evidence: Some(preflight.root_dispatch_evidence),
                             parent_execution_context: None,
@@ -3661,24 +4853,26 @@ async fn run_production_tls_candidate(
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let controller_port = listener.local_addr().unwrap().port();
-    let roots =
-        vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()];
+    let roots = lease_lane.roots();
     let controller_contract = ExternalControllerTransportContract {
-        schema: 2,
-        https_origin: format!("https://localhost:{controller_port}"),
+        schema: 3,
+        https_origin: lease_lane.origin(controller_port),
         route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
         tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
         connect_timeout_ms: 1_000,
-        request_timeout_ms: 2_000,
+        request_timeout_ms: CONTROLLER_REQUEST_CEILING_MS,
         maximum_response_bytes: 64 * 1024,
+        max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
             resolver: ExternalNetworkInputSelection {
-                source: "/etc/resolv.conf".into(),
+                source: lease_lane.resolver_source(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
-                source: "/etc/hosts".into(),
+                source: lease_lane.hosts_source(),
                 max_bytes: 64 * 1024,
+                required: false,
             },
         },
     };
@@ -3691,6 +4885,19 @@ async fn run_production_tls_candidate(
         "startup_timeout_ms": 5_000,
         "state_root": provider_state.path(),
     });
+    let mut settings = settings;
+    if publication == PublicationScenario::Lease {
+        // The provider's snapshot already holds the installed guest runtime;
+        // its sandbox sees the binding's network input files at their paths.
+        settings["guest_owner"] = serde_json::json!({
+            "runtime_root": qualification_inputs._guest_tree.path(),
+            "host_files": [
+                {"from": lease_lane.resolver_source(), "guest_path": lease_lane.resolver_source()},
+                {"from": lease_lane.hosts_source(), "guest_path": lease_lane.hosts_source()},
+            ],
+        });
+        settings["startup_timeout_ms"] = 30_000.into();
+    }
     if publication == PublicationScenario::PublicDispatch {
         let public_project =
             ryeos_executor::execution::project_source::resolve_pinned_snapshot_context(
@@ -3764,12 +4971,17 @@ async fn run_production_tls_candidate(
             roots,
             settings,
             credential.as_bytes(),
+            &placement_qualification,
         )
         .unwrap();
 
         let state = Arc::new(state);
         ryeosd::init_shutdown_channel();
-        let uds_server = tokio::spawn(ryeosd::uds::server::serve(uds_listener, state.clone()));
+        let (mut uds_composition, _) =
+            ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+        uds_composition.arm_from_app_generation(&state).unwrap();
+        let uds_publication = uds_composition.publication(state.clone()).unwrap();
+        let uds_server = tokio::spawn(ryeosd::uds::server::serve(uds_listener, uds_publication));
         tokio::task::yield_now().await;
         assert!(
             !uds_server.is_finished(),
@@ -3782,6 +4994,7 @@ async fn run_production_tls_candidate(
             state.clone(),
             stop.clone(),
             controller_evidence.clone(),
+            lease_lane.tls_config(),
         );
         if let Some(ready) = scripted_turn_ready {
             ready.send(()).unwrap();
@@ -3828,48 +5041,48 @@ async fn run_production_tls_candidate(
             Err(error) => {
                 // Preserve this synthetic node's exact CAS/journal on failure,
                 // rather than erasing capsule evidence during panic cleanup.
-                let retained_node = root.keep();
+                let retained_node = retain_failed_node(root);
                 // The adapter journal is a separate failure domain. Keep it
                 // too: controller intent alone cannot prove occurrence death
                 // or recover a lost activation observation. Print paths only,
                 // never the private bootstrap/adapter document contents.
+                let terminal_evidence = supervisor_terminal_evidence(provider_state.path());
                 let retained_provider_state = provider_state.keep();
+                // The dispatch error leads the report: the store reads below
+                // can themselves be refused (an expired runtime deadline is
+                // the usual cause of a stalled dispatch), so each is printed
+                // as the Result it is and none may hide the first error.
                 panic!(
-                    "public worker dispatch failed: {error}; placement={placement}; \
+                    "public worker dispatch failed: {error:#}; placement={placement}; \
                      retained_node={}; retained_provider_state={}; \
+                     supervisor_terminal={terminal_evidence}; \
                      base_snapshot={base_snapshot_hash}; \
+                     controller_evidence={:#?}; \
                      thread={:#?}; session={:#?}; commands={:#?}; \
-                     controller_evidence={:#?}; channel={:#?}; events={:#?}",
+                     channel={:#?}; events={:#?}",
                     retained_node.display(),
                     retained_provider_state.display(),
-                    state.state_store.get_thread(&placement).unwrap(),
-                    state.state_store.dedicated_session(&placement).unwrap(),
-                    state
-                        .state_store
-                        .dedicated_session_commands(&placement)
-                        .unwrap(),
-                    controller_evidence.lock().unwrap(),
+                    controller_evidence.lock(),
+                    state.state_store.get_thread(&placement),
+                    state.state_store.dedicated_session(&placement),
+                    state.state_store.dedicated_session_commands(&placement),
                     state.state_store.external_execution_channel(&placement),
-                    state
-                        .state_store
-                        .latest_thread_events(&placement, 32)
-                        .unwrap(),
+                    state.state_store.latest_thread_events(&placement, 32),
                 )
             }
         };
+        assert_controller_connections_clean(&controller_evidence);
         if public["thread"]["status"] != "completed" {
-            let retained_node = root.keep();
+            let retained_node = retain_failed_node(root);
+            let terminal_evidence = supervisor_terminal_evidence(provider_state.path());
             let retained_provider_state = provider_state.keep();
             panic!(
                 "public worker terminal failed; retained_node={}; retained_provider_state={}; \
-                 dispatch={public:#}; commands={:#?}; controller_evidence={:#?}",
+                 supervisor_terminal={terminal_evidence}; dispatch={public:#}; controller_evidence={:#?}; commands={:#?}",
                 retained_node.display(),
                 retained_provider_state.display(),
-                state
-                    .state_store
-                    .dedicated_session_commands(&placement)
-                    .unwrap(),
-                controller_evidence.lock().unwrap(),
+                controller_evidence.lock(),
+                state.state_store.dedicated_session_commands(&placement),
             );
         }
         assert!(
@@ -4032,6 +5245,7 @@ async fn run_production_tls_candidate(
             publication,
         )
         .await;
+        close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
         uds_server.abort();
         let _ = uds_server.await;
         return;
@@ -4046,8 +5260,9 @@ async fn run_production_tls_candidate(
         &qualification_use,
     )
     .unwrap();
+    let placement = admitted_placement(&state);
     let admission =
-        ryeos_executor::test_support::admit_worker_session_with_selected_products_and_placement(
+        ryeos_executor::test_support::admit_worker_session_with_selected_products_and_placement_and_binding_timeout(
             &mut state,
             "worker_execution:test/external-candidate",
             &project,
@@ -4069,10 +5284,13 @@ async fn run_production_tls_candidate(
             },
             if codex.is_some() { real_codex_requirement() } else { joined_external_candidate_requirement() },
             qualification_use.clone(),
+            placement,
             controller_contract,
             roots,
             settings,
             credential,
+            &placement_qualification,
+            lease_lane_binding_timeout_seconds(publication),
         )
         .unwrap();
     let capsule_hash = admission.capsule_hash;
@@ -4178,7 +5396,11 @@ async fn run_production_tls_candidate(
     .unwrap();
     let state = Arc::new(state);
     ryeosd::init_shutdown_channel();
-    let uds_server = tokio::spawn(ryeosd::uds::server::serve(uds_listener, state.clone()));
+    let (mut uds_composition, _) =
+        ryeos_executor::SelectedInvocationCompositionBarrier::bootstrap();
+    uds_composition.arm_from_app_generation(&state).unwrap();
+    let uds_publication = uds_composition.publication(state.clone()).unwrap();
+    let uds_server = tokio::spawn(ryeosd::uds::server::serve(uds_listener, uds_publication));
     tokio::task::yield_now().await;
     assert!(
         !uds_server.is_finished(),
@@ -4216,6 +5438,7 @@ async fn run_production_tls_candidate(
         state.clone(),
         stop.clone(),
         controller_evidence.clone(),
+        lease_lane.tls_config(),
     );
 
     let state_root = ryeos_app::private_artifact_home::home_path(
@@ -4276,7 +5499,7 @@ async fn run_production_tls_candidate(
     if scripted_turn || publication == PublicationScenario::StaleBase {
         eprintln!("external fixture: starting exclusive capsule");
     }
-    tokio::task::spawn_blocking(move || {
+    let started = tokio::task::spawn_blocking(move || {
         ryeos_executor::execution::persistent_session::start_exclusive_capsule(
             &start_state,
             &start_capsule,
@@ -4284,14 +5507,77 @@ async fn run_production_tls_candidate(
             start_lifeline,
             Some(&start_state_root),
             &runtime_environment,
+            ryeos_engine::contracts::DeliveredSecretEnv::empty(),
             Vec::new(),
             &identity,
             observation_sink,
         )
     })
     .await
-    .unwrap()
     .unwrap();
+    let started = if publication == PublicationScenario::LeaseUnmetGuarantee {
+        let refusal = format!(
+            "{:#}",
+            started.expect_err("a lease guarantee the spec does not derive must be refused")
+        );
+        assert!(
+            refusal.contains(UNDERIVED_LEASE_GUARANTEE),
+            "the refusal does not name the unmet entry: {refusal}"
+        );
+        // The refusal is raised by lease admission inside the held spawn,
+        // after the trusted launcher wrote its host-lifetime holding and
+        // before any process existed. The failed spawn must clear it.
+        assert!(
+            state
+                .state_store
+                .dedicated_worker_trusted_holding(&placement, worker_instance_id, 1)
+                .unwrap()
+                .is_none(),
+            "a spawn refused before any process existed left its trusted worker holding set"
+        );
+        stop.store(true, Ordering::Release);
+        controller.join().unwrap();
+        close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
+        uds_server.abort();
+        let _ = uds_server.await;
+        return;
+    } else if publication == PublicationScenario::LeaseTooShort {
+        let refusal = format!(
+            "{:#}",
+            started.expect_err("a 60 s lease cannot outlive the session deadline")
+        );
+        assert!(
+            refusal.contains("the remote lease ends in 60s, and this session's deadline is "),
+            "unexpected lease-fit refusal: {refusal}"
+        );
+        // The refusal is raised by lease admission inside the held spawn,
+        // after the trusted launcher wrote its host-lifetime holding and
+        // before any process existed. The failed spawn must clear it.
+        assert!(
+            state
+                .state_store
+                .dedicated_worker_trusted_holding(&placement, worker_instance_id, 1)
+                .unwrap()
+                .is_none(),
+            "a spawn refused before any process existed left its trusted worker holding set"
+        );
+        stop.store(true, Ordering::Release);
+        controller.join().unwrap();
+        close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
+        uds_server.abort();
+        let _ = uds_server.await;
+        return;
+    } else {
+        started
+    };
+    started.unwrap_or_else(|error| {
+        panic!(
+            "exclusive capsule start failed: {error:#}; supervisor_terminal={}; \
+             controller evidence: {:?}",
+            supervisor_terminal_evidence(provider_state.path()),
+            controller_evidence.lock(),
+        )
+    });
     if scripted_turn || publication == PublicationScenario::StaleBase {
         eprintln!("external fixture: exclusive capsule started");
     }
@@ -4319,6 +5605,8 @@ async fn run_production_tls_candidate(
         .await;
         stop.store(true, Ordering::Release);
         let handled = controller.join().unwrap();
+        assert_controller_connections_clean(&controller_evidence);
+        close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
         uds_server.abort();
         let _ = uds_server.await;
         cancelled.unwrap();
@@ -4373,13 +5661,12 @@ async fn run_production_tls_candidate(
     )
     .await
     .unwrap_or_else(|error| {
-        let commands = state
-            .state_store
-            .dedicated_session_commands(&placement)
-            .unwrap();
         panic!(
-            "joined session start failed: {error:#}; retained commands: {commands:#?}; controller evidence: {:?}",
-            controller_evidence.lock().unwrap()
+            "joined session start failed: {error:#}; supervisor_terminal={}; \
+             controller evidence: {:?}; retained commands: {:#?}",
+            supervisor_terminal_evidence(provider_state.path()),
+            controller_evidence.lock(),
+            state.state_store.dedicated_session_commands(&placement),
         )
     });
     if scripted_turn || publication == PublicationScenario::StaleBase {
@@ -4535,6 +5822,7 @@ async fn run_production_tls_candidate(
     }
     stop.store(true, Ordering::Release);
     let handled = controller.join().unwrap();
+    assert_controller_connections_clean(&controller_evidence);
     assert!(
         handled >= 5,
         "candidate controller handled only {handled} requests"
@@ -4705,6 +5993,7 @@ async fn run_production_tls_candidate(
         publication,
     )
     .await;
+    close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
     uds_server.abort();
     let _ = uds_server.await;
     assert_ne!(
@@ -4712,6 +6001,23 @@ async fn run_production_tls_candidate(
         Some(false),
         "guest shell and admitted rg must run before qualifying Codex authoring"
     );
+}
+
+async fn close_test_composition_before_uds_stop<T>(
+    composition: &ryeos_executor::SelectedInvocationCompositionBarrier,
+    app: Arc<ryeos_app::state::AppState>,
+    server: &tokio::task::JoinHandle<T>,
+) {
+    if matches!(
+        composition.close(),
+        ryeos_executor::SelectedRootClose::Unresolved
+    ) {
+        // Preserve the exact root, AppState and listener task if any selected
+        // owner remains. The fixture must not turn an unresolved close into a
+        // successful teardown by aborting its only callback surface.
+        let _retained = (app, server);
+        std::future::pending::<()>().await;
+    }
 }
 
 // Continue from the public session owner's retained C. Both public dispatch
@@ -4776,7 +6082,7 @@ async fn evaluate_integrate_and_publish_candidate(
     let workflow_chain_root = frozen_session.chain_root_id.clone();
     let service_owner = frozen_session.owner_principal.clone();
     let validated = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/validate-candidate-closure-and-base",
         serde_json::json!({
@@ -4802,9 +6108,9 @@ async fn evaluate_integrate_and_publish_candidate(
     state
         .state_store
         .write_project_head_ref(
-            &principal_key,
+            principal_key,
             &project_hash,
-            &base_snapshot_hash,
+            base_snapshot_hash,
             &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
             &guard,
         )
@@ -4822,7 +6128,7 @@ async fn evaluate_integrate_and_publish_candidate(
         &lillux::sha256_hex(b"external-candidate-e2e-evaluate-c")[..32]
     );
     let evaluator_launch = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/start-candidate-evaluation",
         serde_json::json!({
@@ -4844,7 +6150,7 @@ async fn evaluate_integrate_and_publish_candidate(
         evaluator_launch.value["chain_root_id"], evaluator_thread_id,
         "candidate evaluator must be an independent root chain"
     );
-    let evaluator_terminal = wait_for_terminal_thread(&state, &evaluator_thread_id).await;
+    let evaluator_terminal = wait_for_terminal_thread(state, &evaluator_thread_id).await;
     if publication == PublicationScenario::StaleBase {
         eprintln!("stale-base fixture: independent C evaluation settled");
     }
@@ -4876,7 +6182,7 @@ async fn evaluate_integrate_and_publish_candidate(
         &lillux::sha256_hex(b"external-candidate-e2e-integrate-d")[..32]
     );
     let qualified_c = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/qualify-candidate",
         serde_json::json!({
@@ -4900,7 +6206,7 @@ async fn evaluate_integrate_and_publish_candidate(
         .to_owned();
 
     let integration_launch = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/start-candidate-integration",
         serde_json::json!({
@@ -4924,7 +6230,7 @@ async fn evaluate_integrate_and_publish_candidate(
         .as_str()
         .expect("integration launch returned its exact thread")
         .to_owned();
-    let integration_terminal = wait_for_terminal_thread(&state, &integration_thread_id).await;
+    let integration_terminal = wait_for_terminal_thread(state, &integration_thread_id).await;
     if publication == PublicationScenario::StaleBase {
         eprintln!("stale-base fixture: integration D settled");
     }
@@ -4984,7 +6290,7 @@ async fn evaluate_integrate_and_publish_candidate(
         &lillux::sha256_hex(b"external-candidate-e2e-evaluate-d")[..32]
     );
     let integrated_evaluator_launch = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/start-candidate-evaluation",
         serde_json::json!({
@@ -5008,7 +6314,7 @@ async fn evaluate_integrate_and_publish_candidate(
         .expect("integrated evaluator launch returned its exact thread")
         .to_owned();
     let integrated_evaluator_terminal =
-        wait_for_terminal_thread(&state, &integrated_evaluator_thread_id).await;
+        wait_for_terminal_thread(state, &integrated_evaluator_thread_id).await;
     if publication == PublicationScenario::StaleBase {
         eprintln!("stale-base fixture: independent D evaluation settled");
     }
@@ -5036,7 +6342,7 @@ async fn evaluate_integrate_and_publish_candidate(
         )
         .unwrap();
     let qualified_d = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/qualify-candidate",
         serde_json::json!({
@@ -5080,10 +6386,10 @@ async fn evaluate_integrate_and_publish_candidate(
         state
             .state_store
             .advance_project_head_ref(
-                &principal_key,
+                principal_key,
                 &project_hash,
                 &competing_snapshot_hash,
-                &base_snapshot_hash,
+                base_snapshot_hash,
                 &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
                 &guard,
             )
@@ -5092,7 +6398,7 @@ async fn evaluate_integrate_and_publish_candidate(
         drop(authority);
 
         let publication_attempt = try_execute_recorded_service(
-            &state,
+            state,
             &service_owner,
             "service:worker-executions/publish",
             serde_json::json!({
@@ -5109,13 +6415,13 @@ async fn evaluate_integrate_and_publish_candidate(
             Err(error) => error,
         };
         assert!(
-            format!("{error:#}").contains("publication conflict"),
+            format!("{error:#}").contains("base_superseded"),
             "stale B→D publication failed at the wrong boundary: {error:#}"
         );
         assert_eq!(
             state
                 .state_store
-                .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+                .with_state_db(|db| db.read_project_head(principal_key, &project_hash))
                 .unwrap()
                 .as_deref(),
             Some(competing_snapshot_hash.as_str()),
@@ -5125,7 +6431,7 @@ async fn evaluate_integrate_and_publish_candidate(
     }
 
     let published = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/publish",
         serde_json::json!({
@@ -5138,7 +6444,7 @@ async fn evaluate_integrate_and_publish_candidate(
     assert_eq!(published.value["snapshot_hash"], integrated_snapshot_hash);
     assert_eq!(published.value["previous_hash"], base_snapshot_hash);
     let publication_replay = execute_recorded_service(
-        &state,
+        state,
         &service_owner,
         "service:worker-executions/publish",
         serde_json::json!({
@@ -5157,7 +6463,7 @@ async fn evaluate_integrate_and_publish_candidate(
     assert_eq!(
         state
             .state_store
-            .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+            .with_state_db(|db| db.read_project_head(principal_key, &project_hash))
             .unwrap()
             .as_deref(),
         Some(integrated_snapshot_hash.as_str()),
@@ -5247,7 +6553,7 @@ fn lost_allocation_response_reconciles_the_original_occurrence() {
         &allocate,
         None,
         Vec::new(),
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
     )
     .unwrap_err();
     assert!(
@@ -5389,10 +6695,14 @@ fn exercise_activation_fault(fault: &str) {
         .unwrap();
     let manifest = ryeos_state::observe_external_content_tree_exact(&runtime).unwrap();
     let runtime_hash = ryeos_state::external_content_manifest_digest(&manifest).unwrap();
-    let base_db =
-        ryeos_state::StateDb::open(base_store.path(), Arc::new(ryeos_state::TrustStore::new()))
-            .unwrap();
-    let base_state = base_db.pinned_authority().unwrap();
+    // The base snapshot needs content-addressed storage only, so it lives in
+    // a private scratch CAS rather than a node State database.
+    let base_state = ryeos_state::private_cas::open_private_scratch_cas(
+        &lillux::PinnedDirectory::open(base_store.path())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     let base_guard = base_state.acquire_shared_guard().unwrap();
     let base_cas = base_state.cas_store().unwrap();
     let policy = ProjectSnapshotPolicy::new(
@@ -5495,6 +6805,7 @@ fn exercise_activation_fault(fault: &str) {
     let manifest_authority =
         lillux::sealed_memfd(c"synthetic-runtime-manifest", manifest_bytes.as_bytes()).unwrap();
     let guest_inputs = ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: GuestBaseSnapshotInput {
             descriptor: base_authority.inherited_descriptor().unwrap(),
@@ -5585,7 +6896,7 @@ fn exercise_activation_fault(fault: &str) {
         vec![ryeos_external_candidate_supervisor::test_support::TEST_CA_DER_BASE64.to_owned()];
     let now = lillux::time::timestamp_millis();
     let requirement = ExternalCandidateRequirement {
-        schema: 6,
+        schema: 7,
         required_lifecycle_capabilities: Default::default(),
         protocol: PROTOCOL.into(),
         connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
@@ -5593,6 +6904,7 @@ fn exercise_activation_fault(fault: &str) {
         provider_declaration_id: "synthetic-provider".into(),
         provider_configuration_destination: "environments.toml".into(),
         runtime_product_declaration_id: "runtime".into(),
+        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
         runtime_recipe: recipe,
     };
     let qualification_use =
@@ -5601,26 +6913,30 @@ fn exercise_activation_fault(fault: &str) {
         )
         .unwrap();
     let bootstrap = ExternalSupervisorBootstrap {
-        schema: 7,
+        schema: EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
-            schema: 2,
+            schema: 3,
             https_origin: format!("https://localhost:{controller_port}"),
             route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
             tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
             connect_timeout_ms: 1_000,
             request_timeout_ms: 5_000,
             maximum_response_bytes: 64 * 1024,
+            max_clock_skew_ms: None,
             network_inputs: ExternalNetworkInputPolicy {
                 resolver: ExternalNetworkInputSelection {
                     source: "/etc/resolv.conf".into(),
                     max_bytes: 64 * 1024,
+                    required: true,
                 },
                 hosts: ExternalNetworkInputSelection {
                     source: "/etc/hosts".into(),
                     max_bytes: 64 * 1024,
+                    required: false,
                 },
             },
-        },
+        }
+        .into(),
         tls_root_certificates_der_base64: roots,
         placement_thread_id: reservation.placement_thread_id.clone(),
         occurrence_id: occurrence.occurrence_id.clone(),
@@ -5636,9 +6952,15 @@ fn exercise_activation_fault(fault: &str) {
             qualification_use,
             runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
             runtime_manifest_hash: runtime_hash.clone(),
-            runtime_witness_hash: "1".repeat(64),
+            runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "3".repeat(64),
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
         }
         .into(),
         guest_input_identity: guest_inputs.identity_digest().unwrap(),
@@ -5653,11 +6975,23 @@ fn exercise_activation_fault(fault: &str) {
         post_execution_timeout_seconds: 1,
         candidate_export_max_bytes: 1024,
         channel_max_bytes: 1024 * 1024,
+        // The signed profiles' `external-supervisor-journal` envelope.
+        native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+            storage_bytes: 67_108_864,
+            allocator_steps: 2_000_000_000,
+            connections: 16,
+            operation_millis: 4_860_000,
+            cleanup_millis: 120_000,
+            cleanup_steps: 3_000_000,
+        },
+        report_capabilities: false,
     };
     let activation = SupervisorActivationIntent {
         activation_request_digest: "6".repeat(64),
         supervisor_runtime_hash: runtime_hash,
         launcher_artifact_hash: launcher_hash,
+        guest_runtime_artifact_hash: None,
+        guest_runtime_artifact_bytes: None,
         attachment_deadline_ms: bootstrap.attachment_deadline_ms,
         execution_timeout_seconds: bootstrap.execution_timeout_seconds,
         post_execution_timeout_seconds: bootstrap.post_execution_timeout_seconds,
@@ -5758,7 +7092,7 @@ fn exercise_activation_fault(fault: &str) {
             &displaced,
             Some(&bootstrap),
             vec![package_authority.clone()],
-            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+            lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
         )
         .unwrap_err();
         assert!(
@@ -6022,4 +7356,105 @@ fn exercise_activation_fault(fault: &str) {
     );
     controller_stop.store(true, Ordering::Release);
     controller_blocker.join().unwrap();
+}
+
+/// The provider inventory crosses the real process boundary: the synthetic
+/// adapter, run with process creation denied, lists exactly the fixture its
+/// fake provider holds and nothing else.
+#[test]
+fn synthetic_adapter_lists_its_fixture_inventory() {
+    use ryeos_external_execution_contract::provider_inventory::{
+        PROVIDER_INVENTORY_PROTOCOL, ProviderInventoryAdapterRequest,
+        ProviderInventoryAdapterResponse, ProviderResource, ProviderResourceKind,
+    };
+    let adapter = executable(env!(
+        "CARGO_BIN_EXE_ryeos-synthetic-external-lifecycle-adapter"
+    ));
+    let (adapter_hash, _, _) = artifact(&adapter);
+    let provider_spec_bytes = br#"{"schema":1,"operations":[]}"#;
+    let provider_spec =
+        lillux::sealed_memfd(c"synthetic-provider-spec", provider_spec_bytes).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    lillux::PinnedDirectory::open(state.path())
+        .unwrap()
+        .unwrap()
+        .tighten_owner_private_directory()
+        .unwrap();
+    let fixture = vec![
+        ProviderResource {
+            kind: ProviderResourceKind::Sandbox,
+            provider_id: "occ-leaked".into(),
+            state: "running".into(),
+            created_at: Some("2026-11-13T00:00:00Z".into()),
+        },
+        ProviderResource {
+            kind: ProviderResourceKind::Snapshot,
+            provider_id: "snap-1".into(),
+            state: "ready".into(),
+            created_at: None,
+        },
+    ];
+    std::fs::write(
+        state.path().join("provider-inventory.json"),
+        serde_json::to_vec(&fixture).unwrap(),
+    )
+    .unwrap();
+    let credential = b"synthetic-secret";
+    let settings = lillux::canonical_json(&serde_json::json!({
+        "expected_credential_sha256": lillux::sha256_hex(credential),
+        "maximum_copy_depth": 8,
+        "maximum_copy_entries": 1000,
+        "schema": 1,
+        "startup_timeout_ms": 1000,
+        "state_root": state.path(),
+    }))
+    .unwrap()
+    .into_bytes();
+    let request = ProviderInventoryAdapterRequest {
+        protocol: PROVIDER_INVENTORY_PROTOCOL.into(),
+        provider_id: "synthetic-local".into(),
+        adapter_artifact_hash: adapter_hash,
+        settings_digest: lillux::sha256_hex(&settings),
+        provider_spec_digest: lillux::sha256_hex(provider_spec_bytes),
+    };
+    let request_handle = lillux::sealed_memfd(
+        c"synthetic-inventory-request",
+        &ryeos_external_execution_contract::canonical_json(&request).unwrap(),
+    )
+    .unwrap();
+    let settings_handle = lillux::sealed_memfd(c"synthetic-settings", &settings).unwrap();
+    let credential_handle = lillux::sealed_memfd(c"synthetic-credential", credential).unwrap();
+    let fd = |handle: &lillux::InheritedDescriptorAuthority| {
+        handle.inherited_descriptor().unwrap().to_string()
+    };
+    let output = run_lifecycle_adapter(
+        &adapter,
+        LifecycleAdapterInvocation::ListProviderResources,
+        &request_handle,
+        vec![
+            provider_spec.clone(),
+            settings_handle.clone(),
+            credential_handle.clone(),
+        ],
+        vec![
+            (
+                ryeos_external_execution_contract::LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(),
+                fd(&provider_spec),
+            ),
+            (
+                ryeos_external_execution_contract::LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                lillux::sha256_hex(provider_spec_bytes),
+            ),
+            (LIFECYCLE_SETTINGS_FD_ENV.into(), fd(&settings_handle)),
+            (LIFECYCLE_CREDENTIAL_FD_ENV.into(), fd(&credential_handle)),
+        ],
+        lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
+    )
+    .unwrap();
+    assert!(!output.deadline_exceeded);
+    let response: ProviderInventoryAdapterResponse =
+        from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES).unwrap();
+    response.validate_for(&request).unwrap();
+    assert!(response.complete);
+    assert_eq!(response.resources, fixture);
 }

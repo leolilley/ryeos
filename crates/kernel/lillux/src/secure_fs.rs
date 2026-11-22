@@ -10,7 +10,295 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+
+/// What a qualification hook asks a planned removal to do between its move
+/// into the second coordinate and the unlink there.
+#[cfg(feature = "crash-qualification-test-support")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlannedRemovalCut {
+    /// Unlink as usual.
+    Proceed,
+    /// Report the unlink as failed with the original still at the second
+    /// coordinate, without attempting it.
+    FailUnlink,
+}
+
+/// Called with the source and sink coordinates after a planned removal's move
+/// succeeded and before its unlink. The hook may block forever to park the
+/// process at that boundary.
+#[cfg(feature = "crash-qualification-test-support")]
+pub type PlannedRemovalHook = fn(&OsStr, &OsStr) -> PlannedRemovalCut;
+
+#[cfg(feature = "crash-qualification-test-support")]
+static PLANNED_REMOVAL_HOOK: std::sync::OnceLock<PlannedRemovalHook> = std::sync::OnceLock::new();
+
+/// Install the process-wide planned-removal hook. The first installation
+/// wins; later calls with another hook are ignored.
+#[cfg(feature = "crash-qualification-test-support")]
+pub fn install_planned_removal_hook(hook: PlannedRemovalHook) {
+    PLANNED_REMOVAL_HOOK.get_or_init(|| hook);
+}
+
+mod filesystem_identity;
+pub use filesystem_identity::{FilesystemIdentity, IdentityStability};
+mod descriptor_observation;
+pub use descriptor_observation::RetainedFileDescriptorObservation;
+#[cfg(target_os = "linux")]
+mod prefix_walk;
+#[cfg(target_os = "linux")]
+pub use prefix_walk::{
+    MAX_PREFIX_WALK_DEPTH, MAX_PREFIX_WALK_WORK, PrefixDirectoryCoverage, PrefixWalk,
+    PrefixWalkBudget, PrefixWalkDecision, PrefixWalkDirectory, PrefixWalkEntry,
+    PrefixWalkExhaustion,
+};
+
+/// The platform's pathname bound in bytes, the terminating NUL included.
+#[cfg(unix)]
+pub const PATH_MAX_BYTES: u64 = libc::PATH_MAX as u64;
+
+mod temp_name;
+/// Owner token for the recovery marker Lillux itself publishes around a
+/// conditional byte replacement.
+const CONDITIONAL_RECOVERY_TEMP_PURPOSE: TempPurpose = TempPurpose::new("authoring");
+/// Owner token for empty mount-target reservations.
+const MOUNT_TARGET_TEMP_PURPOSE: TempPurpose = TempPurpose::new("mount-target");
+/// Owner token for publications made by Lillux's own unit tests.
+#[cfg(test)]
+pub(crate) const TEST_TEMP_PURPOSE: TempPurpose = TempPurpose::new("test");
+pub use temp_name::{
+    SecureTempClass, SecureTempOwnership, TempPurpose, classify_secure_temp_name,
+    parse_secure_temp_name,
+};
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static FAIL_PLANNED_RESTORE_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_CHILD_REMOVE_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_CHILD_CREATE_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_ATOMIC_CREATE_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static BEFORE_CHILD_CREATE_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+/// Namespace facts from a caller-prepublished quarantine operation. These
+/// observations do not grant permission to replay a possibly committed effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedQuarantineStage {
+    Unchanged,
+    RestoredUnexpected,
+    PreservedUnexpected,
+    QuarantinedOriginal,
+    UnlinkedOriginal,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedQuarantineDisposition {
+    BeforeCommit,
+    DurabilityUncertain,
+    NamespaceChanged,
+}
+#[derive(Debug)]
+pub struct PlannedQuarantineFailure {
+    pub disposition: PlannedQuarantineDisposition,
+    pub stage: PlannedQuarantineStage,
+    pub quarantine_name: OsString,
+    pub error: anyhow::Error,
+}
+impl std::fmt::Display for PlannedQuarantineFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "planned quarantine {:?}/{:?} at {}: {}",
+            self.disposition,
+            self.stage,
+            self.quarantine_name.to_string_lossy(),
+            self.error
+        )
+    }
+}
+impl std::error::Error for PlannedQuarantineFailure {}
+
+/// Original empty-child removal custody. A changed namespace with uncertain
+/// parent sync must not be replayed as a new pathname removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyChildRemovalStage {
+    BeforeRemoval,
+    RemovedPendingSync,
+}
+/// Actual same-operation empty-child removal and parent durability receipt.
+/// The exact-child interpretation requires the caller-held namespace-writer
+/// exclusion documented on `PinnedDirectory::remove_empty_child_if_same`.
+/// This does not certify descriptor retirement, storage reclamation or refund,
+/// or exclude an uncooperative same-UID process from replacing the coordinate.
+/// Only the native removal/sync owner can construct it.
+pub struct RemovedEmptyChild {
+    process: u32,
+    parent: PinnedDirectory,
+    child: PinnedDirectory,
+    name: OsString,
+}
+impl RemovedEmptyChild {
+    /// Consume the original removal receipt without closing either descriptor.
+    /// The recipient must retain the removed coordinate and both actual pins
+    /// until its physical-disposal owner records their terminal observations.
+    /// This move supplies no new exclusion, removal, refund or settlement proof.
+    /// A foreign process or outstanding receipt alias retains the whole receipt.
+    pub fn try_into_original_parts(
+        self: Arc<Self>,
+    ) -> std::result::Result<(PinnedDirectory, PinnedDirectory, OsString), Arc<Self>> {
+        if self.process != std::process::id() {
+            return Err(self);
+        }
+        match Arc::try_unwrap(self) {
+            Ok(Self {
+                process: _,
+                parent,
+                child,
+                name,
+            }) => Ok((parent, child, name)),
+            Err(original) => Err(original),
+        }
+    }
+
+    pub fn parent(&self) -> &PinnedDirectory {
+        &self.parent
+    }
+    pub fn child(&self) -> &PinnedDirectory {
+        &self.child
+    }
+    pub fn name(&self) -> &OsStr {
+        &self.name
+    }
+}
+impl std::fmt::Debug for RemovedEmptyChild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovedEmptyChild").finish_non_exhaustive()
+    }
+}
+
+pub struct EmptyChildRemovalFailure {
+    process: u32,
+    error: anyhow::Error,
+    retry_receipt: std::sync::Mutex<Option<std::sync::Arc<RemovedEmptyChild>>>,
+    stage: EmptyChildRemovalStage,
+    parent: PinnedDirectory,
+    child: PinnedDirectory,
+    name: OsString,
+}
+impl EmptyChildRemovalFailure {
+    /// Resume THIS actual retained post-rmdir owner. Original failure and
+    /// one memoized native receipt stay reachable through concurrent aliases.
+    /// Caller must retain the original parent's namespace-writer exclusion
+    /// through the absence observation and sync, including memoized receipt
+    /// acknowledgement. This method supplies no lock or hostile-host fence.
+    pub fn retry_sync(self: &std::sync::Arc<Self>) -> Result<std::sync::Arc<RemovedEmptyChild>> {
+        let result = (|| -> Result<std::sync::Arc<RemovedEmptyChild>> {
+            ensure!(
+                self.process == std::process::id(),
+                "original removal recovery belongs to another process"
+            );
+            ensure!(
+                self.stage == EmptyChildRemovalStage::RemovedPendingSync,
+                "original directory removal did not enter parent-sync stage"
+            );
+            let mut receipt = self.retry_receipt.try_lock().map_err(|_| {
+                anyhow::anyhow!("original removal receipt custody busy or poisoned")
+            })?;
+            self.parent.ensure_path_binding()?;
+            ensure!(
+                self.parent.entry_no_follow(&self.name)?.is_none(),
+                "original removed directory coordinate was replaced"
+            );
+            if let Some(original) = receipt.as_ref() {
+                return Ok(original.clone());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let original = self.child.directory.metadata()?;
+                ensure!(
+                    original.is_dir() && original.nlink() == 0,
+                    "original removed child inode is not unlinked"
+                );
+            }
+            // Acquire receipt custody before the sync effect; no post-sync
+            // descriptor allocation can lose the actual success.
+            let candidate = std::sync::Arc::new(RemovedEmptyChild {
+                process: self.process,
+                parent: self.parent.try_clone()?,
+                child: self.child.try_clone()?,
+                name: self.name.clone(),
+            });
+            self.parent.sync()?;
+            *receipt = Some(candidate.clone());
+            Ok(candidate)
+        })();
+        result.map_err(|retry| {
+            anyhow::Error::new(EmptyChildRemovalSyncFailure {
+                original: self.clone(),
+                retry,
+            })
+        })
+    }
+    pub fn stage(&self) -> EmptyChildRemovalStage {
+        self.stage
+    }
+    pub fn parent(&self) -> &PinnedDirectory {
+        &self.parent
+    }
+    pub fn child(&self) -> &PinnedDirectory {
+        &self.child
+    }
+    pub fn name(&self) -> &OsStr {
+        &self.name
+    }
+}
+struct EmptyChildRemovalSyncFailure {
+    original: std::sync::Arc<EmptyChildRemovalFailure>,
+    retry: anyhow::Error,
+}
+impl std::fmt::Debug for EmptyChildRemovalSyncFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmptyChildRemovalSyncFailure")
+            .field("original", &self.original)
+            .field("retry", &self.retry)
+            .finish()
+    }
+}
+impl std::fmt::Display for EmptyChildRemovalSyncFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}; same-owner sync retry: {}",
+            self.original, self.retry
+        )
+    }
+}
+impl std::error::Error for EmptyChildRemovalSyncFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.original.as_ref())
+    }
+}
+impl std::fmt::Debug for EmptyChildRemovalFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmptyChildRemovalFailure")
+            .field("stage", &self.stage)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for EmptyChildRemovalFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "original empty-child removal {:?}: {}",
+            self.stage, self.error
+        )
+    }
+}
+impl std::error::Error for EmptyChildRemovalFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
 
 /// Mechanical result of materializing one immutable file into a private
 /// execution root. Policy remains with the caller; Lillux owns only the
@@ -151,6 +439,15 @@ fn digest_open_regular_file_chunked_exact(
     Ok((format!("{:x}", whole.finalize()), chunks))
 }
 
+/// The portable project-snapshot form of one declared regular-file mode: a
+/// mode with any execute bit is 0o755, every other mode is 0o644. A caller
+/// that compares an observed file against a mode it declared in a delivery
+/// normalizes the declaration with this before comparing it to
+/// [`normalized_portable_regular_mode`].
+pub fn normalized_portable_mode(mode: u32) -> u32 {
+    if mode & 0o111 == 0 { 0o644 } else { 0o755 }
+}
+
 /// Normalize one descriptor-observed regular file to RyeOS's portable
 /// project-snapshot mode contract. OS-specific permission inspection remains
 /// inside Lillux; callers consume only the stable 0o644/0o755 result.
@@ -166,11 +463,7 @@ pub fn normalized_portable_regular_mode(metadata: &std::fs::Metadata) -> Result<
         if !metadata.file_type().is_file() {
             anyhow::bail!("portable mode source is not a regular file");
         }
-        Ok(if metadata.permissions().mode() & 0o111 == 0 {
-            0o644
-        } else {
-            0o755
-        })
+        Ok(normalized_portable_mode(metadata.permissions().mode()))
     }
 }
 
@@ -249,6 +542,7 @@ pub struct OpenFileIdentity {
     mode: u32,
     file_type: u32,
     owner: u32,
+    link_count: u64,
 }
 
 impl OpenFileIdentity {
@@ -292,6 +586,12 @@ impl OpenFileIdentity {
         self.owner
     }
 
+    /// How many directory entries name the file. Zero means the open file
+    /// is an orphaned inode that no path reaches any more.
+    pub fn link_count(self) -> u64 {
+        self.link_count
+    }
+
     pub fn is_executable(self) -> bool {
         self.mode & 0o111 != 0
     }
@@ -309,32 +609,85 @@ pub enum OpenMountEntryKind {
     UnixSocket,
 }
 
-/// Serializable identity of an already-open directory. Platform coordinates
-/// remain opaque to authoring and transaction layers; they may retain and
-/// compare this value but never interpret its fields.
+/// Serializable, durable identity of an already-open directory: the identity
+/// of its filesystem plus its inode. Platform coordinates remain opaque to
+/// authoring and transaction layers; they may retain and compare this value
+/// but never interpret its fields. It survives the filesystem being
+/// re-attached under a different device number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedDirectoryIdentity {
-    containing_device: u64,
+    filesystem: FilesystemIdentity,
     inode: u64,
+}
+
+impl PinnedDirectoryIdentity {
+    /// The filesystem this directory lives on, comparable but opaque.
+    pub fn filesystem(&self) -> FilesystemIdentity {
+        self.filesystem
+    }
+
+    /// Whether both directories live on the same filesystem.
+    pub fn same_filesystem(&self, other: &Self) -> bool {
+        self.filesystem == other.filesystem
+    }
+
+    /// The identity of the directory behind an open descriptor.
+    #[cfg(unix)]
+    pub(crate) fn of_directory_descriptor(directory: &File) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(Self {
+            filesystem: FilesystemIdentity::of_descriptor(directory)?,
+            inode: directory.metadata()?.ino(),
+        })
+    }
+
+    /// A stable text form for records that carry identities as strings.
+    pub fn canonical_text(&self) -> Result<String> {
+        serde_json::to_string(self).context("encode directory identity")
+    }
+
+    /// Whether this value names an inode at all; inode zero never does.
+    pub fn names_an_inode(&self) -> bool {
+        self.inode != 0
+    }
 }
 
 /// Serializable stable identity of an already-open regular file. This omits
 /// mutable size and timestamp observations so an outer recovery owner can bind
 /// a durable child inode across legitimate in-place SQLite transactions while
 /// still refusing pathname replacement or rollback through a copied inode.
+/// Like [`PinnedDirectoryIdentity`] it names the filesystem's own identity, not
+/// the kernel's attachment number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedRegularFileIdentity {
-    containing_device: u64,
+    filesystem: FilesystemIdentity,
     inode: u64,
+}
+
+impl PinnedRegularFileIdentity {
+    /// The filesystem this file lives on, comparable but opaque.
+    pub fn filesystem(&self) -> FilesystemIdentity {
+        self.filesystem
+    }
+
+    /// Whether both files live on the same filesystem.
+    pub fn same_filesystem(&self, other: &Self) -> bool {
+        self.filesystem == other.filesystem
+    }
+
+    /// Whether this value names an inode at all; inode zero never does.
+    pub fn names_an_inode(&self) -> bool {
+        self.inode != 0
+    }
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegularFileIdentity {
-    containing_device: u64,
+    filesystem: FilesystemIdentity,
     inode: u64,
 }
 
@@ -358,7 +711,7 @@ fn regular_file_identity(file: &File) -> Result<RegularFileIdentity> {
         anyhow::bail!("descriptor is not a regular file");
     }
     Ok(RegularFileIdentity {
-        containing_device: metadata.dev(),
+        filesystem: FilesystemIdentity::of_descriptor(file)?,
         inode: metadata.ino(),
     })
 }
@@ -486,6 +839,79 @@ pub fn observe_open_file_identity(file: &File) -> Result<OpenFileIdentity> {
             mode: metadata.mode(),
             file_type: metadata.mode() & libc::S_IFMT,
             owner: metadata.uid(),
+            link_count: metadata.nlink(),
+        })
+    }
+}
+
+/// The longest pathname [`observe_open_file_path`] accepts for an open file.
+/// Linux builds a descriptor's name, unlinked marker included, in a
+/// `PATH_MAX` (4096-byte) buffer and fails the read when it does not fit, so
+/// current kernels return at most 4095 bytes. The reader still checks the
+/// bound itself instead of relying on that kernel detail.
+pub const MAX_OPENED_PATH_BYTES: usize = 4096;
+
+/// The kernel's current pathname for an open file. It names where the open
+/// file is linked now, which follows renames made after the file was opened;
+/// it is information about the file's location, not an identity of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedPath {
+    /// The pathname as the kernel reports it, with the kernel's unlinked
+    /// marker removed. A descriptor that names no filesystem object (a pipe,
+    /// a socket, an anonymous inode) reports a name that is not absolute.
+    pub path: PathBuf,
+    /// The kernel marks the name as unlinked: the open file is no longer
+    /// reachable under `path`. A file whose own name ends with the kernel's
+    /// marker is reported the same way.
+    pub unlinked: bool,
+}
+
+/// Read the kernel's current pathname for `file`, refusing a name longer
+/// than [`MAX_OPENED_PATH_BYTES`]. Only Linux reports one.
+pub fn observe_open_file_path(file: &File) -> Result<OpenedPath> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("reading an open file's current pathname is unavailable on this platform")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        const UNLINKED_MARKER: &[u8] = b" (deleted)";
+        let link = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .context("name the open file's descriptor link")?;
+        // One byte past the bound tells a name of exactly the bound from a
+        // truncated longer one.
+        let mut buffer = vec![0_u8; MAX_OPENED_PATH_BYTES + 1];
+        // SAFETY: `link` is a NUL-terminated string that outlives the call,
+        // and `buffer` is a live, writable allocation of exactly the length
+        // passed; readlink writes at most that many bytes and no terminator.
+        let read = unsafe {
+            libc::readlink(
+                link.as_ptr(),
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len(),
+            )
+        };
+        let read = usize::try_from(read).map_err(|_| {
+            anyhow::Error::new(std::io::Error::last_os_error())
+                .context("read the open file's current pathname")
+        })?;
+        if read > MAX_OPENED_PATH_BYTES {
+            anyhow::bail!(
+                "the open file's current pathname is longer than {MAX_OPENED_PATH_BYTES} bytes"
+            );
+        }
+        buffer.truncate(read);
+        let (name, unlinked) = match buffer.strip_suffix(UNLINKED_MARKER) {
+            Some(name) => (name, true),
+            None => (buffer.as_slice(), false),
+        };
+        Ok(OpenedPath {
+            path: PathBuf::from(OsStr::from_bytes(name)),
+            unlinked,
         })
     }
 }
@@ -497,9 +923,24 @@ pub fn pinned_regular_file_identity(file: &File) -> Result<PinnedRegularFileIden
         anyhow::bail!("descriptor is not a regular file");
     }
     Ok(PinnedRegularFileIdentity {
-        containing_device: identity.device,
+        filesystem: FilesystemIdentity::of_descriptor(file)?,
         inode: identity.inode,
     })
+}
+
+/// The durable identity of a regular file reached through a borrowed
+/// descriptor that another owner holds, such as a database keeper. The
+/// descriptor is duplicated only for the duration of the call.
+#[cfg(unix)]
+pub fn pinned_regular_file_identity_of_descriptor(
+    descriptor: std::os::fd::BorrowedFd<'_>,
+) -> Result<PinnedRegularFileIdentity> {
+    let file = File::from(
+        descriptor
+            .try_clone_to_owned()
+            .context("duplicate borrowed regular-file descriptor")?,
+    );
+    pinned_regular_file_identity(&file)
 }
 
 pub fn matches_pinned_regular_file_identity(
@@ -560,11 +1001,194 @@ pub fn require_effective_user_owned_regular(file: &File) -> Result<OpenFileIdent
     }
 }
 
+/// `statfs` magic of FUSE filesystems: their bytes are served by a user-space
+/// process, so permission bits say nothing about whether they can change.
+#[cfg(target_os = "linux")]
+const FUSE_SUPER_MAGIC: u32 = 0x6573_5546;
+
+/// Prove that the current process cannot change the bytes of the exact open
+/// regular file. The file is owned by root and carries no group/other write
+/// bits, so the effective user can neither write it nor chmod itself into
+/// writing it (POSIX ACL entries are bounded by the group bits). The kernel's
+/// own effective-identity access check must also deny writing, which covers
+/// capabilities such as `CAP_DAC_OVERRIDE`. A root effective user never
+/// proves this, and a FUSE-backed file never does either.
+///
+/// Callers use this to run a verified host inode in place of a sealed copy:
+/// the proof is about this process's authority, so a workload launched with
+/// the same credentials inherits the same inability to modify the file.
+pub fn require_unwritable_by_effective_user(file: &File) -> Result<OpenFileIdentity> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("unwritable regular-file proof is unavailable on this platform")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            anyhow::bail!("a root effective user can write every file; no unwritable proof");
+        }
+        let identity = observe_open_file_identity(file)?;
+        if identity.file_type != libc::S_IFREG
+            || identity.owner != 0
+            || identity.is_group_or_other_writable()
+        {
+            anyhow::bail!(
+                "descriptor is not a root-owned regular file without group/other write bits (uid={}, mode={:#o})",
+                identity.owner,
+                identity.mode & 0o7777,
+            );
+        }
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+        // SAFETY: the descriptor is open for the call and the kernel fully
+        // writes the exclusively borrowed output on success.
+        if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("read filesystem type of open descriptor");
+        }
+        // SAFETY: fstatfs succeeded. Magic numbers are 32-bit; the field's
+        // width and signedness differ by target.
+        let filesystem_type = i128::from(unsafe { stats.assume_init() }.f_type) & 0xffff_ffff;
+        if filesystem_type == i128::from(FUSE_SUPER_MAGIC) {
+            anyhow::bail!("descriptor is on a FUSE filesystem served by a user-space process");
+        }
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .expect("descriptor path has no interior NUL");
+        // SAFETY: the path is a valid C string; AT_EACCESS judges the
+        // effective identity, which the kernel checks when it writes.
+        if unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::W_OK, libc::AT_EACCESS) }
+            == 0
+        {
+            anyhow::bail!("the kernel grants this process write access to the descriptor");
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EACCES | libc::EPERM | libc::EROFS)
+        ) {
+            return Err(error).context("judge write access to open descriptor");
+        }
+        if observe_open_file_identity(file)? != identity {
+            anyhow::bail!("descriptor changed while its write authority was judged");
+        }
+        Ok(identity)
+    }
+}
+
 /// Compare the inode identities of two already-open descriptors.
 pub fn same_open_file_identity(left: &File, right: &File) -> Result<bool> {
     let left = observe_open_file_identity(left)?;
     let right = observe_open_file_identity(right)?;
     Ok(left.device == right.device && left.inode == right.inode)
+}
+
+/// Pin the inode behind an already-open regular file as a fresh
+/// path-only descriptor. The pin grants no read or write access; the
+/// original descriptor is left untouched. The pin must name the same inode.
+pub fn path_pin_open_regular_file(file: &File) -> Result<File> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("path-only descriptor pins are available only on Linux");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let expected = observe_open_file_identity(file)?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "path pin source is not a regular file"
+        );
+        let source = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .context("descriptor pin path")?;
+        // SAFETY: a valid NUL-terminated path; the returned descriptor is
+        // owned exactly once below.
+        let descriptor = unsafe { libc::open(source.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("pin open regular file as path-only");
+        }
+        // SAFETY: `descriptor` is a newly opened descriptor owned by nobody else.
+        let pin = unsafe { File::from_raw_fd(descriptor) };
+        let actual = observe_open_file_identity(&pin)?;
+        ensure!(
+            actual.device == expected.device && actual.inode == expected.inode,
+            "path pin names another inode"
+        );
+        Ok(pin)
+    }
+}
+
+/// Register a readable duplicate of an already-open regular file as inherited
+/// child authority. The duplicate names the same inode as `file`; the
+/// original is left untouched, so a lease that owns `file` keeps its own
+/// lifetime.
+pub fn inherited_readable_duplicate_of_open_regular_file(
+    file: &File,
+) -> Result<crate::exec::InheritedDescriptorAuthority> {
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        anyhow::bail!("inherited descriptor authority is unavailable on this platform");
+    }
+    #[cfg(unix)]
+    {
+        ensure!(
+            file.metadata()?.is_file(),
+            "inherited duplicate source is not a regular file"
+        );
+        let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
+        let duplicate = file
+            .try_clone()
+            .context("duplicate open regular file for inheritance")?;
+        crate::exec::InheritedDescriptorAuthority::from_owned_file(duplicate, &lease)
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+/// Register a path-only (`O_PATH`) pin of the inode behind an already-open
+/// regular file as inherited authority, for use as a read-only mount source.
+/// The pin names the same inode as `file`, grants no read or write access
+/// and leaves the original descriptor untouched.
+pub fn inherited_path_pin_of_open_regular_file(
+    file: &File,
+) -> Result<crate::exec::InheritedDescriptorAuthority> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("path-only descriptor pins are available only on Linux");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ensure!(
+            file.metadata()?.is_file(),
+            "path pin source is not a regular file"
+        );
+        let expected = observe_open_file_identity(file)?;
+        let source = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .context("descriptor pin path")?;
+        // The registration lease precedes the open: a descriptor created
+        // before its lease would be inheritable by a concurrent fork.
+        let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
+        // SAFETY: a valid NUL-terminated path; the returned descriptor is
+        // owned exactly once below.
+        let descriptor = unsafe { libc::open(source.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("pin open regular file as path-only");
+        }
+        // SAFETY: `descriptor` is a newly opened descriptor owned by nobody else.
+        let pin = unsafe { File::from_raw_fd(descriptor) };
+        let actual = observe_open_file_identity(&pin)?;
+        ensure!(
+            actual.device == expected.device && actual.inode == expected.inode,
+            "path pin names another inode"
+        );
+        crate::exec::InheritedDescriptorAuthority::from_owned_file(pin, &lease)
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 /// Classify an already-open descriptor admitted as a mount source.
@@ -671,6 +1295,7 @@ fn digest_open_regular_file_exact(file: &File, expected_bytes: u64) -> Result<St
         }
         digest.update(&buffer[..read]);
         remaining -= read as u64;
+        crate::progress::beat();
     }
     let mut sentinel = [0_u8; 1];
     if read_regular_file_at(file, &mut sentinel, expected_bytes)? != 0 {
@@ -691,6 +1316,21 @@ pub enum PinnedEntryType {
     Other,
 }
 
+/// Classify the file-type bits of a no-follow inspection.
+#[cfg(unix)]
+fn entry_type_from_mode(mode: libc::mode_t) -> PinnedEntryType {
+    match mode & libc::S_IFMT {
+        libc::S_IFDIR => PinnedEntryType::Directory,
+        libc::S_IFREG => PinnedEntryType::Regular,
+        libc::S_IFLNK => PinnedEntryType::Symlink,
+        libc::S_IFCHR => PinnedEntryType::CharacterDevice,
+        libc::S_IFBLK => PinnedEntryType::BlockDevice,
+        libc::S_IFIFO => PinnedEntryType::Fifo,
+        libc::S_IFSOCK => PinnedEntryType::Socket,
+        _ => PinnedEntryType::Other,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinnedDirectoryEntryMetadata {
     pub name: OsString,
@@ -698,10 +1338,9 @@ pub struct PinnedDirectoryEntryMetadata {
     pub mode: u32,
     /// Device-node identity (`st_rdev`). Meaningful only for device entries.
     pub device_id: u64,
-    /// Containing-filesystem identity (`st_dev`). A traversal that must stay
-    /// on one filesystem compares this against its pinned root, because a
-    /// bind mount or separate filesystem below the root is neither bounded
-    /// nor reproducible by the root's own declaration.
+    /// `st_dev` identity of this entry. This is an inode identity component,
+    /// not a reliable mount-boundary test: overlayfs can report a different
+    /// device for an ordinary file and its containing directory.
     pub containing_device: u64,
     /// Inode number, for identity comparisons within one filesystem.
     pub inode: u64,
@@ -711,6 +1350,29 @@ pub struct PinnedDirectoryEntryMetadata {
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+
+#[cfg(target_os = "linux")]
+fn mount_id_of_open_descriptor(file: &File) -> Result<u64> {
+    let mut observation: libc::statx = unsafe { std::mem::zeroed() };
+    let empty = c"";
+    if unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            empty.as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_MNT_ID,
+            &mut observation,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error()).context("observe exact mount identity");
+    }
+    ensure!(
+        observation.stx_mask & libc::STATX_MNT_ID != 0,
+        "kernel did not return an exact mount identity"
+    );
+    Ok(observation.stx_mnt_id)
+}
 
 #[cfg(unix)]
 fn open_directory_no_follow(path: &Path) -> Result<Option<File>> {
@@ -915,6 +1577,42 @@ fn directory_names_bounded(
     directory: &File,
     max_entries: Option<usize>,
 ) -> Result<Vec<std::ffi::OsString>> {
+    directory_names_bounded_with_deadline(directory, max_entries, None)
+}
+
+#[cfg(target_os = "linux")]
+fn directory_names_bounded_with_deadline(
+    directory: &File,
+    max_entries: Option<usize>,
+    deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<Vec<std::ffi::OsString>> {
+    check_original_traversal_deadline(deadline)?;
+    let (mut names, _reached_end) = read_directory_names(directory, max_entries, false, || {
+        check_original_traversal_deadline(deadline)
+    })?;
+    check_original_traversal_deadline(deadline)?;
+    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    check_original_traversal_deadline(deadline)?;
+    Ok(names)
+}
+
+/// Read child names, excluding `.` and `..`, from an independent stream over
+/// the retained directory inode, in stream order.
+///
+/// `checkpoint` runs before every stream read and its error ends the read.
+/// With `limit`, reading stops once that many names are held. When
+/// `look_past_limit` is false it stops without another read and the returned
+/// flag is false. When true it reads on until it meets either one more name
+/// (flag false; that name is discarded) or the end of the stream (flag true),
+/// so a directory holding exactly `limit` names is known to be complete.
+/// Without `limit` the flag is always true.
+#[cfg(target_os = "linux")]
+fn read_directory_names(
+    directory: &File,
+    limit: Option<usize>,
+    look_past_limit: bool,
+    mut checkpoint: impl FnMut() -> Result<()>,
+) -> Result<(Vec<std::ffi::OsString>, bool)> {
     use std::os::unix::ffi::OsStringExt as _;
 
     struct DirectoryStream(*mut libc::DIR);
@@ -958,8 +1656,10 @@ fn directory_names_bounded(
     let stream = DirectoryStream(stream);
     let mut names = Vec::new();
     loop {
-        if max_entries.is_some_and(|maximum| names.len() >= maximum) {
-            break;
+        checkpoint()?;
+        let at_limit = limit.is_some_and(|maximum| names.len() >= maximum);
+        if at_limit && !look_past_limit {
+            return Ok((names, false));
         }
         // POSIX distinguishes end-of-directory from failure only through
         // errno when readdir returns null.
@@ -974,17 +1674,18 @@ fn directory_names_bounded(
             if error.raw_os_error().unwrap_or(0) != 0 {
                 return Err(error).context("enumerate exact pinned directory");
             }
-            break;
+            return Ok((names, true));
         }
         // SAFETY: readdir returned a live dirent whose d_name is NUL-terminated.
         let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if matches!(name, b"." | b"..") {
             continue;
         }
+        if at_limit {
+            return Ok((names, false));
+        }
         names.push(std::ffi::OsString::from_vec(name.to_vec()));
     }
-    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    Ok(names)
 }
 
 #[cfg(target_os = "linux")]
@@ -1000,10 +1701,42 @@ fn directory_names_with_limit(
     Ok(names)
 }
 
+fn check_original_traversal_deadline(
+    deadline: Option<crate::time::MonotonicDeadline>,
+) -> Result<()> {
+    if deadline.is_some_and(|expiry| expiry.has_elapsed()) {
+        anyhow::bail!(
+            "original secure directory traversal deadline expired; disposal may be partial"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn directory_names_with_limit_until(
+    directory: &File,
+    max_entries: usize,
+    deadline: crate::time::MonotonicDeadline,
+) -> Result<Vec<std::ffi::OsString>> {
+    let names = directory_names_bounded_with_deadline(
+        directory,
+        Some(max_entries.saturating_add(1)),
+        Some(deadline),
+    )?;
+    if names.len() > max_entries {
+        anyhow::bail!("secure directory traversal exceeds maximum entry count {max_entries}");
+    }
+    Ok(names)
+}
+
 #[cfg(target_os = "linux")]
 fn directory_names(directory: &File) -> Result<Vec<std::ffi::OsString>> {
     directory_names_bounded(directory, None)
 }
+
+mod exclusive_file;
+pub use exclusive_file::ExclusiveFileCreationFailure;
+mod fixed_record;
 
 /// A directory reached component-by-component with `O_NOFOLLOW`. Namespace
 /// reads and mutations stay relative to this exact open directory inode.
@@ -1012,6 +1745,114 @@ pub struct PinnedDirectory {
     path: PathBuf,
     directory: File,
     path_binding_required: bool,
+}
+
+/// A mkdir succeeded but opening or acknowledging the new child failed.
+/// This owns the original parent and, when acquired, the child opened after mkdir.
+/// Attribution to the mkdir-created inode requires caller-enforced namespace
+/// exclusion: mkdir itself returns no child descriptor.
+/// Names and observations alone never authorize adoption, retry or removal.
+/// Drop closes descriptors without removing the uncertain namespace deposit.
+pub struct ChildDirectoryCreationFailure {
+    error: anyhow::Error,
+    parent: PinnedDirectory,
+    name: OsString,
+    child: Option<PinnedDirectory>,
+}
+impl ChildDirectoryCreationFailure {
+    pub fn original_parent(&self) -> &PinnedDirectory {
+        &self.parent
+    }
+    pub fn child_name(&self) -> &OsStr {
+        &self.name
+    }
+    pub fn opened_child(&self) -> Option<&PinnedDirectory> {
+        self.child.as_ref()
+    }
+}
+impl std::fmt::Debug for ChildDirectoryCreationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildDirectoryCreationFailure")
+            .field("error", &self.error)
+            .field("name", &self.name)
+            .field("has_opened_child", &self.child.is_some())
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for ChildDirectoryCreationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "created child acknowledgement failed; original custody retained: {}",
+            self.error
+        )
+    }
+}
+impl std::error::Error for ChildDirectoryCreationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+/// Last entered phase, not a permission to retry or proof of settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicRegularCreationPhase {
+    TemporaryCreated,
+    PublicationAttempted,
+    NamespacePublished,
+    CollisionCleanup,
+}
+
+/// Original descriptor custody when create-only file publication fails after
+/// temporary inode acquisition. No name lookup replaces the original file.
+/// Drop closes descriptors; uncertain names are left for explicit recovery.
+pub struct AtomicRegularCreationFailure {
+    error: anyhow::Error,
+    parent: PinnedDirectory,
+    target_name: OsString,
+    temporary_name: OsString,
+    file: File,
+    phase: AtomicRegularCreationPhase,
+}
+impl AtomicRegularCreationFailure {
+    pub fn original_parent(&self) -> &PinnedDirectory {
+        &self.parent
+    }
+    pub fn original_file(&self) -> &File {
+        &self.file
+    }
+    pub fn target_name(&self) -> &OsStr {
+        &self.target_name
+    }
+    pub fn temporary_name(&self) -> &OsStr {
+        &self.temporary_name
+    }
+    pub fn phase(&self) -> AtomicRegularCreationPhase {
+        self.phase
+    }
+}
+impl std::fmt::Debug for AtomicRegularCreationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AtomicRegularCreationFailure")
+            .field("error", &self.error)
+            .field("target_name", &self.target_name)
+            .field("phase", &self.phase)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for AtomicRegularCreationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "atomic create {:?} failed; original file custody retained: {}",
+            self.phase, self.error
+        )
+    }
+}
+impl std::error::Error for AtomicRegularCreationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
 }
 
 /// An empty regular mount target reserved in an explicitly owned directory.
@@ -1624,7 +2465,10 @@ fn remove_flat_directory_generation(
     for entry in directory.regular_files()? {
         directory.remove_pinned_regular_if_same(&entry)?;
     }
-    if !generations.remove_empty_child_if_same(name, directory)? {
+    if !generations
+        .remove_empty_child_if_same(name, directory)
+        .map(|receipt| receipt.is_some())?
+    {
         anyhow::bail!(
             "directory generation is not a flat regular-file namespace: {}",
             directory.path().display()
@@ -1634,6 +2478,17 @@ fn remove_flat_directory_generation(
 }
 
 impl PinnedRegularFile {
+    /// Hand this exact inode's descriptor to a fork-closed lock, registered
+    /// while the caller still holds the lease it took before opening. A lock
+    /// held on it then never needs the fork window closed.
+    #[cfg(unix)]
+    pub fn into_fork_closed_lock(
+        self,
+        lease: &crate::exec::ForkSensitiveDescriptorLease,
+    ) -> crate::locks::ForkClosedLockFile {
+        crate::locks::ForkClosedLockFile::register(self.file, lease)
+    }
+
     /// Open one exact bounded byte stream whose digest must match an
     /// independently admitted upload identity. The stream must be consumed
     /// and finished before its bytes can be treated as staged input.
@@ -1674,6 +2529,27 @@ impl PinnedRegularFile {
         }
     }
 
+    /// Fixed admission check of the exact pinned file owner, permissions and
+    /// single-link custody. It never reopens or closes a regular data descriptor.
+    pub fn require_owner_fixed(&self, owner: u32) -> std::result::Result<(), &'static str> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = owner;
+            Err("fixed pinned file ownership requires Linux")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(self.file.as_raw_fd(), &mut metadata) } != 0 {
+                return Err("pinned file ownership observation refused");
+            }
+            if metadata.st_uid != owner || metadata.st_mode & 0o022 != 0 || metadata.st_nlink != 1 {
+                return Err("pinned file has unsafe ownership, permissions or links");
+            }
+            Ok(())
+        }
+    }
+
     /// Return the pathname recorded when this authority was opened.
     ///
     /// This is diagnostic context only. It does not prove that the namespace
@@ -1695,6 +2571,29 @@ impl PinnedRegularFile {
     pub fn read_bounded(&self, max_bytes: u64) -> Result<Vec<u8>> {
         read_open_regular_file_bounded(self.file.try_clone()?, max_bytes)
             .with_context(|| format!("read pinned regular file {}", self.path.display()))
+    }
+
+    /// Read at most `max_bytes` from the start of this exact regular file,
+    /// whatever its length: a bounded preview, not whole-file evidence.
+    /// Memory grows only with the bytes actually read, and positional reads
+    /// leave the shared descriptor cursor untouched.
+    pub fn read_prefix(&self, max_bytes: usize) -> Result<Vec<u8>> {
+        const CHUNK: usize = 64 * 1024;
+        let mut bytes = Vec::new();
+        while bytes.len() < max_bytes {
+            let filled = bytes.len();
+            let want = (max_bytes - filled).min(CHUNK);
+            bytes.resize(filled + want, 0);
+            let count = read_regular_file_at(&self.file, &mut bytes[filled..], filled as u64)
+                .with_context(|| {
+                    format!("read pinned regular file prefix {}", self.path.display())
+                })?;
+            bytes.truncate(filled + count);
+            if count == 0 {
+                break;
+            }
+        }
+        Ok(bytes)
     }
 
     /// Observe the exact descriptor for a later stable conditional read.
@@ -1722,8 +2621,34 @@ impl PinnedRegularFile {
         observation: &OpenRegularFileObservation,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
-        let mut file = self.file.try_clone()?;
-        read_open_regular_file_stable_bounded(&mut file, observation, max_bytes)
+        let file = self.file.try_clone()?;
+        read_open_regular_file_stable_bounded(&file, observation, max_bytes)
+    }
+
+    /// Read at most `max_bytes` from the start of this exact observed file.
+    /// Unlike a complete bounded read, larger files are deliberately accepted.
+    /// The caller must label the result as a prefix when observation.size()
+    /// exceeds the ceiling. This observes mutable content, not an immutable
+    /// snapshot or a digest proof. Positional reads do not move shared cursors.
+    pub fn read_stable_prefix(
+        &self,
+        observation: &OpenRegularFileObservation,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        ensure_open_regular_file_unchanged(&self.file, observation)?;
+        let length = usize::try_from(observation.size().min(max_bytes))
+            .map_err(|_| anyhow::anyhow!("regular file prefix does not fit this platform"))?;
+        let mut bytes = vec![0_u8; length];
+        let mut offset = 0;
+        while offset < length {
+            let count = read_regular_file_at(&self.file, &mut bytes[offset..], offset as u64)?;
+            if count == 0 {
+                anyhow::bail!("regular file ended before its observed prefix length");
+            }
+            offset += count;
+        }
+        ensure_open_regular_file_unchanged(&self.file, observation)?;
+        Ok(bytes)
     }
 
     /// Capture exactly this prior descriptor observation, refusing an
@@ -1754,8 +2679,8 @@ impl PinnedRegularFile {
     /// The descriptor clone used by the digest implementation does not escape
     /// this typed authority boundary.
     pub fn digest_stable_exact(&self, observation: &OpenRegularFileObservation) -> Result<String> {
-        let mut file = self.file.try_clone()?;
-        let (digest, after) = digest_open_regular_file_stable_exact(&mut file, observation.size())?;
+        let file = self.file.try_clone()?;
+        let (digest, after) = digest_open_regular_file_stable_exact(&file, observation.size())?;
         if !same_regular_file_observation(&observation.metadata, &after) {
             anyhow::bail!(
                 "pinned regular file changed while it was being digested: {}",
@@ -1892,7 +2817,7 @@ impl PinnedRegularFile {
         anyhow::bail!("inherited descriptor authority is unavailable on this platform");
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             let file = self.file.try_clone()?;
             crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
                 .map_err(anyhow::Error::msg)
@@ -1936,6 +2861,15 @@ impl PinnedRegularFile {
         self,
     ) -> Result<crate::exec::InheritedDescriptorAuthority> {
         crate::exec::inherited_descriptor_path(self.file).map_err(anyhow::Error::msg)
+    }
+
+    /// Transfer this exact pinned regular-file descriptor to an explicit
+    /// close owner. This does not duplicate, reopen, close, or mutate the
+    /// namespace entry. The consumed pin can no longer authorize file access;
+    /// the returned descriptor is ownership transfer only, not close evidence
+    /// or authority for the receiver's later effects.
+    pub fn into_owned_close_descriptor(self) -> File {
+        self.file
     }
 
     /// Prove that this absolute, no-follow spelling still selects this exact
@@ -2123,6 +3057,47 @@ impl Drop for PinnedDirectoryLockInner {
 }
 
 impl PinnedDirectoryLock {
+    /// Pointer identity of retained lock ownership, not an authorization check.
+    /// Different retained owners are never merged merely because inodes match.
+    pub fn same_retained_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Observe the SAME retained namespace descriptor without duplicating,
+    /// reopening, unlocking or transferring it. These are identity facts only:
+    /// callers retain their original admission, process and funding checks;
+    /// matching identities do not establish shared ownership or retirement.
+    pub fn observe_retained_identity(&self) -> Result<OpenFileIdentity> {
+        let identity = observe_open_file_identity(&self.inner.file)?;
+        #[cfg(unix)]
+        ensure!(
+            identity.file_type == libc::S_IFDIR,
+            "retained namespace lock descriptor is not a directory"
+        );
+        Ok(identity)
+    }
+
+    /// Transfer the actual exclusively owned locked descriptor to an explicit
+    /// close owner. This neither unlocks nor closes it and creates no receipt.
+    /// Shared leases refuse the transfer and return the unchanged actual owner.
+    /// The recipient must retain the lock until its protected work is terminal;
+    /// only an actual close result may serve as descriptor retirement evidence.
+    pub fn try_into_owned_close_descriptor(self) -> std::result::Result<File, Self> {
+        match Arc::try_unwrap(self.inner) {
+            Ok(inner) => {
+                // The lock destructor explicitly issues LOCK_UN. Suppress that
+                // effect during ownership transfer: the SAME File must retain
+                // its flock throughout finalizer custody. There are no other
+                // fields/resources in this exclusively extracted inner owner.
+                let inner = std::mem::ManuallyDrop::new(inner);
+                // SAFETY: unique inner ownership was consumed above. Read its
+                // File once; ManuallyDrop prevents a second drop or early unlock.
+                Ok(unsafe { std::ptr::read(&inner.file) })
+            }
+            Err(inner) => Err(Self { inner }),
+        }
+    }
+
     /// Replace this process while retaining the SAME locked open description.
     /// Success never runs this guard's unlock destructor; failure keeps normal
     /// RAII cleanup. Do not implement this as spawn + dropping the guard: an
@@ -2139,7 +3114,7 @@ impl PinnedDirectoryLock {
         }
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             let inherited = crate::exec::InheritedDescriptorAuthority::from_owned_file(
                 self.inner.file.try_clone()?,
                 &lease,
@@ -2195,6 +3170,15 @@ impl PinnedDirectoryLock {
 }
 
 impl PinnedDirectory {
+    /// Transfer this actual directory descriptor to an explicit close owner.
+    /// No duplicate, reopen, close or namespace mutation occurs. The consumed
+    /// directory can no longer authorize descriptor-relative operations.
+    /// This is ownership transfer only, never terminal/disposal evidence or an
+    /// authority grant for the receiver's later effects.
+    pub fn into_owned_close_descriptor(self) -> File {
+        self.directory
+    }
+
     /// Validate a transported flock without unlocking it on return. Identity
     /// alone is insufficient: an independent open must contend and the supplied
     /// open description must itself own exclusive access. A numeric descriptor
@@ -2396,11 +3380,10 @@ impl PinnedDirectory {
     }
 
     pub fn identity(&self) -> Result<PinnedDirectoryIdentity> {
-        let (containing_device, inode) = self.device_inode()?;
-        Ok(PinnedDirectoryIdentity {
-            containing_device,
-            inode,
-        })
+        #[cfg(not(unix))]
+        anyhow::bail!("secure directory identity is unavailable on this platform");
+        #[cfg(unix)]
+        PinnedDirectoryIdentity::of_directory_descriptor(&self.directory)
     }
 
     /// Prove that two already-pinned directory trees do not contain one
@@ -2480,7 +3463,9 @@ impl PinnedDirectory {
 
     /// Remove every entry below this exact pinned directory without following
     /// symlinks or crossing a mounted filesystem boundary. The directory
-    /// itself remains open and is not removed.
+    /// itself remains open and is not removed. The caller must exclude
+    /// concurrent namespace writers: identity and mount checks cannot make
+    /// pathname unlink atomic with a prior observation.
     pub fn remove_contents_recursive(&self) -> Result<()> {
         #[cfg(not(unix))]
         {
@@ -2488,9 +3473,7 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt as _;
-            let root_device = self.directory.metadata()?.dev();
-            self.remove_contents_on_device(root_device)?;
+            self.remove_contents_same_mount()?;
             self.directory.sync_all()?;
             Ok(())
         }
@@ -2498,7 +3481,8 @@ impl PinnedDirectory {
 
     /// Bounded variant of recursive removal for an untrusted or authored
     /// generation. The raw namespace budget is shared across every level and
-    /// enforced before names are retained.
+    /// enforced before names are retained. The caller must exclude concurrent
+    /// namespace writers for the same reason as `remove_contents_recursive`.
     pub fn remove_contents_recursive_bounded(
         &self,
         budget: DirectoryTraversalBudget,
@@ -2510,39 +3494,54 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt as _;
-            let root_device = self.directory.metadata()?.dev();
             let mut remaining = budget.max_entries;
-            self.remove_contents_on_device_bounded(
-                root_device,
-                &mut remaining,
-                budget.max_depth,
-                0,
-            )?;
+            self.remove_contents_same_mount_bounded(&mut remaining, budget.max_depth, 0, None)?;
             self.directory.sync_all()?;
             Ok(())
         }
     }
 
-    #[cfg(unix)]
-    fn remove_contents_on_device_bounded(
+    /// SAME retained inode, global entry/depth budget and original expiry.
+    /// Errors preserve partial disposal uncertainty; kernel I/O is not hard-contained.
+    #[cfg(target_os = "linux")]
+    pub fn remove_contents_recursive_bounded_until(
         &self,
-        root_device: u64,
+        budget: DirectoryTraversalBudget,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<()> {
+        check_original_traversal_deadline(Some(deadline))?;
+        let mut remaining = budget.max_entries;
+        self.remove_contents_same_mount_bounded(
+            &mut remaining,
+            budget.max_depth,
+            0,
+            Some(deadline),
+        )?;
+        check_original_traversal_deadline(Some(deadline))?;
+        self.directory.sync_all()?;
+        check_original_traversal_deadline(Some(deadline))
+    }
+
+    #[cfg(unix)]
+    fn remove_contents_same_mount_bounded(
+        &self,
         remaining: &mut usize,
         max_depth: usize,
         depth: usize,
+        deadline: Option<crate::time::MonotonicDeadline>,
     ) -> Result<()> {
         use std::os::unix::ffi::OsStrExt as _;
-        use std::os::unix::fs::MetadataExt as _;
 
+        check_original_traversal_deadline(deadline)?;
         if depth > max_depth {
             anyhow::bail!("recursive removal exceeds its directory depth bound");
         }
-        let entries = self.entries_no_follow_bounded(*remaining)?;
+        let entries = self.entries_no_follow_with_limit_and_deadline(Some(*remaining), deadline)?;
         *remaining = remaining
             .checked_sub(entries.len())
             .ok_or_else(|| anyhow::anyhow!("recursive removal entry budget underflow"))?;
         for entry in entries {
+            check_original_traversal_deadline(deadline)?;
             let name_c = std::ffi::CString::new(entry.name.as_bytes())?;
             if entry.entry_type == PinnedEntryType::Directory {
                 if depth >= max_depth {
@@ -2563,49 +3562,70 @@ impl PinnedDirectory {
                         directory: pinned,
                         path_binding_required: self.path_binding_required,
                     };
-                    if child.directory.metadata()?.dev() != root_device {
-                        anyhow::bail!("refusing to cross mounted filesystem during removal");
-                    }
-                    if self.remove_empty_child_if_same(&entry.name, &child)? {
+                    let (device, inode) = child.raw_device_inode()?;
+                    ensure!(
+                        device == entry.containing_device && inode == entry.inode,
+                        "directory changed identity during recursive removal"
+                    );
+                    self.ensure_open_child_same_mount(&child)?;
+                    check_original_traversal_deadline(deadline)?;
+                    if self
+                        .remove_empty_child_if_same(&entry.name, &child)
+                        .map(|receipt| receipt.is_some())?
+                    {
+                        #[cfg(all(test, target_os = "linux"))]
+                        original_removal_step_control::checkpoint();
+                        check_original_traversal_deadline(deadline)?;
                         continue;
                     }
                 }
                 let child = self
                     .open_child_directory(&entry.name)?
                     .ok_or_else(|| anyhow::anyhow!("directory disappeared during removal"))?;
-                if child.directory.metadata()?.dev() != root_device {
-                    anyhow::bail!(
-                        "refusing to cross mounted filesystem while removing {}",
-                        child.path.display()
-                    );
-                }
-                child.remove_contents_on_device_bounded(
-                    root_device,
+                let (device, inode) = child.raw_device_inode()?;
+                ensure!(
+                    device == entry.containing_device && inode == entry.inode,
+                    "directory changed identity during recursive removal"
+                );
+                self.ensure_open_child_same_mount(&child)?;
+                child.remove_contents_same_mount_bounded(
                     remaining,
                     max_depth,
                     depth + 1,
+                    deadline,
                 )?;
-                if !self.remove_empty_child_if_same(&entry.name, &child)? {
+                check_original_traversal_deadline(deadline)?;
+                if !self
+                    .remove_empty_child_if_same(&entry.name, &child)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!("directory remained non-empty: {}", child.path.display());
                 }
-            } else if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0
-            {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!(
-                        "remove pinned entry {}",
-                        self.path.join(&entry.name).display()
-                    )
-                });
+            } else {
+                self.ensure_entry_same_mount(&entry)?;
+                check_original_traversal_deadline(deadline)?;
+                let unlink_failed =
+                    unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0;
+                if unlink_failed {
+                    return Err(std::io::Error::last_os_error()).with_context(|| {
+                        format!(
+                            "remove pinned entry {}",
+                            self.path.join(&entry.name).display()
+                        )
+                    });
+                }
             }
+            #[cfg(all(test, target_os = "linux"))]
+            original_removal_step_control::checkpoint();
         }
+        check_original_traversal_deadline(deadline)?;
         self.directory.sync_all()?;
-        Ok(())
+        check_original_traversal_deadline(deadline)
     }
 
     #[cfg(unix)]
-    fn remove_contents_on_device(&self, root_device: u64) -> Result<()> {
+    fn remove_contents_same_mount(&self) -> Result<()> {
         use std::os::unix::ffi::OsStrExt as _;
-        use std::os::unix::fs::MetadataExt as _;
 
         for entry in self.entries_no_follow()? {
             let name_c = std::ffi::CString::new(entry.name.as_bytes())?;
@@ -2613,24 +3633,31 @@ impl PinnedDirectory {
                 let child = self
                     .open_child_directory(&entry.name)?
                     .ok_or_else(|| anyhow::anyhow!("directory disappeared during removal"))?;
-                if child.directory.metadata()?.dev() != root_device {
-                    anyhow::bail!(
-                        "refusing to cross mounted filesystem while removing {}",
-                        child.path.display()
-                    );
-                }
-                child.remove_contents_on_device(root_device)?;
-                if !self.remove_empty_child_if_same(&entry.name, &child)? {
+                let (device, inode) = child.raw_device_inode()?;
+                ensure!(
+                    device == entry.containing_device && inode == entry.inode,
+                    "directory changed identity during recursive removal"
+                );
+                self.ensure_open_child_same_mount(&child)?;
+                child.remove_contents_same_mount()?;
+                if !self
+                    .remove_empty_child_if_same(&entry.name, &child)
+                    .map(|receipt| receipt.is_some())?
+                {
                     anyhow::bail!("directory remained non-empty: {}", child.path.display());
                 }
-            } else if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0
-            {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!(
-                        "remove pinned entry {}",
-                        self.path.join(&entry.name).display()
-                    )
-                });
+            } else {
+                self.ensure_entry_same_mount(&entry)?;
+                let unlink_failed =
+                    unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0;
+                if unlink_failed {
+                    return Err(std::io::Error::last_os_error()).with_context(|| {
+                        format!(
+                            "remove pinned entry {}",
+                            self.path.join(&entry.name).display()
+                        )
+                    });
+                }
             }
         }
         self.directory.sync_all()?;
@@ -2673,10 +3700,11 @@ impl PinnedDirectory {
         &self.path
     }
 
-    /// Return the concrete filesystem identity pinned by this descriptor.
-    /// Callers use this to compare a durable authority fence with the object
-    /// they will actually traverse, without reopening the pathname.
-    pub fn device_inode(&self) -> Result<(u64, u64)> {
+    /// The raw `(st_dev, st_ino)` of this descriptor. `st_dev` is the kernel's
+    /// attachment number, so the pair is only valid for before/after checks
+    /// within one process lifetime and must never be persisted; durable
+    /// fences use [`PinnedDirectory::identity`].
+    pub(crate) fn raw_device_inode(&self) -> Result<(u64, u64)> {
         #[cfg(not(unix))]
         anyhow::bail!("secure directory identity is unavailable on this platform");
         #[cfg(unix)]
@@ -2685,6 +3713,167 @@ impl PinnedDirectory {
             let metadata = self.directory.metadata()?;
             Ok((metadata.dev(), metadata.ino()))
         }
+    }
+
+    /// The durable identity of a regular directory entry beneath this
+    /// directory. The filesystem identity comes from this directory's own
+    /// descriptor, which is a real directory fd. The entry is opened path-only
+    /// and no-follow (needing no read permission and leaving no access time),
+    /// must still be the observed inode, and must be on this directory's mount
+    /// by mount id in the same call.
+    pub fn regular_identity_of_entry(
+        &self,
+        entry: &PinnedDirectoryEntryMetadata,
+    ) -> Result<PinnedRegularFileIdentity> {
+        ensure!(
+            entry.entry_type == PinnedEntryType::Regular,
+            "directory entry is not a regular file"
+        );
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.require_same_device(entry.containing_device)?;
+            Ok(PinnedRegularFileIdentity {
+                filesystem: self.filesystem_identity()?,
+                inode: entry.inode,
+            })
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd as _;
+            use std::os::unix::ffi::OsStrExt as _;
+            let name = std::ffi::CString::new(entry.name.as_bytes())?;
+            let descriptor = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("open directory entry path-only for its identity");
+            }
+            // SAFETY: openat returned a new descriptor that nothing else owns.
+            let pin = unsafe { File::from_raw_fd(descriptor) };
+            let identity = self.regular_identity_of_pin(&pin)?;
+            ensure!(
+                identity.inode == entry.inode,
+                "directory entry changed identity before its durable identity was read"
+            );
+            Ok(identity)
+        }
+    }
+
+    /// The durable identity of an already-open regular file pin of a child of
+    /// this directory, including a path-only (`O_PATH`) pin from which the
+    /// filesystem UUID cannot be read. The pin and this directory must be on
+    /// the same mount, proved by mount id in the same call: on overlayfs a
+    /// file can report another `st_dev` than its parent on one mount, so the
+    /// device number would refuse a genuine child.
+    pub fn regular_identity_of_pin(&self, pin: &File) -> Result<PinnedRegularFileIdentity> {
+        #[cfg(not(unix))]
+        {
+            let _ = pin;
+            anyhow::bail!("pinned regular-file identity is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let observed = observe_open_file_identity(pin)?;
+            ensure!(
+                observed.file_type == libc::S_IFREG,
+                "descriptor is not a regular file"
+            );
+            self.require_same_mount(pin)?;
+            // `fstatfs` answers for a path-only descriptor, so the pin
+            // names its own filesystem.
+            Ok(PinnedRegularFileIdentity {
+                filesystem: FilesystemIdentity::of_descriptor(pin)?,
+                inode: observed.inode,
+            })
+        }
+    }
+
+    fn require_same_mount(&self, pin: &File) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        ensure!(
+            mount_id_of_open_descriptor(&self.directory)? == mount_id_of_open_descriptor(pin)?,
+            "entry is not on the same mount as its parent directory"
+        );
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                self.directory.metadata()?.dev() == pin.metadata()?.dev(),
+                "entry is not on the same filesystem as its parent directory"
+            );
+        }
+        Ok(())
+    }
+
+    /// The durable identity named by an observation of a regular child of
+    /// this directory taken from a descriptor that is still held, with the
+    /// same-device requirement of a descriptor-less claim: with no descriptor
+    /// to read a mount id from, the raw `st_dev` must equal this directory's.
+    /// That can only refuse (never accept) a genuine child on an overlay whose
+    /// layers report other device numbers; callers holding a descriptor use
+    /// [`PinnedDirectory::regular_identity_of_pin`].
+    pub fn regular_identity_of_observation(
+        &self,
+        observed: &OpenFileIdentity,
+    ) -> Result<PinnedRegularFileIdentity> {
+        #[cfg(not(unix))]
+        {
+            let _ = observed;
+            anyhow::bail!("pinned regular-file identity is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            ensure!(
+                observed.file_type == libc::S_IFREG,
+                "descriptor is not a regular file"
+            );
+            self.require_same_device(observed.device)?;
+            Ok(PinnedRegularFileIdentity {
+                filesystem: self.filesystem_identity()?,
+                inode: observed.inode,
+            })
+        }
+    }
+
+    /// The durable identity of a regular child of this directory known only by
+    /// the raw coordinates another owner recorded when it retired the file,
+    /// with the same descriptor-less same-device requirement as
+    /// [`PinnedDirectory::regular_identity_of_observation`].
+    pub fn regular_identity_of_coordinates(
+        &self,
+        device: u64,
+        inode: u64,
+    ) -> Result<PinnedRegularFileIdentity> {
+        self.require_same_device(device)?;
+        Ok(PinnedRegularFileIdentity {
+            filesystem: self.filesystem_identity()?,
+            inode,
+        })
+    }
+
+    fn require_same_device(&self, device: u64) -> Result<()> {
+        ensure!(
+            self.raw_device_inode()?.0 == device,
+            "entry is not on the same filesystem as its parent directory"
+        );
+        Ok(())
+    }
+
+    fn filesystem_identity(&self) -> Result<FilesystemIdentity> {
+        FilesystemIdentity::of_descriptor(&self.directory)
+    }
+
+    /// Whether this open directory is the very inode a just-taken entry
+    /// observation named. Both sides carry the kernel's attachment number, so
+    /// this is a before/after check within one operation and never a durable
+    /// comparison.
+    pub fn matches_entry_metadata(&self, entry: &PinnedDirectoryEntryMetadata) -> Result<bool> {
+        Ok(self.raw_device_inode()? == (entry.containing_device, entry.inode))
     }
 
     /// Capacity observed through this exact filesystem descriptor.
@@ -2703,12 +3892,12 @@ impl PinnedDirectory {
                     .context("read descriptor-relative filesystem capacity");
             }
             let stats = unsafe { stats.assume_init() };
-            let fragment_size = (stats.f_frsize as u64).max(1);
+            let fragment_size = stats.f_frsize.max(1);
             Ok(FilesystemCapacity {
-                total_bytes: (stats.f_blocks as u64).saturating_mul(fragment_size),
-                available_bytes: (stats.f_bavail as u64).saturating_mul(fragment_size),
+                total_bytes: stats.f_blocks.saturating_mul(fragment_size),
+                available_bytes: stats.f_bavail.saturating_mul(fragment_size),
                 allocation_unit_bytes: fragment_size,
-                available_files: stats.f_favail as u64,
+                available_files: stats.f_favail,
             })
         }
     }
@@ -2780,7 +3969,128 @@ impl PinnedDirectory {
                 self.path.display()
             );
         }
+        #[cfg(target_os = "linux")]
+        ensure!(
+            mount_id_of_open_descriptor(&self.directory)?
+                == mount_id_of_open_descriptor(&current.directory)?,
+            "pinned directory path changed mount during the operation: {}",
+            self.path.display()
+        );
         Ok(())
+    }
+
+    /// Re-anchor this path binding after the current process deliberately
+    /// entered a new mount namespace. Every mount there has a new identity, so
+    /// the original descriptor can no longer prove the path. Reopen the same
+    /// path inside the current namespace, require the identical directory
+    /// inode, and keep that descriptor: later checks then compare mounts
+    /// within this namespace. A binding that is not re-anchored keeps
+    /// refusing, and a path that now reaches another inode refuses here.
+    pub fn rebind_in_current_mount_namespace(&mut self) -> Result<()> {
+        if !self.path_binding_required {
+            return Ok(());
+        }
+        let current = Self::open(&self.path)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "pinned directory path disappeared at mount namespace entry: {}",
+                self.path.display()
+            )
+        })?;
+        ensure!(
+            self.is_same_directory(&current)?,
+            "pinned directory path reaches another inode after mount namespace entry: {}",
+            self.path.display()
+        );
+        self.directory = current.directory;
+        Ok(())
+    }
+
+    /// Fixed-size path-binding check for an original admission checkpoint.
+    /// This performs the same no-follow component traversal and exact inode /
+    /// mount comparison as the ordinary check, without cloning path buffers or
+    /// constructing dynamic refusals. It does not grant ownership or funding.
+    /// Give up this binding's path proof because the current process
+    /// deliberately entered a private root in which the path no longer
+    /// resolves (a sandbox prepared for a guest, as opposed to a private
+    /// source filesystem that keeps the host view). The open descriptor
+    /// remains the sole authority for every later traversal and mutation;
+    /// path proofs become no-ops instead of refusing a path that cannot exist.
+    pub fn release_path_binding(&mut self) {
+        self.path_binding_required = false;
+    }
+
+    pub fn ensure_path_binding_fixed(&self) -> std::result::Result<(), &'static str> {
+        if !self.path_binding_required {
+            return Ok(());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err("fixed directory binding requires Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+            use std::os::unix::ffi::OsStrExt as _;
+            if self.path.as_os_str().as_bytes().len() > 4096 {
+                return Err("directory binding path exceeds fixed bound");
+            }
+            let flags = libc::O_RDONLY
+                | libc::O_DIRECTORY
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | libc::O_NONBLOCK;
+            let start = if self.path.is_absolute() { c"/" } else { c"." };
+            let raw = unsafe { libc::open(start.as_ptr(), flags) };
+            if raw < 0 {
+                return Err("directory binding root open refused");
+            }
+            let mut current = unsafe { OwnedFd::from_raw_fd(raw) };
+            for component in self.path.components() {
+                let name = match component {
+                    std::path::Component::RootDir | std::path::Component::CurDir => continue,
+                    std::path::Component::Normal(name) => name.as_bytes(),
+                    _ => return Err("directory binding has noncanonical component"),
+                };
+                if name.is_empty() || name.len() > 255 || name.contains(&0) {
+                    return Err("directory binding component exceeds fixed bound");
+                }
+                let mut terminated = [0u8; 256];
+                terminated[..name.len()].copy_from_slice(name);
+                let raw =
+                    unsafe { libc::openat(current.as_raw_fd(), terminated.as_ptr().cast(), flags) };
+                if raw < 0 {
+                    return Err("directory binding child open refused");
+                }
+                current = unsafe { OwnedFd::from_raw_fd(raw) };
+            }
+            fn identity(
+                fd: i32,
+            ) -> std::result::Result<(libc::dev_t, libc::ino_t, u64), &'static str> {
+                let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+                    return Err("directory binding inode observation refused");
+                }
+                let mut mount: libc::statx = unsafe { std::mem::zeroed() };
+                if unsafe {
+                    libc::statx(
+                        fd,
+                        c"".as_ptr(),
+                        libc::AT_EMPTY_PATH,
+                        libc::STATX_MNT_ID,
+                        &mut mount,
+                    )
+                } != 0
+                    || mount.stx_mask & libc::STATX_MNT_ID == 0
+                {
+                    return Err("directory binding mount observation refused");
+                }
+                Ok((stat.st_dev, stat.st_ino, mount.stx_mnt_id))
+            }
+            if identity(self.directory.as_raw_fd())? != identity(current.as_raw_fd())? {
+                return Err("directory binding inode or mount changed");
+            }
+            Ok(())
+        }
     }
 
     /// Prove this absolute, no-follow spelling selects this exact directory
@@ -2932,12 +4242,30 @@ impl PinnedDirectory {
         &self,
         max_entries: Option<usize>,
     ) -> Result<Vec<PinnedDirectoryEntryMetadata>> {
+        self.entries_no_follow_with_limit_and_deadline(max_entries, None)
+    }
+
+    #[cfg(unix)]
+    fn entries_no_follow_with_limit_and_deadline(
+        &self,
+        max_entries: Option<usize>,
+        deadline: Option<crate::time::MonotonicDeadline>,
+    ) -> Result<Vec<PinnedDirectoryEntryMetadata>> {
+        check_original_traversal_deadline(deadline)?;
         let mut entries = Vec::new();
-        let names = match max_entries {
-            Some(max_entries) => directory_names_with_limit(&self.directory, max_entries)?,
-            None => directory_names(&self.directory)?,
+        let names = match (max_entries, deadline) {
+            #[cfg(target_os = "linux")]
+            (Some(max_entries), Some(deadline)) => {
+                directory_names_with_limit_until(&self.directory, max_entries, deadline)?
+            }
+            (_, Some(_)) => anyhow::bail!(
+                "original-expiry directory enumeration requires supported bounded Linux owner"
+            ),
+            (Some(max_entries), None) => directory_names_with_limit(&self.directory, max_entries)?,
+            (None, None) => directory_names(&self.directory)?,
         };
         for name in names {
+            check_original_traversal_deadline(deadline)?;
             let c_name = std::ffi::CString::new(name.as_bytes())?;
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             if unsafe {
@@ -2956,16 +4284,8 @@ impl PinnedDirectory {
                     )
                 });
             }
-            let entry_type = match stat.st_mode & libc::S_IFMT {
-                libc::S_IFDIR => PinnedEntryType::Directory,
-                libc::S_IFREG => PinnedEntryType::Regular,
-                libc::S_IFLNK => PinnedEntryType::Symlink,
-                libc::S_IFCHR => PinnedEntryType::CharacterDevice,
-                libc::S_IFBLK => PinnedEntryType::BlockDevice,
-                libc::S_IFIFO => PinnedEntryType::Fifo,
-                libc::S_IFSOCK => PinnedEntryType::Socket,
-                _ => PinnedEntryType::Other,
-            };
+            check_original_traversal_deadline(deadline)?;
+            let entry_type = entry_type_from_mode(stat.st_mode);
             entries.push(PinnedDirectoryEntryMetadata {
                 name,
                 entry_type,
@@ -2976,6 +4296,7 @@ impl PinnedDirectory {
             });
         }
         entries.sort_by(|left, right| left.name.cmp(&right.name));
+        check_original_traversal_deadline(deadline)?;
         Ok(entries)
     }
 
@@ -3006,16 +4327,7 @@ impl PinnedDirectory {
                 )
             });
         }
-        let entry_type = match stat.st_mode & libc::S_IFMT {
-            libc::S_IFDIR => PinnedEntryType::Directory,
-            libc::S_IFREG => PinnedEntryType::Regular,
-            libc::S_IFLNK => PinnedEntryType::Symlink,
-            libc::S_IFCHR => PinnedEntryType::CharacterDevice,
-            libc::S_IFBLK => PinnedEntryType::BlockDevice,
-            libc::S_IFIFO => PinnedEntryType::Fifo,
-            libc::S_IFSOCK => PinnedEntryType::Socket,
-            _ => PinnedEntryType::Other,
-        };
+        let entry_type = entry_type_from_mode(stat.st_mode);
         Ok(Some(PinnedDirectoryEntryMetadata {
             name: name.to_os_string(),
             entry_type,
@@ -3033,6 +4345,103 @@ impl PinnedDirectory {
             .ok_or_else(|| anyhow::anyhow!("pinned directory entry disappeared"))?;
         if &observed != expected {
             anyhow::bail!("pinned directory entry changed while it was being observed");
+        }
+        Ok(())
+    }
+
+    /// Require this exact no-follow child to remain on the parent's mount.
+    /// On Linux, mount ID rather than `st_dev` is the boundary: overlayfs can
+    /// report different devices for ordinary files and their parent directory
+    /// even though both are on one mount. The held child descriptor is joined
+    /// to the caller's entry observation before and after the mount check.
+    #[cfg(unix)]
+    pub fn ensure_entry_same_mount(&self, expected: &PinnedDirectoryEntryMetadata) -> Result<()> {
+        self.ensure_entry_observation(expected)?;
+        #[cfg(target_os = "linux")]
+        {
+            let name = std::ffi::CString::new(expected.name.as_bytes())?;
+            let descriptor = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("open exact no-follow child for mount observation");
+            }
+            let child = unsafe { File::from_raw_fd(descriptor) };
+            let metadata = child.metadata()?;
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                metadata.dev() == expected.containing_device
+                    && metadata.ino() == expected.inode
+                    && metadata.mode() == expected.mode,
+                "pinned directory child changed before mount observation"
+            );
+            ensure!(
+                mount_id_of_open_descriptor(&self.directory)?
+                    == mount_id_of_open_descriptor(&child)?,
+                "pinned directory child crosses a mounted filesystem"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                expected.containing_device == self.directory.metadata()?.dev(),
+                "pinned directory child crosses a mounted filesystem"
+            );
+        }
+        self.ensure_entry_observation(expected)
+    }
+
+    /// Check the mount of the actual opened regular file, not a prior path
+    /// observation that could be replaced before the caller consumes it.
+    pub fn ensure_open_regular_same_mount(&self, file: &File) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            anyhow::bail!("open regular-file mount admission is unavailable");
+        }
+        #[cfg(target_os = "linux")]
+        ensure!(
+            mount_id_of_open_descriptor(&self.directory)? == mount_id_of_open_descriptor(file)?,
+            "opened regular file crosses a mounted filesystem"
+        );
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                self.directory.metadata()?.dev() == file.metadata()?.dev(),
+                "opened regular file crosses a mounted filesystem"
+            );
+        }
+        Ok(())
+    }
+
+    /// Check the mount of the exact child directory descriptor used for
+    /// subsequent traversal.
+    pub fn ensure_open_child_same_mount(&self, child: &PinnedDirectory) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+            anyhow::bail!("open child-directory mount admission is unavailable");
+        }
+        #[cfg(target_os = "linux")]
+        ensure!(
+            mount_id_of_open_descriptor(&self.directory)?
+                == mount_id_of_open_descriptor(&child.directory)?,
+            "opened child directory crosses a mounted filesystem"
+        );
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            ensure!(
+                self.directory.metadata()?.dev() == child.directory.metadata()?.dev(),
+                "opened child directory crosses a mounted filesystem"
+            );
         }
         Ok(())
     }
@@ -3090,6 +4499,30 @@ impl PinnedDirectory {
                 self.ensure_path_binding()?;
             }
             Ok(())
+        }
+    }
+
+    /// Fixed-refusal counterpart for an original native admission checkpoint.
+    /// Validate this actual descriptor's current owner and exact 0700 mode,
+    /// then preserve its inode/mount path binding without owned path copies.
+    pub fn require_owner_private_directory_fixed(&self) -> std::result::Result<(), &'static str> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("fixed owner-private directory validation requires Linux")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(self.directory.as_raw_fd(), &mut metadata) } != 0 {
+                return Err("owner-private directory observation refused");
+            }
+            if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+                || metadata.st_uid != unsafe { libc::geteuid() }
+                || metadata.st_mode & 0o7777 != 0o700
+            {
+                return Err("pinned directory is not exactly current-owner mode 0700");
+            }
+            self.ensure_path_binding_fixed()
         }
     }
 
@@ -3229,10 +4662,8 @@ impl PinnedDirectory {
                 Ok(current)
             }
 
-            #[allow(clippy::too_many_arguments)]
             fn visit(
                 directory: &PinnedDirectory,
-                root_device: u64,
                 remaining_entries: &mut usize,
                 max_depth: usize,
                 depth: usize,
@@ -3250,9 +4681,7 @@ impl PinnedDirectory {
                     .ok_or_else(|| anyhow::anyhow!("owner-private tree entry budget underflow"))?;
 
                 for entry in &initial {
-                    if entry.containing_device != root_device {
-                        anyhow::bail!("owner-private tree crosses a mounted filesystem");
-                    }
+                    directory.ensure_entry_same_mount(entry)?;
                     match entry.entry_type {
                         PinnedEntryType::Symlink => {
                             directory.ensure_entry_observation(entry)?;
@@ -3264,10 +4693,9 @@ impl PinnedDirectory {
                                     .ok_or_else(|| {
                                         anyhow::anyhow!("owner-private tree directory disappeared")
                                     })?;
-                            let identity = child.identity()?;
-                            if identity.containing_device != entry.containing_device
-                                || identity.inode != entry.inode
-                            {
+                            directory.ensure_open_child_same_mount(&child)?;
+                            let (device, inode) = child.raw_device_inode()?;
+                            if device != entry.containing_device || inode != entry.inode {
                                 anyhow::bail!("owner-private tree directory changed identity");
                             }
                             let before = child.directory.metadata()?;
@@ -3299,7 +4727,6 @@ impl PinnedDirectory {
                             }
                             visit(
                                 &child,
-                                root_device,
                                 remaining_entries,
                                 max_depth,
                                 depth + 1,
@@ -3331,6 +4758,7 @@ impl PinnedDirectory {
                                 directory.open_regular(&entry.name, false)?.ok_or_else(|| {
                                     anyhow::anyhow!("owner-private tree file disappeared")
                                 })?;
+                            directory.ensure_open_regular_same_mount(&file)?;
                             let before = observe_open_regular_file(&file)?;
                             if !before.matches_directory_entry(entry) {
                                 anyhow::bail!("owner-private tree file changed identity");
@@ -3403,13 +4831,11 @@ impl PinnedDirectory {
                 }
                 OwnerPrivateTreeAction::Tighten => self.set_mode(0o700)?,
             }
-            let root_device = self.directory.metadata()?.dev();
             let root_owner = self.directory.metadata()?.uid();
             let mut remaining_entries = budget.max_entries;
             let mut regular_bytes = 0;
             visit(
                 self,
-                root_device,
                 &mut remaining_entries,
                 budget.max_depth,
                 0,
@@ -3650,6 +5076,9 @@ impl PinnedDirectory {
     }
 
     /// Create one new child directory relative to this exact parent inode.
+    /// The caller must exclude namespace replacement through mkdir/open/sync
+    /// before treating the returned descriptor as the inode created by mkdir.
+    /// Post-mkdir errors retain custody and never authorize automatic replay.
     pub fn create_child(&self, name: &OsStr, mode: u32) -> Result<Self> {
         #[cfg(not(unix))]
         {
@@ -3661,20 +5090,46 @@ impl PinnedDirectory {
             validate_child_name(name)?;
             let name_c = std::ffi::CString::new(name.as_bytes())?;
             let path = self.path.join(name);
+            // Retain parent custody before the first namespace effect.
+            let original_parent = self.try_clone()?;
             if unsafe { libc::mkdirat(self.directory.as_raw_fd(), name_c.as_ptr(), mode) } != 0 {
                 return Err(std::io::Error::last_os_error())
                     .with_context(|| format!("create secure child directory {}", path.display()));
             }
-            self.directory.sync_all()?;
-            let directory =
-                open_child_directory(&self.directory, &name_c, &path)?.ok_or_else(|| {
-                    anyhow::anyhow!("secure child directory disappeared: {}", path.display())
-                })?;
-            Ok(Self {
-                path,
-                directory,
-                path_binding_required: self.path_binding_required,
-            })
+            #[cfg(all(test, target_os = "linux"))]
+            if let Some(before_open) =
+                BEFORE_CHILD_CREATE_OPEN.with(|slot| slot.borrow_mut().take())
+            {
+                before_open();
+            }
+            let mut child = None;
+            let acknowledged = (|| -> Result<()> {
+                let directory =
+                    open_child_directory(&self.directory, &name_c, &path)?.ok_or_else(|| {
+                        anyhow::anyhow!("created child disappeared: {}", path.display())
+                    })?;
+                // Move the actual open descriptor into custody BEFORE sync.
+                child = Some(Self {
+                    path,
+                    directory,
+                    path_binding_required: self.path_binding_required,
+                });
+                #[cfg(all(test, target_os = "linux"))]
+                if FAIL_CHILD_CREATE_SYNC.with(|slot| slot.replace(false)) {
+                    anyhow::bail!("injected child creation acknowledgement failure");
+                }
+                self.directory.sync_all()?;
+                Ok(())
+            })();
+            match acknowledged {
+                Ok(()) => child.context("created child custody missing after acknowledgement"),
+                Err(error) => Err(anyhow::Error::new(ChildDirectoryCreationFailure {
+                    error,
+                    parent: original_parent,
+                    name: name.to_os_string(),
+                    child,
+                })),
+            }
         }
     }
 
@@ -3742,7 +5197,7 @@ impl PinnedDirectory {
             ensure_directory_child_identity(
                 &self.directory,
                 &left_c,
-                left.identity()
+                left.raw_device_inode()
                     .map_err(crate::atomic_fs::AtomicMutationError::before)?,
                 &self.path.join(left_name),
             )
@@ -3751,7 +5206,7 @@ impl PinnedDirectory {
                 &self.directory,
                 &right_c,
                 right
-                    .identity()
+                    .raw_device_inode()
                     .map_err(crate::atomic_fs::AtomicMutationError::before)?,
                 &self.path.join(right_name),
             )
@@ -3774,7 +5229,7 @@ impl PinnedDirectory {
                 &self.directory,
                 &left_c,
                 right
-                    .identity()
+                    .raw_device_inode()
                     .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?,
                 &self.path.join(left_name),
             )
@@ -3782,7 +5237,7 @@ impl PinnedDirectory {
                 ensure_directory_child_identity(
                     &self.directory,
                     &right_c,
-                    left.identity()?,
+                    left.raw_device_inode()?,
                     &self.path.join(right_name),
                 )
             }) {
@@ -3972,6 +5427,89 @@ impl PinnedDirectory {
             }
             self.directory.sync_all()?;
             Ok(())
+        }
+    }
+
+    /// Remove one symlink child only when it still names exactly `expected`.
+    /// `Ok(false)` means no entry exists under `name`. Another entry type, or
+    /// a link naming anything else, is refused and left in place. The caller
+    /// must exclude concurrent writers of this coordinate: the target read
+    /// and the unlink are not one atomic compare-and-remove.
+    pub fn remove_symlink_if_target(&self, name: &OsStr, expected: &[u8]) -> Result<bool> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, expected);
+            anyhow::bail!("descriptor-relative symlink removal is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let Some(entry) = self.entry_no_follow(name)? else {
+                return Ok(false);
+            };
+            if entry.entry_type != PinnedEntryType::Symlink {
+                anyhow::bail!(
+                    "{} is not a symlink; refusing to remove it",
+                    self.path.join(name).display()
+                );
+            }
+            let actual = self
+                .read_symlink_target(name, expected.len() + 1)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("symlink {} disappeared", self.path.join(name).display())
+                })?;
+            if actual != expected {
+                anyhow::bail!(
+                    "symlink {} names another target; refusing to remove it",
+                    self.path.join(name).display()
+                );
+            }
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("remove symlink {}", self.path.join(name).display()));
+            }
+            self.directory.sync_all()?;
+            Ok(true)
+        }
+    }
+
+    /// Whether some process holds the named FIFO child open for reading,
+    /// probed by a non-blocking write-only open that writes nothing. `None`
+    /// means no entry exists under `name`; any other entry type is refused.
+    pub fn fifo_has_reader(&self, name: &OsStr) -> Result<Option<bool>> {
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            anyhow::bail!("descriptor-relative FIFO probing is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let Some(entry) = self.entry_no_follow(name)? else {
+                return Ok(None);
+            };
+            if entry.entry_type != PinnedEntryType::Fifo {
+                anyhow::bail!("{} is not a FIFO", self.path.join(name).display());
+            }
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let fd = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name_c.as_ptr(),
+                    libc::O_WRONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 {
+                // Closing a writer that wrote nothing delivers no data.
+                drop(unsafe { File::from_raw_fd(fd) });
+                return Ok(Some(true));
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ENXIO) => Ok(Some(false)),
+                Some(libc::ENOENT) => Ok(None),
+                _ => Err(error)
+                    .with_context(|| format!("probe FIFO {}", self.path.join(name).display())),
+            }
         }
     }
 
@@ -4238,7 +5776,7 @@ impl PinnedDirectory {
         anyhow::bail!("inherited descriptor authority is unavailable on this platform");
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             let file = self.directory.try_clone()?;
             crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
                 .map_err(anyhow::Error::msg)
@@ -4258,7 +5796,7 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             self.open_mount_entry(name)?
                 .map(|file| {
                     crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
@@ -4280,7 +5818,7 @@ impl PinnedDirectory {
         }
         #[cfg(unix)]
         {
-            let lease = crate::exec::retain_fork_sensitive_descriptors();
+            let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
             self.open_regular(name, writable)?
                 .map(|file| {
                     crate::exec::InheritedDescriptorAuthority::from_owned_file(file, &lease)
@@ -4336,16 +5874,20 @@ impl PinnedDirectory {
 
     /// Create and publish one regular file without replacing an existing
     /// entry. A successful create returns the still-open exact inode; `None`
-    /// means another entry already owns the target name.
+    /// means another entry already owns the target name. Errors after file
+    /// acquisition retain the original parent/file in AtomicRegularCreationFailure.
+    /// Caller-enforced namespace exclusion is required to attribute the named
+    /// publication to that original inode through rename and acknowledgement.
     pub fn atomic_create_regular(
         &self,
         name: &OsStr,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<File>> {
         #[cfg(not(unix))]
         {
-            let _ = (name, bytes, mode);
+            let _ = (name, bytes, mode, purpose);
             anyhow::bail!("secure atomic creation is unavailable on this platform");
         }
         #[cfg(unix)]
@@ -4353,13 +5895,30 @@ impl PinnedDirectory {
             use std::os::unix::fs::PermissionsExt as _;
 
             validate_child_name(name)?;
-            if self.open_regular(name, false)?.is_some() {
+            // Occupancy is metadata only. Opening and dropping an incumbent
+            // data descriptor can release this process's POSIX locks if the
+            // name aliases a SQLite role; regular-file refusal must precede
+            // any acquisition of that incumbent.
+            let occupied = || -> Result<bool> {
+                let Some(entry) = self.entry_no_follow(name)? else {
+                    return Ok(false);
+                };
+                anyhow::ensure!(
+                    entry.entry_type == PinnedEntryType::Regular,
+                    "secure atomic creation target is not a regular file: {}",
+                    self.path.join(name).display()
+                );
+                Ok(true)
+            };
+            if occupied()? {
                 return Ok(None);
             }
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            let sequence = crate::atomic_fs::next_temp_sequence();
-            let temp_name =
-                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let temp_name = temp_name::next_secure_temp_name(purpose)?;
+            let target_coordinate = name.to_os_string();
+            let temporary_coordinate = OsString::from(temp_name.to_string_lossy().into_owned());
+            // Acquire parent custody BEFORE the first file effect.
+            let original_parent = self.try_clone()?;
             let descriptor = unsafe {
                 libc::openat(
                     self.directory.as_raw_fd(),
@@ -4377,10 +5936,13 @@ impl PinnedDirectory {
                     .with_context(|| format!("create secure temp in {}", self.path.display()));
             }
             let mut temp = unsafe { File::from_raw_fd(descriptor) };
+            let mut phase = AtomicRegularCreationPhase::TemporaryCreated;
             let result = (|| -> Result<bool> {
                 temp.write_all(bytes)?;
                 temp.set_permissions(std::fs::Permissions::from_mode(mode))?;
                 temp.sync_all()?;
+                crate::test_hooks::atomic_create_hook_point(purpose, name)?;
+                phase = AtomicRegularCreationPhase::PublicationAttempted;
                 match publish_temp_without_replacement(
                     &self.directory,
                     &temp_name,
@@ -4388,11 +5950,16 @@ impl PinnedDirectory {
                     &self.path.join(name),
                 ) {
                     Ok(()) => {
+                        phase = AtomicRegularCreationPhase::NamespacePublished;
+                        #[cfg(all(test, target_os = "linux"))]
+                        if FAIL_ATOMIC_CREATE_PARENT_SYNC.with(|slot| slot.replace(false)) {
+                            anyhow::bail!("injected atomic publication parent-sync failure");
+                        }
                         self.directory.sync_all()?;
                         Ok(true)
                     }
                     Err(error)
-                        if self.open_regular(name, false)?.is_some()
+                        if occupied()?
                             && error.downcast_ref::<std::io::Error>().is_some_and(|error| {
                                 error.kind() == std::io::ErrorKind::AlreadyExists
                             }) =>
@@ -4402,20 +5969,26 @@ impl PinnedDirectory {
                     Err(error) => Err(error),
                 }
             })();
-            match result {
-                Ok(true) => Ok(Some(temp)),
+            let acknowledged = match result {
+                Ok(true) => return Ok(Some(temp)),
                 Ok(false) => {
-                    unsafe {
-                        libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
-                    }
-                    Ok(None)
+                    phase = AtomicRegularCreationPhase::CollisionCleanup;
+                    // Only dispose this exact unpublished inode; report any
+                    // removal/durability uncertainty with its original pin.
+                    self.remove_if_same(&temporary_coordinate, &temp)
                 }
-                Err(error) => {
-                    unsafe {
-                        libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
-                    }
-                    Err(error)
-                }
+                Err(error) => Err(error),
+            };
+            match acknowledged {
+                Ok(()) => Ok(None),
+                Err(error) => Err(anyhow::Error::new(AtomicRegularCreationFailure {
+                    error,
+                    parent: original_parent,
+                    target_name: target_coordinate,
+                    temporary_name: temporary_coordinate,
+                    file: temp,
+                    phase,
+                })),
             }
         }
     }
@@ -4427,9 +6000,10 @@ impl PinnedDirectory {
         name: &OsStr,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<PinnedRegularFile>> {
         Ok(self
-            .atomic_create_regular(name, bytes, mode)?
+            .atomic_create_regular(name, bytes, mode, purpose)?
             .map(|file| PinnedRegularFile {
                 path: self.path.join(name),
                 name: name.to_os_string(),
@@ -4446,7 +6020,7 @@ impl PinnedDirectory {
         // Acquire the cleanup owner before publishing anything.
         let parent = self.try_clone()?;
         let target = self
-            .atomic_create_pinned_regular(name, b"", 0o400)?
+            .atomic_create_pinned_regular(name, b"", 0o400, MOUNT_TARGET_TEMP_PURPOSE)?
             .context("mount target reservation destination is already occupied")?;
         Ok(EmptyMountTargetReservation {
             parent,
@@ -4464,10 +6038,11 @@ impl PinnedDirectory {
         reader: &mut R,
         maximum_bytes: u64,
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<(File, u64)>> {
         #[cfg(not(unix))]
         {
-            let _ = (name, reader, maximum_bytes, mode);
+            let _ = (name, reader, maximum_bytes, mode, purpose);
             anyhow::bail!("secure streamed atomic creation is unavailable on this platform");
         }
         #[cfg(unix)]
@@ -4482,9 +6057,7 @@ impl PinnedDirectory {
                 return Ok(None);
             }
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            let sequence = crate::atomic_fs::next_temp_sequence();
-            let temp_name =
-                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let temp_name = temp_name::next_secure_temp_name(purpose)?;
             let descriptor = unsafe {
                 libc::openat(
                     self.directory.as_raw_fd(),
@@ -4515,6 +6088,7 @@ impl PinnedDirectory {
                 }
                 temp.set_permissions(std::fs::Permissions::from_mode(mode))?;
                 temp.sync_all()?;
+                crate::test_hooks::atomic_create_hook_point(purpose, name)?;
                 match publish_temp_without_replacement(
                     &self.directory,
                     &temp_name,
@@ -4565,9 +6139,10 @@ impl PinnedDirectory {
         reader: &mut R,
         maximum_bytes: u64,
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<(PinnedRegularFile, u64)>> {
         let Some((mut file, copied)) =
-            self.atomic_create_regular_from_reader(name, reader, maximum_bytes, mode)?
+            self.atomic_create_regular_from_reader(name, reader, maximum_bytes, mode, purpose)?
         else {
             return Ok(None);
         };
@@ -5298,19 +6873,18 @@ impl PinnedDirectory {
         expected: Option<&File>,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<()> {
         #[cfg(not(unix))]
         {
-            let _ = (name, expected, bytes, mode);
+            let _ = (name, expected, bytes, mode, purpose);
             anyhow::bail!("secure atomic publication is unavailable on this platform");
         }
         #[cfg(unix)]
         {
             validate_child_name(name)?;
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            let sequence = crate::atomic_fs::next_temp_sequence();
-            let temp_name =
-                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let temp_name = temp_name::next_secure_temp_name(purpose)?;
             let descriptor = unsafe {
                 libc::openat(
                     self.directory.as_raw_fd(),
@@ -5335,6 +6909,7 @@ impl PinnedDirectory {
                 }
                 temp.write_all(bytes)?;
                 temp.sync_all()?;
+                crate::test_hooks::atomic_create_hook_point(purpose, name)?;
                 match expected {
                     None => publish_temp_without_replacement(
                         &self.directory,
@@ -5384,8 +6959,15 @@ impl PinnedDirectory {
         expected: Option<&PinnedRegularFile>,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<()> {
-        self.atomic_write_if_same(name, expected.map(|entry| &entry.file), bytes, mode)
+        self.atomic_write_if_same(
+            name,
+            expected.map(|entry| &entry.file),
+            bytes,
+            mode,
+            purpose,
+        )
     }
 
     /// Stage complete replacement bytes inside this exact directory, then
@@ -5555,15 +7137,37 @@ impl PinnedDirectory {
 
     #[cfg(target_os = "linux")]
     fn regular_identity_at(&self, name: &OsStr) -> Result<Option<RegularFileIdentity>> {
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
         let Some(entry) = self.entry_no_follow(name)? else {
             return Ok(None);
         };
         if entry.entry_type != PinnedEntryType::Regular {
             anyhow::bail!("conditional authoring recovery encountered a non-regular entry");
         }
+        // Path-only: no read permission is needed and no access time is
+        // touched; the filesystem identity comes from this directory.
+        let c_name = std::ffi::CString::new(name.as_bytes())?;
+        let descriptor = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("open conditional authoring recovery entry");
+        }
+        // SAFETY: openat returned a new descriptor that nothing else owns.
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let identity = self.regular_identity_of_pin(&file)?;
+        if identity.inode != entry.inode {
+            anyhow::bail!("conditional authoring recovery entry changed identity");
+        }
         Ok(Some(RegularFileIdentity {
-            containing_device: entry.containing_device,
-            inode: entry.inode,
+            filesystem: identity.filesystem,
+            inode: identity.inode,
         }))
     }
 
@@ -5589,7 +7193,7 @@ impl PinnedDirectory {
         use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
         let marker_name = Self::conditional_byte_recovery_name(target_name);
-        let Some(mut marker) = self
+        let Some(marker) = self
             .open_regular(&marker_name, false)
             .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?
         else {
@@ -5599,9 +7203,8 @@ impl PinnedDirectory {
             .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
         let marker_identity = regular_file_identity(&marker)
             .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
-        let bytes =
-            read_open_regular_file_stable_bounded(&mut marker, &marker_observation, 16 * 1024)
-                .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
+        let bytes = read_open_regular_file_stable_bounded(&marker, &marker_observation, 16 * 1024)
+            .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
         let recovery: ConditionalByteReplacementRecovery = serde_json::from_slice(&bytes)
             .context("decode conditional authoring recovery record")
             .map_err(crate::atomic_fs::AtomicMutationError::namespace_changed)?;
@@ -5745,8 +7348,14 @@ impl PinnedDirectory {
         };
         let recovery_bytes =
             serde_json::to_vec(&recovery).map_err(crate::atomic_fs::AtomicMutationError::before)?;
-        self.atomic_write_if_same(&marker_name, None, &recovery_bytes, 0o600)
-            .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+        self.atomic_write_if_same(
+            &marker_name,
+            None,
+            &recovery_bytes,
+            0o600,
+            CONDITIONAL_RECOVERY_TEMP_PURPOSE,
+        )
+        .map_err(crate::atomic_fs::AtomicMutationError::before)?;
 
         let fail_before =
             |error: anyhow::Error| match self.recover_conditional_byte_replacement(target_name) {
@@ -5819,10 +7428,11 @@ impl PinnedDirectory {
         name: &OsStr,
         bytes: &[u8],
         mode: u32,
+        purpose: TempPurpose,
     ) -> Result<Option<PreparedAtomicCreate>> {
         #[cfg(not(unix))]
         {
-            let _ = (name, bytes, mode);
+            let _ = (name, bytes, mode, purpose);
             anyhow::bail!("secure prepared publication is unavailable on this platform");
         }
         #[cfg(unix)]
@@ -5833,9 +7443,7 @@ impl PinnedDirectory {
             }
             let directory = self.try_clone()?;
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            let sequence = crate::atomic_fs::next_temp_sequence();
-            let temp_name =
-                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let temp_name = temp_name::next_secure_temp_name(purpose)?;
             let descriptor = unsafe {
                 libc::openat(
                     self.directory.as_raw_fd(),
@@ -5859,6 +7467,12 @@ impl PinnedDirectory {
                     libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
                 }
                 return Err(error).context("write secure batch temp");
+            }
+            if let Err(error) = crate::test_hooks::atomic_create_hook_point(purpose, name) {
+                unsafe {
+                    libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
+                }
+                return Err(error);
             }
             Ok(Some(PreparedAtomicCreate {
                 directory,
@@ -5999,6 +7613,367 @@ impl PinnedDirectory {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn sync_directory_after_planned_restore(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if FAIL_PLANNED_RESTORE_SYNC.with(|flag| flag.replace(false)) {
+            return Err(std::io::Error::other(
+                "injected planned restore directory-sync failure",
+            ));
+        }
+        self.directory.sync_all()
+    }
+
+    /// Move only the exact retained original into a prepublished coordinate.
+    /// NOREPLACE preserves any quarantine occupant; mismatches restore without
+    /// replacing a public-name occupant. Expected File remains caller-owned.
+    pub fn quarantine_if_same_planned_atomic(
+        &self,
+        name: &OsStr,
+        expected: &File,
+        quarantine: &OsStr,
+    ) -> std::result::Result<(), PlannedQuarantineFailure> {
+        let fail = |disposition, stage, error| PlannedQuarantineFailure {
+            disposition,
+            stage,
+            quarantine_name: quarantine.to_os_string(),
+            error,
+        };
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (name, expected);
+            return Err(fail(
+                PlannedQuarantineDisposition::BeforeCommit,
+                PlannedQuarantineStage::Unchanged,
+                anyhow::anyhow!("planned quarantine requires Linux"),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let prepare = (|| -> Result<_> {
+                validate_child_name(name)?;
+                validate_child_name(quarantine)?;
+                ensure!(
+                    name != quarantine,
+                    "quarantine must differ from public coordinate"
+                );
+                ensure!(
+                    expected.metadata()?.is_file(),
+                    "expected quarantine object is not regular"
+                );
+                Ok((
+                    std::ffi::CString::new(name.as_bytes())?,
+                    std::ffi::CString::new(quarantine.as_bytes())?,
+                ))
+            })();
+            let (name_c, quarantine_c) = prepare.map_err(|error| {
+                fail(
+                    PlannedQuarantineDisposition::BeforeCommit,
+                    PlannedQuarantineStage::Unchanged,
+                    error,
+                )
+            })?;
+            rename_noreplace_between(&self.directory, &name_c, &self.directory, &quarantine_c)
+                .map_err(|error| {
+                    fail(
+                        PlannedQuarantineDisposition::BeforeCommit,
+                        PlannedQuarantineStage::Unchanged,
+                        error.into(),
+                    )
+                })?;
+            if let Err(error) = ensure_entry_matches(
+                &self.directory,
+                &quarantine_c,
+                Some(expected),
+                &self.path.join(quarantine),
+            ) {
+                return match rename_noreplace_between(
+                    &self.directory,
+                    &quarantine_c,
+                    &self.directory,
+                    &name_c,
+                ) {
+                    Err(restore) => Err(fail(
+                        PlannedQuarantineDisposition::NamespaceChanged,
+                        PlannedQuarantineStage::PreservedUnexpected,
+                        anyhow::anyhow!(
+                            "unexpected object preserved at quarantine; restore rename failed: {error:#}; {restore:#}"
+                        ),
+                    )),
+                    Ok(()) => match self.sync_directory_after_planned_restore() {
+                        Ok(()) => Err(fail(
+                            PlannedQuarantineDisposition::BeforeCommit,
+                            PlannedQuarantineStage::RestoredUnexpected,
+                            error,
+                        )),
+                        Err(sync) => Err(fail(
+                            PlannedQuarantineDisposition::DurabilityUncertain,
+                            PlannedQuarantineStage::RestoredUnexpected,
+                            anyhow::anyhow!(
+                                "unexpected object restored to public name, durability uncertain: {error:#}; {sync:#}"
+                            ),
+                        )),
+                    },
+                };
+            }
+            self.directory.sync_all().map_err(|error| {
+                fail(
+                    PlannedQuarantineDisposition::DurabilityUncertain,
+                    PlannedQuarantineStage::QuarantinedOriginal,
+                    error.into(),
+                )
+            })
+        }
+    }
+
+    /// Planned counterpart of remove_if_same_atomic. Every effect coordinate
+    /// is known before mutation, so interrupted operations remain enumerable.
+    pub fn remove_if_same_planned_atomic(
+        &self,
+        name: &OsStr,
+        expected: &File,
+        quarantine: &OsStr,
+    ) -> std::result::Result<(), PlannedQuarantineFailure> {
+        self.quarantine_if_same_planned_atomic(name, expected, quarantine)?;
+        #[cfg(target_os = "linux")]
+        {
+            #[cfg(feature = "crash-qualification-test-support")]
+            if let Some(hook) = PLANNED_REMOVAL_HOOK.get()
+                && hook(name, quarantine) == PlannedRemovalCut::FailUnlink
+            {
+                return Err(PlannedQuarantineFailure {
+                    disposition: PlannedQuarantineDisposition::DurabilityUncertain,
+                    stage: PlannedQuarantineStage::QuarantinedOriginal,
+                    quarantine_name: quarantine.to_os_string(),
+                    error: anyhow::anyhow!("injected failure after planned move, before unlink"),
+                });
+            }
+            let name_c = std::ffi::CString::new(quarantine.as_bytes()).expect("validated child");
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
+                return Err(PlannedQuarantineFailure {
+                    disposition: PlannedQuarantineDisposition::DurabilityUncertain,
+                    stage: PlannedQuarantineStage::QuarantinedOriginal,
+                    quarantine_name: quarantine.to_os_string(),
+                    error: std::io::Error::last_os_error().into(),
+                });
+            }
+            self.directory
+                .sync_all()
+                .map_err(|error| PlannedQuarantineFailure {
+                    disposition: PlannedQuarantineDisposition::DurabilityUncertain,
+                    stage: PlannedQuarantineStage::UnlinkedOriginal,
+                    quarantine_name: quarantine.to_os_string(),
+                    error: error.into(),
+                })
+        }
+        #[cfg(not(target_os = "linux"))]
+        unreachable!("quarantine operation refused unsupported platform")
+    }
+
+    /// Move the exact retained regular O_PATH owner into a prepublished coordinate.
+    /// All identity observations use metadata handles; no data descriptor is opened.
+    /// The caller retains namespace exclusion, funding, the expected owner and a
+    /// durable recovery plan for this chosen coordinate across every partial stage.
+    /// This method supplies no cleanup authority or permission to replay an effect.
+    pub fn quarantine_metadata_regular_if_same_planned_atomic(
+        &self,
+        name: &OsStr,
+        expected: &File,
+        quarantine: &OsStr,
+    ) -> std::result::Result<(), PlannedQuarantineFailure> {
+        let fail = |disposition, stage, error| PlannedQuarantineFailure {
+            disposition,
+            stage,
+            quarantine_name: quarantine.to_os_string(),
+            error,
+        };
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (name, expected);
+            return Err(fail(
+                PlannedQuarantineDisposition::BeforeCommit,
+                PlannedQuarantineStage::Unchanged,
+                anyhow::anyhow!("planned quarantine requires Linux"),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let prepare = (|| -> Result<_> {
+                validate_child_name(name)?;
+                validate_child_name(quarantine)?;
+                ensure!(
+                    name != quarantine,
+                    "quarantine must differ from public coordinate"
+                );
+                let flags = unsafe { libc::fcntl(expected.as_raw_fd(), libc::F_GETFL) };
+                ensure!(
+                    flags >= 0 && flags & libc::O_PATH != 0,
+                    "metadata quarantine requires an actual O_PATH descriptor"
+                );
+                ensure!(
+                    expected.metadata()?.is_file(),
+                    "expected quarantine object is not regular"
+                );
+                Ok((
+                    std::ffi::CString::new(name.as_bytes())?,
+                    std::ffi::CString::new(quarantine.as_bytes())?,
+                ))
+            })();
+            let (name_c, quarantine_c) = prepare.map_err(|error| {
+                fail(
+                    PlannedQuarantineDisposition::BeforeCommit,
+                    PlannedQuarantineStage::Unchanged,
+                    error,
+                )
+            })?;
+            rename_noreplace_between(&self.directory, &name_c, &self.directory, &quarantine_c)
+                .map_err(|error| {
+                    fail(
+                        PlannedQuarantineDisposition::BeforeCommit,
+                        PlannedQuarantineStage::Unchanged,
+                        error.into(),
+                    )
+                })?;
+            let identity_check = (|| -> Result<()> {
+                use std::os::unix::fs::MetadataExt;
+                let current = self
+                    .open_mount_entry(quarantine)?
+                    .context("metadata quarantine object disappeared")?;
+                let current = current.metadata()?;
+                let expected = expected.metadata()?;
+                ensure!(
+                    current.is_file(),
+                    "metadata quarantine object is not regular"
+                );
+                ensure!(
+                    current.dev() == expected.dev() && current.ino() == expected.ino(),
+                    "metadata quarantine target changed before mutation"
+                );
+                Ok(())
+            })();
+            if let Err(error) = identity_check {
+                return match rename_noreplace_between(
+                    &self.directory,
+                    &quarantine_c,
+                    &self.directory,
+                    &name_c,
+                ) {
+                    Err(restore) => Err(fail(
+                        PlannedQuarantineDisposition::NamespaceChanged,
+                        PlannedQuarantineStage::PreservedUnexpected,
+                        anyhow::anyhow!(
+                            "unexpected object preserved at quarantine; restore rename failed: {error:#}; {restore:#}"
+                        ),
+                    )),
+                    Ok(()) => match self.sync_directory_after_planned_restore() {
+                        Ok(()) => Err(fail(
+                            PlannedQuarantineDisposition::BeforeCommit,
+                            PlannedQuarantineStage::RestoredUnexpected,
+                            error,
+                        )),
+                        Err(sync) => Err(fail(
+                            PlannedQuarantineDisposition::DurabilityUncertain,
+                            PlannedQuarantineStage::RestoredUnexpected,
+                            anyhow::anyhow!(
+                                "unexpected object restored to public name, durability uncertain: {error:#}; {sync:#}"
+                            ),
+                        )),
+                    },
+                };
+            }
+            self.directory.sync_all().map_err(|error| {
+                fail(
+                    PlannedQuarantineDisposition::DurabilityUncertain,
+                    PlannedQuarantineStage::QuarantinedOriginal,
+                    error.into(),
+                )
+            })
+        }
+    }
+
+    /// Planned metadata-only removal with the same custody and recovery requirements
+    /// as quarantine_metadata_regular_if_same_planned_atomic. The expected O_PATH
+    /// owner stays caller-owned; late sync refusal reports the actual unlink stage.
+    pub fn remove_metadata_regular_if_same_planned_atomic(
+        &self,
+        name: &OsStr,
+        expected: &File,
+        quarantine: &OsStr,
+    ) -> std::result::Result<(), PlannedQuarantineFailure> {
+        self.quarantine_metadata_regular_if_same_planned_atomic(name, expected, quarantine)?;
+        #[cfg(target_os = "linux")]
+        {
+            let name_c = std::ffi::CString::new(quarantine.as_bytes()).expect("validated child");
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
+                return Err(PlannedQuarantineFailure {
+                    disposition: PlannedQuarantineDisposition::DurabilityUncertain,
+                    stage: PlannedQuarantineStage::QuarantinedOriginal,
+                    quarantine_name: quarantine.to_os_string(),
+                    error: std::io::Error::last_os_error().into(),
+                });
+            }
+            self.directory
+                .sync_all()
+                .map_err(|error| PlannedQuarantineFailure {
+                    disposition: PlannedQuarantineDisposition::DurabilityUncertain,
+                    stage: PlannedQuarantineStage::UnlinkedOriginal,
+                    quarantine_name: quarantine.to_os_string(),
+                    error: error.into(),
+                })
+        }
+        #[cfg(not(target_os = "linux"))]
+        unreachable!("quarantine operation refused unsupported platform")
+    }
+
+    /// Unlink one regular child while it is still the inode `expected`
+    /// names, then sync this directory. Returns `false`, with nothing
+    /// changed, when the child is already absent.
+    ///
+    /// This is for a name that is itself debris or a quarantine: there is no
+    /// public coordinate to preserve, so no intermediate name is created.
+    /// The identity check and the unlink are not one atomic step; the caller
+    /// must hold exclusion over every cooperating writer of this namespace
+    /// for the whole call, as for [`Self::remove_empty_child_if_same`].
+    pub fn unlink_regular_if_same(&self, name: &OsStr, expected: &File) -> Result<bool> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (name, expected);
+            anyhow::bail!("identity-checked unlink requires Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            validate_child_name(name)?;
+            ensure!(
+                expected.metadata()?.is_file(),
+                "identity-checked unlink expects a regular file"
+            );
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let path = self.path.join(name);
+            if self.entry_no_follow(name)?.is_none() {
+                return Ok(false);
+            }
+            ensure_entry_matches(&self.directory, &name_c, Some(expected), &path)?;
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("unlink {}", path.display()));
+            }
+            self.directory
+                .sync_all()
+                .with_context(|| format!("sync directory after unlinking {}", path.display()))?;
+            Ok(true)
+        }
+    }
+
+    /// Journal callers retain one typed coordinate/identity authority; no
+    /// protected SQLite descriptor is exported through this generic method.
+    pub fn remove_pinned_regular_planned_atomic(
+        &self,
+        expected: &PinnedRegularFile,
+        quarantine: &OsStr,
+    ) -> std::result::Result<(), PlannedQuarantineFailure> {
+        self.remove_if_same_planned_atomic(expected.name(), &expected.file, quarantine)
+    }
+
     /// Revalidate an expected regular child identity (or expected absence)
     /// immediately before a later descriptor-relative mutation.
     pub fn ensure_regular_entry_matches(
@@ -6019,9 +7994,78 @@ impl PinnedDirectory {
         }
     }
 
-    /// Remove an exact previously-opened empty child directory and sync its
-    /// parent. A non-empty child is left in place and reported as `false`.
-    pub fn remove_empty_child_if_same(&self, name: &OsStr, expected: &Self) -> Result<bool> {
+    /// Compare a required regular entry to this actual retained descriptor
+    /// without opening/closing a data FD (which can disturb SQLite POSIX locks).
+    /// Names and refusals use fixed storage. No absence grants are produced.
+    pub fn require_regular_entry_descriptor_fixed(
+        &self,
+        name: &OsStr,
+        expected: &File,
+    ) -> std::result::Result<(), &'static str> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (name, expected);
+            Err("fixed regular entry check requires Linux")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let mut components = Path::new(name).components();
+            if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+                || components.next().is_some()
+            {
+                return Err("regular entry name is not one normal component");
+            }
+            let bytes = name.as_bytes();
+            if bytes.is_empty() || bytes.len() > 255 || bytes.contains(&0) {
+                return Err("regular entry name exceeds fixed bound");
+            }
+            let mut terminated = [0u8; 256];
+            terminated[..bytes.len()].copy_from_slice(bytes);
+            let mut observed: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe {
+                libc::fstatat(
+                    self.directory.as_raw_fd(),
+                    terminated.as_ptr().cast(),
+                    &mut observed,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                return Err("required regular entry observation refused");
+            }
+            if observed.st_mode & libc::S_IFMT != libc::S_IFREG {
+                return Err("required entry is not a regular file");
+            }
+            let mut held: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(expected.as_raw_fd(), &mut held) } != 0 {
+                return Err("retained regular descriptor observation refused");
+            }
+            if (held.st_dev, held.st_ino) != (observed.st_dev, observed.st_ino) {
+                return Err("required regular entry changed");
+            }
+            Ok(())
+        }
+    }
+
+    /// Remove a previously-opened empty child directory and sync its parent.
+    /// A non-empty child is left in place and reported as `None`.
+    /// Only actual removal plus parent sync yields the opaque receipt.
+    ///
+    /// Caller MUST exclude writers of this parent's child coordinate from the
+    /// initial identity observation through removal, sync and acknowledgement,
+    /// and retain that exclusion for any `EmptyChildRemovalFailure::retry_sync`.
+    /// This requires the namespace's shared writer lock or exclusive ownership
+    /// honored by all cooperating writers. The method does not acquire a lock.
+    /// Identity validation followed by `unlinkat` is not atomic compare/rmdir;
+    /// absent this precondition, replacement can cause removal of a different
+    /// empty directory. The receipt's exact-child interpretation is conditional
+    /// on this exclusion, not a guarantee against arbitrary same-UID processes.
+    pub fn remove_empty_child_if_same(
+        &self,
+        name: &OsStr,
+        expected: &Self,
+    ) -> Result<Option<RemovedEmptyChild>> {
         #[cfg(not(unix))]
         {
             let _ = (name, expected);
@@ -6054,26 +8098,65 @@ impl PinnedDirectory {
                     path.display()
                 );
             }
-            if unsafe {
-                libc::unlinkat(
-                    self.directory.as_raw_fd(),
-                    name_c.as_ptr(),
-                    libc::AT_REMOVEDIR,
-                )
-            } != 0
-            {
-                let error = std::io::Error::last_os_error();
-                if matches!(
-                    error.raw_os_error(),
-                    Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
-                ) {
-                    return Ok(false);
+            #[cfg(target_os = "linux")]
+            ensure!(
+                mount_id_of_open_descriptor(&self.directory)?
+                    == mount_id_of_open_descriptor(&current)?
+                    && mount_id_of_open_descriptor(&current)?
+                        == mount_id_of_open_descriptor(&expected.directory)?,
+                "secure child directory mount changed before mutation"
+            );
+            // Retain both ORIGINAL descriptor identities before the effect.
+            // No fallible descriptor acquisition follows a successful rmdir.
+            let parent = self.try_clone()?;
+            let child = expected.try_clone()?;
+            let name_owned = name.to_os_string();
+            let mut stage = EmptyChildRemovalStage::BeforeRemoval;
+            let removed = (|| -> Result<bool> {
+                if unsafe {
+                    libc::unlinkat(
+                        self.directory.as_raw_fd(),
+                        name_c.as_ptr(),
+                        libc::AT_REMOVEDIR,
+                    )
+                } != 0
+                {
+                    let error = std::io::Error::last_os_error();
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::ENOTEMPTY) | Some(libc::EEXIST)
+                    ) {
+                        return Ok(false);
+                    }
+                    return Err(error)
+                        .with_context(|| format!("remove secure directory {}", path.display()));
                 }
-                return Err(error)
-                    .with_context(|| format!("remove secure directory {}", path.display()));
+                stage = EmptyChildRemovalStage::RemovedPendingSync;
+                #[cfg(all(test, target_os = "linux"))]
+                if FAIL_CHILD_REMOVE_SYNC.with(|slot| slot.replace(false)) {
+                    anyhow::bail!("injected empty-child parent sync failure after removal");
+                }
+                self.directory.sync_all()?;
+                Ok(true)
+            })();
+            match removed {
+                Ok(false) => Ok(None),
+                Ok(true) => Ok(Some(RemovedEmptyChild {
+                    process: std::process::id(),
+                    parent,
+                    child,
+                    name: name_owned,
+                })),
+                Err(error) => Err(anyhow::Error::new(EmptyChildRemovalFailure {
+                    process: std::process::id(),
+                    error,
+                    retry_receipt: std::sync::Mutex::new(None),
+                    stage,
+                    parent,
+                    child,
+                    name: name_owned,
+                })),
             }
-            self.directory.sync_all()?;
-            Ok(true)
         }
     }
 
@@ -6318,8 +8401,34 @@ fn ensure_entry_matches(
     display_path: &Path,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
-    let current = open_regular_at(parent, name, display_path)?;
-    match (expected, current.as_ref()) {
+    // Conditional mutation compares identity only. Opening a data descriptor
+    // here could disturb a live SQLite inode's process-wide POSIX locks.
+    let mut observed: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut observed,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    let current = if result == 0 {
+        anyhow::ensure!(
+            observed.st_mode & libc::S_IFMT == libc::S_IFREG,
+            "secure target is not a regular file: {}",
+            display_path.display()
+        );
+        Some((observed.st_dev as u64, observed.st_ino as u64))
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).with_context(|| {
+                format!("inspect secure regular identity {}", display_path.display())
+            });
+        }
+        None
+    };
+    match (expected, current) {
         (None, None) => Ok(()),
         (None, Some(_)) => anyhow::bail!(
             "secure target appeared before publication: {}",
@@ -6331,8 +8440,7 @@ fn ensure_entry_matches(
         ),
         (Some(expected), Some(current)) => {
             let expected = expected.metadata()?;
-            let current = current.metadata()?;
-            if expected.dev() != current.dev() || expected.ino() != current.ino() {
+            if (expected.dev(), expected.ino()) != current {
                 anyhow::bail!(
                     "secure target changed before mutation: {}",
                     display_path.display()
@@ -6347,7 +8455,7 @@ fn ensure_entry_matches(
 fn ensure_directory_child_identity(
     parent: &File,
     name: &std::ffi::CStr,
-    expected: PinnedDirectoryIdentity,
+    expected: (u64, u64),
     display_path: &Path,
 ) -> Result<()> {
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
@@ -6363,10 +8471,7 @@ fn ensure_directory_child_identity(
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("inspect directory child {}", display_path.display()));
     }
-    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR
-        || stat.st_dev != expected.containing_device
-        || stat.st_ino != expected.inode
-    {
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR || (stat.st_dev, stat.st_ino) != expected {
         anyhow::bail!(
             "directory child changed before conditional exchange: {}",
             display_path.display()
@@ -6480,16 +8585,7 @@ pub fn inspect_optional_entry_no_follow(path: &Path) -> Result<Option<PinnedEntr
             }
             return Err(error).with_context(|| format!("inspect secure entry {}", path.display()));
         }
-        let entry_type = match stat.st_mode & libc::S_IFMT {
-            libc::S_IFDIR => PinnedEntryType::Directory,
-            libc::S_IFREG => PinnedEntryType::Regular,
-            libc::S_IFLNK => PinnedEntryType::Symlink,
-            libc::S_IFCHR => PinnedEntryType::CharacterDevice,
-            libc::S_IFBLK => PinnedEntryType::BlockDevice,
-            libc::S_IFIFO => PinnedEntryType::Fifo,
-            libc::S_IFSOCK => PinnedEntryType::Socket,
-            _ => PinnedEntryType::Other,
-        };
+        let entry_type = entry_type_from_mode(stat.st_mode);
         Ok(Some(entry_type))
     }
 }
@@ -6526,6 +8622,39 @@ pub fn canonicalize_existing_path(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("canonicalize existing path {}", path.display()))
 }
 
+/// Resolve `path` once, pin the exact regular file and seal its bounded
+/// bytes, or report that the file does not exist. Only a missing path
+/// (including a missing parent) is `Ok(None)`: any other failure to resolve,
+/// open, read or bound the file is an error, and an existing file that is
+/// empty is `Some` with no bytes, never `None`.
+pub fn capture_optional_sealed_regular_file(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<CapturedRegularFile>> {
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!("canonicalize existing path {}", path.display())));
+        }
+    };
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("regular file has no parent: {}", resolved.display()))?;
+    let name = resolved
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("regular file has no name: {}", resolved.display()))?;
+    let Some(directory) = PinnedDirectory::open(parent)? else {
+        return Ok(None);
+    };
+    let Some(file) = directory.open_pinned_regular(name, false)? else {
+        return Ok(None);
+    };
+    file.capture_sealed_bounded(&file.observation()?, max_bytes)
+        .map(Some)
+}
+
 /// Existing host roots that a same-UID sandbox must never receive as a broad
 /// writable mount. This is a Linux/host-layout safety floor, not authored
 /// workload policy; callers may add narrower protected roots but cannot make
@@ -6546,6 +8675,24 @@ pub fn protected_system_write_roots() -> Vec<PathBuf> {
 /// This is host diagnostic data only; it never becomes workload authority.
 pub fn current_user_home() -> Option<PathBuf> {
     std::env::var_os("HOME").and_then(|home| canonicalize_existing_path(Path::new(&home)).ok())
+}
+
+/// Owning (uid, gid) of one existing path, without following a final
+/// symlink. Observation only, for fixtures that bind a directory to the
+/// account that owns it; it never authorizes access.
+pub fn path_owner_ids(path: &Path) -> Result<(u32, u32)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("observe owner of {}", path.display()))?;
+        Ok((metadata.uid(), metadata.gid()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("numeric path ownership is unavailable on this OS")
+    }
 }
 
 /// Pin one already-canonical absolute mount source with `O_PATH`, without
@@ -6571,7 +8718,7 @@ pub fn pin_canonical_mount_source(
         }
         let encoded = CString::new(path.as_os_str().as_bytes())
             .context("mount source contains an interior NUL")?;
-        let lease = crate::exec::retain_fork_sensitive_descriptors();
+        let lease = crate::exec::try_retain_fork_sensitive_descriptors()?;
         let mut descriptor = unsafe {
             libc::open(
                 encoded.as_ptr(),
@@ -6655,7 +8802,7 @@ pub fn read_open_regular_file_bounded(mut file: File, max_bytes: u64) -> Result<
 /// without growing beyond the caller's reservation. The descriptor identity
 /// and metadata must remain stable, and the sentinel must remain unused.
 pub fn read_open_regular_file_exact_bounded(
-    mut file: File,
+    file: File,
     expected_bytes: u64,
     max_bytes: u64,
 ) -> Result<Vec<u8>> {
@@ -6673,7 +8820,7 @@ pub fn read_open_regular_file_exact_bounded(
         );
     }
     read_open_regular_file_stable_bounded(
-        &mut file,
+        &file,
         &OpenRegularFileObservation { metadata: before },
         max_bytes,
     )
@@ -6946,15 +9093,17 @@ where
             }
             continue;
         }
+        // Pruning reads only the path, so an ignored entry is never opened:
+        // an ignored symlink or special file is skipped, not refused.
+        if prune(&relative, false)? {
+            continue;
+        }
         let file = open_regular_at(&frame.directory, &name_c, &display)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "secure project walk encountered a symlink, special file, or disappearing entry: {}",
                 display.display()
             )
         })?;
-        if prune(&relative, false)? {
-            continue;
-        }
         visit(&relative, file)?;
     }
     Ok(())
@@ -7000,10 +9149,8 @@ where
                 let source_child = source
                     .open_child_directory(&entry.name)?
                     .ok_or_else(|| anyhow::anyhow!("source directory disappeared during copy"))?;
-                let source_child_identity = source_child.identity()?;
-                if source_child_identity.containing_device != entry.containing_device
-                    || source_child_identity.inode != entry.inode
-                {
+                let (source_device, source_inode) = source_child.raw_device_inode()?;
+                if source_device != entry.containing_device || source_inode != entry.inode {
                     anyhow::bail!("source directory changed identity during copy");
                 }
                 let metadata = source_child.directory.metadata()?;
@@ -7098,6 +9245,7 @@ fn copy_open_regular_into_new(
     }
     let mut target = unsafe { File::from_raw_fd(descriptor) };
     let result = (|| -> Result<()> {
+        crate::progress::beat();
         source.seek(std::io::SeekFrom::Start(0))?;
         let mut bounded = (&mut source).take(observation.size().saturating_add(1));
         let copied = std::io::copy(&mut bounded, &mut target)?;
@@ -7287,8 +9435,230 @@ fn restore_quarantined_regular(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_modes_normalize_like_observed_ones() {
+        assert_eq!(super::normalized_portable_mode(0o500), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o400), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o644), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o755), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o010), 0o755);
+    }
+
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_root_owned_system_binary_is_unwritable_by_an_ordinary_effective_user() {
+        if unsafe { libc::geteuid() } == 0 {
+            let file = File::open("/bin/sh").unwrap();
+            assert!(require_unwritable_by_effective_user(&file).is_err());
+            return;
+        }
+        let canonical = std::fs::canonicalize("/bin/sh").unwrap();
+        let file = File::open(&canonical).unwrap();
+        let identity = require_unwritable_by_effective_user(&file)
+            .expect("a root-owned system shell cannot be written by an ordinary user");
+        assert_eq!(identity.owner, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_owned_by_the_effective_user_is_never_proved_unwritable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned");
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let file = File::open(&path).unwrap();
+        let error = require_unwritable_by_effective_user(&file).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("root-owned")
+                || format!("{error:#}").contains("root effective user"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn stable_prefix_is_bounded_cursor_independent_and_rejects_changed_file() {
+        use std::io::{Seek, SeekFrom};
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("preview");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let mut file = directory
+            .open_pinned_regular(OsStr::new("preview"), false)
+            .unwrap()
+            .unwrap();
+        let observation = file.observation().unwrap();
+        file.seek(SeekFrom::Start(7)).unwrap();
+        assert_eq!(file.read_stable_prefix(&observation, 4).unwrap(), b"0123");
+        assert_eq!(file.stream_position().unwrap(), 7);
+        assert_eq!(
+            file.read_stable_prefix(&observation, 10).unwrap(),
+            b"0123456789"
+        );
+        assert_eq!(
+            file.read_stable_prefix(&observation, 40).unwrap(),
+            b"0123456789"
+        );
+        assert!(file.read_stable_prefix(&observation, 0).unwrap().is_empty());
+        std::fs::write(&path, b"short").unwrap();
+        assert!(file.read_stable_prefix(&observation, 4).is_err());
+    }
+
+    #[test]
+    fn stable_prefix_rejects_a_same_size_rewrite_of_the_same_inode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("preview");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let file = directory
+            .open_pinned_regular(OsStr::new("preview"), false)
+            .unwrap()
+            .unwrap();
+        let observation = file.observation().unwrap();
+        // The kernel stamps times at a coarse tick, so let one pass before the
+        // rewrite for the change to be visible in the observation.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let inode_before = std::fs::metadata(&path).unwrap();
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let inode_after = std::fs::metadata(&path).unwrap();
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(inode_before.ino(), inode_after.ino());
+        }
+        assert_eq!(inode_before.len(), inode_after.len());
+        assert!(file.read_stable_prefix(&observation, 4).is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn opened_path_names_the_open_file_where_it_is_linked_now() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_path = tmp.path().canonicalize().unwrap();
+        let original = tmp_path.join("auth.json");
+        std::fs::write(&original, b"credential").unwrap();
+        let file = File::open(&original).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath {
+                path: original.clone(),
+                unlinked: false
+            }
+        );
+        assert_eq!(observe_open_file_identity(&file).unwrap().link_count(), 1);
+
+        let renamed = tmp_path.join("elsewhere.json");
+        std::fs::rename(&original, &renamed).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath {
+                path: renamed.clone(),
+                unlinked: false
+            }
+        );
+
+        std::fs::remove_file(&renamed).unwrap();
+        assert_eq!(
+            observe_open_file_path(&file).unwrap(),
+            OpenedPath {
+                path: renamed,
+                unlinked: true
+            }
+        );
+        assert_eq!(observe_open_file_identity(&file).unwrap().link_count(), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn opened_path_of_a_pipe_is_not_absolute() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let file = File::from(std::os::fd::OwnedFd::from(reader));
+        let opened = observe_open_file_path(&file).unwrap();
+        assert!(!opened.path.is_absolute(), "{}", opened.path.display());
+        assert!(!opened.unlinked);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pinned_regular_close_transfer_moves_the_same_descriptor() {
+        use std::os::fd::AsRawFd as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("input"), b"pinned source").unwrap();
+        let parent = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let pinned = parent
+            .open_pinned_regular(OsStr::new("input"), false)
+            .unwrap()
+            .unwrap();
+        let original_fd = pinned.file.as_raw_fd();
+
+        let mut transferred = pinned.into_owned_close_descriptor();
+        assert_eq!(transferred.as_raw_fd(), original_fd);
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut transferred, &mut bytes).unwrap();
+        assert_eq!(bytes, b"pinned source");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn planned_mismatch_restoration_sync_failure_reports_actual_public_location() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let public = tmp.path().join("public");
+        std::fs::write(&public, b"original").unwrap();
+        let original = File::open(&public).unwrap();
+        std::fs::rename(&public, tmp.path().join("retained-original")).unwrap();
+        std::fs::write(&public, b"unexpected").unwrap();
+        FAIL_PLANNED_RESTORE_SYNC.with(|flag| flag.set(true));
+        let failure = root
+            .quarantine_if_same_planned_atomic(
+                OsStr::new("public"),
+                &original,
+                OsStr::new("planned-quarantine"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.disposition,
+            PlannedQuarantineDisposition::DurabilityUncertain
+        );
+        assert_eq!(failure.stage, PlannedQuarantineStage::RestoredUnexpected);
+        assert_eq!(std::fs::read(&public).unwrap(), b"unexpected");
+        assert!(!tmp.path().join("planned-quarantine").exists());
+        assert_eq!(
+            std::fs::read(tmp.path().join("retained-original")).unwrap(),
+            b"original"
+        );
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn planned_quarantine_occupied_coordinate_preserves_both_objects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        std::fs::write(tmp.path().join("public"), b"original").unwrap();
+        std::fs::write(tmp.path().join("planned-quarantine"), b"foreign").unwrap();
+        let original = File::open(tmp.path().join("public")).unwrap();
+        let failure = root
+            .quarantine_if_same_planned_atomic(
+                OsStr::new("public"),
+                &original,
+                OsStr::new("planned-quarantine"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.disposition,
+            PlannedQuarantineDisposition::BeforeCommit
+        );
+        assert_eq!(failure.stage, PlannedQuarantineStage::Unchanged);
+        assert_eq!(
+            std::fs::read(tmp.path().join("public")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("planned-quarantine")).unwrap(),
+            b"foreign"
+        );
+    }
     #[cfg(unix)]
     #[test]
     fn absent_inherited_directory_is_refused_without_constructing_an_owner() {
@@ -7511,14 +9881,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("value");
         std::fs::write(&path, b"exact").unwrap();
-        let mut file = File::open(&path).unwrap();
+        let file = File::open(&path).unwrap();
         let (digest, metadata) =
-            digest_open_regular_file_stable_exact(&mut file, b"exact".len() as u64).unwrap();
+            digest_open_regular_file_stable_exact(&file, b"exact".len() as u64).unwrap();
         assert_eq!(digest, crate::sha256_hex(b"exact"));
         assert_eq!(metadata.len(), b"exact".len() as u64);
 
-        let mut file = File::open(&path).unwrap();
-        assert!(digest_open_regular_file_stable_exact(&mut file, 1).is_err());
+        let file = File::open(&path).unwrap();
+        assert!(digest_open_regular_file_stable_exact(&file, 1).is_err());
     }
 
     #[test]
@@ -7783,7 +10153,13 @@ mod tests {
         })
         .unwrap();
         directory
-            .atomic_write_if_same(&marker_name, None, &bytes, 0o600)
+            .atomic_write_if_same(
+                &marker_name,
+                None,
+                &bytes,
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap();
     }
 
@@ -7921,10 +10297,35 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("value");
         std::fs::write(&path, b"first").unwrap();
-        let mut file = File::open(&path).unwrap();
+        let file = File::open(&path).unwrap();
         let observed = observe_open_regular_file(&file).unwrap();
         std::fs::write(&path, b"second-value").unwrap();
-        assert!(read_open_regular_file_stable_bounded(&mut file, &observed, 1024).is_err());
+        assert!(read_open_regular_file_stable_bounded(&file, &observed, 1024).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn optional_sealed_capture_separates_missing_from_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let empty = root.path().join("empty");
+        std::fs::write(&empty, b"").unwrap();
+        let captured = capture_optional_sealed_regular_file(&empty, 16)
+            .unwrap()
+            .expect("an empty file is present");
+        assert!(captured.bytes().is_empty());
+        assert!(
+            capture_optional_sealed_regular_file(&root.path().join("missing"), 16)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            capture_optional_sealed_regular_file(&root.path().join("no/such/parent"), 16)
+                .unwrap()
+                .is_none()
+        );
+        let full = root.path().join("full");
+        std::fs::write(&full, b"0123456789").unwrap();
+        assert!(capture_optional_sealed_regular_file(&full, 4).is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -7976,14 +10377,13 @@ mod tests {
         file.write_all(b"exact retained bytes").unwrap();
         file.seek(std::io::SeekFrom::Start(4)).unwrap();
         let observed = observe_open_regular_file(&file).unwrap();
-        let mut clone = file.try_clone().unwrap();
+        let clone = file.try_clone().unwrap();
         assert_eq!(
-            read_open_regular_file_stable_bounded(&mut clone, &observed, 128).unwrap(),
+            read_open_regular_file_stable_bounded(&clone, &observed, 128).unwrap(),
             b"exact retained bytes"
         );
         assert_eq!(file.stream_position().unwrap(), 4);
-        let (digest, _) =
-            digest_open_regular_file_stable_exact(&mut clone, observed.size()).unwrap();
+        let (digest, _) = digest_open_regular_file_stable_exact(&clone, observed.size()).unwrap();
         assert_eq!(digest, crate::cas::sha256_hex(b"exact retained bytes"));
         assert_eq!(file.stream_position().unwrap(), 4);
         assert_eq!(
@@ -8133,7 +10533,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("value"), b"value").unwrap();
         let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
-        let (root_device, _) = pinned.device_inode().unwrap();
+        let (root_device, _) = pinned.raw_device_inode().unwrap();
 
         let entries = pinned.entries_no_follow().unwrap();
         let entry = entries
@@ -8141,11 +10541,182 @@ mod tests {
             .find(|entry| entry.name == OsStr::new("value"))
             .unwrap();
 
-        // A traversal that must stay on one filesystem compares this against
-        // its pinned root; `device_id` (st_rdev) cannot answer that question.
+        // st_dev remains part of the observed inode identity, but mount
+        // admission uses the held child's mount ID on Linux. Overlayfs need
+        // not report the same st_dev for a file and its containing directory.
         assert_eq!(entry.containing_device, root_device);
         assert_ne!(entry.inode, 0);
         assert_eq!(entry.device_id, 0);
+        pinned.ensure_entry_same_mount(entry).unwrap();
+        let opened = pinned
+            .open_regular(OsStr::new("value"), false)
+            .unwrap()
+            .unwrap();
+        pinned.ensure_open_regular_same_mount(&opened).unwrap();
+
+        let mut changed = entry.clone();
+        changed.inode += 1;
+        assert!(pinned.ensure_entry_same_mount(&changed).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_entry_mount_check_rejects_proc_mount() {
+        let root = PinnedDirectory::open(Path::new("/")).unwrap().unwrap();
+        let Some(proc) = root.entry_no_follow(OsStr::new("proc")).unwrap() else {
+            return;
+        };
+        if proc.entry_type != PinnedEntryType::Directory {
+            return;
+        }
+        let Some(open_proc) = root.open_child_directory(OsStr::new("proc")).unwrap() else {
+            return;
+        };
+        if root.ensure_open_child_same_mount(&open_proc).is_err() {
+            assert!(root.ensure_entry_same_mount(&proc).is_err());
+            assert!(root.ensure_open_child_same_mount(&open_proc).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_traversal_expiry_refuses_before_actual_directory_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("root");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("original"), b"original").unwrap();
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        assert!(
+            root.remove_contents_recursive_bounded_until(
+                DirectoryTraversalBudget::new(8, 4),
+                crate::time::MonotonicDeadline::after(crate::time::Duration::ZERO)
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path.join("original")).unwrap(), b"original");
+        assert!(path.is_dir());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_traversal_global_entry_bound_survives_deadline_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("root");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("one"), b"one").unwrap();
+        std::fs::write(path.join("two"), b"two").unwrap();
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        assert!(
+            root.remove_contents_recursive_bounded_until(
+                DirectoryTraversalBudget::new(1, 4),
+                crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(2))
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path.join("one")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("two")).unwrap(), b"two");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_traversal_global_remaining_is_not_reset_between_sibling_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("root");
+        for child in ["a-first", "b-second"] {
+            std::fs::create_dir_all(path.join(child)).unwrap();
+            std::fs::write(path.join(child).join("one"), b"one").unwrap();
+            std::fs::write(path.join(child).join("two"), b"two").unwrap();
+        }
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        // Two root names + two first-sibling files leave ONE global entry.
+        // Enumerating the second sibling's TWO names must refuse before unlink.
+        assert!(
+            root.remove_contents_recursive_bounded_until(
+                DirectoryTraversalBudget::new(5, 4),
+                crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(2))
+            )
+            .is_err()
+        );
+        assert!(!path.join("a-first").exists());
+        assert_eq!(std::fs::read(path.join("b-second/one")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("b-second/two")).unwrap(), b"two");
+        assert!(path.is_dir()); // partial disposal, never a full-removal receipt
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_traversal_mid_disposal_expiry_keeps_remaining_physical_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("root");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("a-removed"), b"first").unwrap();
+        std::fs::write(path.join("b-retained"), b"second").unwrap();
+        let root = PinnedDirectory::open(&path).unwrap().unwrap();
+        let original_identity = root.identity().unwrap();
+        let original = crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1));
+        let (stepped, observed) = std::sync::mpsc::channel();
+        let (resume, held_step) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut first = true;
+            let result = original_removal_step_control::with_hook(
+                move || {
+                    if first {
+                        first = false;
+                        stepped.send(()).unwrap();
+                        held_step
+                            .recv_timeout(std::time::Duration::from_secs(2))
+                            .unwrap();
+                    }
+                },
+                || {
+                    root.remove_contents_recursive_bounded_until(
+                        DirectoryTraversalBudget::new(8, 4),
+                        original,
+                    )
+                },
+            );
+            (result, root) // return the SAME pinned owner on partial disposal
+        });
+        let observed_step = observed.recv_timeout(std::time::Duration::from_secs(2));
+        let before_expiry = !original.has_elapsed();
+        let actual_partial = !path.join("a-removed").exists() && path.join("b-retained").exists();
+        if observed_step.is_ok() && before_expiry {
+            crate::time::sleep(original.remaining() + crate::time::Duration::from_millis(5));
+        }
+        let _ = resume.send(()); // settle real traversal before asserting, including error cases
+        let (result, retained_root) = worker
+            .join()
+            .expect("actual pinned traversal owner must join");
+        assert!(
+            observed_step.is_ok() && before_expiry && actual_partial,
+            "control must stop AFTER actual first unlink and BEFORE original expiry"
+        );
+        assert!(result.is_err());
+        retained_root.ensure_path_binding().unwrap();
+        assert_eq!(retained_root.identity().unwrap(), original_identity);
+        assert!(original.has_elapsed());
+        assert!(!path.join("a-removed").exists());
+        assert_eq!(std::fs::read(path.join("b-retained")).unwrap(), b"second");
+        assert!(path.is_dir()); // actual remaining namespace is retained, no cleanup receipt
+    }
+
+    #[test]
+    fn recursive_removal_of_exact_nested_entries_preserves_root() {
+        for bounded in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root_path = temp.path().join("root");
+            std::fs::create_dir_all(root_path.join("nested")).unwrap();
+            std::fs::write(root_path.join("nested/value"), b"value").unwrap();
+            let root = PinnedDirectory::open(&root_path).unwrap().unwrap();
+            if bounded {
+                root.remove_contents_recursive_bounded(DirectoryTraversalBudget::new(8, 4))
+                    .unwrap();
+            } else {
+                root.remove_contents_recursive().unwrap();
+            }
+            assert!(root_path.is_dir());
+            assert!(root.entries_no_follow().unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -8191,6 +10762,7 @@ mod tests {
                     Some(&expected),
                     b"desired",
                     0o600,
+                    crate::secure_fs::TEST_TEMP_PURPOSE,
                 )
                 .is_err()
         );
@@ -8339,6 +10911,11 @@ mod tests {
         let guard = directory.lock_exclusive().unwrap();
         let retained = guard.clone();
         retained.ensure_protects(&directory).unwrap();
+        let observed = retained.observe_retained_identity().unwrap();
+        let original = directory.raw_device_inode().unwrap();
+        assert_eq!((observed.device, observed.inode), original);
+        let same = guard.observe_retained_identity().unwrap();
+        assert_eq!((same.device, same.inode), (observed.device, observed.inode));
         drop(guard);
 
         assert_eq!(
@@ -8416,7 +10993,13 @@ mod tests {
 
         assert!(
             directory
-                .atomic_write_if_same(OsStr::new("cas-entry"), None, b"replacement", 0o600)
+                .atomic_write_if_same(
+                    OsStr::new("cas-entry"),
+                    None,
+                    b"replacement",
+                    0o600,
+                    crate::secure_fs::TEST_TEMP_PURPOSE,
+                )
                 .is_err()
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"existing");
@@ -8435,6 +11018,7 @@ mod tests {
                 &mut payload,
                 64,
                 0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
             )
             .unwrap()
             .unwrap();
@@ -8797,11 +11381,222 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn child_creation_sync_failure_retains_original_inodes_without_retry_or_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let parent_identity = parent.identity().unwrap();
+        FAIL_CHILD_CREATE_SYNC.with(|slot| slot.set(true));
+        let error = parent
+            .create_child(OsStr::new("created"), 0o700)
+            .unwrap_err();
+        let failure = error
+            .downcast_ref::<ChildDirectoryCreationFailure>()
+            .unwrap();
+        assert_eq!(
+            failure.original_parent().identity().unwrap(),
+            parent_identity
+        );
+        assert_eq!(failure.child_name(), OsStr::new("created"));
+        let child = failure.opened_child().unwrap();
+        let child_identity = child.identity().unwrap();
+        assert!(child.entry_names().unwrap().is_empty());
+        // A later name replacement cannot become the original created owner.
+        std::fs::rename(root.path().join("created"), root.path().join("retained")).unwrap();
+        std::fs::create_dir(root.path().join("created")).unwrap();
+        assert_eq!(child.identity().unwrap(), child_identity);
+        assert!(child.ensure_path_binding().is_err());
+        assert!(parent.create_child(OsStr::new("created"), 0o700).is_err());
+        drop(error);
+        assert!(root.path().join("retained").is_dir());
+        assert!(root.path().join("created").is_dir());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_creation_without_namespace_exclusion_cannot_attribute_opened_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let path = root.path().to_path_buf();
+        BEFORE_CHILD_CREATE_OPEN.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(path.join("created"), path.join("mkdir-original")).unwrap();
+                std::fs::create_dir(path.join("created")).unwrap();
+                std::fs::write(path.join("created/foreign"), b"replacement").unwrap();
+            }));
+        });
+        FAIL_CHILD_CREATE_SYNC.with(|slot| slot.set(true));
+        let error = parent
+            .create_child(OsStr::new("created"), 0o700)
+            .unwrap_err();
+        let failure = error
+            .downcast_ref::<ChildDirectoryCreationFailure>()
+            .unwrap();
+        let opened = failure.opened_child().unwrap();
+        let created = parent
+            .open_child_directory(OsStr::new("mkdir-original"))
+            .unwrap()
+            .unwrap();
+        assert!(!opened.is_same_directory(&created).unwrap());
+        assert!(
+            opened
+                .entry_no_follow(OsStr::new("foreign"))
+                .unwrap()
+                .is_some()
+        );
+        drop(error);
+        assert!(root.path().join("mkdir-original").is_dir());
+        assert!(root.path().join("created/foreign").is_file());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_create_sync_failure_retains_published_original_file() {
+        use std::os::unix::fs::FileExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let parent = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let parent_identity = parent.identity().unwrap();
+        FAIL_ATOMIC_CREATE_PARENT_SYNC.with(|slot| slot.set(true));
+        let error = parent
+            .atomic_create_regular(
+                OsStr::new("record"),
+                b"original",
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
+            .unwrap_err();
+        let failure = error
+            .downcast_ref::<AtomicRegularCreationFailure>()
+            .unwrap();
+        assert_eq!(
+            failure.phase(),
+            AtomicRegularCreationPhase::NamespacePublished
+        );
+        assert_eq!(
+            failure.original_parent().identity().unwrap(),
+            parent_identity
+        );
+        assert_eq!(failure.target_name(), OsStr::new("record"));
+        let identity = observe_open_file_identity(failure.original_file()).unwrap();
+        let entry = parent
+            .entry_no_follow(OsStr::new("record"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.containing_device, identity.device());
+        assert_eq!(entry.inode, identity.inode());
+        std::fs::rename(
+            root.path().join("record"),
+            root.path().join("retained-original"),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("record"), b"replacement").unwrap();
+        let mut bytes = [0u8; 8];
+        assert_eq!(failure.original_file().read_at(&mut bytes, 0).unwrap(), 8);
+        assert_eq!(&bytes, b"original");
+        let after = observe_open_file_identity(failure.original_file()).unwrap();
+        // Rename can change ctime; custody is the same actual device/inode.
+        assert_eq!(after.device(), identity.device());
+        assert_eq!(after.inode(), identity.inode());
+        assert_eq!(after.size(), identity.size());
+        drop(error);
+        assert_eq!(
+            std::fs::read(root.path().join("retained-original")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("record")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_create_occupied_alias_preserves_existing_posix_lock() {
+        use std::os::fd::AsRawFd;
+        let root = tempfile::tempdir().unwrap();
+        let owner_path = root.path().join("owner");
+        let owner = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&owner_path)
+            .unwrap();
+        std::fs::hard_link(&owner_path, root.path().join("record")).unwrap();
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        assert_eq!(
+            unsafe { libc::fcntl(owner.as_raw_fd(), libc::F_SETLK, &lock) },
+            0
+        );
+        // OFD and process-owned locks conflict even in the same process. This
+        // query observes the POSIX lock without opening another inode FD.
+        let check = || {
+            let mut query: libc::flock = unsafe { std::mem::zeroed() };
+            query.l_type = libc::F_WRLCK as _;
+            query.l_whence = libc::SEEK_SET as _;
+            assert_eq!(
+                unsafe { libc::fcntl(owner.as_raw_fd(), libc::F_OFD_GETLK, &mut query) },
+                0
+            );
+            assert_eq!(query.l_type, libc::F_WRLCK as libc::c_short);
+            assert_eq!(query.l_pid, std::process::id() as libc::pid_t);
+        };
+        check();
+        assert!(
+            directory
+                .atomic_create_regular(
+                    OsStr::new("record"),
+                    b"replacement",
+                    0o600,
+                    crate::secure_fs::TEST_TEMP_PURPOSE,
+                )
+                .unwrap()
+                .is_none()
+        );
+        check();
+        assert_eq!(owner.metadata().unwrap().len(), 0);
+        assert_eq!(directory.entry_names().unwrap().len(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_create_refuses_nonregular_incumbents_without_following_them() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let root = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        std::fs::create_dir(root.path().join("directory")).unwrap();
+        symlink("missing", root.path().join("symlink")).unwrap();
+        let fifo = std::ffi::CString::new(root.path().join("fifo").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        for name in ["directory", "symlink", "fifo"] {
+            assert!(
+                directory
+                    .atomic_create_regular(
+                        OsStr::new(name),
+                        b"replacement",
+                        0o600,
+                        crate::secure_fs::TEST_TEMP_PURPOSE,
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(directory.entry_names().unwrap().len(), 3);
+        assert!(!root.path().join("missing").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn prepared_batch_entry_is_hidden_until_its_complete_bytes_are_flushed() {
         let dir = tempfile::tempdir().unwrap();
         let directory = PinnedDirectory::open(dir.path()).unwrap().unwrap();
         let prepared = directory
-            .prepare_atomic_create(OsStr::new("cas-entry"), b"complete bytes", 0o600)
+            .prepare_atomic_create(
+                OsStr::new("cas-entry"),
+                b"complete bytes",
+                0o600,
+                crate::secure_fs::TEST_TEMP_PURPOSE,
+            )
             .unwrap()
             .unwrap();
 
@@ -9184,5 +11979,327 @@ mod tests {
         );
         assert!(digest_open_regular_file_stable_chunked_exact(&file, 9, 4).is_err());
         assert!(digest_open_regular_file_stable_chunked_exact(&file, 10, 0).is_err());
+    }
+}
+
+// Test-only acknowledgement gate on actual existing physical disposal steps.
+// It creates no production callback, registry, worker or cleanup authority.
+#[cfg(all(test, target_os = "linux"))]
+mod original_removal_step_control {
+    use super::*;
+    use std::os::unix::fs::MetadataExt as _;
+
+    std::thread_local! {
+        static AFTER_ACTUAL_STEP: std::cell::RefCell<Option<Box<dyn FnMut()>>> = std::cell::RefCell::new(None);
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            AFTER_ACTUAL_STEP.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn with_hook<T>(hook: impl FnMut() + 'static, operation: impl FnOnce() -> T) -> T {
+        AFTER_ACTUAL_STEP.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "actual disposal test gate cannot nest"
+            );
+            *slot.borrow_mut() = Some(Box::new(hook));
+        });
+        let _reset = Reset;
+        operation()
+    }
+    pub(super) fn checkpoint() {
+        AFTER_ACTUAL_STEP.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn removal_receipt_transfer_preserves_aliases_and_exact_descriptors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let child = parent.create_child(OsStr::new("child"), 0o700).unwrap();
+        let receipt = Arc::new(
+            parent
+                .remove_empty_child_if_same(OsStr::new("child"), &child)
+                .unwrap()
+                .unwrap(),
+        );
+        let parent_fd = receipt.parent.directory.as_raw_fd();
+        let child_fd = receipt.child.directory.as_raw_fd();
+        let alias = Arc::clone(&receipt);
+        let original = receipt.try_into_original_parts().unwrap_err();
+        assert!(Arc::ptr_eq(&original, &alias));
+        assert_eq!(original.parent.directory.as_raw_fd(), parent_fd);
+        assert_eq!(original.child.directory.as_raw_fd(), child_fd);
+        drop(alias);
+        let (actual_parent, actual_child, name) = original.try_into_original_parts().unwrap();
+        assert_eq!(actual_parent.directory.as_raw_fd(), parent_fd);
+        assert_eq!(actual_child.directory.as_raw_fd(), child_fd);
+        assert_eq!(name, OsStr::new("child"));
+        assert!(actual_parent.directory.metadata().unwrap().is_dir());
+        assert_eq!(actual_child.directory.metadata().unwrap().nlink(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn removal_receipt_transfer_refuses_foreign_process_before_consumption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let child = parent.create_child(OsStr::new("child"), 0o700).unwrap();
+        let mut receipt = parent
+            .remove_empty_child_if_same(OsStr::new("child"), &child)
+            .unwrap()
+            .unwrap();
+        let parent_fd = receipt.parent.directory.as_raw_fd();
+        let child_fd = receipt.child.directory.as_raw_fd();
+        receipt.process = std::process::id().wrapping_add(1);
+        let original = Arc::new(receipt).try_into_original_parts().unwrap_err();
+        assert_eq!(original.parent.directory.as_raw_fd(), parent_fd);
+        assert_eq!(original.child.directory.as_raw_fd(), child_fd);
+        assert!(original.parent.directory.metadata().unwrap().is_dir());
+        assert_eq!(original.child.directory.metadata().unwrap().nlink(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_child_receipt_requires_actual_removal_and_preserves_nonempty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let child = parent.create_child(OsStr::new("child"), 0o700).unwrap();
+        let original = child.identity().unwrap();
+        std::fs::write(child.path().join("foreign"), b"preserve").unwrap();
+        assert!(
+            parent
+                .remove_empty_child_if_same(OsStr::new("child"), &child)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read(child.path().join("foreign")).unwrap(),
+            b"preserve"
+        );
+        std::fs::remove_file(child.path().join("foreign")).unwrap();
+        let receipt = parent
+            .remove_empty_child_if_same(OsStr::new("child"), &child)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.child().identity().unwrap(), original);
+        assert!(receipt.parent().is_same_directory(&parent).unwrap());
+        assert_eq!(receipt.name(), OsStr::new("child"));
+        assert!(!child.path().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_child_sync_failure_retains_removed_original_and_preserves_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let original = parent.create_child(OsStr::new("child"), 0o700).unwrap();
+        let original_identity = original.identity().unwrap();
+        FAIL_CHILD_REMOVE_SYNC.with(|slot| slot.set(true));
+        let error = parent
+            .remove_empty_child_if_same(OsStr::new("child"), &original)
+            .map(|receipt| receipt.is_some())
+            .unwrap_err();
+        let failure = std::sync::Arc::new(error.downcast::<EmptyChildRemovalFailure>().unwrap());
+        assert_eq!(failure.stage(), EmptyChildRemovalStage::RemovedPendingSync);
+        assert_eq!(failure.child().identity().unwrap(), original_identity);
+        assert!(
+            failure
+                .parent()
+                .entry_no_follow(failure.name())
+                .unwrap()
+                .is_none()
+        );
+        let receipt = failure.retry_sync().unwrap();
+        assert_eq!(receipt.child().identity().unwrap(), original_identity);
+        assert_eq!(receipt.name(), OsStr::new("child"));
+        let same = failure.retry_sync().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&receipt, &same));
+        let replacement = parent.create_child(OsStr::new("child"), 0o700).unwrap();
+        assert_ne!(replacement.identity().unwrap(), original_identity);
+        assert!(failure.retry_sync().is_err());
+        assert!(
+            failure
+                .parent()
+                .remove_empty_child_if_same(failure.name(), failure.child())
+                .map(|receipt| receipt.is_some())
+                .is_err()
+        );
+        drop(failure);
+        drop(receipt);
+        drop(same);
+        assert!(
+            tmp.path().join("child").is_dir(),
+            "failure/receipt Drop cannot remove a replacement"
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fixed_directory_binding_controls {
+    #[test]
+    fn original_binding_accepts_and_rebound_inode_refuses() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        original.ensure_path_binding().unwrap();
+        original.ensure_path_binding_fixed().unwrap();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        assert!(original.ensure_path_binding().is_err());
+        assert!(original.ensure_path_binding_fixed().is_err());
+    }
+    #[test]
+    fn namespace_rebind_keeps_the_same_inode_and_refuses_another() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+        original.ensure_path_binding().unwrap();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        assert!(original.rebind_in_current_mount_namespace().is_err());
+        assert_eq!(original.identity().unwrap(), identity);
+        assert!(original.ensure_path_binding().is_err());
+    }
+    #[test]
+    fn released_binding_keeps_descriptor_authority_without_path_proofs() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.release_path_binding();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        original.ensure_path_binding().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+    }
+
+    #[test]
+    fn original_binding_rejects_symlink_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        let retained = temp.path().join("retained");
+        std::fs::create_dir(&selected).unwrap();
+        let original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        std::fs::rename(&selected, &retained).unwrap();
+        std::os::unix::fs::symlink(&retained, &selected).unwrap();
+        assert!(original.ensure_path_binding().is_err());
+        assert!(original.ensure_path_binding_fixed().is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fixed_private_directory_controls {
+    #[test]
+    fn exact_owner_mode_is_required_by_both_checks() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private");
+        std::fs::create_dir(&path).unwrap();
+        let directory = super::PinnedDirectory::open(&path).unwrap().unwrap();
+        for (mode, accepted) in [
+            (0o700, true),
+            (0o750, false),
+            (0o1700, false),
+            (0o2700, false),
+        ] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                directory.require_owner_private_directory().is_ok(),
+                accepted
+            );
+            assert_eq!(
+                directory.require_owner_private_directory_fixed().is_ok(),
+                accepted
+            );
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fixed_regular_entry_controls {
+    #[test]
+    fn retained_inode_accepts_and_replacement_or_symlink_refuses() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = super::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let path = temp.path().join("account");
+        std::fs::write(&path, b"original").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let name = std::ffi::OsStr::new("account");
+        directory
+            .require_regular_entry_descriptor_fixed(name, &file)
+            .unwrap();
+        std::fs::rename(&path, temp.path().join("retained")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(
+            directory
+                .require_regular_entry_descriptor_fixed(name, &file)
+                .is_err()
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            directory
+                .require_regular_entry_descriptor_fixed(name, &file)
+                .is_err()
+        );
+        std::os::unix::fs::symlink(temp.path().join("retained"), &path).unwrap();
+        assert!(
+            directory
+                .require_regular_entry_descriptor_fixed(name, &file)
+                .is_err()
+        );
+        assert_eq!(file.metadata().unwrap().len(), 8);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod unlink_regular_if_same_tests {
+    use super::*;
+
+    #[test]
+    fn unlinks_only_the_expected_inode_and_reports_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        std::fs::write(tmp.path().join("debris"), b"one").unwrap();
+        let pin = directory
+            .open_mount_entry(OsStr::new("debris"))
+            .unwrap()
+            .unwrap();
+        // A replacement at the same name is refused and kept.
+        std::fs::rename(tmp.path().join("debris"), tmp.path().join("moved")).unwrap();
+        std::fs::write(tmp.path().join("debris"), b"two").unwrap();
+        assert!(
+            directory
+                .unlink_regular_if_same(OsStr::new("debris"), &pin)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(tmp.path().join("debris")).unwrap(), b"two");
+        // The expected inode is unlinked; a second call finds it absent.
+        assert!(
+            directory
+                .unlink_regular_if_same(OsStr::new("moved"), &pin)
+                .unwrap()
+        );
+        assert!(!tmp.path().join("moved").exists());
+        assert!(
+            !directory
+                .unlink_regular_if_same(OsStr::new("moved"), &pin)
+                .unwrap()
+        );
     }
 }

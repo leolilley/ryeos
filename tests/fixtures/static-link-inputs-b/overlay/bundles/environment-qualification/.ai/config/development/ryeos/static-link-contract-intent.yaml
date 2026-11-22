@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-29T06:43:34Z:9e60899e5c00383c4ae5597ee9e67fe396edec5ed13e8816dd3ff388d52fbf3b:QXOCPmTWBdJb2Z9/acmg1F3YiL2bEShzhlY290ndw9dNn+DhO5BTSVXwgVLO9228lIAy+1HDDDX8UvqNA3uiBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+name: static-link-contract-intent
+version: "1.1.0"
+schema: ryeos.static_link_contract_intent.v1
+# Resolve this intent from admitted project source, with the source Standard
+# manifest authenticated against the installed Standard publisher. Select
+# the B contract at .ai/config/development/ryeos/static-link-inputs.yaml in the
+# explicitly applied candidate project.
+# This intent selects contract bytes; the signed producer Tool independently
+# selects its input realization, and qualification has its own member policy.
+expected_contract_body_sha256: 7c9931a86ea0c7411527f0e22b2020cd13b741f66cc25b5276eafdbb08bf1743

@@ -1,12 +1,17 @@
-# ryeos:signed:2026-08-04T10:21:25Z:9be880dd2e156334f6d6d8b0fed109344c19103d9f9edb7ed26a1e41769a9afb:iYfOQikCB+06NYtUSRMcJ/6WBMaUZ3o7pg02K0NpiY6MlffVJfMzHlUiU1hgOlfvXmWOuet/fYpSnBfccdWADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T19:57:15Z:a9c7fa456c6b42b2b3a45c5bbb41ccc2340f7008c69439666e07ae0e92fdac1a:63V0BmTAG54ZHcHLRF7uf0/0Nu/eGRvM8f89Nd9X/N/dE3NOot+Rm1C1ug+mrZMpxQ8LCI4/OELIspk8L0LQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
-title: Node Threads
+title: Observed Operator Threads
 version: "1.0.0"
 description: >-
-  Node-wide thread history across project contexts. The input acts as the
+  Bounded threads visible to this admitted operator, not every owner on the
+  node. An empty page is not proof of no retained work. The input acts as the
   active/status/kind/source filter instead of a separate active-only view.
 
 widget: table
+# The tile's right note: how the page is bounded and ordered, said plainly.
+body:
+  supplement:
+    frame_detail: "200 at most · sorted by watch"
 sources:
   default:
     ref: service:ui/ryeos-ui/threads/list
@@ -14,40 +19,47 @@ sources:
       limit: 200
       sort: watch
     collection: threads
+    coverage: coverage
 projections:
   columns:
     - label: thread
       field: thread_id
+      role: id
     - label: kind
       field: kind
+      role: kind
       present: words
+      # The wire kind names the run; the table says what ran.
+      labels:
+        directive_run: directive
+        graph_run: graph
+        schedule_run: schedule
+        tool_run: tool
+        worker_run: worker
     # The table carries the readable leaf; the full canonical ref remains in
     # expanded detail.
     - label: item
       field: item_ref
+      role: ref
       present: leaf
     - label: project
       field: project.name
+      role: text
       fallback: node
     - label: status
       field: status
+      role: status
       present: words
-    # Sparse by design: ordinary threads stay blank, while graph-follow rows
-    # expose their operator-facing lineage state instead of an internal role.
-    - label: lineage
-      field: follow.display_state
-      present: words
-      tone:
-        field: follow.display_state
-        map:
-          suspended: warn
-          resume_queued: neutral
-          resumed: good
     - label: created
       field: created_at
-      present: time_date
+      role: time
+      # Today reads as the time of day, the day before as the word below,
+      # older rows as time and date.
+      present: time_relative
+      labels:
+        yesterday: yesterday
   expand:
-    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at, current_node.node, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected, error]
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at]
   tone:
     field: status
     map:
@@ -67,33 +79,21 @@ selection:
   activate: watch
 affordances:
   - id: watch
-    label: Watch
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
-      drill: true
-  - id: watch-child
-    label: Watch child
-    invoke:
-      plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.follow.child_thread_id}"
-        chain_root: "{record.follow.child_chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
   - id: tree
     label: Tree
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
       open_view: view:ryeos/thread/tree
       drill: true
   - id: inspect

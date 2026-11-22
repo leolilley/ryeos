@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-27T22:01:04Z:12db5676b51943e6ad69a58d9709901c270fdd7ae28cf057e02a41ef8f34682e:PqDJY4xkwjKEyhUSjs9DWZMabzbbFnwglr8yjLtjrGHdMWJaOQ6rL2/JNWO1AVaqEqOd1GZmH7Lib9cYW2b1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:27:24Z:bd47578d52eb1175879876dc249ca36482ed464b3773e4e978bfb2630e9cb431:8oBOdmxBd5oH9B1UlGoV1cMwf5UiAtlvqKP1SwMWlnjd9cl71F5lgnur782Rc6zZCX0BwAvi7GOllcnKttmfAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
 title: "RyeOS Repository Development Knowledge"
 description: "Scope and index for contributor-facing knowledge used to change, test, review, and release the RyeOS repository"
 entry_type: reference
-version: "1.0.3"
+version: "1.0.4"
 ```
 
 # RyeOS Repository Development Knowledge
@@ -20,7 +20,7 @@ product architecture, operator activation, or user workflows.
 | Knowledge | Location |
 |---|---|
 | How to build, test, sign, review, migrate, debug, or release this repository | `.ai/knowledge/ryeos/development/` |
-| Implemented RyeOS concepts, runtime contracts, user workflows, and cross-bundle operator runbooks | `bundles/standard/.ai/knowledge/` |
+| Implemented RyeOS concepts, runtime contracts, user workflows, and cross-bundle operator runbooks | `bundles/ryeos-docs/.ai/knowledge/` |
 | Knowledge inseparable from a self-contained optional bundle and intentionally available only with that bundle | That feature bundle's `.ai/knowledge/`, when the bundle provides knowledge |
 | Explicitly deferred design work | `.ai/knowledge/ryeos/future/` |
 | Research arguments and papers | `.ai/knowledge/ryeos/papers/` |
@@ -41,6 +41,8 @@ contributor guide rather than duplicating the product documentation.
 - `dev-workflow`, `build-and-test`, `remote-development-and-qualification`,
   `ui-development`, `mcp-setup`, and `source-local-bundle-development`:
   contributor workflows.
+- `dev-host-tools`: externally invoked host tools for guarded cargo, daemon
+  feature checks, init smokes and dev-node drift.
 - `signing`, `release-process`, and `bundle-format-migrations`: publication and
   migration procedures for repository changes.
 - `persistence-schema-evolution` and `filesystem-durability`: implementation
@@ -49,6 +51,9 @@ contributor guide rather than duplicating the product documentation.
 - `steering-graph-interrupt-and-cancel-path`: an implementation decision record.
 - `admitted-execution-recovery`: a contributor-facing map of the recovery code
   and the invariants changes to that code must preserve.
+- `signed-offline-operations` and `remote-qualification-testimony`: design
+  rationale, threat model and invariants for stopped-node changes and for
+  qualifications that cross between nodes.
 - `ui-design-system`: the governing Gruvbox visual language, nested-view-set
   direction, component anatomy, contextual-input rules, renderer/content
   ownership and visual review criteria. Read it before implementing or restyling

@@ -1,7 +1,8 @@
-# ryeos:signed:2026-09-14T10:03:09Z:a08b6a9314ddc886651fc491f77f1f979b4b5788a6a4db2ba83f00c866610ccb:mq7RZkAl5kd6gO9a5Y9IDIDqyvU79KXvYAGqUfI57ERQpsyOVlnLB57MyF5lIyD6OXOxSNWErJPUrfX7FS2vDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T22:09:14Z:4810b8ae22c8b0b09254845ecdc842134d50829249e594ba26b82837804b00b0:FKYPmB76FYEbWqdO/Y1D89IYt2oQO3n9uvVLMnQHeMKgL+d+Xgkv/91rp3meDPn5y38I4CJkaqoz3zxPa+72CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread-crystal
+title: Thread crystal
 version: "1.0.0"
-description: Focused thread transcript over the live prism backdrop
+description: Focused thread transcript
 
 capabilities:
   sources: ["ryeos.execute.service.*"]
@@ -16,16 +17,14 @@ tiling:
 tiles:
   - "view:ryeos/thread/transcript"
 
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
-
 style:
   border: hidden
 
-backdrop: view:ryeos/backdrop/prism-shards
 
 library:
+  - group: Inspection
+    views:
+      - view:ryeos/node/status
   - group: Threads
     views:
       - view:ryeos/threads/history
@@ -51,11 +50,7 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
-
-ambient:
-  show_background: true
-  opacity: 0.35
+          model: directive:ryeos/models/general
 
 affordances:
   - id: view.transcript

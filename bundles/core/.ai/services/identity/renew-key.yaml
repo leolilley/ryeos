@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T16:31:53Z:49c40fe51feb00c1157ca1265438cece3a50597f07a0944b6a8bb90928178142:bctHXTBQow08KGrISezB5dEJyt6gUOW+2CvctYkn20VtqPF5l1/9HwyzP1Ml5ojXHpYu5vyISI6rarm+TevaBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: identity.renew-key
+required_caps: ["ryeos.execute.service.identity/renew-key"]
+schema:
+  fingerprint: string
+  lifetime_secs: number?
+description: "Renew an authorized-key grant with a new expiry. Only the principal that granted the key or the node operator may renew it; the grantee cannot extend its own grant."

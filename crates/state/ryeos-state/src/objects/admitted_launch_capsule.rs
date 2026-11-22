@@ -37,9 +37,24 @@ use super::{
 // binding identity in direct plans. Missing predecessor fields are not local
 // execution authority and must never be filled from current node preferences.
 // v30 classifies product-qualification purpose as executable-program authority.
-// A verifier's selected policy, witness and purpose cannot enter or leave the
-// sealed invocation without moving the exact program identity.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 30;
+// v31 binds its explicit qualification subject. v32 is the strict source cut
+// for the retained remote-verifier inventory. A verifier's selected policy,
+// witness and purpose cannot enter or leave the sealed invocation without
+// moving the exact program identity. V34 seals the consumer runtime
+// realization and admitted qualification use. V35 requires the closed,
+// byte-bounded member-source proof and exact runtime-definition owner on every
+// BundleExecutor identity. V37 seals the admitted recipient principal and its
+// own scopes into every vault-reading environment authority (project overlay
+// and vault namespace), as provider environments already did. V38 records the
+// request's live-project intent (`default` or `live`) in every live project
+// authority; an explicit live demand is refused wherever the resolved root is
+// not live. V39 seals the external-effect authority's unknown-outcome retry
+// ceiling, the number of leading retries a runtime may issue after a failure
+// that leaves it unknown whether the external system acted. Every schema change here requires a matching
+// Operational dispatch-effect replay-index epoch bump, which retires effects
+// sealed under predecessor capsule contracts.
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 39;
+pub const MAX_ADMITTED_LAUNCH_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
 
@@ -64,7 +79,7 @@ const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
     "project_binding_subject_authority",
     "project_context",
     "product_selections",
-    "product_qualification",
+    "qualification",
     "ref_bindings",
     "resolved_ref_bindings",
     "requested_by",
@@ -391,7 +406,7 @@ where
 /// Recovery may apply stricter current trust and isolation policy, but it
 /// must never rebuild these values from mutable runtime, protocol, executor,
 /// or kind registries.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "driver", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AdmittedExecutionClosure {
     ManagedRuntime {
@@ -418,6 +433,14 @@ pub enum AdmittedDirectCommandClosure {
         /// to the process image. This is behavior-bearing for interpreters and
         /// binaries whose loader resolves adjacent libraries from `$ORIGIN`.
         execution_path: std::path::PathBuf,
+        /// Canonical host file the admitted bytes were captured from, when
+        /// they came from the host. Not authority: disabled isolation may run
+        /// this inode in place of a sealed copy only after re-digesting it to
+        /// `executable_blob_hash` and proving the daemon cannot change it, so
+        /// a multi-call binary's executable self lookup names the real file.
+        /// Its file name is the execution path's file name.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        host_origin: Option<std::path::PathBuf>,
     },
     RealizationMember {
         executable_blob_hash: String,
@@ -484,8 +507,20 @@ impl AdmittedExecutionClosure {
                 if let AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash,
                     execution_path,
+                    host_origin,
                 } = command
                 {
+                    if let Some(host_origin) = host_origin {
+                        validate_absolute_normalized_path(
+                            "admitted direct command host origin",
+                            host_origin,
+                        )?;
+                        if host_origin.file_name() != execution_path.file_name() {
+                            anyhow::bail!(
+                                "admitted direct command host origin names a different file than its execution path"
+                            );
+                        }
+                    }
                     super::thread_snapshot::validate_canonical_hash(
                         "admitted direct executable blob hash",
                         executable_blob_hash,
@@ -660,6 +695,476 @@ impl AdmittedAccountingScope {
     }
 }
 
+pub const MAX_BUNDLE_EXECUTOR_PROOF_BYTES: usize = 5_439_492;
+const MAX_PROOF_METADATA_BYTES: usize = 65_536;
+const MAX_SIGNED_EXECUTOR_MANIFEST_REF_BYTES: usize = 16 * 1024;
+const MAX_EXECUTOR_MANIFEST_OBJECT_BYTES: usize = 1024 * 1024;
+const MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES: usize = 64 * 1024;
+const MAX_SIGNED_ITEM_SOURCE_SIDECAR_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RetainedItemSpaceV1 {
+    Project,
+    Bundle,
+    Node,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RetainedTrustClassV1 {
+    TrustedBundle,
+    TrustedProject,
+    TrustedNode,
+    UntrustedProject,
+    Unsigned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BundleExecutorRequestOriginV1 {
+    WrapperBundle { wrapper_bundle_name: String },
+    QualifiedBundleAlias { bundle_alias: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedBundleIdentityV1 {
+    pub name: String,
+    pub body_digest: String,
+    pub signer_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedRuntimeDefinitionOwnerV1 {
+    pub requested_id: String,
+    pub canonical_ref: String,
+    pub source_space: RetainedItemSpaceV1,
+    pub trust_class: RetainedTrustClassV1,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub signer_fingerprint: Option<String>,
+    pub content_hash: String,
+    pub raw_content_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedRuntimeBinarySelectionV1 {
+    pub definition_owner: RetainedRuntimeDefinitionOwnerV1,
+    /// Exact zero-based position in the authenticated runtime executor chain.
+    pub definition_owner_chain_index: usize,
+    pub authored_command: String,
+    pub expanded_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleExecutorMemberSourceProofV1 {
+    pub requested_binary_ref: String,
+    pub request_origin: BundleExecutorRequestOriginV1,
+    pub selected_bundle: SelectedBundleIdentityV1,
+    pub runtime_selection: RetainedRuntimeBinarySelectionV1,
+    pub selected_item_ref: String,
+    pub target_triple: String,
+    pub item_source_hash: String,
+    pub expected_mode: u32,
+    pub signed_executor_manifest_ref: Vec<u8>,
+    pub executor_manifest_object: serde_json::Value,
+    pub item_source_object: serde_json::Value,
+    pub signed_item_source_sidecar: Vec<u8>,
+}
+
+impl BundleExecutorMemberSourceProofV1 {
+    pub fn validate(
+        &self,
+        executor_manifest_hash: &str,
+        executor_manifest_signer: &str,
+        executable_content_hash: &str,
+    ) -> anyhow::Result<()> {
+        let validate_hash =
+            |label: &str, hash: &str| super::thread_snapshot::validate_canonical_hash(label, hash);
+        validate_hash(
+            "selected Bundle body digest",
+            &self.selected_bundle.body_digest,
+        )?;
+        validate_hash(
+            "selected Bundle signer",
+            &self.selected_bundle.signer_fingerprint,
+        )?;
+        validate_hash("executor manifest hash", executor_manifest_hash)?;
+        validate_hash("executor manifest signer", executor_manifest_signer)?;
+        validate_hash("executable content hash", executable_content_hash)?;
+        validate_hash("ItemSource hash", &self.item_source_hash)?;
+        validate_hash(
+            "runtime definition content hash",
+            &self.runtime_selection.definition_owner.content_hash,
+        )?;
+        validate_hash(
+            "runtime definition raw content digest",
+            &self.runtime_selection.definition_owner.raw_content_digest,
+        )?;
+        if let Some(signer) = &self.runtime_selection.definition_owner.signer_fingerprint {
+            validate_hash("runtime definition signer", signer)?;
+        }
+        validate_trimmed_control_free("requested binary ref", &self.requested_binary_ref, false)?;
+        validate_trimmed_control_free(
+            "selected executor member ref",
+            &self.selected_item_ref,
+            false,
+        )?;
+        validate_trimmed_control_free("executor target triple", &self.target_triple, false)?;
+        validate_trimmed_control_free("selected Bundle name", &self.selected_bundle.name, false)?;
+        validate_trimmed_control_free(
+            "runtime owner requested id",
+            &self.runtime_selection.definition_owner.requested_id,
+            false,
+        )?;
+        validate_trimmed_control_free(
+            "runtime owner canonical ref",
+            &self.runtime_selection.definition_owner.canonical_ref,
+            false,
+        )?;
+        validate_trimmed_control_free(
+            "runtime authored command",
+            &self.runtime_selection.authored_command,
+            false,
+        )?;
+        if self.runtime_selection.expanded_command != self.requested_binary_ref {
+            anyhow::bail!(
+                "runtime expanded command differs from successful binary resolver request"
+            );
+        }
+        let requested = self
+            .requested_binary_ref
+            .strip_prefix("bin:")
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor proof request must use bin: form"))?;
+        let (alias, name) = match requested.split_once('/') {
+            Some((alias, name)) if !name.contains('/') => (Some(alias), name),
+            Some(_) => {
+                anyhow::bail!("BundleExecutor proof request has a noncanonical qualified shape")
+            }
+            None => (None, requested),
+        };
+        let selected_name = if alias.is_none() { name.trim() } else { name };
+        if selected_name.is_empty()
+            || selected_name.contains('/')
+            || selected_name.contains("..")
+            || selected_name.starts_with('.')
+            || selected_name.chars().any(char::is_whitespace)
+            || selected_name.chars().any(char::is_control)
+            || self.selected_item_ref != format!("bin/{}/{selected_name}", self.target_triple)
+        {
+            anyhow::bail!("selected executor member does not derive from the exact binary request");
+        }
+        if !safe_bundle_member_segment(&self.target_triple)
+            || !safe_bundle_member_segment(&self.selected_bundle.name)
+        {
+            anyhow::bail!("BundleExecutor proof contains an unsafe target or Bundle segment");
+        }
+        match (&self.request_origin, alias) {
+            (
+                BundleExecutorRequestOriginV1::WrapperBundle {
+                    wrapper_bundle_name,
+                },
+                None,
+            ) if wrapper_bundle_name == &self.selected_bundle.name => {}
+            (BundleExecutorRequestOriginV1::QualifiedBundleAlias { bundle_alias }, Some(alias))
+                if bundle_alias == alias && bundle_alias == &self.selected_bundle.name => {}
+            _ => {
+                anyhow::bail!("BundleExecutor request origin contradicts selected Bundle identity")
+            }
+        }
+        if self.signed_executor_manifest_ref.len() > MAX_SIGNED_EXECUTOR_MANIFEST_REF_BYTES
+            || self.signed_item_source_sidecar.len() > MAX_SIGNED_ITEM_SOURCE_SIDECAR_BYTES
+        {
+            anyhow::bail!("BundleExecutor signed proof document exceeds its byte ceiling");
+        }
+        let manifest = lillux::canonical_json_bounded(
+            &self.executor_manifest_object,
+            MAX_EXECUTOR_MANIFEST_OBJECT_BYTES,
+        )?;
+        if manifest.len() > MAX_EXECUTOR_MANIFEST_OBJECT_BYTES
+            || lillux::sha256_hex(&manifest) != executor_manifest_hash
+        {
+            anyhow::bail!(
+                "BundleExecutor manifest object exceeds its byte ceiling or hash identity"
+            );
+        }
+        let signed_ref = std::str::from_utf8(&self.signed_executor_manifest_ref)?;
+        let (signature_line, manifest_body) = signed_ref
+            .split_once('\n')
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor signed manifest ref is malformed"))?;
+        let header = lillux::signature::parse_signature_line(signature_line, "#", None)
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor signed manifest header is malformed"))?;
+        let expected_manifest_body =
+            format!("ryeos:bundle-executor-manifest\n{executor_manifest_hash}\n");
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(&header.signature_b64)
+            .context("decode BundleExecutor signed manifest signature")?;
+        if manifest_body != expected_manifest_body
+            || header.signer_fingerprint != executor_manifest_signer
+            || header.content_hash != lillux::signature::content_hash(manifest_body)
+            || signature.len() != 64
+            || base64::engine::general_purpose::STANDARD.encode(&signature) != header.signature_b64
+        {
+            anyhow::bail!("BundleExecutor signed manifest ref contradicts its manifest identity");
+        }
+        let manifest_object = self
+            .executor_manifest_object
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor manifest object must be an object"))?;
+        let item_source_hashes = manifest_object
+            .get("item_source_hashes")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor manifest lacks item_source_hashes"))?;
+        if manifest_object.len() != 2
+            || manifest_object
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("source_manifest")
+            || item_source_hashes
+                .get(&self.selected_item_ref)
+                .and_then(serde_json::Value::as_str)
+                != Some(self.item_source_hash.as_str())
+        {
+            anyhow::bail!("BundleExecutor manifest does not select the retained ItemSource");
+        }
+        let item_source = lillux::canonical_json_bounded(
+            &self.item_source_object,
+            MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES,
+        )?;
+        if item_source.len() > MAX_EXECUTOR_ITEM_SOURCE_OBJECT_BYTES
+            || lillux::sha256_hex(&item_source) != self.item_source_hash
+        {
+            anyhow::bail!("BundleExecutor ItemSource object exceeds its ceiling or hash identity");
+        }
+        let item_source_object = self
+            .item_source_object
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor ItemSource must be an object"))?;
+        let blob_hash = item_source_object
+            .get("content_blob_hash")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor ItemSource has no content blob hash"))?;
+        validate_hash("BundleExecutor content blob hash", blob_hash)?;
+        let mode = item_source_object
+            .get("mode")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor ItemSource has no numeric mode"))?;
+        if item_source_object.len() != 6
+            || item_source_object
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("item_source")
+            || item_source_object
+                .get("item_ref")
+                .and_then(serde_json::Value::as_str)
+                != Some(self.selected_item_ref.as_str())
+            || item_source_object
+                .get("integrity")
+                .and_then(serde_json::Value::as_str)
+                != Some(format!("sha256:{blob_hash}").as_str())
+            || item_source_object.get("signature_info") != Some(&serde_json::Value::Null)
+            || blob_hash != executable_content_hash
+            || mode != u64::from(self.expected_mode)
+            || mode > 0o777
+            || mode & 0o111 == 0
+        {
+            anyhow::bail!("BundleExecutor ItemSource contradicts its retained member or mode");
+        }
+        let sidecar = std::str::from_utf8(&self.signed_item_source_sidecar)?;
+        let (sidecar_header, sidecar_body) = sidecar
+            .split_once('\n')
+            .ok_or_else(|| anyhow::anyhow!("BundleExecutor ItemSource sidecar is malformed"))?;
+        let sidecar_header = lillux::signature::parse_signature_line(sidecar_header, "#", None)
+            .ok_or_else(|| {
+                anyhow::anyhow!("BundleExecutor ItemSource sidecar header is malformed")
+            })?;
+        let sidecar_signature = base64::engine::general_purpose::STANDARD
+            .decode(&sidecar_header.signature_b64)
+            .context("decode BundleExecutor ItemSource sidecar signature")?;
+        let canonical_item_source = std::str::from_utf8(&item_source)?;
+        if sidecar_body != canonical_item_source
+            || sidecar_header.signer_fingerprint != executor_manifest_signer
+            || sidecar_header.content_hash != lillux::signature::content_hash(sidecar_body)
+            || sidecar_signature.len() != 64
+            || base64::engine::general_purpose::STANDARD.encode(&sidecar_signature)
+                != sidecar_header.signature_b64
+        {
+            anyhow::bail!("BundleExecutor ItemSource sidecar contradicts retained source identity");
+        }
+        let full = lillux::canonical_json_bytes_bounded(self, MAX_BUNDLE_EXECUTOR_PROOF_BYTES)?;
+        let encoded_signed_ref = lillux::canonical_json_bytes_bounded(
+            &self.signed_executor_manifest_ref,
+            MAX_BUNDLE_EXECUTOR_PROOF_BYTES,
+        )?;
+        let encoded_sidecar = lillux::canonical_json_bytes_bounded(
+            &self.signed_item_source_sidecar,
+            MAX_BUNDLE_EXECUTOR_PROOF_BYTES,
+        )?;
+        let document_bytes =
+            encoded_signed_ref.len() + manifest.len() + item_source.len() + encoded_sidecar.len();
+        let metadata_bytes = full.len().checked_sub(document_bytes).ok_or_else(|| {
+            anyhow::anyhow!("BundleExecutor proof document accounting exceeds its encoding")
+        })?;
+        if metadata_bytes > MAX_PROOF_METADATA_BYTES {
+            anyhow::bail!("BundleExecutor proof metadata exceeds its aggregate byte ceiling");
+        }
+        Ok(())
+    }
+}
+
+fn safe_bundle_member_segment(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('.')
+        && !value.contains("..")
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.chars().any(char::is_whitespace)
+        && !value.chars().any(char::is_control)
+}
+
+pub(crate) fn validate_bundle_executor_plan_proof(
+    execution_plan: &serde_json::Value,
+    executable_identity: &DirectExecutableIdentity,
+) -> anyhow::Result<()> {
+    let plan_command = execution_plan
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|nodes| nodes.first())
+        .filter(|node| {
+            node.get("node_type").and_then(serde_json::Value::as_str) == Some("dispatch_subprocess")
+        })
+        .and_then(|node| node.get("spec"))
+        .and_then(|spec| spec.get("verified_command"));
+    match executable_identity {
+        DirectExecutableIdentity::BundleExecutor {
+            member_source_proof,
+            ..
+        } => {
+            if plan_command
+                .and_then(|command| command.get("authority"))
+                .and_then(serde_json::Value::as_str)
+                != Some("bundle_executor")
+            {
+                anyhow::bail!("BundleExecutor identity contradicts exact plan command authority");
+            }
+            let provider = plan_command
+                .and_then(|command| command.get("provider"))
+                .ok_or_else(|| anyhow::anyhow!("BundleExecutor plan has no member-source proof"))?;
+            let encoded = provider
+                .get("member_source_proof")
+                .ok_or_else(|| anyhow::anyhow!("BundleExecutor plan has no member-source proof"))?;
+            let retained: BundleExecutorMemberSourceProofV1 =
+                serde_json::from_value(encoded.clone())
+                    .context("decode BundleExecutor plan member-source proof")?;
+            if &retained != member_source_proof {
+                anyhow::bail!(
+                    "BundleExecutor member-source proof contradicts exact execution plan"
+                );
+            }
+            if provider.get("runtime_selection")
+                != Some(&serde_json::to_value(&retained.runtime_selection)?)
+            {
+                anyhow::bail!(
+                    "BundleExecutor proof owner contradicts runtime selection in exact plan"
+                );
+            }
+            let owner_index = retained.runtime_selection.definition_owner_chain_index;
+            let chain = execution_plan
+                .get("executor_chain")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("BundleExecutor plan has no executor-chain positions")
+                })?;
+            let owner = &retained.runtime_selection.definition_owner;
+            if chain.get(owner_index).and_then(serde_json::Value::as_str)
+                != Some(owner.requested_id.as_str())
+            {
+                anyhow::bail!(
+                    "BundleExecutor runtime owner is not at its retained executor-chain position"
+                );
+            }
+            if owner_index == 0 {
+                if execution_plan
+                    .get("root_ref")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(owner.canonical_ref.as_str())
+                    || owner.requested_id != owner.canonical_ref
+                {
+                    anyhow::bail!("BundleExecutor root runtime owner differs from exact plan root");
+                }
+            } else {
+                let authorities = execution_plan
+                    .get("executor_authorities")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("BundleExecutor plan has no executor authorities")
+                    })?;
+                let authority = authorities.get(owner_index - 1).ok_or_else(|| {
+                    anyhow::anyhow!("BundleExecutor runtime owner position has no authority")
+                })?;
+                let expected_space = match owner.source_space {
+                    RetainedItemSpaceV1::Project => "project",
+                    RetainedItemSpaceV1::Bundle => "bundle",
+                    RetainedItemSpaceV1::Node => "node",
+                };
+                let expected_trust = match owner.trust_class {
+                    RetainedTrustClassV1::TrustedBundle => "trusted_bundle",
+                    RetainedTrustClassV1::TrustedProject => "trusted_project",
+                    RetainedTrustClassV1::TrustedNode => "trusted_node",
+                    RetainedTrustClassV1::UntrustedProject => "untrusted_project",
+                    RetainedTrustClassV1::Unsigned => "unsigned",
+                };
+                if authority
+                    .get("requested_id")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(owner.requested_id.as_str())
+                    || authority
+                        .get("canonical_ref")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(owner.canonical_ref.as_str())
+                    || authority
+                        .get("source_space")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(expected_space)
+                    || authority
+                        .get("trust_class")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(expected_trust)
+                    || authority.get("signer_fingerprint")
+                        != Some(&serde_json::to_value(&owner.signer_fingerprint)?)
+                    || authority
+                        .get("content_hash")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(owner.content_hash.as_str())
+                    || authority
+                        .get("raw_content_digest")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(owner.raw_content_digest.as_str())
+                {
+                    anyhow::bail!(
+                        "BundleExecutor runtime owner differs from the indexed executor authority"
+                    );
+                }
+            }
+        }
+        DirectExecutableIdentity::CapturedContent { .. } | DirectExecutableIdentity::NodePolicy => {
+            if plan_command
+                .and_then(|command| command.get("authority"))
+                .and_then(serde_json::Value::as_str)
+                == Some("bundle_executor")
+            {
+                anyhow::bail!(
+                    "BundleExecutor plan cannot be represented by a proofless executable identity"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DirectExecutableIdentity {
@@ -667,6 +1172,7 @@ pub enum DirectExecutableIdentity {
         content_hash: String,
         executor_manifest_hash: String,
         executor_manifest_signer_fingerprint: String,
+        member_source_proof: BundleExecutorMemberSourceProofV1,
     },
     CapturedContent {
         content_hash: String,
@@ -831,12 +1337,18 @@ impl AdmittedLaunchArtifactIdentity {
                         content_hash,
                         executor_manifest_hash,
                         executor_manifest_signer_fingerprint,
+                        member_source_proof,
                     } => {
                         validate_hash("verified executable content hash", content_hash)?;
                         validate_hash("executor bundle manifest hash", executor_manifest_hash)?;
                         validate_signer(
                             "executor bundle manifest signer",
                             executor_manifest_signer_fingerprint,
+                        )?;
+                        member_source_proof.validate(
+                            executor_manifest_hash,
+                            executor_manifest_signer_fingerprint,
+                            content_hash,
                         )?;
                     }
                     DirectExecutableIdentity::CapturedContent { content_hash } => {
@@ -1399,6 +1911,11 @@ impl AdmittedLaunchCapsule {
     /// authority is rejected as an old capsule, before serde interprets any
     /// of its fields.
     pub fn from_current_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let canonical_bytes =
+            lillux::canonical_json_bounded(&value, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)?;
+        if canonical_bytes.len() > MAX_ADMITTED_LAUNCH_CAPSULE_BYTES {
+            anyhow::bail!("admitted launch capsule exceeds its raw canonical byte ceiling");
+        }
         let object = value
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("admitted launch capsule must be an object"))?;
@@ -1448,8 +1965,9 @@ impl AdmittedLaunchCapsule {
             "launch capsule exact program hash",
             &self.exact_program_hash,
         )?;
-        let canonical_program = lillux::canonical_json(&self.exact_program)?;
-        let observed_program_hash = lillux::sha256_hex(canonical_program.as_bytes());
+        let canonical_program =
+            lillux::canonical_json_bounded(&self.exact_program, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)?;
+        let observed_program_hash = lillux::sha256_hex(&canonical_program);
         if observed_program_hash != self.exact_program_hash {
             anyhow::bail!(
                 "admitted launch capsule exact program hash mismatch: declared {}, observed {}",
@@ -1566,6 +2084,7 @@ impl AdmittedLaunchCapsule {
                     protocol_content_hash,
                     protocol_signer_fingerprint,
                     execution_plan_hash,
+                    executable_identity,
                     ..
                 },
                 AdmittedExecutionClosure::DirectItemExecutor {
@@ -1589,11 +2108,15 @@ impl AdmittedLaunchCapsule {
                         "admitted direct protocol document contradicts artifact identity"
                     );
                 }
-                let observed_plan_hash =
-                    lillux::sha256_hex(lillux::canonical_json(execution_plan)?.as_bytes());
+                let canonical_plan = lillux::canonical_json_bounded(
+                    execution_plan,
+                    MAX_ADMITTED_LAUNCH_CAPSULE_BYTES,
+                )?;
+                let observed_plan_hash = lillux::sha256_hex(&canonical_plan);
                 if &observed_plan_hash != execution_plan_hash {
                     anyhow::bail!("admitted direct execution plan contradicts artifact identity");
                 }
+                validate_bundle_executor_plan_proof(execution_plan, executable_identity)?;
                 if let AdmittedDirectCommandClosure::RealizationMember {
                     realization_id,
                     realization_manifest_hash,
@@ -1697,6 +2220,7 @@ impl AdmittedLaunchCapsule {
                 AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash,
                     execution_path: _,
+                    host_origin: _,
                 }
                 | AdmittedDirectCommandClosure::RealizationMember {
                     executable_blob_hash,
@@ -1755,6 +2279,8 @@ impl AdmittedLaunchCapsule {
                 );
             }
         }
+        lillux::canonical_json_bytes_bounded(self, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)
+            .context("admitted launch capsule exceeds bounded canonical byte ceiling")?;
         Ok(())
     }
 
@@ -1762,10 +2288,14 @@ impl AdmittedLaunchCapsule {
         serde_json::to_value(self).expect("admitted launch capsule serialization cannot fail")
     }
 
-    pub fn content_hash(&self) -> anyhow::Result<String> {
+    pub fn to_canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
         self.validate()?;
-        let canonical = lillux::canonical_json(&self.to_value())?;
-        Ok(lillux::sha256_hex(canonical.as_bytes()))
+        lillux::canonical_json_bytes_bounded(self, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES)
+            .context("serialize admitted launch capsule under byte ceiling")
+    }
+
+    pub fn content_hash(&self) -> anyhow::Result<String> {
+        Ok(lillux::sha256_hex(&self.to_canonical_bytes()?))
     }
 
     /// Compare the immutable admission authority shared by continuation
@@ -1804,6 +2334,114 @@ impl AdmittedLaunchCapsule {
             && self
                 .project_authority
                 .same_continuation_lineage(&other.project_authority)?)
+    }
+
+    /// Compare a source segment with the successor of an operator rebind
+    /// continuation: one that keeps the admitted program and re-admits only
+    /// what launch preparation derives from the ref bindings at `names`.
+    ///
+    /// The successor may differ from the source in exactly these places:
+    /// - `ref_bindings` and `resolved_ref_bindings` at each name, where the
+    ///   source must already seal a binding and the successor must name a
+    ///   different item;
+    /// - the prepared launch's `binding_records` at each name;
+    /// - the prepared launch fields in
+    ///   [`REBOUND_PREPARED_LAUNCH_FIELDS`], which preparation computes from
+    ///   the bound items and current signed configuration.
+    ///
+    /// Everything else is compared whole after those places are removed, so a
+    /// field added to the program, the prepared launch, or this capsule later
+    /// is held equal until it is classified here. That covers the admitted
+    /// subject and resolution, descriptors, executor, driver, lifecycle,
+    /// capabilities, accounting scope, every other binding, the isolation,
+    /// network and resource ceilings, target and project-result requirements,
+    /// and all execution, content, environment, evidence and session
+    /// dependencies. Project authority keeps the ordinary continuation
+    /// lineage rule.
+    ///
+    /// This proves the shape of the change only. The caller must separately
+    /// prove that the source's admitted runtime contract lets an operator
+    /// rebind each name, select this comparison from the typed transition it
+    /// is committing rather than from the fields that changed, and prove that
+    /// the two realization objects differ only in their launch-authority and
+    /// execution-closure digests.
+    pub fn same_rebound_continuation_admission(
+        &self,
+        successor: &Self,
+        names: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<bool> {
+        self.validate()?;
+        successor.validate()?;
+        if names.is_empty() {
+            anyhow::bail!("an operator rebind continuation names no ref binding");
+        }
+        // Exhaustive on purpose: a new capsule field does not compile until it
+        // is placed in the comparison below or deliberately left per-segment.
+        let Self {
+            schema,
+            kind,
+            exact_program,
+            // Recomputed from `exact_program` by `validate`; it moves with the
+            // rebound bindings.
+            exact_program_hash: _,
+            // Per-segment envelope, validated against each segment's own
+            // resume ledger.
+            sealed_invocation: _,
+            project_authority,
+            lifecycle_authority,
+            launch_driver,
+            artifact_identity,
+            execution_closure,
+            // The caller proves the realization transition.
+            execution_realization_hash: _,
+            source_binding_hash,
+            accounting_scope,
+            effective_caps,
+            parent_delegation_caps,
+            runtime_ref,
+            executor_ref,
+        } = self;
+        let (
+            AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch,
+                runtime_descriptor_document,
+                protocol_descriptor_document,
+                executor_blob_hash,
+            },
+            AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch: successor_prepared_runtime_launch,
+                runtime_descriptor_document: successor_runtime_descriptor_document,
+                protocol_descriptor_document: successor_protocol_descriptor_document,
+                executor_blob_hash: successor_executor_blob_hash,
+            },
+        ) = (execution_closure, &successor.execution_closure)
+        else {
+            // Only a managed runtime launch has a prepared, binding-derived
+            // closure to re-admit.
+            return Ok(false);
+        };
+        if !rebound_names_replace_sealed_bindings(exact_program, &successor.exact_program, names)? {
+            return Ok(false);
+        }
+        Ok(*schema == successor.schema
+            && *kind == successor.kind
+            && rebound_program_remainder(exact_program, names)?
+                == rebound_program_remainder(&successor.exact_program, names)?
+            && *lifecycle_authority == successor.lifecycle_authority
+            && *launch_driver == successor.launch_driver
+            && *artifact_identity == successor.artifact_identity
+            && rebound_prepared_launch_remainder(prepared_runtime_launch, names)?
+                == rebound_prepared_launch_remainder(successor_prepared_runtime_launch, names)?
+            && runtime_descriptor_document == successor_runtime_descriptor_document
+            && protocol_descriptor_document == successor_protocol_descriptor_document
+            && executor_blob_hash == successor_executor_blob_hash
+            && *source_binding_hash == successor.source_binding_hash
+            && *accounting_scope == successor.accounting_scope
+            && *effective_caps == successor.effective_caps
+            && *parent_delegation_caps == successor.parent_delegation_caps
+            && *runtime_ref == successor.runtime_ref
+            && *executor_ref == successor.executor_ref
+            && project_authority.same_continuation_lineage(&successor.project_authority)?)
     }
 
     /// Return the exact named persistent-session capsules retained by this
@@ -1845,6 +2483,94 @@ impl AdmittedLaunchCapsule {
             && self.runtime_ref == target.runtime_ref
             && self.executor_ref == target.executor_ref)
     }
+}
+
+/// Prepared-launch fields a rebound continuation replaces whole. Launch
+/// preparation computes each from the bound items and the signed
+/// configuration current at the rebind, so none can be inherited from the
+/// source. Every prepared-launch field absent from this list, and every
+/// binding record outside the rebound names, must stay equal.
+pub const REBOUND_PREPARED_LAUNCH_FIELDS: &[&str] = &[
+    "config_contributors",
+    "external_effect_authority",
+    "financial_authority",
+    "required_secrets",
+    "runtime_data",
+    "runtime_facts",
+];
+
+const REBOUND_PROGRAM_BINDING_FIELDS: &[&str] = &["ref_bindings", "resolved_ref_bindings"];
+
+fn rebound_binding_map<'a>(
+    owner: &'a serde_json::Value,
+    field: &str,
+) -> anyhow::Result<&'a serde_json::Map<String, serde_json::Value>> {
+    owner
+        .get(field)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("rebound continuation has no {field} object"))
+}
+
+/// A rebind replaces a binding the source already sealed with a different
+/// item. It never introduces a binding name, drops one, or relabels an
+/// unchanged binding as rebound.
+fn rebound_names_replace_sealed_bindings(
+    source_program: &serde_json::Value,
+    successor_program: &serde_json::Value,
+    names: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<bool> {
+    let source_refs = rebound_binding_map(source_program, "ref_bindings")?;
+    let successor_refs = rebound_binding_map(successor_program, "ref_bindings")?;
+    let source_resolved = rebound_binding_map(source_program, "resolved_ref_bindings")?;
+    let successor_resolved = rebound_binding_map(successor_program, "resolved_ref_bindings")?;
+    Ok(names.iter().all(|name| {
+        source_resolved.contains_key(name)
+            && successor_resolved.contains_key(name)
+            && successor_refs.get(name).is_some_and(|successor| {
+                successor.is_string() && source_refs.get(name) != Some(successor)
+            })
+    }))
+}
+
+/// The exact program with the rebound binding entries removed.
+fn rebound_program_remainder(
+    program: &serde_json::Value,
+    names: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut remainder = program.clone();
+    for field in REBOUND_PROGRAM_BINDING_FIELDS {
+        let bindings = remainder
+            .get_mut(*field)
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("rebound continuation has no {field} object"))?;
+        for name in names {
+            bindings.remove(name);
+        }
+    }
+    Ok(remainder)
+}
+
+/// The prepared launch with the replaced fields and the rebound binding
+/// records removed.
+fn rebound_prepared_launch_remainder(
+    prepared_runtime_launch: &serde_json::Value,
+    names: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut remainder = prepared_runtime_launch.clone();
+    let object = remainder
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("prepared runtime launch must be an object"))?;
+    for field in REBOUND_PREPARED_LAUNCH_FIELDS {
+        object.remove(*field);
+    }
+    let records = object
+        .get_mut("binding_records")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("prepared runtime launch has no binding_records object"))?;
+    for name in names {
+        records.remove(name);
+    }
+    Ok(remainder)
 }
 
 fn admitted_persistent_session_capsules_from_closure(
@@ -1915,6 +2641,36 @@ fn cross_site_execution_closure_matches(
     })
 }
 
+/// Replace a prepared dependency's `product_selections` by their semantic
+/// identity. A selection's full serialization binds the receiving node's own
+/// redemption proof, which differs between the two sites by design; the
+/// comparison uses the same identity the root invocation's selections are
+/// compared by. The projection is only compared, never stored.
+fn project_dependency_product_selections(
+    name: &str,
+    dependency: &mut serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    let selections: Vec<crate::external_content::products::composition::ProductSelection> =
+        serde_json::from_value(
+            dependency
+                .get("product_selections")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("prepared dependency has no product selections"))?,
+        )
+        .with_context(|| format!("decode product selections of prepared dependency `{name}`"))?;
+    crate::external_content::products::composition::validate_product_selections(&selections)?;
+    dependency.insert(
+        "product_selections".to_owned(),
+        serde_json::Value::Array(
+            selections
+                .iter()
+                .map(|selection| selection.semantic_identity_value())
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        ),
+    );
+    Ok(())
+}
+
 fn cross_site_prepared_runtime_launch_projection(
     prepared: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
@@ -1932,12 +2688,18 @@ fn cross_site_prepared_runtime_launch_projection(
     for (name, dependency) in dependencies {
         require_exact_keys(
             dependency,
-            &["canonical_ref", "resolution", "subject"],
+            &[
+                "canonical_ref",
+                "product_selections",
+                "resolution",
+                "subject",
+            ],
             &format!("prepared execution dependency `{name}`"),
         )?;
         let dependency = dependency
             .as_object_mut()
             .expect("exact keys require object");
+        project_dependency_product_selections(name, dependency)?;
         let resolution = retained_resolution_projection(
             dependency
                 .get("resolution")
@@ -1976,13 +2738,113 @@ fn cross_site_prepared_runtime_launch_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dependency_with_selections(
+        selections: serde_json::Value,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut dependency = serde_json::Map::new();
+        dependency.insert("product_selections".to_owned(), selections);
+        dependency
+    }
+
+    fn local_selection(declaration: &str, witness: char) -> serde_json::Value {
+        serde_json::json!({
+            "declaration_id": declaration,
+            "witness_hash": witness.to_string().repeat(64),
+            "witness_source": {"kind": "local_capture"},
+            "qualification_hash": null,
+            "remote_testimony": null,
+        })
+    }
+
+    #[test]
+    fn dependency_product_selections_project_to_their_semantic_identity() {
+        let mut empty = dependency_with_selections(serde_json::json!([]));
+        project_dependency_product_selections("dep", &mut empty).unwrap();
+        assert_eq!(empty["product_selections"], serde_json::json!([]));
+
+        let mut selected = dependency_with_selections(serde_json::json!([
+            local_selection("alpha", 'a'),
+            local_selection("beta", 'b'),
+        ]));
+        project_dependency_product_selections("dep", &mut selected).unwrap();
+        let projected = selected["product_selections"].as_array().unwrap();
+        assert_eq!(projected.len(), 2);
+        // Identity keeps the declaration, witness and qualification only.
+        assert_eq!(
+            projected[0],
+            serde_json::json!({
+                "declaration_id": "alpha",
+                "witness_hash": "a".repeat(64),
+                "qualification_hash": null,
+            })
+        );
+    }
+
+    #[test]
+    fn different_dependency_product_selections_have_different_identities() {
+        let project = |selections: serde_json::Value| {
+            let mut dependency = dependency_with_selections(selections);
+            project_dependency_product_selections("dep", &mut dependency).unwrap();
+            dependency
+        };
+        let first = project(serde_json::json!([local_selection("alpha", 'a')]));
+        let same = project(serde_json::json!([local_selection("alpha", 'a')]));
+        let other_witness = project(serde_json::json!([local_selection("alpha", 'b')]));
+        let none = project(serde_json::json!([]));
+        assert_eq!(first, same);
+        assert_ne!(first, other_witness);
+        assert_ne!(first, none);
+    }
+
+    #[test]
+    fn the_receiving_nodes_redemption_proof_does_not_change_the_identity() {
+        let project = |source: serde_json::Value| {
+            let mut selection = local_selection("alpha", 'a');
+            selection["witness_source"] = source;
+            let mut dependency = dependency_with_selections(serde_json::json!([selection]));
+            project_dependency_product_selections("dep", &mut dependency).unwrap();
+            dependency
+        };
+        assert_eq!(
+            project(serde_json::json!({"kind": "local_capture"})),
+            project(serde_json::json!({"kind": "received", "acceptance_hash": "c".repeat(64)})),
+        );
+    }
+
+    #[test]
+    fn malformed_dependency_product_selections_are_refused() {
+        let refuse = |value: Option<serde_json::Value>| {
+            let mut dependency = serde_json::Map::new();
+            if let Some(value) = value {
+                dependency.insert("product_selections".to_owned(), value);
+            }
+            project_dependency_product_selections("dep", &mut dependency).is_err()
+        };
+        assert!(refuse(None), "a dependency without the field is refused");
+        assert!(refuse(Some(serde_json::json!("x"))));
+        assert!(
+            refuse(Some(serde_json::json!([
+                local_selection("beta", 'b'),
+                local_selection("alpha", 'a'),
+            ]))),
+            "selections must be in canonical order"
+        );
+        assert!(refuse(Some(serde_json::json!([
+            local_selection("alpha", 'a'),
+            local_selection("alpha", 'a'),
+        ]))));
+    }
     use crate::objects::{
         ExecutionOwnershipAuthority, ExecutionProjectAuthority, ExecutionRecoveryAuthority,
     };
 
     fn signed_descriptor(body: &str, seed: u8) -> (String, String, String) {
         let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
-        let document = lillux::signature::sign_content(body, &key, "#", None);
+        // A fixed signing time keeps two fixtures built in different seconds
+        // byte-identical, so comparisons of their descriptors are stable.
+        let document =
+            lillux::signature::sign_content_at(body, &key, "#", None, "2026-01-01T00:00:00Z");
         let header =
             lillux::signature::parse_signature_line(document.lines().next().unwrap(), "#", None)
                 .unwrap();
@@ -2085,7 +2947,7 @@ mod tests {
             "resolved_result_policy": {"retention":"full"},
             "captured_history_policy": {"retention":"durable"},
             "candidate_evaluation": null,
-            "product_qualification": null,
+            "qualification": null,
         });
         sealed_invocation
             .as_object_mut()
@@ -2108,6 +2970,7 @@ mod tests {
                         std::path::Path::new("/executor"),
                     )
                     .unwrap(),
+                    host_origin: None,
                 }
             }
             DirectExecutableIdentity::NodePolicy => AdmittedDirectCommandClosure::NodePolicy,
@@ -2116,7 +2979,35 @@ mod tests {
             sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
         let (protocol_descriptor_document, protocol_content_hash, protocol_signer_fingerprint) =
             signed_descriptor("protocol: direct\n", 31);
-        let execution_plan = serde_json::json!({"plan_id": "test"});
+        let execution_plan = match &executable_identity {
+            DirectExecutableIdentity::BundleExecutor {
+                member_source_proof,
+                ..
+            } => serde_json::json!({
+                "root_ref": "tool:test/run",
+                "executor_chain": ["tool:test/run", "runtime:fixture"],
+                "executor_authorities": [{
+                    "requested_id": "runtime:fixture",
+                    "canonical_ref": "runtime:fixture",
+                    "source_space": "bundle",
+                    "trust_class": "trusted_bundle",
+                    "signer_fingerprint": "c".repeat(64),
+                    "content_hash": "d".repeat(64),
+                    "raw_content_digest": "e".repeat(64)
+                }],
+                "nodes": [{
+                    "node_type": "dispatch_subprocess",
+                    "spec": {"verified_command": {
+                        "authority": "bundle_executor",
+                        "provider": {
+                            "runtime_selection": &member_source_proof.runtime_selection,
+                            "member_source_proof": member_source_proof
+                        }
+                    }}
+                }]
+            }),
+            _ => serde_json::json!({"plan_id": "test"}),
+        };
         let execution_plan_hash =
             lillux::sha256_hex(lillux::canonical_json(&execution_plan).unwrap().as_bytes());
         AdmittedLaunchCapsule {
@@ -2167,6 +3058,110 @@ mod tests {
             runtime_ref: "runtime:direct".to_string(),
             executor_ref: "tool:test/executor".to_string(),
         }
+    }
+
+    fn bundle_executor_proof_fixture() -> BundleExecutorMemberSourceProofV1 {
+        let item_source_object = serde_json::json!({
+            "kind":"item_source",
+            "item_ref":"bin/x86_64-unknown-linux-gnu/runner",
+            "content_blob_hash":"f".repeat(64),
+            "integrity":format!("sha256:{}", "f".repeat(64)),
+            "signature_info":null,
+            "mode":0o755,
+        });
+        let item_source_bytes = lillux::canonical_json(&item_source_object).unwrap();
+        let item_source_hash = lillux::sha256_hex(item_source_bytes.as_bytes());
+        let executor_manifest_object = serde_json::json!({
+            "kind":"source_manifest",
+            "item_source_hashes":{"bin/x86_64-unknown-linux-gnu/runner":item_source_hash},
+        });
+        let manifest_bytes = lillux::canonical_json(&executor_manifest_object).unwrap();
+        let manifest_hash = lillux::sha256_hex(manifest_bytes.as_bytes());
+        let manifest_body = format!("ryeos:bundle-executor-manifest\n{manifest_hash}\n");
+        let content_hash = lillux::sha256_hex(manifest_body.as_bytes());
+        let signature = base64::engine::general_purpose::STANDARD.encode([0_u8; 64]);
+        let signed_executor_manifest_ref = format!(
+            "# ryeos:signed:2026-10-05T00:00:00Z:{content_hash}:{signature}:{}\n{manifest_body}",
+            "5".repeat(64),
+        )
+        .into_bytes();
+        let item_source_signature = lillux::signature::content_hash(&item_source_bytes);
+        let signed_item_source_sidecar = format!(
+            "# ryeos:signed:2026-10-05T00:00:00Z:{item_source_signature}:{signature}:{}\n{item_source_bytes}",
+            "5".repeat(64),
+        ).into_bytes();
+        BundleExecutorMemberSourceProofV1 {
+            requested_binary_ref: "bin:runner".to_owned(),
+            request_origin: BundleExecutorRequestOriginV1::WrapperBundle {
+                wrapper_bundle_name: "fixture".to_owned(),
+            },
+            selected_bundle: SelectedBundleIdentityV1 {
+                name: "fixture".to_owned(),
+                body_digest: "a".repeat(64),
+                signer_fingerprint: "b".repeat(64),
+            },
+            runtime_selection: RetainedRuntimeBinarySelectionV1 {
+                definition_owner: RetainedRuntimeDefinitionOwnerV1 {
+                    requested_id: "runtime:fixture".to_owned(),
+                    canonical_ref: "runtime:fixture".to_owned(),
+                    source_space: RetainedItemSpaceV1::Bundle,
+                    trust_class: RetainedTrustClassV1::TrustedBundle,
+                    signer_fingerprint: Some("c".repeat(64)),
+                    content_hash: "d".repeat(64),
+                    raw_content_digest: "e".repeat(64),
+                },
+                definition_owner_chain_index: 1,
+                authored_command: "bin:runner".to_owned(),
+                expanded_command: "bin:runner".to_owned(),
+            },
+            selected_item_ref: "bin/x86_64-unknown-linux-gnu/runner".to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            item_source_hash,
+            expected_mode: 0o755,
+            signed_executor_manifest_ref,
+            executor_manifest_object,
+            item_source_object,
+            signed_item_source_sidecar,
+        }
+    }
+
+    #[test]
+    fn bundle_executor_member_proof_binds_request_origin_member_and_source_documents() {
+        let proof = bundle_executor_proof_fixture();
+        let manifest_hash = lillux::sha256_hex(
+            lillux::canonical_json(&proof.executor_manifest_object)
+                .unwrap()
+                .as_bytes(),
+        );
+        proof
+            .validate(&manifest_hash, &"5".repeat(64), &"f".repeat(64))
+            .unwrap();
+
+        let mut wrong_member = proof.clone();
+        wrong_member.selected_item_ref = "bin/x86_64-unknown-linux-gnu/other".to_owned();
+        assert!(
+            wrong_member
+                .validate(&manifest_hash, &"5".repeat(64), &"f".repeat(64))
+                .is_err()
+        );
+
+        let mut wrong_origin = proof.clone();
+        wrong_origin.request_origin = BundleExecutorRequestOriginV1::WrapperBundle {
+            wrapper_bundle_name: "different".to_owned(),
+        };
+        assert!(
+            wrong_origin
+                .validate(&manifest_hash, &"5".repeat(64), &"f".repeat(64))
+                .is_err()
+        );
+
+        let mut wrong_source_hash = proof;
+        wrong_source_hash.item_source_hash = "0".repeat(64);
+        assert!(
+            wrong_source_hash
+                .validate(&manifest_hash, &"5".repeat(64), &"f".repeat(64))
+                .is_err()
+        );
     }
 
     fn managed_capsule(prepared_runtime_launch: serde_json::Value) -> AdmittedLaunchCapsule {
@@ -2301,16 +3296,13 @@ mod tests {
     fn qualification_purpose_moves_exact_program_identity() {
         let (mut invocation, ordinary, _) =
             sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
-        invocation["product_qualification"] = serde_json::json!({"selected_policy":"first"});
+        invocation["qualification"] = serde_json::json!({"selected_policy":"first"});
         let first = project_sealed_root_exact_program(&invocation).unwrap();
         assert_ne!(first, ordinary);
-        invocation["product_qualification"] = serde_json::json!({"selected_policy":"second"});
+        invocation["qualification"] = serde_json::json!({"selected_policy":"second"});
         let second = project_sealed_root_exact_program(&invocation).unwrap();
         assert_ne!(second, first);
-        invocation
-            .as_object_mut()
-            .unwrap()
-            .remove("product_qualification");
+        invocation.as_object_mut().unwrap().remove("qualification");
         assert!(project_sealed_root_exact_program(&invocation).is_err());
     }
 
@@ -2328,6 +3320,7 @@ mod tests {
                 witness_hash: selection.witness_hash.clone(),
                 witness_source: ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             },
         };
         let (mut local, _, _) =
@@ -2820,6 +3813,287 @@ mod tests {
         assert!(!source.same_continuation_admission(&successor).unwrap());
     }
 
+    /// A managed capsule that seals a `model` binding and one other binding,
+    /// with every prepared-launch field present. `model` and `facts` vary the
+    /// bound item and what preparation derived from it.
+    fn bound_capsule(model: &str, facts: &str) -> AdmittedLaunchCapsule {
+        let resolved = serde_json::json!({
+            "model": {
+                "canonical_ref": model,
+                "resolution": {
+                    "root_raw_content_digest": lillux::sha256_hex(model.as_bytes())
+                }
+            },
+            "guard": {
+                "canonical_ref": "directive:test/guard",
+                "resolution": {"root_raw_content_digest": "7".repeat(64)}
+            }
+        });
+        let mut capsule = managed_capsule(serde_json::json!({
+            "project_result_requirement": "none",
+            "filesystem_authority_ceiling": "captured_execution",
+            "network_authority_ceiling": "isolated",
+            "target_requirement": null,
+            "resource_authority_ceiling": "node_policy",
+            "runtime_data": {"provider_snapshot": {"model_name": facts}},
+            "required_secrets": [{"name": format!("{facts}_KEY")}],
+            "runtime_facts": {"model_name": facts},
+            "binding_records": resolved,
+            "execution_dependencies": {"provider_transport": {"ref": "tool:test/transport"}},
+            "content_dependencies": {},
+            "evidence_attachments": [],
+            "environment_contributions": {},
+            "admitted_sessions": {},
+            "config_contributors": [{"canonical_id": format!("config:test/{facts}")}],
+            "financial_authority": {"authority_digest": facts},
+            "external_effect_authority": {"authority_family": facts},
+        }));
+        capsule.sealed_invocation["ref_bindings"] =
+            serde_json::json!({"model": model, "guard": "directive:test/guard"});
+        capsule.sealed_invocation["resolved_ref_bindings"] = resolved;
+        reseal_program(&mut capsule);
+        capsule.validate().expect("bound capsule fixture");
+        capsule
+    }
+
+    fn reseal_program(capsule: &mut AdmittedLaunchCapsule) {
+        capsule.exact_program =
+            project_sealed_root_exact_program(&capsule.sealed_invocation).unwrap();
+        capsule.exact_program_hash = lillux::sha256_hex(
+            lillux::canonical_json(&capsule.exact_program)
+                .unwrap()
+                .as_bytes(),
+        );
+    }
+
+    fn prepared_launch(capsule: &mut AdmittedLaunchCapsule) -> &mut serde_json::Value {
+        let AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch,
+            ..
+        } = &mut capsule.execution_closure
+        else {
+            unreachable!()
+        };
+        prepared_runtime_launch
+    }
+
+    fn rebound_names(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// The source, and a successor rebound at `model` to a different item.
+    fn rebound_pair() -> (AdmittedLaunchCapsule, AdmittedLaunchCapsule) {
+        let source = bound_capsule("directive:test/models/first", "first");
+        let mut successor = bound_capsule("directive:test/models/second", "second");
+        successor.execution_realization_hash = "8".repeat(64);
+        successor.sealed_invocation["parameters"] = serde_json::json!({"input": "next"});
+        reseal_program(&mut successor);
+        (source, successor)
+    }
+
+    #[test]
+    fn rebound_continuation_accepts_a_change_at_an_allowed_name_only() {
+        let (source, successor) = rebound_pair();
+        let model = rebound_names(&["model"]);
+        assert_ne!(source.exact_program_hash, successor.exact_program_hash);
+        assert!(
+            source
+                .same_rebound_continuation_admission(&successor, &model)
+                .unwrap()
+        );
+        // The ordinary continuation comparison still refuses the same pair.
+        assert!(
+            !source
+                .same_continuation_program_admission(&successor)
+                .unwrap()
+        );
+
+        // The comparison is selected by name: the unchanged binding cannot be
+        // the rebound one, and naming nothing is not a rebind.
+        assert!(
+            !source
+                .same_rebound_continuation_admission(&successor, &rebound_names(&["guard"]))
+                .unwrap()
+        );
+        assert!(
+            !source
+                .same_rebound_continuation_admission(
+                    &successor,
+                    &rebound_names(&["guard", "model"])
+                )
+                .unwrap()
+        );
+        assert!(
+            source
+                .same_rebound_continuation_admission(&successor, &rebound_names(&[]))
+                .is_err()
+        );
+        // A name the source never sealed cannot be introduced by a rebind.
+        assert!(
+            !source
+                .same_rebound_continuation_admission(&successor, &rebound_names(&["absent"]))
+                .unwrap()
+        );
+        // An unchanged binding is not a rebind, even with fresh preparation.
+        let mut refreshed = source.clone();
+        prepared_launch(&mut refreshed)["runtime_facts"] =
+            serde_json::json!({"model_name": "refreshed"});
+        assert!(
+            !source
+                .same_rebound_continuation_admission(&refreshed, &model)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn rebound_continuation_refuses_a_change_outside_the_named_binding() {
+        let (source, successor) = rebound_pair();
+        let model = rebound_names(&["model"]);
+        let refused = |successor: &AdmittedLaunchCapsule| {
+            successor
+                .validate()
+                .expect("mutated successor stays a valid capsule");
+            !source
+                .same_rebound_continuation_admission(successor, &model)
+                .unwrap()
+        };
+
+        // Another binding, in the program and in its prepared record.
+        let mut other_binding = successor.clone();
+        let changed = serde_json::json!({
+            "canonical_ref": "directive:test/other-guard",
+            "resolution": {"root_raw_content_digest": "6".repeat(64)}
+        });
+        other_binding.sealed_invocation["ref_bindings"]["guard"] =
+            serde_json::json!("directive:test/other-guard");
+        other_binding.sealed_invocation["resolved_ref_bindings"]["guard"] = changed.clone();
+        reseal_program(&mut other_binding);
+        prepared_launch(&mut other_binding)["binding_records"]["guard"] = changed;
+        assert!(refused(&other_binding));
+
+        // Program identity outside the bindings.
+        for (field, value) in [
+            ("item_ref", serde_json::json!("directive:test/other")),
+            ("execution_hints", serde_json::json!({"debug_raw": true})),
+            (
+                "effective_definition_digest",
+                serde_json::json!("2".repeat(64)),
+            ),
+            (
+                "resolved_result_policy",
+                serde_json::json!({"retention": "none"}),
+            ),
+            ("verified_trust_class", serde_json::json!("trusted_project")),
+        ] {
+            let mut changed = successor.clone();
+            changed.sealed_invocation[field] = value;
+            reseal_program(&mut changed);
+            assert!(refused(&changed), "program field {field}");
+        }
+
+        // Capsule authority outside the program.
+        let mut caps = successor.clone();
+        caps.effective_caps
+            .push("ryeos.write.project.live".to_string());
+        assert!(refused(&caps));
+        let mut parent_caps = successor.clone();
+        parent_caps.parent_delegation_caps = Some(vec!["ryeos.read.project.live".to_string()]);
+        assert!(refused(&parent_caps));
+        let mut accounting = successor.clone();
+        accounting.accounting_scope = Some(AdmittedAccountingScope {
+            budget_authority_site_id: "site:fixture-a".to_string(),
+            ledger_epoch: 1,
+            execution_budget_id: "budget:fresh".to_string(),
+            directive_budget_id: None,
+        });
+        assert!(refused(&accounting));
+        let mut lifecycle = successor.clone();
+        lifecycle.lifecycle_authority = ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE;
+        assert!(refused(&lifecycle));
+        let mut executor = successor.clone();
+        let AdmittedExecutionClosure::ManagedRuntime {
+            executor_blob_hash, ..
+        } = &mut executor.execution_closure
+        else {
+            unreachable!()
+        };
+        *executor_blob_hash = "b".repeat(64);
+        assert!(
+            !source
+                .same_rebound_continuation_admission(&executor, &model)
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn rebound_continuation_refuses_widened_ceilings_and_changed_dependencies() {
+        let (source, successor) = rebound_pair();
+        let model = rebound_names(&["model"]);
+        for (field, value) in [
+            (
+                "filesystem_authority_ceiling",
+                serde_json::json!("node_policy"),
+            ),
+            (
+                "network_authority_ceiling",
+                serde_json::json!("node_policy"),
+            ),
+            ("resource_authority_ceiling", serde_json::json!("unbounded")),
+            ("target_requirement", serde_json::json!({"class": "gpu"})),
+            (
+                "project_result_requirement",
+                serde_json::json!("retained_generation"),
+            ),
+            (
+                "execution_dependencies",
+                serde_json::json!({"provider_transport": {"ref": "tool:test/other-transport"}}),
+            ),
+            (
+                "content_dependencies",
+                serde_json::json!({"weights": {"ref": "config:test/weights"}}),
+            ),
+            (
+                "environment_contributions",
+                serde_json::json!({"provider": {"target": "provider_transport"}}),
+            ),
+            (
+                "evidence_attachments",
+                serde_json::json!([{"event": "1".repeat(64)}]),
+            ),
+            (
+                "admitted_sessions",
+                serde_json::json!({"worker": "1".repeat(64)}),
+            ),
+            // A prepared-launch field this comparison has never classified is
+            // held equal, not ignored.
+            ("unclassified_later_field", serde_json::json!(true)),
+        ] {
+            let mut changed = successor.clone();
+            prepared_launch(&mut changed)[field] = value;
+            changed
+                .validate()
+                .expect("mutated successor stays a valid capsule");
+            assert!(
+                !source
+                    .same_rebound_continuation_admission(&changed, &model)
+                    .unwrap(),
+                "prepared launch field {field}"
+            );
+        }
+
+        // Exactly the classified preparer outputs may differ.
+        for field in REBOUND_PREPARED_LAUNCH_FIELDS {
+            let mut changed = successor.clone();
+            prepared_launch(&mut changed)[*field] = serde_json::json!({"replaced": field});
+            assert!(
+                source
+                    .same_rebound_continuation_admission(&changed, &model)
+                    .unwrap(),
+                "replaced prepared launch field {field}"
+            );
+        }
+    }
+
     #[test]
     fn capsule_rejects_divergent_inner_and_outer_project_authority() {
         let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
@@ -2828,6 +4102,8 @@ mod tests {
         capsule.project_authority =
             ExecutionProjectAuthority::projectless(crate::objects::EnvironmentAuthority::Vault {
                 namespace: "test".to_string(),
+                recipient_principal: "operator".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority: crate::objects::EnvironmentNameAuthority::DeclaredRequired,
             })
             .unwrap();
@@ -2982,6 +4258,49 @@ mod tests {
     }
 
     #[test]
+    fn content_addressed_command_requires_its_explicit_host_origin() {
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value["execution_closure"]["command"]
+            .as_object_mut()
+            .unwrap()
+            .remove("host_origin");
+
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("host_origin"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn content_addressed_host_origin_must_name_the_execution_file() {
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value["execution_closure"]["command"]["host_origin"] =
+            serde_json::json!("/usr/bin/not-the-executor");
+
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("host origin names a different file"),
+            "unexpected error: {error:#}"
+        );
+
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value["execution_closure"]["command"]["host_origin"] =
+            serde_json::json!("/usr/bin/executor");
+        AdmittedLaunchCapsule::from_current_value(value)
+            .expect("a host origin naming the execution file is accepted");
+    }
+
+    #[test]
     fn restart_recovery_rejects_a_node_policy_direct_executable() {
         let capsule = direct_capsule(DirectExecutableIdentity::NodePolicy);
         let error = capsule.validate().unwrap_err();
@@ -3002,11 +4321,18 @@ mod tests {
     #[test]
     fn source_only_root_seals_distinct_source_and_executor_manifests() {
         let root_manifest_hash = "a".repeat(64);
-        let executor_manifest_hash = "b".repeat(64);
+        let member_source_proof = bundle_executor_proof_fixture();
+        let executor_manifest_hash = lillux::sha256_hex(
+            lillux::canonical_json(&member_source_proof.executor_manifest_object)
+                .unwrap()
+                .as_bytes(),
+        );
+        let executor_manifest_signer_fingerprint = "5".repeat(64);
         let mut capsule = direct_capsule(DirectExecutableIdentity::BundleExecutor {
-            content_hash: "e".repeat(64),
+            content_hash: "f".repeat(64),
             executor_manifest_hash: executor_manifest_hash.clone(),
-            executor_manifest_signer_fingerprint: "5".repeat(64),
+            executor_manifest_signer_fingerprint,
+            member_source_proof,
         });
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             root_subject_source_identity,
@@ -3022,6 +4348,70 @@ mod tests {
 
         capsule.validate().unwrap();
         assert_ne!(root_manifest_hash, executor_manifest_hash);
+    }
+
+    #[test]
+    fn bundle_executor_owner_must_join_the_indexed_plan_chain_and_authority() {
+        let proof = bundle_executor_proof_fixture();
+        let manifest_hash = lillux::sha256_hex(
+            lillux::canonical_json(&proof.executor_manifest_object)
+                .unwrap()
+                .as_bytes(),
+        );
+        let mut capsule = direct_capsule(DirectExecutableIdentity::BundleExecutor {
+            content_hash: "f".repeat(64),
+            executor_manifest_hash: manifest_hash,
+            executor_manifest_signer_fingerprint: "5".repeat(64),
+            member_source_proof: proof,
+        });
+        capsule.validate().unwrap();
+
+        let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            execution_plan_hash,
+            ..
+        } = &mut capsule.artifact_identity
+        else {
+            unreachable!()
+        };
+        let AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. } =
+            &mut capsule.execution_closure
+        else {
+            unreachable!()
+        };
+        execution_plan["executor_chain"][1] = serde_json::json!("runtime:substituted");
+        *execution_plan_hash =
+            lillux::sha256_hex(lillux::canonical_json(execution_plan).unwrap().as_bytes());
+        assert!(capsule.validate().is_err());
+
+        let proof = bundle_executor_proof_fixture();
+        let manifest_hash = lillux::sha256_hex(
+            lillux::canonical_json(&proof.executor_manifest_object)
+                .unwrap()
+                .as_bytes(),
+        );
+        let mut capsule = direct_capsule(DirectExecutableIdentity::BundleExecutor {
+            content_hash: "f".repeat(64),
+            executor_manifest_hash: manifest_hash,
+            executor_manifest_signer_fingerprint: "5".repeat(64),
+            member_source_proof: proof,
+        });
+        let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            execution_plan_hash,
+            ..
+        } = &mut capsule.artifact_identity
+        else {
+            unreachable!()
+        };
+        let AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. } =
+            &mut capsule.execution_closure
+        else {
+            unreachable!()
+        };
+        execution_plan["executor_authorities"][0]["signer_fingerprint"] =
+            serde_json::json!("9".repeat(64));
+        *execution_plan_hash =
+            lillux::sha256_hex(lillux::canonical_json(execution_plan).unwrap().as_bytes());
+        assert!(capsule.validate().is_err());
     }
 
     #[test]
@@ -3122,6 +4512,32 @@ mod tests {
         assert!(
             !source
                 .same_cross_site_continuation_program_admission(&target)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_worker_executions_route_fixed_params_are_covered_by_the_capsule_hash() {
+        let pinned = |effort: &str| {
+            managed_capsule(serde_json::json!({
+                "runtime_data": {"worker_execution": {
+                    "route_set": "hosted",
+                    "route_fixed_params": {"session.start": {"effort": effort}},
+                }},
+            }))
+        };
+        let base = pinned("high");
+        assert_eq!(
+            base.content_hash().unwrap(),
+            pinned("high").content_hash().unwrap()
+        );
+        assert_ne!(
+            base.content_hash().unwrap(),
+            pinned("low").content_hash().unwrap()
+        );
+        assert!(
+            !base
+                .same_cross_site_continuation_program_admission(&pinned("low"))
                 .unwrap()
         );
     }

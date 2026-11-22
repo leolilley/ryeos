@@ -19,7 +19,7 @@ use ryeos_runtime::scoped_relay_handoff::{
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerExecutableSource, ProducerStdinSource,
 };
-use ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose;
+use ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView;
 
 use crate::operator_external_content::product_qualification::{
     CurrentBundleProducerRecipe, resolve_current_bundle_producer_recipe_for_purpose,
@@ -46,6 +46,10 @@ fn admit_recipe_subject(
             realization_id == subject_declaration_id && manifest_hash == subject_manifest_hash,
             "producer executable is not the sealed qualification subject"
         ),
+        ProducerExecutableSource::AdmittedMechanismHelpers { .. } => ensure!(
+            !direct_consumer_target_required,
+            "consumer runtime qualification cannot substitute mechanism helpers for its subject"
+        ),
         ProducerExecutableSource::AdmittedVerifierExecutable => ensure!(
             !direct_consumer_target_required,
             "consumer runtime qualification requires a direct admitted subject executable"
@@ -54,48 +58,12 @@ fn admit_recipe_subject(
     Ok(())
 }
 
-#[cfg(test)]
-mod recipe_subject_tests {
-    use super::*;
-
-    #[test]
-    fn realization_executable_must_be_the_sealed_subject() {
-        let executable = ProducerExecutableSource::AdmittedRealizationMember {
-            realization_id: "codex_runtime".to_owned(),
-            manifest_hash: "a".repeat(64),
-            relative_path: "bin/codex".to_owned(),
-            executable_sha256: "b".repeat(64),
-        };
-        assert!(admit_recipe_subject(&executable, "codex_runtime", &"a".repeat(64), true).is_ok());
-        assert!(admit_recipe_subject(&executable, "other_runtime", &"a".repeat(64), true).is_err());
-        assert!(admit_recipe_subject(&executable, "codex_runtime", &"c".repeat(64), true).is_err());
-        assert!(
-            admit_recipe_subject(
-                &ProducerExecutableSource::AdmittedVerifierExecutable,
-                "codex_runtime",
-                &"a".repeat(64),
-                false,
-            )
-            .is_ok()
-        );
-        assert!(
-            admit_recipe_subject(
-                &ProducerExecutableSource::AdmittedVerifierExecutable,
-                "codex_runtime",
-                &"a".repeat(64),
-                true,
-            )
-            .is_err()
-        );
-    }
-}
-
 /// The successful return is only an attempt locator. The process and all
 /// descriptor lifelines have already been transferred to the live registry.
 pub fn start_scoped_producer(
     state: &AppState,
     key: &ScopedProducerAuthorityKey,
-    purpose: &ProductQualificationLaunchPurpose,
+    purpose: &QualificationExecutionPurposeView<'_>,
     scenario_id: &str,
     selected: &CurrentBundleProducerRecipe,
     admitted_stdin: &str,
@@ -116,7 +84,17 @@ pub fn start_scoped_producer(
         "scoped producer isolation class moved before reservation"
     );
     ScopedProducerAuthorityKey::new(key.root_thread_id.clone(), key.launch_owner.clone())?;
-    purpose.validate()?;
+    // Rejoin the entire source-specific purpose to the authenticated root
+    // before consuming its live process authority. A validated view is data,
+    // and cannot supply a different purpose or producer input for this owner.
+    ensure!(
+        crate::operator_external_content::product_qualification::admitted_root_producer_stdin(
+            state,
+            &key.root_thread_id,
+            purpose,
+        )? == admitted_stdin,
+        "scoped producer input differs from the authenticated root"
+    );
     let current = resolve_current_bundle_producer_recipe_for_purpose(state, purpose, scenario_id)?;
     ensure!(
         current == *selected,
@@ -124,10 +102,10 @@ pub fn start_scoped_producer(
     );
     admit_recipe_subject(
         &selected.recipe.executable_source,
-        &purpose.subject_declaration_id,
-        &purpose.subject_manifest_hash,
+        purpose.subject_declaration_id(),
+        purpose.subject_manifest_hash(),
         purpose
-            .policy_source
+            .policy_source()
             .policy
             .consumer_execution_context
             .is_some(),
@@ -143,6 +121,28 @@ pub fn start_scoped_producer(
         &key.root_thread_id,
         &serde_json::to_string(&key.launch_owner)?,
     )?;
+
+    // A signed helper tuple does not prepare the mounted supervisor's finite
+    // controls. Refuse before spending the original root's one-shot key until
+    // the Engine-owned bootstrap carrier is available for this exact attempt.
+    if matches!(
+        selected.recipe.executable_source,
+        ProducerExecutableSource::AdmittedMechanismHelpers { .. }
+    ) {
+        let live = state.scoped_producer_authorities.get_exact(key)?;
+        live.admitted_command_for_recipe(scenario_id, &source, &selected.recipe.executable_source)?;
+        live.mechanism_probe_source(scenario_id, &source)?
+            .require_original_root_for_preparation(
+                state,
+                key,
+                purpose,
+                scenario_id,
+                selected,
+                coordinate,
+                release_deadline,
+            )?;
+        anyhow::bail!("trusted mechanism bootstrap preparation is unavailable");
+    }
 
     // The one-shot authority cut precedes durable reservation. Losing it on
     // any later error is intentional: no callback may re-open this attempt.
@@ -255,19 +255,22 @@ pub fn start_scoped_producer(
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: std::slice::from_ref(admitted_command.authority().identity()),
             verified_command: Some(&admitted_command),
             external_read_only_mounts: live.read_only_mounts(),
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &prepared_mounts,
             target_channels: &target_channels,
+            target_sealed_payloads: &[],
             item_ref: "scoped-producer",
             thread_id: &key.root_thread_id,
+            verbatim_env_names: &[],
         };
         let (
             mut held,
@@ -373,12 +376,13 @@ pub fn start_scoped_producer(
                 &attempt_id,
                 &identity,
                 &crate::runtime_db::scoped_child_attempt::ScopedChildMountPreparationEvidence {
-                    schema: 3,
+                    schema: 4,
                     plan_digest: provenance
                         .plan_digest
                         .clone()
                         .context("compiled scoped producer has no exact plan digest")?,
                     expected: expected_mount_preparation.clone(),
+                    expected_launch: expected_applied_launch.clone(),
                     observed: mount_preparation.clone(),
                     prepared_directory_sources: prepared_directory_sources.clone(),
                     prepared_immutable_sha256: prepared_immutable_sha256.clone(),
@@ -775,5 +779,58 @@ pub mod test_support {
             self.finished.store(true, Ordering::Release);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod recipe_subject_tests {
+    use super::*;
+
+    #[test]
+    fn mechanism_helpers_cannot_replace_a_consumer_subject() {
+        use ryeos_state::external_content::products::producer_recipe::ProducerRealizationMemberIdentity;
+        let member = |id: &str| ProducerRealizationMemberIdentity {
+            realization_id: id.to_owned(),
+            manifest_hash: "a".repeat(64),
+            relative_path: "bin/helper".to_owned(),
+            executable_sha256: "b".repeat(64),
+        };
+        let helpers = ProducerExecutableSource::AdmittedMechanismHelpers {
+            supervisor: member("supervisor"),
+            launcher: member("launcher"),
+        };
+        assert!(admit_recipe_subject(&helpers, "original_subject", &"c".repeat(64), false).is_ok());
+        assert!(admit_recipe_subject(&helpers, "original_subject", &"c".repeat(64), true).is_err());
+    }
+
+    #[test]
+    fn realization_executable_must_be_the_sealed_subject() {
+        let executable = ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id: "codex_runtime".to_owned(),
+            manifest_hash: "a".repeat(64),
+            relative_path: "bin/codex".to_owned(),
+            executable_sha256: "b".repeat(64),
+        };
+        assert!(admit_recipe_subject(&executable, "codex_runtime", &"a".repeat(64), true).is_ok());
+        assert!(admit_recipe_subject(&executable, "other_runtime", &"a".repeat(64), true).is_err());
+        assert!(admit_recipe_subject(&executable, "codex_runtime", &"c".repeat(64), true).is_err());
+        assert!(
+            admit_recipe_subject(
+                &ProducerExecutableSource::AdmittedVerifierExecutable,
+                "codex_runtime",
+                &"a".repeat(64),
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            admit_recipe_subject(
+                &ProducerExecutableSource::AdmittedVerifierExecutable,
+                "codex_runtime",
+                &"a".repeat(64),
+                true,
+            )
+            .is_err()
+        );
     }
 }

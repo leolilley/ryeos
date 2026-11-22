@@ -1,0 +1,368 @@
+{
+  "accepted_initial_effects": [
+    {
+      "id": 1,
+      "kind": {
+        "request": {
+          "binding_attachment_id": "cutover-golden-attachment",
+          "binding_digest": "cutover-golden-binding",
+          "binding_generation": 1,
+          "coordinate": {
+            "channel": "library",
+            "kind": "source",
+            "view_ref": "view:ryeos/view-sets/library"
+          },
+          "payload": {
+            "kind": "source_parameters",
+            "params": {}
+          }
+        },
+        "request_bounds": {
+          "max_input_bytes": 16384,
+          "max_request_bytes": 65536,
+          "max_seat_append_bytes": 65536
+        },
+        "tile_id": "rsk1/seat%3A11111111-1111-4111-8111-111111111111%3Asurface%3A22222222-2222-4222-8222-222222222222%3Atile%3A2/source/library",
+        "type": "fetch_source"
+      }
+    }
+  ],
+  "view_model": {
+    "chrome": {
+      "health_label": "connected",
+      "health_tone": "good",
+      "subtitle": "/fixture/project",
+      "title": "RyeOS"
+    },
+    "dialogs": [],
+    "generation": 2,
+    "notices": [],
+    "now_ms": 0,
+    "overlay": {
+      "key_hints": [
+        {
+          "keys": "↑/↓",
+          "word": "move"
+        },
+        {
+          "keys": "enter",
+          "word": "open"
+        },
+        {
+          "keys": "a",
+          "word": "acknowledge"
+        },
+        {
+          "keys": "esc",
+          "word": "close"
+        }
+      ],
+      "needs_you": [],
+      "needs_you_count": null,
+      "open": false,
+      "running": [],
+      "running_count": null,
+      "selected": null
+    },
+    "presentation": {
+      "chrome": {
+        "border": "thin",
+        "status_bar": {
+          "edge": "bottom",
+          "energy": 0.0,
+          "first_run": false,
+          "key_hints": [
+            {
+              "keys": "ctrl+k",
+              "word": "open"
+            },
+            {
+              "keys": "alt+o",
+              "word": "overlay"
+            },
+            {
+              "keys": "alt+t/b",
+              "word": "bars"
+            },
+            {
+              "keys": "ctrl+←/→",
+              "word": "tab"
+            },
+            {
+              "keys": "ctrl+↑/↓",
+              "word": "move"
+            },
+            {
+              "keys": "alt+r",
+              "word": "rename"
+            }
+          ],
+          "segments": [],
+          "visible": true
+        },
+        "switcher": {
+          "edge": "left"
+        },
+        "title": "Rye OS",
+        "top_bar": {
+          "add_tab": true,
+          "tabs": [
+            {
+              "active": true,
+              "number": 1,
+              "tile_count": 1,
+              "title": "cutover-golden",
+              "view_set_id": 1
+            }
+          ],
+          "visible": false
+        },
+        "version_label": "RYE OS - unqualified"
+      },
+      "frame": {
+        "corners": {
+          "tone": "accent",
+          "visible": true
+        }
+      },
+      "metrics": {
+        "active_thread_count": 0,
+        "activity_level": 0.11999999731779099,
+        "project_count": 0,
+        "schedule_count": 0,
+        "service_count": 0,
+        "thread_count": 0,
+        "tile_count": 1
+      },
+      "motion": [],
+      "schema_version": "ryeos.ui.presentation.v1",
+      "theme": {
+        "id": "system",
+        "tone": "accent"
+      }
+    },
+    "schema_version": "ryeos.ui.vm.v3",
+    "session": {
+      "posture": "observation_only",
+      "project_path": null,
+      "root_ref": "config:fixture/cutover",
+      "session_id": "cutover-session",
+      "surface_ordinal": 1,
+      "surfaces": [
+        {
+          "active": true,
+          "chip": {
+            "authored_in_project": false,
+            "mark": "initial"
+          },
+          "close_intent": null,
+          "ordinal": 1,
+          "rename_intent": {
+            "binding": {
+              "binding_attachment_id": "cutover-golden-attachment",
+              "binding_digest": "cutover-golden-binding",
+              "binding_generation": 1
+            },
+            "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+            "title": "Cutover",
+            "type": "rename_surface"
+          },
+          "select_intent": {
+            "binding": {
+              "binding_attachment_id": "cutover-golden-attachment",
+              "binding_digest": "cutover-golden-binding",
+              "binding_generation": 1
+            },
+            "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+            "type": "select_surface"
+          },
+          "surface_instance_id": "22222222-2222-4222-8222-222222222222",
+          "title": "Cutover"
+        }
+      ],
+      "title": "Cutover",
+      "user_principal_id": null
+    },
+    "transport": {
+      "channels": [
+        {
+          "channel": "session",
+          "freshness": "current"
+        }
+      ],
+      "freshness": "current"
+    },
+    "view_set": {
+      "center_is_empty": false,
+      "focused_tile": "2",
+      "layout_guard": "317eed5a0a787a7e0614ed276195baa21c2ef3ac9d4e8469ced533eea1d7bf4b",
+      "lens_trail": [],
+      "root": {
+        "attachment_label": null,
+        "background_transparent": false,
+        "chrome_hidden": false,
+        "current": true,
+        "focused": true,
+        "group_id": "3",
+        "instance_key": "seat:11111111-1111-4111-8111-111111111111:surface:22222222-2222-4222-8222-222222222222:tile:2",
+        "intents": [
+          {
+            "intent": {
+              "tile_id": "2",
+              "type": "close_tile"
+            },
+            "label": "Close view",
+            "title": "Close this view; its running work is unaffected"
+          }
+        ],
+        "maximized": false,
+        "tabs": [
+          {
+            "active": true,
+            "tile_id": "2",
+            "title": "Saved view sets"
+          }
+        ],
+        "tile_id": "2",
+        "title": "Saved view sets",
+        "type": "tile",
+        "view": {
+          "sections": [
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:866efe85e921fd43108b75fd8df7d7d86dd5379b2f985166383e4e7515efcc99",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Reusable Surfaces"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:ff1a1f013c07217a55e90b2ea14bf4e371736497f73084c58747237d798ee341",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Particular Surfaces"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:b38cbfab50276068003c3ad6a9edc644e4678ad633785e6d9a83129018a91677",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Independent copies of particular Surfaces"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:bdce026ceae72fb84380b22618c4d9cd687f97b4237f6396af0d9aa592f278f6",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Save Surface composition"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:cbc51b475c1748b2a611c51b4d635770d9395762335690fb551d61a19e70fedc",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Retain Surface subjects"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:2522482af5cfd4ff1d816a50656ee9347521048393fd007b717869c6b3eb995f",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Save composition"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:4a205fe1402603742352c481ee640f3bed12cdf101a4e4ecce8d2b6e1657f765",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Retain current subject"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:f9c21b13cd1df3a02059d1ea2c21fe090005da6c0441a962774a2e650ab0c72a",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Saved compositions"
+            },
+            {
+              "collapsed": false,
+              "count": 0,
+              "cursor": 0,
+              "header_selected": false,
+              "id": "view-section:72794f92c2e68ff5139224f0bb90b912ffb28fe9e0eb66d028c614de090eb594",
+              "rows": [],
+              "source_status": {
+                "message": "Waiting for source",
+                "stale": false,
+                "state": "loading"
+              },
+              "title": "Particular view sets"
+            }
+          ],
+          "title": "Saved view sets",
+          "type": "sections"
+        }
+      },
+      "split_max_ratio": 0.8999999761581421,
+      "split_min_ratio": 0.10000000149011612,
+      "tile_count": 1,
+      "view_set_id": 1
+    }
+  }
+}

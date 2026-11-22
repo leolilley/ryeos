@@ -38,6 +38,12 @@ pub const REMOTE_CLOSURE_MAX_TOTAL_BLOB_BYTES: u64 = 1024 * 1024 * 1024;
 pub const REMOTE_CLOSURE_MAX_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const REMOTE_CLOSURE_MAX_LINKS_PER_OBJECT: usize = 100_000;
 
+/// Hard ceilings for repeated typed reads during publication/history replay.
+/// Remote publication admits at most 100,000 objects and 512 MiB of unique
+/// object bytes. Per-closure limits below cannot exceed these absolute caps.
+pub(crate) const MAX_BOUNDED_VALIDATION_READS: usize = 800_064;
+pub(crate) const MAX_BOUNDED_VALIDATION_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Transitive closure for one or more CAS object roots.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectClosureReport {
@@ -52,6 +58,13 @@ pub struct ObjectClosureReport {
     /// verified by callers that hold that store; these are never opened as CAS
     /// blobs.
     pub large_object_hashes: BTreeSet<String>,
+    /// Unique addressed object bytes actually read during closure traversal.
+    pub object_bytes_read: u64,
+    /// Unique addressed blob bytes actually verified during closure traversal.
+    pub blob_bytes_verified: u64,
+    /// Typed object-edge count retained for traversal diagnostics; it does not
+    /// multiply the bounded authoritative-history reread budget.
+    pub object_reference_count: usize,
     /// Blob hashes referenced by reachable objects but absent from CAS.
     pub missing_blobs: Vec<MissingDependency>,
     /// Object hashes that were referenced but not present in CAS.
@@ -118,6 +131,20 @@ pub struct ObjectContractRegistration {
     pub links: fn(&Value) -> Result<RegisteredObjectLinks, String>,
 }
 
+/// Exact typed ThreadEvent contract owned above state. Callbacks receive the
+/// complete envelope, after the ordinary state-owned envelope validation, so
+/// the domain owner can prove its payload's relationship to the emitting
+/// thread.
+pub struct EventPayloadContractRegistration {
+    pub event_type: &'static str,
+    pub validate: fn(&Value) -> anyhow::Result<()>,
+    pub links: fn(&Value) -> Result<RegisteredObjectLinks, String>,
+}
+
+/// Meaning-blind namespace: every event selector in this namespace requires an
+/// installed exact decoder, including before any installation.
+pub const REGISTERED_EVENT_SELECTOR_PREFIX: &str = "contract.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisteredObjectExpectation {
     Any,
@@ -176,6 +203,66 @@ pub fn install_object_contracts(
         .map_err(|_| anyhow::anyhow!("application object contracts were already installed"))
 }
 
+static REGISTERED_EVENT_CONTRACTS: OnceLock<Vec<EventPayloadContractRegistration>> =
+    OnceLock::new();
+
+/// Install the application-owned event payload contracts exactly once, before
+/// any closure walk or event append. Selectors must live in the reserved
+/// namespace, be canonical and be unique; repeated installation fails closed.
+pub fn install_event_payload_contracts(
+    events: Vec<EventPayloadContractRegistration>,
+) -> anyhow::Result<()> {
+    let events = validate_event_registrations(events)?;
+    REGISTERED_EVENT_CONTRACTS
+        .set(events)
+        .map_err(|_| anyhow::anyhow!("application event contracts were already installed"))
+}
+
+fn validate_event_registrations(
+    mut events: Vec<EventPayloadContractRegistration>,
+) -> anyhow::Result<Vec<EventPayloadContractRegistration>> {
+    events.sort_by_key(|registration| registration.event_type);
+    let mut prior = None;
+    for registration in &events {
+        if !canonical_registered_event_selector(registration.event_type) {
+            anyhow::bail!(
+                "registered event selector is not canonical/reserved: {}",
+                registration.event_type
+            );
+        }
+        if prior == Some(registration.event_type) {
+            anyhow::bail!(
+                "registered event selector {} is duplicated",
+                registration.event_type
+            );
+        }
+        prior = Some(registration.event_type);
+    }
+    Ok(events)
+}
+
+fn canonical_registered_event_selector(selector: &str) -> bool {
+    selector.len() <= 128
+        && selector
+            .strip_prefix(REGISTERED_EVENT_SELECTOR_PREFIX)
+            .is_some_and(|suffix| {
+                suffix.split('.').all(|segment| {
+                    !segment.is_empty()
+                        && segment.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                        })
+                })
+            })
+}
+
+/// Event selectors the installed application contracts admit.
+pub fn current_event_payload_selectors() -> Vec<&'static str> {
+    REGISTERED_EVENT_CONTRACTS
+        .get()
+        .map(|events| events.iter().map(|contract| contract.event_type).collect())
+        .unwrap_or_default()
+}
+
 /// Exact object kinds the current closure decoder admits.
 ///
 /// Durable writers and maintenance coverage tests use this inventory so a new
@@ -231,6 +318,67 @@ fn registered_contract(kind: &str) -> Option<&'static ObjectContractRegistration
         .map(|index| &registrations[index])
 }
 
+fn event_contract_in<'a>(
+    table: Option<&'a [EventPayloadContractRegistration]>,
+    selector: &str,
+) -> Result<Option<&'a EventPayloadContractRegistration>, String> {
+    if !selector.starts_with(REGISTERED_EVENT_SELECTOR_PREFIX) {
+        return Ok(None);
+    }
+    if !canonical_registered_event_selector(selector) {
+        return Err("noncanonical reserved event selector".into());
+    }
+    table
+        .and_then(|events| {
+            events
+                .binary_search_by_key(&selector, |entry| entry.event_type)
+                .ok()
+                .map(|index| &events[index])
+        })
+        .map(Some)
+        .ok_or_else(|| format!("unregistered reserved event selector: {selector}"))
+}
+
+fn event_contract_for_value<'a>(
+    table: Option<&'a [EventPayloadContractRegistration]>,
+    value: &Value,
+) -> Result<Option<&'a EventPayloadContractRegistration>, String> {
+    let selector = value
+        .get("event_type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing thread event selector".to_string())?;
+    event_contract_in(table, selector)
+}
+
+fn validate_registered_event(value: &Value) -> anyhow::Result<()> {
+    if let Some(contract) =
+        event_contract_for_value(REGISTERED_EVENT_CONTRACTS.get().map(Vec::as_slice), value)
+            .map_err(anyhow::Error::msg)?
+    {
+        (contract.validate)(value)?;
+    }
+    Ok(())
+}
+
+fn registered_event_links_in(
+    table: Option<&[EventPayloadContractRegistration]>,
+    value: &Value,
+) -> Result<Option<ContractLinks>, String> {
+    let Some(contract) = event_contract_for_value(table, value)? else {
+        return Ok(None);
+    };
+    // Diagnostic traversal also refuses unvalidated domain edges.
+    let envelope = serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())
+        .map_err(|error| error.to_string())?;
+    envelope.validate().map_err(|error| format!("{error:#}"))?;
+    (contract.validate)(value).map_err(|error| format!("{error:#}"))?;
+    convert_registered_links((contract.links)(value)?).map(Some)
+}
+
+fn links_registered_event(value: &Value) -> Result<Option<ContractLinks>, String> {
+    registered_event_links_in(REGISTERED_EVENT_CONTRACTS.get().map(Vec::as_slice), value)
+}
+
 fn decode_registered(value: &Value) -> anyhow::Result<Option<ContractLinks>> {
     let kind = value
         .get("kind")
@@ -261,7 +409,10 @@ fn registered_links(
     contract: &ObjectContractRegistration,
     value: &Value,
 ) -> Result<ContractLinks, String> {
-    let declared = (contract.links)(value)?;
+    convert_registered_links((contract.links)(value)?)
+}
+
+fn convert_registered_links(declared: RegisteredObjectLinks) -> Result<ContractLinks, String> {
     let mut links = ContractLinks::leaf();
     for edge in declared.object_edges {
         push_typed_hash(
@@ -345,6 +496,113 @@ pub struct ObjectClosureLimits {
     pub max_links_per_object: usize,
 }
 
+/// Separate finite work budget for typed history verification after unique
+/// closure admission. Every read must name a member of that exact closure.
+/// The protocol permits at most 100,000 objects and 512 MiB of unique object
+/// bytes. An admitted object may be revisited by exact-head validation, legal
+/// transition checks, an optional source/target frontier check, and projection
+/// replay, so the allowance is eight reads per admitted hash and eight times
+/// the actual admitted byte total. Absolute limits cap this at 800,064 reads
+/// and 4 GiB even if a caller supplies a larger local policy. Typed history
+/// traversal follows chain/event/snapshot links; generic reference counts do
+/// not multiply this budget.
+#[derive(Debug)]
+pub(crate) struct BoundedCasObjectReadBudget {
+    admitted_hashes: BTreeSet<String>,
+    limits: ObjectClosureLimits,
+    validation_work_bytes: u64,
+    validation_reads: usize,
+    max_validation_work_bytes: u64,
+    max_validation_reads: usize,
+}
+
+impl BoundedCasObjectReadBudget {
+    pub(crate) fn new(
+        admitted_hashes: &BTreeSet<String>,
+        limits: ObjectClosureLimits,
+        initial_total_bytes: u64,
+    ) -> anyhow::Result<Self> {
+        if admitted_hashes.len() > limits.max_objects {
+            anyhow::bail!("admitted closure exceeds its object-count limit");
+        }
+        if initial_total_bytes > limits.max_total_object_bytes {
+            anyhow::bail!("admitted closure exceeds its aggregate object-byte limit");
+        }
+        let max_validation_reads = limits
+            .max_objects
+            .checked_mul(8)
+            .and_then(|count| count.checked_add(64))
+            .context("validation object-read ceiling overflow")?
+            .min(MAX_BOUNDED_VALIDATION_READS);
+        let max_validation_work_bytes = initial_total_bytes
+            .checked_mul(8)
+            .context("validation work-byte ceiling overflow")?
+            .min(MAX_BOUNDED_VALIDATION_BYTES);
+        Ok(Self {
+            admitted_hashes: admitted_hashes.clone(),
+            limits,
+            validation_work_bytes: 0,
+            validation_reads: 0,
+            max_validation_work_bytes,
+            max_validation_reads,
+        })
+    }
+
+    pub(crate) fn get_object(
+        &mut self,
+        cas: &lillux::CasStore,
+        hash: &str,
+        type_maximum_bytes: u64,
+    ) -> anyhow::Result<Option<Value>> {
+        if !self.admitted_hashes.contains(hash) {
+            anyhow::bail!("verification object {hash} is outside the admitted closure");
+        }
+        self.validation_reads = self
+            .validation_reads
+            .checked_add(1)
+            .context("validation object-read count overflow")?;
+        if self.validation_reads > self.max_validation_reads {
+            anyhow::bail!(
+                "authoritative validation exceeds its bounded object-read work budget: {} > {}",
+                self.validation_reads,
+                self.max_validation_reads
+            );
+        }
+        let remaining_work_bytes = self
+            .max_validation_work_bytes
+            .checked_sub(self.validation_work_bytes)
+            .context("validation work-byte accounting exceeded its admitted ceiling")?;
+        let maximum_bytes = self
+            .limits
+            .max_object_bytes
+            .min(type_maximum_bytes)
+            .min(remaining_work_bytes);
+        let Some(value) = cas.get_object_bounded(hash, maximum_bytes)? else {
+            return Ok(None);
+        };
+        let maximum = usize::try_from(maximum_bytes)
+            .context("admitted verification object limit exceeds this platform")?;
+        let canonical_len = u64::try_from(lillux::canonical_json_bounded(&value, maximum)?.len())
+            .context("verification object canonical size exceeds u64")?;
+        self.validation_work_bytes = self
+            .validation_work_bytes
+            .checked_add(canonical_len)
+            .context("validation object work-byte count overflow")?;
+        if self.validation_work_bytes > self.max_validation_work_bytes {
+            anyhow::bail!(
+                "authoritative validation exceeds its bounded object-byte work budget: {} > {}",
+                self.validation_work_bytes,
+                self.max_validation_work_bytes
+            );
+        }
+        Ok(Some(value))
+    }
+
+    pub(crate) fn admits_hash(&self, hash: &str) -> bool {
+        self.admitted_hashes.contains(hash)
+    }
+}
+
 /// Load one CAS JSON object by its exact requested identity.
 ///
 /// This is the shared authority boundary for consumers that act on a CAS
@@ -388,16 +646,34 @@ pub fn load_exact_cas_object_with_cas(
     if !is_canonical_hash(requested_hash) {
         anyhow::bail!("invalid requested CAS object hash {requested_hash}");
     }
-    let value = cas
-        .get_object(requested_hash)?
+    let raw = cas
+        .get_object_raw_bytes_bounded_with_capsule_ceiling(
+            requested_hash,
+            max_bytes,
+            crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow::anyhow!("CAS object {requested_hash} is missing"))?;
-    let canonical = lillux::canonical_json(&value)
-        .with_context(|| format!("failed to canonicalize CAS object {requested_hash}"))?;
-    let byte_len = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
-    if byte_len > max_bytes {
-        anyhow::bail!("CAS object {requested_hash} exceeds byte limit: {byte_len} > {max_bytes}");
+    let cap =
+        usize::try_from(max_bytes).context("admitted object byte limit exceeds this platform")?;
+    let value: Value = serde_json::from_slice(&raw)
+        .with_context(|| format!("failed to parse CAS object {requested_hash}"))?;
+    if lillux::canonical_json_bounded(&value, cap)?.as_slice() != raw {
+        anyhow::bail!("CAS object {requested_hash} is not stored as canonical JSON bytes");
     }
     Ok(value)
+}
+
+/// Load a capsule with its protocol-wide raw-byte ceiling, independently of
+/// the larger caller-selected generic object policy.
+pub fn load_exact_capsule_object_with_cas(
+    cas: &lillux::CasStore,
+    requested_hash: &str,
+) -> anyhow::Result<Value> {
+    load_exact_cas_object_with_cas(
+        cas,
+        requested_hash,
+        crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+    )
 }
 
 /// Load one CAS blob by its exact requested identity without following links.
@@ -432,12 +708,8 @@ pub fn load_exact_cas_blob_with_cas(
         anyhow::bail!("invalid requested CAS blob hash {requested_hash}");
     }
     let bytes = cas
-        .get_blob(requested_hash)?
+        .get_blob_bounded(requested_hash, max_bytes)?
         .ok_or_else(|| anyhow::anyhow!("CAS blob {requested_hash} is missing"))?;
-    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if byte_len > max_bytes {
-        anyhow::bail!("CAS blob {requested_hash} exceeds byte limit: {byte_len} > {max_bytes}");
-    }
     Ok(bytes)
 }
 
@@ -570,6 +842,7 @@ pub(crate) fn collect_object_closure_with_cas_and_check(
         roots,
         ObjectClosureLimits::unbounded_for_local_maintenance(),
         check,
+        false,
     )
 }
 
@@ -620,7 +893,23 @@ pub fn collect_object_closure_with_cas_and_limits(
     limits: ObjectClosureLimits,
 ) -> anyhow::Result<ObjectClosureReport> {
     let mut check = || Ok(());
-    collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check)
+    collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check, false)
+}
+
+pub(crate) fn collect_object_closure_with_cas_and_limits_and_check_and_verify(
+    cas: &lillux::CasStore,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+    verify_typed_objects: bool,
+) -> anyhow::Result<ObjectClosureReport> {
+    collect_object_closure_from_source(
+        ClosureCas::Pinned(cas),
+        roots,
+        limits,
+        check,
+        verify_typed_objects,
+    )
 }
 
 /// Collect and validate a closure from untrusted in-memory transport bytes.
@@ -639,6 +928,7 @@ pub fn collect_object_closure_from_memory(
         roots,
         limits,
         &mut check,
+        false,
     )
 }
 
@@ -648,7 +938,7 @@ fn collect_object_closure_with_limits_and_check(
     limits: ObjectClosureLimits,
     check: &mut dyn FnMut() -> anyhow::Result<()>,
 ) -> anyhow::Result<ObjectClosureReport> {
-    collect_object_closure_from_source(ClosureCas::Path(cas_root), roots, limits, check)
+    collect_object_closure_from_source(ClosureCas::Path(cas_root), roots, limits, check, false)
 }
 
 #[derive(Clone, Copy)]
@@ -665,21 +955,11 @@ impl ClosureCas<'_> {
     fn read_object(self, hash: &str, max_bytes: u64) -> anyhow::Result<Option<Vec<u8>>> {
         match self {
             Self::Path(root) => read_cas_file_no_follow(root, "objects", hash, ".json", max_bytes),
-            Self::Pinned(cas) => {
-                let Some((file, size)) = cas.open_object(hash)? else {
-                    return Ok(None);
-                };
-                if size > max_bytes {
-                    anyhow::bail!("CAS object {hash} exceeds byte limit {max_bytes}");
-                }
-                let mut bytes = Vec::with_capacity(usize::try_from(size)?);
-                file.take(max_bytes.saturating_add(1))
-                    .read_to_end(&mut bytes)?;
-                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
-                    anyhow::bail!("CAS object {hash} exceeded byte limit while reading");
-                }
-                Ok(Some(bytes))
-            }
+            Self::Pinned(cas) => cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
+                hash,
+                max_bytes,
+                crate::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+            ),
             Self::Memory { objects, .. } => {
                 let Some(bytes) = objects.get(hash) else {
                     return Ok(None);
@@ -752,7 +1032,9 @@ impl ClosureCas<'_> {
             if read == 0 {
                 break;
             }
-            total = total.saturating_add(u64::try_from(read)?);
+            total = total
+                .checked_add(u64::try_from(read)?)
+                .context("CAS blob byte count overflow")?;
             if total > max_bytes {
                 anyhow::bail!("CAS blob {hash} exceeded byte limit while reading");
             }
@@ -770,10 +1052,12 @@ fn collect_object_closure_from_source(
     roots: impl IntoIterator<Item = String>,
     limits: ObjectClosureLimits,
     check: &mut dyn FnMut() -> anyhow::Result<()>,
+    verify_typed_objects: bool,
 ) -> anyhow::Result<ObjectClosureReport> {
     let mut report = ObjectClosureReport::default();
     let mut queue: VecDeque<(String, Option<String>, ExpectedObject)> = VecDeque::new();
     let mut loaded_identities = HashMap::<String, LoadedObjectIdentity>::new();
+    let mut inspected_blobs = HashMap::<String, (u64, String)>::new();
     let mut history_edges = BTreeMap::<HistoryGraph, BTreeMap<String, BTreeSet<String>>>::new();
     let mut total_object_bytes = 0_u64;
     let mut total_blob_bytes = 0_u64;
@@ -814,7 +1098,12 @@ fn collect_object_closure_from_source(
             );
         }
 
-        let content = match cas.read_object(&hash, limits.max_object_bytes)? {
+        let remaining_object_bytes = limits
+            .max_total_object_bytes
+            .checked_sub(total_object_bytes)
+            .context("object closure object-byte accounting exceeded its admitted total")?;
+        let content_limit = limits.max_object_bytes.min(remaining_object_bytes);
+        let content = match cas.read_object(&hash, content_limit)? {
             Some(content) => content,
             None => {
                 report.missing_objects.push(MissingDependency {
@@ -824,7 +1113,12 @@ fn collect_object_closure_from_source(
                 continue;
             }
         };
-        total_object_bytes = total_object_bytes.saturating_add(content.len() as u64);
+        total_object_bytes = total_object_bytes
+            .checked_add(
+                u64::try_from(content.len()).context("object closure object size exceeds u64")?,
+            )
+            .context("object closure total object-byte count overflow")?;
+        report.object_bytes_read = total_object_bytes;
         if total_object_bytes > limits.max_total_object_bytes {
             anyhow::bail!(
                 "object closure exceeds max_total_object_bytes: {} > {}",
@@ -920,12 +1214,37 @@ fn collect_object_closure_from_source(
             continue;
         }
 
+        if verify_typed_objects {
+            match identity.kind.as_str() {
+                "chain_state" => {
+                    let state: crate::ChainState = serde_json::from_value(value.clone())
+                        .with_context(|| format!("decode chain_state {hash}"))?;
+                    state.validate()?;
+                }
+                "thread_snapshot" => {
+                    crate::objects::ThreadSnapshot::from_current_value(value.clone())
+                        .with_context(|| format!("decode current thread_snapshot {hash}"))?;
+                }
+                "thread_event" => {
+                    let event: crate::objects::ThreadEvent = serde_json::from_value(value.clone())
+                        .with_context(|| format!("decode thread_event {hash}"))?;
+                    event.validate()?;
+                }
+                _ => {}
+            }
+        }
+
         let object_edges = decoded.object_edges;
+        report.object_reference_count = report
+            .object_reference_count
+            .checked_add(object_edges.len())
+            .context("object closure reference count overflow")?;
 
         let link_count = object_edges
             .len()
-            .saturating_add(decoded.blob_hashes.len())
-            .saturating_add(decoded.large_object_hashes.len());
+            .checked_add(decoded.blob_hashes.len())
+            .and_then(|count| count.checked_add(decoded.large_object_hashes.len()))
+            .context("object closure link count overflow")?;
         if link_count > limits.max_links_per_object {
             anyhow::bail!(
                 "object {hash} exceeds max_links_per_object: {} > {}",
@@ -955,34 +1274,53 @@ fn collect_object_closure_from_source(
             }
             report.large_object_hashes.insert(large_object);
         }
-        let project_file_size = if identity.kind == "project_file" {
-            Some(
+        let declared_blob_size = match identity.kind.as_str() {
+            "project_file" => Some((
+                "project_file",
                 crate::objects::ProjectFile::from_value(&value)
                     .map_err(|error| anyhow::anyhow!(error))?
                     .size,
-            )
-        } else {
-            None
+            )),
+            crate::objects::THREAD_ATTACHMENT_KIND => Some((
+                crate::objects::THREAD_ATTACHMENT_KIND,
+                crate::objects::ThreadAttachment::from_value(&value)
+                    .map_err(|error| anyhow::anyhow!(error))?
+                    .byte_length,
+            )),
+            _ => None,
         };
         for blob in decoded.blob_hashes {
             check()?;
             if is_canonical_hash(&blob) {
-                match cas
-                    .inspect_blob(&blob, limits.max_blob_bytes)
-                    .with_context(|| {
-                        format!(
-                            "enforce max_blob_bytes={} for referenced blob {blob}",
-                            limits.max_blob_bytes
-                        )
-                    })? {
+                let remaining_blob_bytes = limits
+                    .max_total_blob_bytes
+                    .checked_sub(total_blob_bytes)
+                    .context("object closure blob-byte accounting exceeded its admitted total")?;
+                let inspected = if let Some(observed) = inspected_blobs.get(&blob) {
+                    Some(observed.clone())
+                } else {
+                    let observed = cas
+                        .inspect_blob(&blob, limits.max_blob_bytes.min(remaining_blob_bytes))
+                        .with_context(|| {
+                            format!(
+                                "enforce max_blob_bytes={} for referenced blob {blob}",
+                                limits.max_blob_bytes
+                            )
+                        })?;
+                    if let Some(observed) = observed.as_ref() {
+                        inspected_blobs.insert(blob.clone(), observed.clone());
+                    }
+                    observed
+                };
+                match inspected {
                     Some((actual_size, actual_hash)) => {
-                        if let Some(expected_size) = project_file_size
+                        if let Some((declaring_kind, expected_size)) = declared_blob_size
                             && actual_size != expected_size
                         {
                             report.malformed_objects.push(MalformedObject {
                                 hash: hash.clone(),
                                 reason: format!(
-                                    "project_file declares size {expected_size}, but blob {blob} has size {actual_size}"
+                                    "{declaring_kind} declares size {expected_size}, but blob {blob} has size {actual_size}"
                                 ),
                             });
                             continue;
@@ -995,7 +1333,10 @@ fn collect_object_closure_from_source(
                                     limits.max_blobs
                                 );
                             }
-                            total_blob_bytes = total_blob_bytes.saturating_add(actual_size);
+                            total_blob_bytes = total_blob_bytes
+                                .checked_add(actual_size)
+                                .context("object closure total blob-byte count overflow")?;
+                            report.blob_bytes_verified = total_blob_bytes;
                             if total_blob_bytes > limits.max_total_blob_bytes {
                                 anyhow::bail!(
                                     "object closure exceeds max_total_blob_bytes: {} > {}",
@@ -1354,7 +1695,91 @@ fn is_canonical_hash(hash: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use serde_json::json;
+
+    fn test_event_contract(selector: &'static str) -> EventPayloadContractRegistration {
+        EventPayloadContractRegistration {
+            event_type: selector,
+            validate: |event| {
+                if event["payload"]["owner"] != event["thread_id"] {
+                    anyhow::bail!("payload owner differs from emitting thread");
+                }
+                Ok(())
+            },
+            links: |event| {
+                Ok(RegisteredObjectLinks {
+                    object_edges: vec![RegisteredObjectEdge {
+                        hash: event["payload"]["evidence"]
+                            .as_str()
+                            .ok_or("missing evidence")?
+                            .to_owned(),
+                        expected: RegisteredObjectExpectation::Kind("thread_event"),
+                    }],
+                    ..Default::default()
+                })
+            },
+        }
+    }
+
+    #[test]
+    fn event_registration_is_exact_reserved_and_fail_closed_without_installation() {
+        assert!(event_contract_in(None, "contract.test.v1").is_err());
+        assert!(event_contract_in(None, "contract..v1").is_err());
+        assert!(event_contract_in(None, "ordinary_event").unwrap().is_none());
+        for selector in [
+            "ordinary_event",
+            "contract.",
+            "contract.Test.v1",
+            "contract.test-v1",
+        ] {
+            assert!(validate_event_registrations(vec![test_event_contract(selector)]).is_err());
+        }
+        assert!(
+            validate_event_registrations(vec![
+                test_event_contract("contract.test.v1"),
+                test_event_contract("contract.test.v1")
+            ])
+            .is_err()
+        );
+        let table =
+            validate_event_registrations(vec![test_event_contract("contract.test.v1")]).unwrap();
+        assert!(event_contract_in(Some(&table), "contract.test.v2").is_err());
+        assert!(
+            event_contract_in(Some(&table), "contract.test.v1")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn event_links_validate_envelope_owner_and_canonical_typed_evidence() {
+        let table =
+            validate_event_registrations(vec![test_event_contract("contract.test.v1")]).unwrap();
+        let mut event = json!({
+            "kind":"thread_event", "schema":crate::objects::SCHEMA_VERSION,
+            "chain_root_id":"T-one", "chain_seq":1, "thread_id":"T-one", "thread_seq":1,
+            "event_type":"contract.test.v1", "durability":"journal",
+            "ts":"2026-10-05T00:00:00Z", "prev_chain_event_hash":null,
+            "prev_thread_event_hash":null, "payload":{"owner":"T-one","evidence":h("ab")}
+        });
+        let links = registered_event_links_in(Some(&table), &event)
+            .unwrap()
+            .unwrap();
+        assert_eq!(links.object_edges.len(), 1);
+        assert_eq!(
+            links.object_edges[0].expected,
+            ExpectedObject::Kind("thread_event")
+        );
+        event["payload"]["owner"] = json!("T-other");
+        assert!(registered_event_links_in(Some(&table), &event).is_err());
+        event["payload"]["owner"] = json!("T-one");
+        event["payload"]["evidence"] = json!("not-a-hash");
+        assert!(registered_event_links_in(Some(&table), &event).is_err());
+        event["payload"]["evidence"] = json!(h("ab"));
+        event["thread_id"] = json!("");
+        assert!(registered_event_links_in(Some(&table), &event).is_err());
+    }
 
     fn h(byte: &str) -> String {
         byte.repeat(32)
@@ -1437,6 +1862,81 @@ mod tests {
         assert!(report.is_complete(), "{report:?}");
         assert_eq!(report.object_hashes.len(), 4);
         assert!(report.blob_hashes.contains(&blob_hash));
+    }
+
+    fn thread_event_naming(cas_root: &Path, refs: &[String]) -> String {
+        write_object(
+            cas_root,
+            &json!({
+                "schema": 1,
+                "kind": "thread_event",
+                "chain_root_id": "chain",
+                "chain_seq": 1,
+                "thread_id": "thread",
+                "thread_seq": 1,
+                "event_type": "cognition_frame",
+                "durability": "durable",
+                "ts": "2026-01-01T00:00:00Z",
+                "prev_chain_event_hash": null,
+                "prev_thread_event_hash": null,
+                "payload": {"attachment_refs": refs},
+            }),
+        )
+    }
+
+    #[test]
+    fn thread_event_reaches_its_attachment_object_and_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let blob_hash = write_blob(&cas_root, b"inventory");
+        let attachment = write_object(
+            &cas_root,
+            &crate::objects::ThreadAttachment {
+                media_type: "application/json".to_owned(),
+                byte_length: b"inventory".len() as u64,
+                blob_hash: blob_hash.clone(),
+            }
+            .to_value(),
+        );
+        let event = thread_event_naming(&cas_root, std::slice::from_ref(&attachment));
+        let report = collect_object_closure(&cas_root, [event.clone()]).unwrap();
+        assert!(report.is_complete(), "{report:?}");
+        assert!(report.object_hashes.contains(&attachment));
+        assert!(report.blob_hashes.contains(&blob_hash));
+    }
+
+    #[test]
+    fn thread_attachment_with_a_wrong_declared_length_is_malformed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let blob_hash = write_blob(&cas_root, b"inventory");
+        let attachment = write_object(
+            &cas_root,
+            &crate::objects::ThreadAttachment {
+                media_type: "application/json".to_owned(),
+                byte_length: 3,
+                blob_hash,
+            }
+            .to_value(),
+        );
+        let event = thread_event_naming(&cas_root, &[attachment]);
+        let report = collect_object_closure(&cas_root, [event]).unwrap();
+        assert!(!report.is_complete(), "{report:?}");
+        assert!(
+            report
+                .malformed_objects
+                .iter()
+                .any(|object| object.reason.contains("thread_attachment declares size 3"))
+        );
+    }
+
+    #[test]
+    fn thread_event_naming_a_missing_attachment_is_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let event = thread_event_naming(&cas_root, &[h("ee")]);
+        let report = collect_object_closure(&cas_root, [event]).unwrap();
+        assert!(!report.is_complete(), "{report:?}");
     }
 
     #[test]
@@ -1587,6 +2087,8 @@ mod tests {
             }),
             json!({"kind": "source_manifest"}),
             json!({"kind": "item_source"}),
+            json!({"kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND}),
+            json!({"kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND}),
         ] {
             assert!(
                 validate_current_object(&value).is_err(),
@@ -1785,6 +2287,132 @@ mod tests {
     }
 
     #[test]
+    fn guest_runtime_materialization_closure_is_narrow_and_typed() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[17u8; 32]).verifying_key();
+        let signer = lillux::crypto::fingerprint(&key);
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let signed_item = write_blob(&cas_root, b"signed recipe");
+        let signed_bundle = write_blob(&cas_root, b"signed Bundle manifest");
+        let signed_ref = write_blob(&cas_root, b"signed executor manifest ref");
+        let manifest_bytes = write_blob(&cas_root, b"canonical selected executor manifest");
+        let signed_sidecar = write_blob(&cas_root, b"signed selected ItemSource sidecar");
+        let payload = write_blob(&cas_root, b"exact guest owner executable");
+        let item_ref = "bin/x86_64-unknown-linux-gnu/owner";
+        let item_source = write_object(
+            &cas_root,
+            &json!({
+                "kind": "item_source",
+                "item_ref": item_ref,
+                "content_blob_hash": payload,
+                "integrity": "none",
+                "signature_info": null,
+                "mode": null
+            }),
+        );
+        let source = json!({
+            "schema": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+            "kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
+            "signed_recipe_items": [{
+                "resolved_ref": "config:codex/guest-owner-materialization",
+                "bundle_name": "codex",
+                "signer_fingerprint": signer,
+                "signed_blob_hash": signed_item,
+                "raw_content_digest": h("bb"),
+                "signature_envelope": {"prefix": "#", "suffix": null, "after_shebang": false}
+            }],
+            "signed_bundle_manifests": [{
+                "bundle_name": "codex",
+                "signer_fingerprint": signer,
+                "signed_blob_hash": signed_bundle,
+                "body_digest": h("dd")
+            }],
+            "signer_keys": [{
+                "signer_fingerprint": signer,
+                "verifying_key": format!("ed25519:{}", base64::engine::general_purpose::STANDARD.encode(key.to_bytes()))
+            }],
+            "executor": {
+                "bundle_name": "codex",
+                "item_ref": item_ref,
+                "target_triple": "x86_64-unknown-linux-gnu",
+                "signer_fingerprint": signer,
+                "signed_manifest_ref_blob_hash": signed_ref,
+                "manifest_object_blob_hash": manifest_bytes,
+                "item_source_object_hash": item_source,
+                "signed_sidecar_blob_hash": signed_sidecar,
+                "payload_blob_hash": payload
+            }
+        });
+        let source_hash = write_object(&cas_root, &source);
+        let runtime = write_object(
+            &cas_root,
+            &json!({
+                "kind": crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+                "schema": crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA,
+                "entries": [],
+                "entry_count": 0,
+                "total_bytes": 0
+            }),
+        );
+        let subject = write_object(
+            &cas_root,
+            &json!({
+                "schema": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+                "kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND,
+                "coordinate_digest": h("ff"),
+                "runtime_manifest_hash": runtime,
+                "source_evidence_hash": source_hash
+            }),
+        );
+        let complete = collect_object_closure(&cas_root, [subject]).unwrap();
+        assert!(complete.is_complete(), "{complete:?}");
+        assert_eq!(complete.object_hashes.len(), 4);
+        assert_eq!(complete.blob_hashes.len(), 6);
+
+        let mut missing = source.clone();
+        missing["executor"]["signed_sidecar_blob_hash"] = json!(h("11"));
+        let missing_hash = write_object(&cas_root, &missing);
+        let missing_report = collect_object_closure(&cas_root, [missing_hash]).unwrap();
+        assert!(!missing_report.is_complete());
+        assert!(
+            missing_report
+                .missing_blobs
+                .iter()
+                .any(|entry| entry.hash == h("11"))
+        );
+
+        let mut wrong_ref = source;
+        wrong_ref["executor"]["item_ref"] = json!("bin/x86_64-unknown-linux-gnu/other");
+        let wrong_hash = write_object(&cas_root, &wrong_ref);
+        let wrong_report = collect_object_closure(&cas_root, [wrong_hash]).unwrap();
+        assert!(!wrong_report.is_complete());
+        assert!(
+            wrong_report
+                .malformed_objects
+                .iter()
+                .any(|entry| { entry.reason.contains("does not match embedded item_source") })
+        );
+
+        let wrong_subject = write_object(
+            &cas_root,
+            &json!({
+                "schema": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SCHEMA,
+                "kind": crate::objects::GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND,
+                "coordinate_digest": h("ff"),
+                "runtime_manifest_hash": runtime,
+                "source_evidence_hash": runtime
+            }),
+        );
+        let wrong_kind_report = collect_object_closure(&cas_root, [wrong_subject]).unwrap();
+        assert!(!wrong_kind_report.is_complete());
+        assert!(wrong_kind_report.malformed_objects.iter().any(|entry| {
+            entry
+                .reason
+                .contains("expected kind guest_runtime_materialization_source")
+        }));
+    }
+
+    #[test]
     fn qualification_attestation_owns_its_exact_product_witness_only() {
         use crate::external_content::products::qualification::{
             PRODUCT_QUALIFICATION_ATTESTATION_POLICY, PRODUCT_QUALIFICATION_CLAIM,
@@ -1948,7 +2576,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("exceeds max_total_object_bytes"));
+        assert!(err.to_string().contains("exceeds byte limit"), "{err:#}");
     }
 
     #[test]
@@ -2073,7 +2701,8 @@ mod tests {
             "execution_closure":{"command":{"authority":"runtime_path"}},
             "exact_program":{"resolution_output":semantic},
             "retained_product_selections":resolution["composed"]["derived"]["effective_external_product_selections"],
-            "retained_external_runtime_qualification":null
+            "retained_external_runtime_qualification":null,
+            "retained_external_runtime_content_qualification":null
         });
         for capsule in [&outer, &dependency, &persistent] {
             let edges = typed_object_edges(capsule).unwrap();
@@ -2100,6 +2729,63 @@ mod tests {
         }));
         qualified["retained_external_runtime_qualification"] = json!({"proof": {}});
         assert!(typed_object_edges(&qualified).is_err());
+        // A remote product testimony reaches this node's own acceptance, not
+        // the origin's attestation.
+        qualified["retained_external_runtime_qualification"] = json!({
+            "proof": {"attestation_hash": h("aa")},
+            "remote_testimony": {"acceptance_hash": h("ad")}
+        });
+        let edges = typed_object_edges(&qualified).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("ad") && edge.expected == ExpectedObject::Kind("attestation")
+        }));
+        assert!(!edges.iter().any(|edge| edge.hash == h("aa")));
+        let mut content_qualified = persistent.clone();
+        content_qualified["retained_external_runtime_content_qualification"] =
+            json!({"attestation_hash": h("ab")});
+        let edges = typed_object_edges(&content_qualified).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("ab") && edge.expected == ExpectedObject::Kind("attestation")
+        }));
+        // A remote content testimony reaches this node's own acceptance, not
+        // the origin's attestation, which is not in this store.
+        // It also reaches this node's own activation receipt and binding.
+        let mut remote_content = persistent.clone();
+        remote_content["retained_external_runtime_content_qualification"] = json!({
+            "attestation_hash": h("ab"),
+            "remote_testimony": {"acceptance_hash": h("ac")},
+            "receiver_join": {
+                "activation_receipt_hash": h("ae"),
+                "binding_hash": h("af"),
+                "target_node_fingerprint": h("a0")
+            }
+        });
+        let edges = typed_object_edges(&remote_content).unwrap();
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("ac") && edge.expected == ExpectedObject::Kind("attestation")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("ae")
+                && edge.expected
+                    == ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_ACTIVATION_KIND)
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.hash == h("af")
+                && edge.expected
+                    == ExpectedObject::Kind(crate::objects::EXTERNAL_CONTENT_BINDING_KIND)
+        }));
+        assert!(
+            !edges
+                .iter()
+                .any(|edge| edge.hash == h("ab") || edge.hash == h("a0"))
+        );
+        remote_content["retained_external_runtime_content_qualification"]["receiver_join"] =
+            Value::Null;
+        assert!(typed_object_edges(&remote_content).is_err());
+        // The two owning slots cannot borrow one another's field shape.
+        content_qualified["retained_external_runtime_content_qualification"] =
+            json!({"proof": {"attestation_hash": h("aa")}});
+        assert!(typed_object_edges(&content_qualified).is_err());
     }
 
     #[test]
@@ -2229,5 +2915,145 @@ mod tests {
                 "missing current object contract: {kind}"
             );
         }
+    }
+
+    #[test]
+    fn bounded_verification_budget_shares_total_and_requires_closure_membership() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = lillux::CasStore::new(directory.path().join("cas"));
+        let value = json!({"kind":"budget_fixture", "value":"bounded"});
+        let canonical = lillux::canonical_json(&value).unwrap();
+        let hash = cas.store_object(&value).unwrap();
+        let outside_hash = cas.store_object(&json!({"kind":"outside"})).unwrap();
+        let admitted = BTreeSet::from([hash.clone()]);
+        let object_bytes = u64::try_from(canonical.len()).unwrap();
+        let limits = ObjectClosureLimits {
+            max_objects: 1,
+            max_object_bytes: object_bytes,
+            max_total_object_bytes: u64::try_from(canonical.len()).unwrap(),
+            ..ObjectClosureLimits::default()
+        };
+        let mut budget = BoundedCasObjectReadBudget::new(&admitted, limits, object_bytes).unwrap();
+        for _ in 0..8 {
+            assert_eq!(
+                budget
+                    .get_object(&cas, &hash, limits.max_object_bytes)
+                    .unwrap(),
+                Some(value.clone()),
+            );
+        }
+        assert_eq!(
+            budget.validation_work_bytes,
+            budget.max_validation_work_bytes
+        );
+        assert!(
+            budget
+                .get_object(&cas, &hash, limits.max_object_bytes)
+                .is_err()
+        );
+        assert!(
+            budget
+                .get_object(&cas, &outside_hash, limits.max_object_bytes)
+                .is_err()
+        );
+
+        let mut read_budget = BoundedCasObjectReadBudget::new(
+            &admitted,
+            ObjectClosureLimits {
+                max_total_object_bytes: object_bytes * 2,
+                ..limits
+            },
+            object_bytes * 2,
+        )
+        .unwrap();
+        read_budget.validation_reads = read_budget.max_validation_reads - 1;
+        assert!(
+            read_budget
+                .get_object(&cas, &hash, limits.max_object_bytes)
+                .is_ok()
+        );
+        assert_eq!(
+            read_budget.validation_reads,
+            read_budget.max_validation_reads
+        );
+        assert!(
+            read_budget
+                .get_object(&cas, &hash, limits.max_object_bytes)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bounded_verification_budget_checks_count_and_byte_overflow() {
+        let admitted = BTreeSet::new();
+        let count_overflow = BoundedCasObjectReadBudget::new(
+            &admitted,
+            ObjectClosureLimits {
+                max_objects: usize::MAX,
+                max_total_object_bytes: u64::MAX,
+                ..ObjectClosureLimits::default()
+            },
+            0,
+        )
+        .unwrap_err();
+        assert!(count_overflow.to_string().contains("read ceiling overflow"));
+
+        let byte_overflow = BoundedCasObjectReadBudget::new(
+            &admitted,
+            ObjectClosureLimits {
+                max_total_object_bytes: u64::MAX,
+                ..ObjectClosureLimits::default()
+            },
+            u64::MAX,
+        )
+        .unwrap_err();
+        assert!(
+            byte_overflow
+                .to_string()
+                .contains("work-byte ceiling overflow")
+        );
+    }
+
+    #[test]
+    fn bounded_verification_budget_honors_absolute_caps_beyond_remote_policy() {
+        let admitted = BTreeSet::new();
+        let limits = ObjectClosureLimits {
+            max_objects: REMOTE_CLOSURE_MAX_OBJECTS,
+            max_total_object_bytes: REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES,
+            ..ObjectClosureLimits::default()
+        };
+        let budget = BoundedCasObjectReadBudget::new(
+            &admitted,
+            limits,
+            REMOTE_CLOSURE_MAX_TOTAL_OBJECT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(budget.max_validation_reads, MAX_BOUNDED_VALIDATION_READS);
+        assert_eq!(
+            budget.max_validation_work_bytes,
+            MAX_BOUNDED_VALIDATION_BYTES
+        );
+        assert_eq!(MAX_BOUNDED_VALIDATION_READS, 800_064);
+        assert_eq!(MAX_BOUNDED_VALIDATION_BYTES, 4 * 1024 * 1024 * 1024);
+
+        let generous_local_byte_limit = u64::MAX / 8;
+        let larger_local_budget = BoundedCasObjectReadBudget::new(
+            &admitted,
+            ObjectClosureLimits {
+                max_objects: REMOTE_CLOSURE_MAX_OBJECTS * 2,
+                max_total_object_bytes: generous_local_byte_limit,
+                ..ObjectClosureLimits::default()
+            },
+            generous_local_byte_limit,
+        )
+        .unwrap();
+        assert_eq!(
+            larger_local_budget.max_validation_reads,
+            MAX_BOUNDED_VALIDATION_READS
+        );
+        assert_eq!(
+            larger_local_budget.max_validation_work_bytes,
+            MAX_BOUNDED_VALIDATION_BYTES
+        );
     }
 }

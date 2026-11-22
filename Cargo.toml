@@ -1,15 +1,20 @@
 [workspace]
 members = [
     "crates/kernel/lillux",
+    "crates/kernel/lillux-sqlite",
     "crates/daemon/ryeos-api",
     "crates/daemon/ryeos-app",
     "crates/daemon/ryeos-bundle",
     "crates/daemon/ryeos-node",
+    "crates/daemon/ryeos-scheduler-service",
     "crates/bin/cli",
     "crates/bin/daemon",
     "crates/daemon/ryeos-ui",
     "crates/clients/base",
+    "crates/clients/presentation-contract",
+    "crates/clients/runtime",
     "crates/clients/terminal",
+    "crates/clients/transport",
     "crates/clients/web",
     "crates/kinds/directive-definition",
     "crates/runtimes/directive",
@@ -20,17 +25,22 @@ members = [
     "crates/engine/ryeos-external-execution",
     "crates/engine/ryeos-http-transport",
     "crates/engine/ryeos-expression",
+    "crates/engine/ryeos-timeline",
     "crates/kinds/graph-definition",
     "crates/engine/ryeos-engine",
     "crates/engine/ryeos-executor",
     "crates/runtimes/graph",
     "crates/tools/handler-bins",
+    "crates/tools/parser-bins",
+    "crates/tools/gpu-loader-owner-contract",
     "crates/engine/ryeos-handler-protocol",
     "crates/engine/ryeos-isolation-protocol",
     "crates/engine/ryeos-provider-contract",
     "crates/engine/ryeos-project-capture",
     "crates/runtimes/knowledge",
     "crates/engine/ryeos-runtime",
+    "crates/engine/ryeos-node-runtime",
+    "crates/engine/ryeos-scheduler-contract",
     "crates/state/ryeos-scheduler",
     "crates/state/ryeos-state",
     "crates/tools/core-tools",
@@ -44,22 +54,61 @@ members = [
     "crates/tools/external-guest-occurrence-owner",
     "crates/tools/external-guest-runtime-producer",
     "crates/tools/external-guest-restoration-verifier",
+    "crates/tools/guest-wire-verifier",
     "crates/tools/codex-external-configuration",
     "crates/tools/codex-guest-runtime-producer",
-    "crates/tools/independent-runtime-verifier",
+    "crates/tools/codex-runtime-verifier",
+    "crates/tools/claude-code-adapter",
     "tests/e2e/external-execution/synthetic-lifecycle-adapter",
     "crates/host-adapters/lillux-oci-hook",
+    "crates/host-adapters/remote-lease-core",
+    "crates/host-adapters/modal-sandbox-adapter",
     "crates/host-adapters/render-sandbox-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
-    "crates/tools/ui-contract-exporter",
     "crates/support/ryeos-tracing",
+    "crates/support/ryeos-request-signing",
+    "crates/support/ryeos-chat-stub",
     "crates/state/ryeos-vault",
+    "crates/host-adapters/modal-guest-launcher",
 ]
+# The browser renderer is its own workspace with its own lock, so this lock
+# (the one the release chain vendors) names crates.io sources only.
+exclude = ["vendor/libsqlite3-sys-0.28.0", "crates/clients/rune"]
 resolver = "2"
+
+# Workspace lint policy. The four clippy shape lints below are allowed for
+# the whole workspace: they judge error and type size and argument counts,
+# not correctness, and the daemon's typed refusals trip them by design.
+# Every other clippy and rustc warning stays denied in CI.
+[workspace.lints.clippy]
+result_large_err = "allow"
+large_enum_variant = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
 
 [workspace.package]
 license = "MIT"
+
+# Debug binaries carry every crate of the workspace; with full debuginfo the
+# daemon test binary passes the executable-measurement bound that every node
+# start applies to itself. Line tables keep file:line backtraces at a fraction
+# of the size and compile memory.
+[profile.dev]
+debug = "line-tables-only"
+
+# Every CLI invocation and every daemon start re-verifies the signed node and
+# bundle inventory; at opt-level 0 the signature and hash crates make each
+# call cost tens of seconds on a development origin. Optimize the same
+# cryptographic hot path the test profile does.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 lto = "thin"
@@ -81,6 +130,7 @@ opt-level = 3
 opt-level = 3
 
 [workspace.dependencies]
+lillux-sqlite = { path = "crates/kernel/lillux-sqlite" }
 # Internal crates
 lillux = { path = "crates/kernel/lillux" }
 ryeos-accounting = { path = "crates/engine/ryeos-accounting" }
@@ -91,27 +141,38 @@ ryeos-external-execution = { path = "crates/engine/ryeos-external-execution" }
 ryeos-http-transport = { path = "crates/engine/ryeos-http-transport" }
 ryeos-api = { path = "crates/daemon/ryeos-api" }
 ryeos-app = { path = "crates/daemon/ryeos-app" }
+ryeos-node-runtime = { path = "crates/engine/ryeos-node-runtime" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
 ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
+ryeos-client-runtime = { path = "crates/clients/runtime" }
+ryeos-client-transport = { path = "crates/clients/transport" }
 ryeos-directive-definition = { path = "crates/kinds/directive-definition" }
 ryeos-expression = { path = "crates/engine/ryeos-expression" }
+ryeos-timeline = { path = "crates/engine/ryeos-timeline" }
 ryeos-graph-definition = { path = "crates/kinds/graph-definition" }
 ryeos-engine = { path = "crates/engine/ryeos-engine" }
 ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }
 ryeos-isolation-protocol = { path = "crates/engine/ryeos-isolation-protocol" }
 ryeos-provider-contract = { path = "crates/engine/ryeos-provider-contract" }
+ryeos-ui-presentation-contract = { path = "crates/clients/presentation-contract" }
 ryeos-project-capture = { path = "crates/engine/ryeos-project-capture" }
 ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
+ryeos-scheduler-contract = { path = "crates/engine/ryeos-scheduler-contract" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }
+ryeos-scheduler-service = { path = "crates/daemon/ryeos-scheduler-service" }
 ryeos-state = { path = "crates/state/ryeos-state" }
 ryeos-core-tools = { path = "crates/tools/core-tools" }
+ryeos-gpu-loader-owner-contract = { path = "crates/tools/gpu-loader-owner-contract" }
 ryeos-structured-session = { path = "crates/tools/structured-session" }
 ryeos-lillux-isolation-adapter = { path = "crates/tools/lillux-isolation-adapter" }
 ryeos-lillux-oci-hook = { path = "crates/host-adapters/lillux-oci-hook" }
+ryeos-remote-lease-core = { path = "crates/host-adapters/remote-lease-core" }
 ryeos-tracing = { path = "crates/support/ryeos-tracing" }
+ryeos-request-signing = { path = "crates/support/ryeos-request-signing" }
+ryeos-chat-stub = { path = "crates/support/ryeos-chat-stub" }
 ryeos-ui = { path = "crates/daemon/ryeos-ui" }
 ryeos-vault = { path = "crates/state/ryeos-vault" }
 
@@ -123,10 +184,10 @@ async-trait = "0.1"
 axum = { version = "0.7", default-features = false }
 base64 = "0.22"
 bytes = "1"
-chrono = "0.4"
-chrono-tz = "0.10"
+# Time library. The bundled tz database keeps zone results identical on every
+# host (the scheduler evaluates cron schedules in named zones).
+jiff = { version = "1.0.0", default-features = false, features = ["std", "tzdb-bundle-always"] }
 clap = { version = "4", features = ["derive"] }
-cron = "0.16"
 crossterm = { version = "0.29", features = ["event-stream"] }
 directories = "5"
 dirs = "6"
@@ -149,7 +210,7 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false }
 signal-hook = "0.3"
 rmp-serde = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_stacker = "0.1"
@@ -162,6 +223,11 @@ thiserror = "2"
 tiktoken-rs = "0.12"
 tokio = "1"
 tokio-stream = "0.1"
+# WebSocket framing for the external channel stream: the controller side rides
+# axum's `ws` feature (tokio-tungstenite 0.24); the guest side drives the same
+# tungstenite release synchronously over its Lillux network stream and rustls.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
@@ -169,3 +235,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 unicode-width = "0.2"
 zeroize = "1"
+
+# One maintained, pinned SQLite implementation; optional bound host backend.
+[patch.crates-io]
+libsqlite3-sys = { path = "vendor/libsqlite3-sys-0.28.0" }

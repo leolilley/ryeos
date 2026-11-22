@@ -349,6 +349,9 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         }
     }

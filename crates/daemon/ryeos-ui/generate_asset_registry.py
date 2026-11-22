@@ -6,13 +6,40 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import string
+import subprocess
+import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "web-assets.json"
-PACKAGE = ROOT / "../../clients/web/pkg"
+PACKAGE = ROOT / "../../clients/rune/pkg"
 GENERATED = ROOT / "src/generated_web_assets.rs"
+DIGEST_SCRIPT = (
+    ROOT
+    / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/web-package-source-digest.py"
+)
+BINDING_SOURCE = ROOT / "../../clients/base/src/lib.rs"
+BINDING_CONSTANT = re.compile(
+    r'^pub const UI_BINDING_CONTRACT_REVISION: &str = "([^"]+)";$', re.MULTILINE
+)
+SNIPPETS = (
+    ROOT
+    / "../../../.ai/tools/ryeos/development/browser-assets-production/lib/rune-snippets.toml"
+)
+
+
+def code_binding_revision() -> str:
+    """The binding revision the client code declares; the manifest only mirrors it."""
+    matches = BINDING_CONSTANT.findall(BINDING_SOURCE.read_text())
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one UI_BINDING_CONTRACT_REVISION constant in {BINDING_SOURCE.resolve()}, "
+            f"found {len(matches)}"
+        )
+    return matches[0]
 
 
 def load_manifest() -> dict:
@@ -38,7 +65,14 @@ def validate(manifest: dict) -> None:
             raise SystemExit(f"duplicate asset route or filename: {route} / {filename}")
         routes.add(route)
         filenames.add(filename)
-        if route != "/ui" and route != f"/ui/assets/{filename}":
+        encoding = asset.get("encoding")
+        if encoding not in {None, "gzip"}:
+            raise SystemExit(f"unsupported encoding for {route}: {encoding}")
+        # A gzip-encoded member is stored as `<served name>.gz` and served as is.
+        served = filename.removesuffix(".gz") if encoding == "gzip" else filename
+        if encoding == "gzip" and served == filename:
+            raise SystemExit(f"gzip-encoded asset must be stored as .gz: {filename}")
+        if route != "/ui" and route != f"/ui/assets/{served}":
             raise SystemExit(f"non-canonical asset route: {route}")
         if Path(filename).name != filename:
             raise SystemExit(f"asset filename must be one path component: {filename}")
@@ -60,11 +94,35 @@ def validate(manifest: dict) -> None:
             if imported not in known_routes:
                 raise SystemExit(f"{route} imports unregistered asset {imported}")
 
+    # Rune's flattened snippet modules are exactly the declared list.
+    declared = {
+        f"{entry['crate'].replace('-', '_')}_{Path(entry['path']).stem}.js"
+        for entry in tomllib.loads(SNIPPETS.read_text())["snippets"]
+    }
+    registered = {name for name in filenames if re.fullmatch(r"rune_.+\.js", name)}
+    if registered != declared:
+        raise SystemExit(
+            "registered Rune snippets differ from rune-snippets.toml: "
+            f"unregistered={sorted(declared - registered)} stale={sorted(registered - declared)}"
+        )
+
+    # The files Rune fetches at runtime are registered, gzip-encoded, and named as imports of
+    # the bindings module that fetches them.
+    bindings = next(
+        asset for asset in manifest["assets"] if asset["filename"] == "ryeos_rune.js"
+    )
+    for entry in tomllib.loads(SNIPPETS.read_text())["fetched"]:
+        name = Path(entry["path"]).name
+        if f"{name}.gz" not in filenames:
+            raise SystemExit(f"a file Rune fetches at runtime is not registered: {name}")
+        if f"/ui/assets/{name}" not in bindings["imports"]:
+            raise SystemExit(f"ryeos_rune.js does not name the file it fetches: {name}")
+
     packaged = {
         path.name
         for path in PACKAGE.iterdir()
         if path.is_file()
-        and path.suffix in {".html", ".js", ".css", ".wasm", ".png", ".svg", ".ico"}
+        and path.suffix in {".html", ".js", ".css", ".wasm", ".png", ".svg", ".ico", ".ttf", ".gz"}
     }
     if packaged != filenames:
         raise SystemExit(
@@ -89,6 +147,7 @@ def render(manifest: dict) -> str:
                 f'        content_type: {json.dumps(asset["mime"])},',
                 f'        cache_control: {json.dumps(asset["cache"])},',
                 f'        sha256: {json.dumps(asset["sha256"])},',
+                f'        encoding: {"Some(" + json.dumps(asset["encoding"]) + ")" if asset.get("encoding") else "None"},',
             ]
         )
         if asset["imports"]:
@@ -106,7 +165,7 @@ def render(manifest: dict) -> str:
             lines.append("        imports: &[],")
         lines.extend(
             [
-                f'        bytes: include_bytes!("../../../clients/web/pkg/{asset["filename"]}"),',
+                f'        bytes: include_bytes!("../../../clients/rune/pkg/{asset["filename"]}"),',
                 "    },",
             ]
         )
@@ -122,11 +181,43 @@ def main() -> None:
     if args.check and args.refresh_digests:
         raise SystemExit("--check and --refresh-digests are mutually exclusive")
     manifest = load_manifest()
+    code_revision = code_binding_revision()
+    if args.check:
+        if manifest["ui_binding_revision"] != code_revision:
+            raise SystemExit(
+                "web-assets.json ui_binding_revision is stale: "
+                f"manifest={manifest['ui_binding_revision']} code={code_revision} "
+                "(UI_BINDING_CONTRACT_REVISION in crates/clients/base/src/lib.rs); "
+                "rerun generate_asset_registry.py without --check"
+            )
+    else:
+        # The manifest field is derived from the code constant, never hand-edited.
+        manifest["ui_binding_revision"] = code_revision
+        MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
     if args.refresh_digests:
+        stamped = subprocess.run(
+            [sys.executable, "-I", str(DIGEST_SCRIPT), "--stamped"],
+            capture_output=True,
+            text=True,
+        )
+        if stamped.returncode != 0:
+            raise SystemExit(f"refusing to refresh digests: {stamped.stderr.strip()}")
         for asset in manifest["assets"]:
             asset["sha256"] = hashlib.sha256(
                 (PACKAGE / asset["filename"]).read_bytes()
             ).hexdigest()
+        # Record which sources this package was built from; CI recomputes the
+        # digest and fails when they differ (a source changed, package not rebuilt).
+        # The digest comes from the build stamp, which the script refuses unless
+        # the package in pkg/ was built from the current sources.
+        digest = stamped.stdout.strip()
+        manifest.pop("source_digest", None)
+        ordered = {}
+        for key, value in manifest.items():
+            ordered[key] = value
+            if key == "ui_binding_revision":
+                ordered["source_digest"] = digest
+        manifest = ordered
         MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
     validate(manifest)
     expected = render(manifest)

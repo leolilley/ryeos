@@ -11,12 +11,12 @@
 //! G2 must land first (walker self-check removed) so that this test pins
 //! the daemon-side gate as the single boundary.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::fast_fixture::{FastFixture, register_workflow_bundles};
 use lillux::crypto::SigningKey;
 use serde_json::{Map, Value, json};
 
@@ -54,6 +54,7 @@ fn plant_echo_tool(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()
 #   category: echo
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "echo input as json"
 
 import json, sys
@@ -294,28 +295,11 @@ fn receipt_metadata_for_node<'a>(
         .unwrap_or_else(|| panic!("receipt for node `{node}` missing metadata object: {receipt:#}"))
 }
 
-fn persisted_thread_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = common::selected_projection_path(state_path)
-        .expect("resolve selected projection generation");
-    let conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap_or_else(|e| panic!("open projection DB at {}: {e}", db_path.display()));
-    let mut stmt = conn
-        .prepare(
-            "SELECT event_type, payload FROM events \
-             WHERE thread_id = ?1 \
-             ORDER BY chain_seq ASC",
-        )
-        .expect("prepare persisted event query");
-    stmt.query_map(rusqlite::params![thread_id], |row| {
-        let event_type: String = row.get(0)?;
-        let payload_blob: Vec<u8> = row.get(1)?;
-        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-        Ok((event_type, payload))
-    })
-    .expect("query persisted events")
-    .collect::<Result<Vec<_>, _>>()
-    .expect("read persisted events")
+/// Persisted events of `thread_id`, read through the daemon's replay service.
+async fn persisted_thread_events(h: &DaemonHarness, thread_id: &str) -> Vec<(String, Value)> {
+    h.existing_thread_events(thread_id)
+        .await
+        .unwrap_or_else(|e| panic!("replay persisted events of {thread_id}: {e:#}"))
 }
 
 fn assert_graph_runtime_event_identity(
@@ -372,7 +356,7 @@ fn assert_graph_runtime_event_identity(
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_action_completes_with_permitted_cap() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -385,7 +369,7 @@ async fn graph_action_completes_with_permitted_cap() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_echo_tool(project.path(), &fixture.publisher).expect("plant echo tool");
@@ -550,7 +534,7 @@ async fn graph_action_completes_with_permitted_cap() {
         "successful action receipt must carry a non-empty node result hash; receipt_metadata={receipt_metadata:#?}"
     );
 
-    let events = persisted_thread_events(&h.state_path, &graph_thread_id);
+    let events = persisted_thread_events(&h, &graph_thread_id).await;
     assert_graph_runtime_event_identity(
         &events,
         "graph_step_started",
@@ -572,13 +556,13 @@ async fn graph_action_completes_with_permitted_cap() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
-        .expect("start daemon with standard bundle");
+        .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_in_process_service_graph(project.path(), &fixture.publisher)
@@ -602,33 +586,104 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
         );
     }
 
-    let graph_thread = graph_thread_id(&body, "in-process service graph");
+    let graph_thread = graph_thread_id(&body, "in-process service graph").to_owned();
+    let warnings = body
+        .pointer("/result/warnings")
+        .and_then(Value::as_array)
+        .expect("graph runtime result carries warnings array");
+    assert!(
+        warnings.is_empty(),
+        "canonical graph lifecycle events must not be rejected: {warnings:#?}"
+    );
+
+    // An inline in-process child is a thread in the graph's chain with the
+    // graph thread as upstream, so `threads.children` lists it with its
+    // dispatch edge while the daemon is live. The intent ledger below must
+    // name this same child.
+    let (children_status, children_body) = h
+        .post_execute(
+            "service:threads/children",
+            ".",
+            json!({ "thread_id": graph_thread }),
+        )
+        .await
+        .expect("post service:threads/children for graph thread");
+    assert!(
+        children_status.is_success(),
+        "threads.children failed: status={children_status}; body={children_body:#}"
+    );
+    let linked_children = children_body
+        .pointer("/result/children")
+        .and_then(Value::as_array)
+        .expect("threads.children returns a children array")
+        .iter()
+        .map(|child| {
+            (
+                child
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .expect("child thread_id")
+                    .to_owned(),
+                child
+                    .get("upstream_thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                child
+                    .get("chain_root_id")
+                    .and_then(Value::as_str)
+                    .expect("child chain_root_id")
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        linked_children.len(),
+        1,
+        "the inline in-process child is the graph thread's one child: {linked_children:#?}"
+    );
+    let (linked_child, linked_upstream, linked_chain_root) = &linked_children[0];
+    assert_eq!(linked_upstream.as_deref(), Some(graph_thread.as_str()));
+    assert_eq!(linked_chain_root, &graph_thread);
+
+    // Lifecycle testimony is read through the live daemon's replay service.
+    let graph_events = persisted_thread_events(&h, &graph_thread).await;
+    let mut child_events_by_thread: std::collections::BTreeMap<String, Vec<(String, Value)>> =
+        std::collections::BTreeMap::new();
+    for (thread_id, event_type, payload) in h.principal_events().await {
+        if thread_id != graph_thread {
+            child_events_by_thread
+                .entry(thread_id)
+                .or_default()
+                .push((event_type, payload));
+        }
+    }
+
+    // The runtime-action intent ledger has no service surface. Stop the node
+    // in order, then read its Runtime store through the native test gate;
+    // the live store behind a running daemon is never reopened.
+    h.stop_gracefully()
+        .await
+        .expect("stop daemon before reading its Runtime store");
     let runtime_path = h
         .state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
-    let runtime = rusqlite::Connection::open_with_flags(
-        runtime_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("open runtime database read-only");
-    let intents = runtime
-        .prepare(
+    let intents = ryeos_app::test_support::read_existing_runtime(&runtime_path, |runtime| {
+        let mut statement = runtime.prepare(
             "SELECT operation_id, mode, child_thread_id FROM runtime_action_intent \
              WHERE chain_root_id=?1 ORDER BY operation_id",
-        )
-        .and_then(|mut statement| {
-            statement
-                .query_map([graph_thread], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .expect("read runtime-action intents");
+        )?;
+        let rows = statement
+            .query_map([graph_thread.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    });
     assert_eq!(
         intents.len(),
         1,
@@ -641,17 +696,12 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
         "operation id must be a SHA-256 hex digest"
     );
     assert_eq!(mode, "inline");
-    assert_ne!(child_thread, graph_thread);
-
-    let warnings = body
-        .pointer("/result/warnings")
-        .and_then(Value::as_array)
-        .expect("graph runtime result carries warnings array");
-    assert!(
-        warnings.is_empty(),
-        "canonical graph lifecycle events must not be rejected: {warnings:#?}"
+    assert_ne!(child_thread, &graph_thread);
+    assert_eq!(
+        child_thread, linked_child,
+        "the intent ledger and the lineage edge name the same inline child"
     );
-    let graph_events = persisted_thread_events(&h.state_path, graph_thread);
+
     for event_type in ["tool_call_start", "tool_call_result"] {
         let payload = graph_events
             .iter()
@@ -665,7 +715,13 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
         );
     }
 
-    let child_events = persisted_thread_events(&h.state_path, child_thread);
+    let child_events = child_events_by_thread.get(child_thread).unwrap_or_else(|| {
+        panic!(
+            "the pre-minted in-process child {child_thread} must be a recorded thread of the \
+             launching principal; threads={:?}",
+            child_events_by_thread.keys().collect::<Vec<_>>()
+        )
+    });
     assert!(
         child_events
             .iter()
@@ -683,7 +739,7 @@ async fn graph_action_reserves_one_runtime_intent_for_an_in_process_service() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pinned_graph_action_borrows_parent_workspace_after_tool_thread_birth() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -723,7 +779,7 @@ async fn pinned_graph_action_borrows_parent_workspace_after_tool_thread_birth() 
     );
 
     let graph_thread = graph_thread_id(&body, "pinned graph action");
-    let events = persisted_thread_events(&h.state_path, graph_thread);
+    let events = persisted_thread_events(&h, graph_thread).await;
     assert!(
         events.iter().any(|(event_type, payload)| {
             event_type == "tool_call_result"
@@ -742,7 +798,7 @@ async fn pinned_graph_action_borrows_parent_workspace_after_tool_thread_birth() 
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_with_runtime_authority_permission_rejected_at_launch() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -755,7 +811,7 @@ async fn graph_with_runtime_authority_permission_rejected_at_launch() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_runtime_authority_graph(project.path(), &fixture.publisher)
@@ -800,7 +856,7 @@ async fn graph_with_runtime_authority_permission_rejected_at_launch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_with_legacy_callbacks_rejected() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -813,7 +869,7 @@ async fn graph_with_legacy_callbacks_rejected() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_legacy_callbacks_graph(project.path(), &fixture.publisher)
@@ -851,7 +907,7 @@ async fn graph_with_legacy_callbacks_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_action_denied_without_permitted_cap() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -864,7 +920,7 @@ async fn graph_action_denied_without_permitted_cap() {
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_echo_tool(project.path(), &fixture.publisher).expect("plant echo tool");
@@ -974,7 +1030,7 @@ async fn graph_action_denied_without_permitted_cap() {
         "failed action receipt must carry dispatch error context; receipt_metadata={receipt_metadata:#?}"
     );
 
-    let events = persisted_thread_events(&h.state_path, &graph_thread_id);
+    let events = persisted_thread_events(&h, &graph_thread_id).await;
     assert_graph_runtime_event_identity(
         &events,
         "graph_step_started",
@@ -998,5 +1054,89 @@ async fn graph_action_denied_without_permitted_cap() {
         "graph:denied",
         "greet",
         Some("error"),
+    );
+}
+
+/// Plant a Python tool that always exits nonzero.
+fn plant_failing_tool(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let tool_dir = project_dir.join(".ai").join("tools").join("alwaysfail");
+    std::fs::create_dir_all(&tool_dir)?;
+    let body = r#"#!/usr/bin/env python3
+# ryeos-tool:
+#   category: alwaysfail
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
+#   description: "always exits nonzero"
+
+import sys
+sys.stderr.write("boom\n")
+sys.exit(1)
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(tool_dir.join("fail.py"), signed)?;
+    Ok(())
+}
+
+/// A failing tool with `retry: {attempts: 3, on: [tool_failure]}` is retried
+/// twice (graph_node_retry x2) and then routed through on_error.
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_failing_tool_retries_on_opt_in_tool_failure() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_cmd| {})
+        .await
+        .expect("start daemon with the workflow bundles");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_failing_tool(project.path(), &fixture.publisher).expect("plant failing tool");
+    let graphs_dir = project.path().join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir).unwrap();
+    let body = r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.alwaysfail/fail
+config:
+  start: boom
+  nodes:
+    boom:
+      action:
+        item_id: "tool:alwaysfail/fail"
+        ref_bindings: {}
+      retry: {attempts: 3, backoff_ms: 1, on: [tool_failure], idempotent: true}
+      on_error: recover
+    recover:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
+    std::fs::write(graphs_dir.join("retry_tool_failure.yaml"), signed).unwrap();
+
+    let (status, resp) = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        h.post_execute(
+            "graph:retry_tool_failure",
+            project.path().to_str().unwrap(),
+            json!({}),
+        ),
+    )
+    .await
+    .expect("execute timed out")
+    .expect("post /execute");
+    assert!(status.is_success(), "status={status} body={resp:#}");
+
+    let thread_id = graph_thread_id(&resp, "retry tool failure").to_string();
+    let events = persisted_thread_events(&h, &thread_id).await;
+    let retries = events
+        .iter()
+        .filter(|(ty, _)| ty == "graph_node_retry")
+        .count();
+    assert_eq!(
+        retries, 2,
+        "attempts: 3 on a failing tool emits two retries; events={events:#?}"
     );
 }

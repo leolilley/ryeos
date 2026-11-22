@@ -9,13 +9,14 @@ The `ryeos` package has two immutable inputs:
 
 - the signed-tag source archive, used to build the host binaries; and
 - `ryeos-bundles-<version>-x86_64.tar.gz`, produced by the release workflow
-  after populating and signing the full bundle set with the official publisher
-  key.
+  after populating and signing the release bundle sets with the official
+  publisher key. The archive carries every bundle of every installable set, so any set's
+  init profile can be selected from an installed archive.
 
 The AUR build copies the second artifact verbatim into `/usr/share/ryeos`. It
 does not regenerate CAS data, re-sign bundle content, or import packaged trust
-documents as authority. `ryeos init --node-profile full` verifies the installed
-artifact and its complete full-distribution init profile against the official
+documents as authority. `ryeos init --node-profile standard --host-class local` verifies the installed
+artifact and its complete standard-distribution init profile against the official
 publisher key compiled into the release binary. Fresh init refuses an absent
 profile.
 
@@ -29,7 +30,7 @@ may replace the stopped node's complete policy generation under the normal
 node-signing and compare-and-swap contract; execution fails closed when a
 selected signed backend is missing or unusable. Validate the change with
 `ryeos node doctor` and restart the node to load it. The
-[isolation contract](../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) documents the strict
+[isolation contract](../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md) documents the strict
 schema and operating contract.
 
 For a release, download both immutable inputs once and run:

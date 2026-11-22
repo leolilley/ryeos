@@ -3,9 +3,11 @@ name = "ryeos-client-base"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Renderer-neutral client model, layout, views, text surfaces, scene primitives"
+description = "Renderer-neutral client model, layout, views, text surfaces"
 
 [dependencies]
+ryeos-timeline = { workspace = true }
+ryeos-ui-presentation-contract = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -17,3 +19,6 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 ryeos-engine = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

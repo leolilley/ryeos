@@ -4,20 +4,31 @@
 //! 1. Checkout project from CAS to working directory
 //! 2. After execution, diff working dir and fold back changes
 
+mod admitted_callback_authority;
 pub(crate) mod admitted_trust;
 pub mod arch_check;
 pub mod cache;
 mod direct_output;
 pub mod effective_program_projection;
 pub(crate) mod execution_realization;
+pub mod external_consumer_delivery;
 pub(crate) mod external_content;
 mod external_direct_inputs;
 pub(crate) mod external_guest_inputs;
 pub mod external_guest_runtime_product;
+pub mod external_qualification_inputs;
+pub(crate) mod external_qualification_local_materials;
+pub(crate) mod external_qualification_local_worker;
+pub(crate) mod external_qualification_relay;
+pub mod external_qualification_start;
+pub(crate) mod external_structured_session_relay;
+pub(crate) mod host_access_gate;
 pub mod launch;
 pub(crate) mod launch_claim;
 pub mod launch_envelope;
 pub mod launch_preparation;
+pub mod launch_rebind;
+pub(crate) mod launch_trust_gate;
 pub mod lillux_bridge;
 pub mod limits;
 pub mod persistent_session;
@@ -27,6 +38,12 @@ pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
 pub mod runtime_dispatch;
+mod selected_invocation_root;
+pub use selected_invocation_root::{
+    SelectedInstallationRefusal, SelectedInvocationAttachment,
+    SelectedInvocationCompositionBarrier, SelectedRootAdmissionFence,
+    abandoned_selected_compositions,
+};
 pub(crate) mod source_closure;
 pub mod spawn_detached_child;
 pub mod spawn_follow_child;
@@ -513,7 +530,7 @@ pub(crate) fn checkout_project_snapshot(
         .verify_completion_marker_for_files(project_files, snapshot_hash)
         .is_err()
     {
-        cache.discard_generation(snapshot_hash)?;
+        cache.discard_generation(snapshot_hash, &_build_lock)?;
         let cache_root = cache.pinned_root()?;
         let (staging_name, staging_root) =
             cache_root.create_unique_child(&format!("{snapshot_hash}.staging"), 0o700)?;
@@ -533,6 +550,7 @@ pub(crate) fn checkout_project_snapshot(
                 let _ = staging_root.remove_contents_recursive().and_then(|()| {
                     cache_root
                         .remove_empty_child_if_same(&staging_name, &staging_root)
+                        .map(|receipt| receipt.is_some())
                         .and_then(|removed| {
                             if removed {
                                 Ok(())
@@ -596,7 +614,7 @@ pub(crate) fn checkout_project_snapshot(
             // A valid marker beside a mutated generation is not authority.
             // Rebuild once beneath the still-held construction lock, then
             // mint the proof from the rebuilt descriptor tree.
-            cache.discard_generation(snapshot_hash)?;
+            cache.discard_generation(snapshot_hash, &_build_lock)?;
             let cache_root = cache.pinned_root()?;
             let (staging_name, staging_root) =
                 cache_root.create_unique_child(&format!("{snapshot_hash}.staging"), 0o700)?;
@@ -688,10 +706,9 @@ fn admitted_operational_shadow_paths(
         &capsule.execution_closure,
         state.isolation.is_enforced(),
     )? == source_closure::SourceMountPlacement::Project
+        && let Some(source_mount) = source_closure::admitted_source_mount(state, resolution)?
     {
-        if let Some(source_mount) = source_closure::admitted_source_mount(state, resolution)? {
-            paths.push(source_mount);
-        }
+        paths.push(source_mount);
     }
     if let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
         prepared_runtime_launch,
@@ -716,12 +733,12 @@ pub(crate) struct FoldBackOutputsParams<'a> {
     pub authority: &'a ryeos_state::PinnedStateAuthority,
     pub cas_mutation_guard: &'a ryeos_state::CasMutationGuard,
     pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
-    pub workspace_id: &'a str,
-    pub launch_owner: &'a str,
+    /// The frozen workspace evidence from `freeze_workspace_for_foldback`,
+    /// taken before the caller acquired its CAS mutation guard.
+    pub lifecycle: ryeos_engine::isolation::PinnedWorkspaceLifecycleResult,
     pub working_dir: &'a Path,
     pub pre_tree_hash: &'a str,
     pub policy_hash: &'a str,
-    pub base_snapshot_hash: &'a str,
     pub workspace_record: &'a ryeos_app::runtime_db::WorkspaceRecord,
     pub operational_shadow_paths: &'a [String],
     pub output_partition: Option<&'a ryeos_state::objects::WorkspaceOutputPartition>,
@@ -933,17 +950,56 @@ fn load_workspace_output_base_capture(
     Ok(Some(capture))
 }
 
+/// Freeze the workspace and capture its mutation evidence. The adapter
+/// starts a process, which a thread retaining a CAS mutation guard or other
+/// fork-sensitive descriptor authority cannot do, so every fold-back caller
+/// runs this before acquiring its guard. The result is plain evidence plus
+/// pinned workspace roots; nothing in it is staged CAS state.
+pub(crate) fn freeze_workspace_for_foldback(
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+    workspace_id: &str,
+    launch_owner: &str,
+    base_snapshot_hash: &str,
+    working_dir: &Path,
+    workspace_record: &ryeos_app::runtime_db::WorkspaceRecord,
+) -> Result<ryeos_engine::isolation::PinnedWorkspaceLifecycleResult> {
+    let layout = workspace::WorkspaceLayout::from_root(working_dir.to_path_buf());
+    let lifecycle = isolation
+        .workspace_lifecycle_pinned(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
+            workspace_id,
+            launch_owner,
+            base_snapshot: base_snapshot_hash,
+            project_path: &layout.project,
+            mount_identity: workspace_record.mount_identity.as_deref(),
+        })
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let pinned = lillux::canonical_json(&serde_json::to_value(
+        &lifecycle.evidence.pinned_root_identities,
+    )?)?;
+    if workspace_record.workspace_id != workspace_id
+        || workspace_record.base_snapshot != base_snapshot_hash
+        || workspace_record.launch_owner.as_deref() != Some(launch_owner)
+        || workspace_record.backend_id.as_deref() != Some(lifecycle.evidence.backend_id.as_str())
+        || workspace_record.backend_version.as_deref()
+            != Some(lifecycle.evidence.backend_version.as_str())
+        || workspace_record.pinned_root_identities.as_deref() != Some(pinned.as_str())
+        || workspace_record.mount_identity != lifecycle.evidence.mount_identity
+    {
+        anyhow::bail!("workspace freeze evidence does not match the durable creation journal");
+    }
+    Ok(lifecycle)
+}
+
 pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<FoldBackCapture> {
     let FoldBackOutputsParams {
         authority,
         cas_mutation_guard,
         isolation,
-        workspace_id,
-        launch_owner,
+        lifecycle,
         working_dir,
         pre_tree_hash,
         policy_hash,
-        base_snapshot_hash,
         workspace_record,
         operational_shadow_paths,
         output_partition,
@@ -989,30 +1045,6 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
     };
 
     let layout = workspace::WorkspaceLayout::from_root(working_dir.to_path_buf());
-    let lifecycle = isolation
-        .workspace_lifecycle_pinned(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
-            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
-            workspace_id,
-            launch_owner,
-            base_snapshot: base_snapshot_hash,
-            project_path: &layout.project,
-            mount_identity: workspace_record.mount_identity.as_deref(),
-        })
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let pinned = lillux::canonical_json(&serde_json::to_value(
-        &lifecycle.evidence.pinned_root_identities,
-    )?)?;
-    if workspace_record.workspace_id != workspace_id
-        || workspace_record.base_snapshot != base_snapshot_hash
-        || workspace_record.launch_owner.as_deref() != Some(launch_owner)
-        || workspace_record.backend_id.as_deref() != Some(lifecycle.evidence.backend_id.as_str())
-        || workspace_record.backend_version.as_deref()
-            != Some(lifecycle.evidence.backend_version.as_str())
-        || workspace_record.pinned_root_identities.as_deref() != Some(pinned.as_str())
-        || workspace_record.mount_identity != lifecycle.evidence.mount_identity
-    {
-        anyhow::bail!("workspace freeze evidence does not match the durable creation journal");
-    }
     let mut captured_outputs = None;
     let new_tree = if daemon_mediated_source_capture {
         if output_partition.is_some() {
@@ -1037,7 +1069,7 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
             pre_tree,
             operational_shadow_paths,
         )?;
-        ryeos_state::project_sync::validate_project_tree_paths(&captured, policy)?;
+        ryeos_state::project_sync::validate_stored_project_tree_paths(&captured, policy)?;
         (captured != *pre_tree).then_some(captured)
     } else if isolation.is_enforced() {
         let mutation_content = lifecycle.mutation_content.as_ref().ok_or_else(|| {
@@ -1103,7 +1135,7 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
             pre_tree,
             operational_shadow_paths,
         )?;
-        ryeos_state::project_sync::validate_project_tree_paths(&captured, policy)?;
+        ryeos_state::project_sync::validate_stored_project_tree_paths(&captured, policy)?;
         (captured != *pre_tree).then_some(captured)
     };
     let Some(new_tree) = new_tree else {
@@ -1183,13 +1215,8 @@ pub(crate) fn seal_callback_workspace_generation(
     // The caller does not commit it: Freezing is the durable contact fence;
     // a follow/continuation capture does not itself terminalize the root.
     let authority = pinned_state_authority(state)?;
-    let guard = authority.acquire_shared_guard()?;
+    let read_guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
-    let snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
-        &cas,
-        base_snapshot_hash,
-    )?
-    .ok_or_else(|| anyhow::anyhow!("base project snapshot {base_snapshot_hash} is absent"))?;
     let workspace = workspace::WorkspaceLayout::from_project(effective_project)?;
     let workspace_id = workspace
         .root
@@ -1210,6 +1237,15 @@ pub(crate) fn seal_callback_workspace_generation(
     if record.base_snapshot != base_snapshot_hash {
         anyhow::bail!("callback workspace base snapshot contradicts its resume base");
     }
+    // Freezing is one-way: a node that cannot quiesce every bound borrower
+    // refuses here, while the workspace is still Active, rather than after
+    // fencing it for a capture that can never run.
+    require_workspace_quiescence_admitted(state, &record, "callback workspace freeze")?;
+    let snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
+        &cas,
+        base_snapshot_hash,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("base project snapshot {base_snapshot_hash} is absent"))?;
     match record.state {
         WorkspaceState::Active => state.state_store.transition_execution_workspace_owned(
             workspace_id,
@@ -1236,6 +1272,18 @@ pub(crate) fn seal_callback_workspace_generation(
             quiesced: Some(quiesced),
         });
     }
+    // The freeze adapter starts a process, so the read guard ends first and
+    // the publishing guard is taken only after the evidence is in hand.
+    drop(read_guard);
+    let lifecycle = freeze_workspace_for_foldback(
+        &state.isolation,
+        workspace_id,
+        launch_owner,
+        base_snapshot_hash,
+        &workspace.root,
+        &record,
+    )?;
+    let guard = authority.acquire_shared_guard()?;
     let permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
@@ -1248,12 +1296,10 @@ pub(crate) fn seal_callback_workspace_generation(
         authority: &authority,
         cas_mutation_guard: &guard,
         isolation: &state.isolation,
-        workspace_id,
-        launch_owner,
+        lifecycle,
         working_dir: &workspace.root,
         pre_tree_hash: &snapshot.project_tree_hash,
         policy_hash: &snapshot.effective_policy_hash,
-        base_snapshot_hash,
         workspace_record: &record,
         operational_shadow_paths: &operational_shadow_paths,
         output_partition: output_context.as_ref().map(|context| &context.partition),
@@ -1311,6 +1357,13 @@ pub(crate) fn capture_runtime_workspace_input_generation(
     effective_project: &Path,
     base_snapshot_hash: &str,
 ) -> Result<PendingProjectResult> {
+    // A node that cannot quiesce workspace borrowers refuses before the
+    // operation is read or moved out of Reserved.
+    require_workspace_quiescence_qualified(
+        &state.isolation.inspection().process_scopes,
+        &state.isolation.inspection().process_scope_capabilities,
+        "workspace-input capture",
+    )?;
     let intent = state
         .state_store
         .get_runtime_action_intent(operation_id)?
@@ -1352,6 +1405,10 @@ pub(crate) fn capture_runtime_workspace_input_generation(
     state
         .state_store
         .assert_launch_owner(thread_id, launch_owner)?;
+    // Each current borrower's process scope is judged while the operation
+    // is still Reserved, so a refusal never leaves it Quiescing.
+    bound_workspace_targets(state, &record)
+        .context("workspace-input capture refused before it started")?;
     state.state_store.transition_runtime_workspace_operation(
         operation_id,
         &[ryeos_app::runtime_db::RuntimeWorkspaceOperationPhase::Reserved],
@@ -1361,6 +1418,16 @@ pub(crate) fn capture_runtime_workspace_input_generation(
 
     let capture = (|| -> Result<(ryeos_state::objects::WorkspaceGenerationPair, PendingCasPublication)> {
         let authority = pinned_state_authority(state)?;
+        // The freeze adapter starts a process, so it runs before this
+        // thread takes the CAS mutation guard.
+        let lifecycle = freeze_workspace_for_foldback(
+            &state.isolation,
+            workspace_id,
+            launch_owner,
+            base_snapshot_hash,
+            &workspace.root,
+            &record,
+        )?;
         let guard = authority.acquire_shared_guard()?;
         let cas = authority.cas_store()?;
         let snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
@@ -1378,12 +1445,10 @@ pub(crate) fn capture_runtime_workspace_input_generation(
             authority: &authority,
             cas_mutation_guard: &guard,
             isolation: &state.isolation,
-            workspace_id,
-            launch_owner,
+            lifecycle,
             working_dir: &workspace.root,
             pre_tree_hash: &snapshot.project_tree_hash,
             policy_hash: &snapshot.effective_policy_hash,
-            base_snapshot_hash,
             workspace_record: &record,
             operational_shadow_paths: &operational_shadow_paths,
             output_partition: output_context.as_ref().map(|context| &context.partition),
@@ -1466,6 +1531,14 @@ pub(crate) fn quiesce_runtime_workspace_exclusive(
     {
         anyhow::bail!("runtime workspace operation is not an unstarted exclusive operation");
     }
+    // Refuse while the operation is still unstarted: an exclusive operation
+    // on a scope-configured node freezes every borrower's scope, and that
+    // freeze must not be the barrier's first use.
+    require_workspace_quiescence_qualified(
+        &state.isolation.inspection().process_scopes,
+        &state.isolation.inspection().process_scope_capabilities,
+        "exclusive workspace operation",
+    )?;
 
     let workspace = workspace::WorkspaceLayout::from_project(effective_project)?;
     let workspace_id = workspace
@@ -1493,6 +1566,13 @@ pub(crate) fn quiesce_runtime_workspace_exclusive(
     state
         .state_store
         .assert_launch_owner(thread_id, launch_owner)?;
+    // Each current borrower's process scope is judged while the operation
+    // is still unstarted, so an execution recovered with a scope on a node
+    // whose policy no longer configures scopes refuses here rather than
+    // after strict groups were stopped. Stopping re-resolves the borrowers
+    // under the quiescing barrier and judges them again.
+    bound_workspace_targets(state, &record)
+        .context("exclusive workspace operation refused before it started")?;
     state.state_store.transition_runtime_workspace_operation(
         operation_id,
         &[ryeos_app::runtime_db::RuntimeWorkspaceOperationPhase::Reserved],
@@ -1521,6 +1601,20 @@ pub(crate) fn quiesce_runtime_workspace_exclusive(
     Ok(ExclusiveWorkspaceQuiescence {
         group: Some(quiesced),
     })
+}
+
+/// Whether a runtime's own terminal callback advances HEAD to its frozen
+/// result. Every terminal status does except a continuation segment, whose
+/// successor carries the work on. A run stopped by its deadline advances HEAD
+/// like any other stop: the daemon's own settlement of a stopped runtime
+/// (`capture_stopped_managed_runtime_result`) advances it with no status guard,
+/// so a deadline stop ends in the same HEAD state whichever side settles it.
+fn callback_terminal_advances_head(
+    reported_status: &ryeos_engine::contracts::ThreadTerminalStatus,
+    authoritative_status: &str,
+) -> bool {
+    *reported_status != ryeos_engine::contracts::ThreadTerminalStatus::Continued
+        && authoritative_status != ryeos_state::objects::ThreadStatus::Continued.as_str()
 }
 
 /// Seal the result generation required by a managed runtime's terminal
@@ -1596,10 +1690,7 @@ pub async fn prepare_managed_runtime_terminal_project_result(
         .get_thread(&thread_id)?
         .ok_or_else(|| anyhow::anyhow!("managed runtime thread disappeared during finalization"))?
         .status;
-    let is_continuation_segment = *reported_status
-        == ryeos_engine::contracts::ThreadTerminalStatus::Continued
-        || authoritative_status == ryeos_state::objects::ThreadStatus::Continued.as_str();
-    if !is_continuation_segment
+    if callback_terminal_advances_head(reported_status, &authoritative_status)
         && let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
             head_ref,
             expected_hash,
@@ -1611,7 +1702,7 @@ pub async fn prepare_managed_runtime_terminal_project_result(
             &launch_owner,
             head_ref,
             expected_hash,
-            pending.snapshot_hash(),
+            pending.generation(),
         )?;
     }
 
@@ -1628,6 +1719,58 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
     thread_id: &str,
     launch_owner: &str,
 ) -> Result<Option<ryeos_state::objects::WorkspaceGenerationPair>> {
+    let Some(terminal_publication) = stopped_runtime_capture_publication(provenance)? else {
+        return Ok(None);
+    };
+    // The later terminal-state commit acquires its own guard. This temporary
+    // disposition fence drains worker starts before any post-exit capture;
+    // missing attachment metadata alone is not a no-contact proof.
+    let root_contact_fence = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+        &state.state_store,
+        thread_id,
+    )?;
+    capture_stopped_managed_runtime_result(
+        state,
+        provenance,
+        thread_id,
+        launch_owner,
+        terminal_publication,
+        &root_contact_fence,
+    )
+}
+
+/// Same capture for a caller that already holds the root terminalization
+/// fence across its whole settlement. The fence is exclusive and not
+/// reentrant (a second acquisition for the same root is refused), so such a
+/// caller must pass its own guard here instead of calling
+/// [`prepare_stopped_managed_runtime_terminal_project_result`], which would
+/// try to reserve the root again and refuse.
+pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result_under_fence(
+    state: &ryeos_app::state::AppState,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    thread_id: &str,
+    launch_owner: &str,
+    root_contact_fence: &ryeos_app::hosted_operation::HostedRootTerminalizationGuard,
+) -> Result<Option<ryeos_state::objects::WorkspaceGenerationPair>> {
+    let Some(terminal_publication) = stopped_runtime_capture_publication(provenance)? else {
+        return Ok(None);
+    };
+    capture_stopped_managed_runtime_result(
+        state,
+        provenance,
+        thread_id,
+        launch_owner,
+        terminal_publication,
+        root_contact_fence,
+    )
+}
+
+/// The publication a stopped runtime's capture must honour, or `None` when
+/// no capture applies (a borrowed child, no project foldback, or a discarded
+/// result).
+fn stopped_runtime_capture_publication(
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+) -> Result<Option<&ryeos_state::objects::PinnedTerminalPublication>> {
     if provenance.is_borrowed_child() || !provenance.project_authority().requires_project_foldback()
     {
         return Ok(None);
@@ -1644,13 +1787,17 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
     ) {
         return Ok(None);
     }
-    // The later terminal-state commit acquires its own guard. This temporary
-    // disposition fence drains worker starts before any post-exit capture;
-    // missing attachment metadata alone is not a no-contact proof.
-    let _root_contact_fence = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
-        &state.state_store,
-        thread_id,
-    )?;
+    Ok(Some(terminal_publication))
+}
+
+fn capture_stopped_managed_runtime_result(
+    state: &ryeos_app::state::AppState,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    thread_id: &str,
+    launch_owner: &str,
+    terminal_publication: &ryeos_state::objects::PinnedTerminalPublication,
+    _root_contact_fence: &ryeos_app::hosted_operation::HostedRootTerminalizationGuard,
+) -> Result<Option<ryeos_state::objects::WorkspaceGenerationPair>> {
     state
         .state_store
         .assert_execution_process_detached_owned(thread_id, launch_owner)?;
@@ -1717,7 +1864,7 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
             launch_owner,
             head_ref,
             expected_hash,
-            &generation.snapshot_hash,
+            &generation,
         )?;
     }
     Ok(Some(generation))
@@ -1730,13 +1877,148 @@ fn select_stopped_managed_runtime_result(
     external_generation.map_or_else(capture_local_generation, Ok)
 }
 
+/// An `AdvanceHead` publication refused before any HEAD write. The frozen
+/// generation was already bound to the workspace journal (journal before
+/// contact), so it stays retained as the execution's result; only the HEAD
+/// did not move. A thread that hits this fails with
+/// [`HEAD_ADVANCE_NOT_APPLIED`] and reports the retained generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadAdvanceNotApplied {
+    pub refusal: ryeos_state::refs::ProjectHeadAdvanceRefusal,
+    pub expected_head: String,
+    pub retained: ryeos_state::objects::WorkspaceGenerationPair,
+}
+
+/// Outcome code of a thread whose requested HEAD advance was not applied.
+pub const HEAD_ADVANCE_NOT_APPLIED: &str = "head_advance_not_applied";
+
+impl HeadAdvanceNotApplied {
+    /// The typed refusal anywhere in an error chain.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.downcast_ref::<Self>()
+    }
+
+    /// Durable error payload of the failed thread.
+    pub fn error_payload(&self) -> serde_json::Value {
+        let observed_head = match &self.refusal {
+            ryeos_state::refs::ProjectHeadAdvanceRefusal::Conflict { observed, .. } => {
+                observed.clone()
+            }
+            _ => None,
+        };
+        serde_json::json!({
+            "code": HEAD_ADVANCE_NOT_APPLIED,
+            "reason": self.refusal.reason(),
+            "message": self.to_string(),
+            "expected_head": self.expected_head,
+            "observed_head": observed_head,
+            "retained_snapshot_hash": self.retained.snapshot_hash,
+            "retained_output_capture_hash": self.retained.output_capture_hash,
+        })
+    }
+}
+
+impl HeadAdvanceNotApplied {
+    /// The terminal completion of a managed runtime whose fold-back HEAD
+    /// advance was refused: `failed` with outcome
+    /// [`HEAD_ADVANCE_NOT_APPLIED`] and the retained-generation payload,
+    /// keeping the runtime's cost and its reported status as testimony. The
+    /// runtime's own result is not committed; its publication did not happen.
+    pub fn failed_completion(
+        &self,
+        reported: &ryeos_engine::contracts::ExecutionCompletion,
+    ) -> ryeos_engine::contracts::ExecutionCompletion {
+        let mut error = self.error_payload();
+        error
+            .as_object_mut()
+            .expect("head-advance payload is an object")
+            .insert(
+                "reported_status".into(),
+                serde_json::Value::String(reported.status.as_str().to_owned()),
+            );
+        ryeos_engine::contracts::ExecutionCompletion {
+            status: ryeos_engine::contracts::ThreadTerminalStatus::Failed,
+            outcome_code: Some(HEAD_ADVANCE_NOT_APPLIED.to_owned()),
+            result: None,
+            error: Some(error),
+            artifacts: Vec::new(),
+            final_cost: reported.final_cost.clone(),
+            continuation_request: None,
+            metadata: None,
+        }
+    }
+}
+
+/// Outcome code of a run interrupted after its HEAD advance applied but
+/// before its own completion was confirmed.
+pub const HEAD_ADVANCED_BEFORE_INTERRUPTION: &str = "head_advanced_before_interruption";
+
+/// Outcome code and error payload of a run whose fold-back froze and bound a
+/// generation and was then interrupted. Recovery never publishes:
+/// - HEAD does not name the generation: [`HEAD_ADVANCE_NOT_APPLIED`] with
+///   reason `interrupted`;
+/// - HEAD already names it, so the advance applied before the interruption:
+///   [`HEAD_ADVANCED_BEFORE_INTERRUPTION`], recording the publication although
+///   the run's own completion was never confirmed.
+pub fn interrupted_head_advance_outcome(
+    expected_head: &str,
+    observed_head: Option<&str>,
+    retained: &ryeos_state::objects::WorkspaceGenerationPair,
+) -> (&'static str, serde_json::Value) {
+    if observed_head == Some(retained.snapshot_hash.as_str()) {
+        return (
+            HEAD_ADVANCED_BEFORE_INTERRUPTION,
+            serde_json::json!({
+                "code": HEAD_ADVANCED_BEFORE_INTERRUPTION,
+                "message": format!(
+                    "HEAD advanced from {expected_head} to the run's result generation {} \
+                     before the run was interrupted; its own completion was never confirmed",
+                    retained.snapshot_hash
+                ),
+                "advanced_from": expected_head,
+                "head": retained.snapshot_hash,
+                "snapshot_hash": retained.snapshot_hash,
+                "output_capture_hash": retained.output_capture_hash,
+            }),
+        );
+    }
+    (
+        HEAD_ADVANCE_NOT_APPLIED,
+        serde_json::json!({
+            "code": HEAD_ADVANCE_NOT_APPLIED,
+            "reason": "interrupted",
+            "message": format!(
+                "the run was interrupted after freezing its result generation {} and before \
+                 advancing HEAD; recovery never publishes, so the generation is retained",
+                retained.snapshot_hash
+            ),
+            "expected_head": expected_head,
+            "observed_head": observed_head,
+            "retained_snapshot_hash": retained.snapshot_hash,
+            "retained_output_capture_hash": retained.output_capture_hash,
+        }),
+    )
+}
+
+impl std::fmt::Display for HeadAdvanceNotApplied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "HEAD advance not applied ({}); the result generation {} is retained",
+            self.refusal, self.retained.snapshot_hash
+        )
+    }
+}
+
+impl std::error::Error for HeadAdvanceNotApplied {}
+
 fn advance_head_to_frozen_runtime_result(
     state: &ryeos_app::state::AppState,
     thread_id: &str,
     launch_owner: &str,
     head_ref: &str,
     expected_hash: &str,
-    result_snapshot_hash: &str,
+    generation: &ryeos_state::objects::WorkspaceGenerationPair,
 ) -> Result<()> {
     let mut components = head_ref.split('/');
     let (Some("projects"), Some(principal_key), Some(project_hash), Some("head"), None) = (
@@ -1766,16 +2048,32 @@ fn advance_head_to_frozen_runtime_result(
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire result-generation write permit: {error}"))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    state.state_store.advance_project_head_ref_owned(
-        thread_id,
-        launch_owner,
-        principal_key,
-        project_hash,
-        result_snapshot_hash,
-        expected_hash,
-        &signer,
-        &cas_guard,
-    )
+    state
+        .state_store
+        .advance_project_head_ref_owned(
+            thread_id,
+            launch_owner,
+            principal_key,
+            project_hash,
+            &generation.snapshot_hash,
+            expected_hash,
+            &signer,
+            &cas_guard,
+        )
+        .map_err(|error| {
+            match error
+                .downcast_ref::<ryeos_state::refs::ProjectHeadAdvanceRefusal>()
+                .cloned()
+            {
+                Some(refusal) => HeadAdvanceNotApplied {
+                    refusal,
+                    expected_head: expected_hash.to_owned(),
+                    retained: generation.clone(),
+                }
+                .into(),
+                None => error,
+            }
+        })
 }
 
 /// Complete a write-ahead callback freeze whose runtime owner died after the
@@ -1883,14 +2181,26 @@ fn recover_interrupted_workspace_freeze_inner(
         recovered_freeze_uses_daemon_mediated_source_capture(state, thread_id)?;
     assert_workspace_capture_processes_settled(state, record)?;
     let authority = pinned_state_authority(state)?;
-    let guard = authority.acquire_shared_guard()?;
     let (operational_shadow_paths, output_context) =
         admitted_workspace_capture_inputs(state, thread_id, record)?;
-    if let Some(generation) =
-        verified_frozen_generation(&authority, record, output_context.as_ref())?
     {
-        return Ok(generation);
+        let read_guard = authority.acquire_shared_guard()?;
+        let verified = verified_frozen_generation(&authority, record, output_context.as_ref())?;
+        authority.ensure_guard(&read_guard)?;
+        if let Some(generation) = verified {
+            return Ok(generation);
+        }
     }
+    // The freeze adapter starts a process, so it runs with no guard held.
+    let lifecycle = freeze_workspace_for_foldback(
+        &state.isolation,
+        &record.workspace_id,
+        launch_owner,
+        &record.base_snapshot,
+        Path::new(&record.root_path),
+        record,
+    )?;
+    let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let base = ryeos_state::project_materialization::load_project_snapshot_bounded(
         &cas,
@@ -1909,12 +2219,10 @@ fn recover_interrupted_workspace_freeze_inner(
         authority: &authority,
         cas_mutation_guard: &guard,
         isolation: &state.isolation,
-        workspace_id: &record.workspace_id,
-        launch_owner,
+        lifecycle,
         working_dir: Path::new(&record.root_path),
         pre_tree_hash: &base.project_tree_hash,
         policy_hash: &base.effective_policy_hash,
-        base_snapshot_hash: &record.base_snapshot,
         workspace_record: record,
         operational_shadow_paths: &operational_shadow_paths,
         output_partition: output_context.as_ref().map(|context| &context.partition),
@@ -1978,6 +2286,25 @@ fn quiesce_bound_workspace(
     state: &ryeos_app::state::AppState,
     record: &ryeos_app::runtime_db::WorkspaceRecord,
 ) -> Result<QuiescedExecutionGroup> {
+    let qualified = &state.isolation.inspection().process_scope_capabilities;
+    let targets = bound_workspace_targets(state, record)?;
+    let mut quiesced = QuiescedExecutionGroup {
+        authorities: Vec::new(),
+    };
+    let mut groups = std::collections::BTreeMap::new();
+    for identity in &targets {
+        quiesced.stop_once(identity, qualified, &mut groups)?;
+    }
+    Ok(quiesced)
+}
+
+/// Every live execution bound to the workspace, by exact identity, after
+/// checking that this node can freeze each one's process scope. Nothing is
+/// stopped here: a refusal leaves every group running.
+fn bound_workspace_targets(
+    state: &ryeos_app::state::AppState,
+    record: &ryeos_app::runtime_db::WorkspaceRecord,
+) -> Result<Vec<ryeos_app::process::ExecutionProcessIdentity>> {
     let view_identity = record
         .mount_identity
         .as_deref()
@@ -2001,14 +2328,16 @@ fn quiesce_bound_workspace(
         .map(serde_json::from_str)
         .transpose()
         .context("decode workspace process owner")?;
-    let mut quiesced = QuiescedExecutionGroup {
-        authorities: Vec::new(),
-    };
-    let mut groups = std::collections::BTreeMap::new();
-    let root_identity = state
-        .state_store
-        .execution_process_identity_owned(root, launch_owner)?;
-    quiesced.stop_once(&root_identity, &mut groups)?;
+    let qualified = &state.isolation.inspection().process_scope_capabilities;
+    // Every bound execution's exact identity is resolved, and every process
+    // scope among them checked against what this node can freeze, before any
+    // group is stopped: a refusal after some groups stopped would leave them
+    // stopped for an operation that never runs.
+    let mut targets = vec![
+        state
+            .state_store
+            .execution_process_identity_owned(root, launch_owner)?,
+    ];
     let mut after = None;
     let mut root_seen = false;
     loop {
@@ -2042,7 +2371,7 @@ fn quiesce_bound_workspace(
                         member.thread_id
                     )
                 })?;
-            quiesced.stop_once(&identity, &mut groups)?;
+            targets.push(identity);
         }
         after = members.last().map(|member| member.thread_id.clone());
     }
@@ -2060,10 +2389,50 @@ fn quiesce_bound_workspace(
                 // group absence; a dead leader alone does not stabilize it.
                 ryeos_app::process::assert_reaped_process_group_absent(identity)?;
             }
-            _ => quiesced.stop_once(identity, &mut groups)?,
+            _ => targets.push(identity.clone()),
         }
     }
-    Ok(quiesced)
+    require_bound_scopes_quiescence_qualified(&targets, qualified)?;
+    Ok(targets)
+}
+
+/// Refuse when any bound execution runs in a process scope and this node
+/// has not qualified scope quiescence. It is judged per identity, not from
+/// the node's scope policy: an execution recovered with a scope still needs
+/// its scope frozen on a node that no longer configures scopes.
+fn require_bound_scopes_quiescence_qualified(
+    identities: &[ryeos_app::process::ExecutionProcessIdentity],
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
+) -> Result<()> {
+    // A PID-namespace-contained execution can be terminated and settled but
+    // never frozen, whatever the node qualified for cgroup scopes.
+    if let Some((scoped, refusal)) = identities.iter().find_map(|identity| {
+        identity
+            .process_scope
+            .as_ref()
+            .and_then(lillux::ProcessScopeRecovery::quiescence_refusal)
+            .map(|refusal| (identity, refusal))
+    }) {
+        anyhow::bail!(
+            "workspace quiescence refused before any process group was stopped: the execution \
+             with process group leader {} cannot be quiesced: {refusal}",
+            scoped.group_leader_pid
+        );
+    }
+    match identities
+        .iter()
+        .find(|identity| identity.process_scope.is_some())
+    {
+        Some(scoped) => ryeos_app::process::require_scope_quiescence_qualified(qualified)
+            .with_context(|| {
+                format!(
+                    "workspace quiescence refused before any process group was stopped: the \
+                     execution with process group leader {} runs in a process scope",
+                    scoped.group_leader_pid
+                )
+            }),
+        None => Ok(()),
+    }
 }
 
 /// The caller already owns the root contact fence. Empty membership is the
@@ -2090,16 +2459,16 @@ pub(crate) fn assert_workspace_capture_processes_settled(
         .get_thread(root)?
         .ok_or_else(|| anyhow::anyhow!("terminal workspace capture root disappeared"))?;
     if let Some(identity) = thread.runtime.process_identity.as_ref() {
-        ryeos_app::process::assert_reaped_process_group_absent(identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(identity, "root runtime")?;
     } else if thread.runtime.pid.is_some() || thread.runtime.pgid.is_some() {
         anyhow::bail!("terminal workspace capture root has incomplete process identity");
     }
     if let Some(encoded) = record.process_identity.as_deref() {
         let identity = serde_json::from_str(encoded).context("decode workspace process owner")?;
-        ryeos_app::process::assert_reaped_process_group_absent(&identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(&identity, "workspace owner")?;
     }
     if let Some(identity) = worker_identity.as_ref() {
-        ryeos_app::process::assert_reaped_process_group_absent(identity)?;
+        ryeos_app::process::assert_reaped_process_group_absent_as(identity, "dedicated worker")?;
     }
     Ok(())
 }
@@ -2153,6 +2522,7 @@ impl QuiescedExecutionGroup {
     fn stop_once(
         &mut self,
         identity: &ryeos_app::process::ExecutionProcessIdentity,
+        qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
         groups: &mut std::collections::BTreeMap<WorkspaceCaptureOwner, Option<(String, i64)>>,
     ) -> Result<()> {
         let first = register_workspace_capture_group(groups, identity)?;
@@ -2168,6 +2538,7 @@ impl QuiescedExecutionGroup {
             self.authorities
                 .push(ryeos_app::process::quiesce_exact_process_group(
                     identity,
+                    qualified,
                     lillux::time::Duration::from_secs(2),
                 )?);
         }
@@ -2206,6 +2577,42 @@ impl QuiescedExecutionGroup {
         }
         Ok(())
     }
+}
+
+/// Whether this node can freeze the borrowers of a workspace operation that
+/// quiesces them (`operation` names it in the refusal). A node without
+/// configured process scopes stops strict process groups by signal and needs
+/// no scope guarantee; a scope-configured node freezes each borrower's scope,
+/// so it must have qualified quiescence.
+fn require_workspace_quiescence_qualified(
+    process_scopes: &ryeos_engine::isolation::IsolationProcessScopePolicy,
+    qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
+    operation: &str,
+) -> Result<()> {
+    match process_scopes {
+        ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {} => Ok(()),
+        ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
+            control_timeout_ms: _,
+        } => ryeos_app::process::require_scope_quiescence_qualified(qualified)
+            .with_context(|| format!("{operation} refused before it started")),
+    }
+}
+
+/// The node-level and per-borrower quiescence judgement, run before an
+/// operation's first durable transition. Nothing is stopped here.
+fn require_workspace_quiescence_admitted(
+    state: &ryeos_app::state::AppState,
+    record: &ryeos_app::runtime_db::WorkspaceRecord,
+    operation: &str,
+) -> Result<()> {
+    require_workspace_quiescence_qualified(
+        &state.isolation.inspection().process_scopes,
+        &state.isolation.inspection().process_scope_capabilities,
+        operation,
+    )?;
+    bound_workspace_targets(state, record)
+        .with_context(|| format!("{operation} refused before it started"))?;
+    Ok(())
 }
 
 /// Cancellation-safe ownership of exclusively quiesced workspace borrowers.
@@ -2299,6 +2706,42 @@ pub(crate) fn ensure_control_tree_unchanged(
 }
 
 #[cfg(test)]
+mod head_advance_on_terminal_tests {
+    use super::callback_terminal_advances_head;
+    use ryeos_engine::contracts::ThreadTerminalStatus as Reported;
+    use ryeos_state::objects::ThreadStatus;
+
+    /// The daemon's settlement of a stopped runtime advances HEAD for every
+    /// status (it has no status guard), so the runtime's own callback must
+    /// advance it for every status but a continuation. A deadline stop then
+    /// ends in the same HEAD state whichever side settles it.
+    #[test]
+    fn a_deadline_stop_advances_head_like_every_other_terminal() {
+        let running = ThreadStatus::Running.as_str();
+        for reported in [
+            Reported::Completed,
+            Reported::Failed,
+            Reported::Cancelled,
+            Reported::Killed,
+            Reported::TimedOut,
+        ] {
+            assert!(
+                callback_terminal_advances_head(&reported, running),
+                "{reported:?}"
+            );
+        }
+        assert!(!callback_terminal_advances_head(
+            &Reported::Continued,
+            running
+        ));
+        assert!(!callback_terminal_advances_head(
+            &Reported::TimedOut,
+            ThreadStatus::Continued.as_str()
+        ));
+    }
+}
+
+#[cfg(test)]
 mod pinned_child_authority_tests {
     use super::*;
     use std::collections::BTreeMap;
@@ -2345,7 +2788,9 @@ mod pinned_child_authority_tests {
             target_start_time_ticks: 200,
             group_leader_pid: 39,
             group_leader_start_time_ticks: 190,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -2374,16 +2819,327 @@ mod pinned_child_authority_tests {
         assert_eq!(groups.len(), 2);
     }
 
+    fn bound_identity(
+        process_scope: Option<lillux::ProcessScopeRecovery>,
+        leader: i64,
+    ) -> ryeos_app::process::ExecutionProcessIdentity {
+        ryeos_app::process::ExecutionProcessIdentity {
+            schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            process_scope,
+            boot_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+            target_pid: leader + 1,
+            target_start_time_ticks: 200,
+            group_leader_pid: leader,
+            group_leader_start_time_ticks: 190,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
+            resource_selections: Vec::new(),
+            resource_settlement_authority: None,
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_recovered_scope_on_an_unconfigured_node_refuses_before_any_stop() {
+        let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2", "boot_id": "00000000-0000-4000-8000-000000000000",
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3}, "name": "fixture-scope"}
+        }))
+        .unwrap();
+        // An unconfigured node qualifies no scope capability. Its node-level
+        // pre-check admits, yet a strict group listed before the recovered
+        // scoped borrower must not be stopped and then abandoned: the whole
+        // set is judged first.
+        let unconfigured = std::collections::BTreeSet::new();
+        require_workspace_quiescence_qualified(
+            &ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {},
+            &unconfigured,
+            "exclusive workspace operation",
+        )
+        .unwrap();
+        let targets = [bound_identity(None, 39), bound_identity(Some(scope), 49)];
+        let message = format!(
+            "{:#}",
+            require_bound_scopes_quiescence_qualified(&targets, &unconfigured).unwrap_err()
+        );
+        assert!(
+            message.contains("before any process group was stopped"),
+            "{message}"
+        );
+        assert!(message.contains("process group leader 49"), "{message}");
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        // Strict groups alone need no scope guarantee.
+        require_bound_scopes_quiescence_qualified(&targets[..1], &unconfigured).unwrap();
+        let qualified: std::collections::BTreeSet<_> =
+            [lillux::ProcessScopeCapability::Quiescence].into();
+        require_bound_scopes_quiescence_qualified(&targets, &qualified).unwrap();
+    }
+
+    #[test]
+    fn pid_namespace_contained_borrower_is_refused_workspace_quiescence_by_name() {
+        let boot = "00000000-0000-4000-8000-000000000000";
+        let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+            "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                "init_pid": 40, "init_start_time_ticks": 200,
+                "namespace": {"device": 1, "inode": 2}}
+        }))
+        .unwrap();
+        let targets = [bound_identity(None, 39), bound_identity(Some(scope), 49)];
+        // Even a node that qualified scope quiescence cannot freeze this
+        // execution: containment by namespace init is not a writer barrier.
+        let qualified: std::collections::BTreeSet<_> =
+            [lillux::ProcessScopeCapability::Quiescence].into();
+        let message = format!(
+            "{:#}",
+            require_bound_scopes_quiescence_qualified(&targets, &qualified).unwrap_err()
+        );
+        assert!(
+            message.contains("before any process group was stopped"),
+            "{message}"
+        );
+        assert!(message.contains("cannot quiesce"), "{message}");
+        assert!(message.contains("process group leader 49"), "{message}");
+        // Strict groups alone are unaffected.
+        require_bound_scopes_quiescence_qualified(&targets[..1], &qualified).unwrap();
+    }
+
+    #[test]
+    fn unqualified_scope_quiescence_is_refused_before_any_freeze() {
+        let boot = "00000000-0000-4000-8000-000000000000";
+        let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3}, "name": "fixture-scope"}
+        }))
+        .unwrap();
+        let identity = ryeos_app::process::ExecutionProcessIdentity {
+            schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            process_scope: Some(scope),
+            boot_id: boot.to_owned(),
+            target_pid: 40,
+            target_start_time_ticks: 200,
+            group_leader_pid: 39,
+            group_leader_start_time_ticks: 190,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
+            resource_selections: Vec::new(),
+            resource_settlement_authority: None,
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
+        };
+        // Termination and recovery qualified, the freezer not: the fixture
+        // scope names no real cgroup, so reaching the freezer would fail
+        // differently from this refusal.
+        let without_quiescence: std::collections::BTreeSet<_> = [
+            lillux::ProcessScopeCapability::Termination,
+            lillux::ProcessScopeCapability::Recovery,
+        ]
+        .into();
+        let error = ryeos_app::process::quiesce_exact_process_group(
+            &identity,
+            &without_quiescence,
+            lillux::time::Duration::from_secs(1),
+        )
+        .err()
+        .expect("unqualified scope quiescence must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("this node did not qualify scope quiescence"),
+            "{error:#}"
+        );
+
+        let required = ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
+            control_timeout_ms: 1000,
+        };
+        let error = require_workspace_quiescence_qualified(
+            &required,
+            &without_quiescence,
+            "exclusive workspace operation",
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("refused before it started"), "{message}");
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        let mut with_quiescence = without_quiescence.clone();
+        with_quiescence.insert(lillux::ProcessScopeCapability::Quiescence);
+        require_workspace_quiescence_qualified(
+            &required,
+            &with_quiescence,
+            "exclusive workspace operation",
+        )
+        .unwrap();
+        // Strict process groups are stopped by signal, not frozen.
+        require_workspace_quiescence_qualified(
+            &ryeos_engine::isolation::IsolationProcessScopePolicy::Unconfigured {},
+            &std::collections::BTreeSet::new(),
+            "exclusive workspace operation",
+        )
+        .unwrap();
+    }
+
+    /// A scope-configured node whose freezer is unqualified: termination
+    /// and recovery are proved, quiescence is not.
+    #[cfg(target_os = "linux")]
+    fn unqualified_scope_quiescence_isolation(
+        app_root: &Path,
+    ) -> Arc<ryeos_engine::isolation::IsolationRuntime> {
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+        policy.process_scopes = ryeos_engine::isolation::IsolationProcessScopePolicy::Required {
+            control_timeout_ms: 1_000,
+        };
+        policy.requires_capabilities = vec!["recovery:scope".into(), "termination:scope".into()];
+        let runtime =
+            ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_definition_validation(
+                app_root,
+                policy,
+                app_root.join("isolation-policy.json"),
+                "0".repeat(64),
+                None,
+            )
+            .unwrap();
+        assert!(
+            !runtime
+                .inspection()
+                .process_scope_capabilities
+                .contains(&lillux::ProcessScopeCapability::Quiescence)
+        );
+        Arc::new(runtime)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unqualified_callback_freeze_refuses_while_the_workspace_is_still_active() {
+        let (temp, _store_owner, mut state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
+        state.isolation = unqualified_scope_quiescence_isolation(temp.path());
+        let workspace_id = "workspace-runtime-parent";
+        let parent = "T-runtime-parent";
+        let before = state
+            .state_store
+            .execution_workspace(workspace_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.state, WorkspaceState::Active);
+        let fence = ryeos_app::hosted_operation::begin_hosted_root_terminalization(
+            &state.state_store,
+            parent,
+        )
+        .unwrap();
+        let project = temp
+            .path()
+            .join(workspace_id)
+            .join(ryeos_engine::execution_workspace::PROJECT_DIR);
+        let error = seal_callback_workspace_generation(
+            &state,
+            parent,
+            &project,
+            &before.base_snapshot,
+            &fence,
+        )
+        .err()
+        .expect("an unqualified node must refuse the callback freeze");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("callback workspace freeze refused before it started"),
+            "{message}"
+        );
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        let after = state
+            .state_store
+            .execution_workspace(workspace_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, WorkspaceState::Active);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unqualified_workspace_input_capture_refuses_before_any_operation_phase_moves() {
+        let (temp, _store_owner, mut state) =
+            crate::augmentations::compose_context_positions::tests::bound_runtime_children_fixture(
+            );
+        state.isolation = unqualified_scope_quiescence_isolation(temp.path());
+        let workspace_id = "workspace-runtime-parent";
+        let before = state
+            .state_store
+            .execution_workspace(workspace_id)
+            .unwrap()
+            .unwrap();
+        let project = temp
+            .path()
+            .join(workspace_id)
+            .join(ryeos_engine::execution_workspace::PROJECT_DIR);
+        // No intent is reserved: the refusal names the node's missing
+        // guarantee, not the absent operation, so it precedes every read
+        // and every phase transition of the operation.
+        let error = capture_runtime_workspace_input_generation(
+            &state,
+            "runtime-op-unqualified-capture",
+            "T-runtime-parent",
+            &project,
+            &before.base_snapshot,
+        )
+        .err()
+        .expect("an unqualified node must refuse workspace-input capture");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("workspace-input capture refused before it started"),
+            "{message}"
+        );
+        assert!(
+            message.contains("this node did not qualify scope quiescence"),
+            "{message}"
+        );
+        assert!(
+            state
+                .state_store
+                .runtime_action_intents()
+                .unwrap()
+                .is_empty()
+        );
+        let after = state
+            .state_store
+            .execution_workspace(workspace_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, WorkspaceState::Active);
+    }
+
     #[test]
     fn workspace_capture_deduplicates_scope_across_distinct_process_groups() {
         let boot = "00000000-0000-4000-8000-000000000000";
         let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
-            "version": 4, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0}, "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
-                "parent": {"containing_device": 1, "inode": 2},
-                "directory": {"containing_device": 1, "inode": 3}, "name": "fixture-scope"}
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3}, "name": "fixture-scope"}
         }))
         .unwrap();
         let mut identity = ryeos_app::process::ExecutionProcessIdentity {
@@ -2394,7 +3150,9 @@ mod pinned_child_authority_tests {
             target_start_time_ticks: 200,
             group_leader_pid: 39,
             group_leader_start_time_ticks: 190,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -2426,7 +3184,9 @@ mod pinned_child_authority_tests {
             target_start_time_ticks: 200,
             group_leader_pid: 39,
             group_leader_start_time_ticks: 0,
+            pid_namespace: lillux::current_pid_namespace().unwrap(),
             resource_selections: Vec::new(),
+            resource_settlement_authority: None,
             resource_operations: Vec::new(),
             resource_allocation_limit: None,
             resource_occupancy_start: None,
@@ -2444,9 +3204,11 @@ mod pinned_child_authority_tests {
         use std::os::unix::fs::MetadataExt as _;
 
         let state_root = tempfile::tempdir().unwrap();
-        let state_db =
-            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
-                .unwrap();
+        let state_db = ryeos_app::test_support::TestState::open(
+            state_root.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = state_db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -2605,6 +3367,127 @@ mod pinned_child_authority_tests {
         assert_eq!(
             terminal_publication,
             ryeos_state::objects::PinnedTerminalPublication::RetainResult
+        );
+    }
+}
+
+#[cfg(test)]
+mod head_advance_not_applied_tests {
+    use super::*;
+
+    fn not_applied(refusal: ryeos_state::refs::ProjectHeadAdvanceRefusal) -> HeadAdvanceNotApplied {
+        HeadAdvanceNotApplied {
+            refusal,
+            expected_head: "b".repeat(64),
+            retained: ryeos_state::objects::WorkspaceGenerationPair {
+                snapshot_hash: "c".repeat(64),
+                output_capture_hash: Some("d".repeat(64)),
+            },
+        }
+    }
+
+    #[test]
+    fn head_conflict_reports_the_retained_generation_and_observed_head() {
+        let error: anyhow::Error =
+            not_applied(ryeos_state::refs::ProjectHeadAdvanceRefusal::Conflict {
+                expected: "b".repeat(64),
+                observed: Some("e".repeat(64)),
+            })
+            .into();
+        let found = HeadAdvanceNotApplied::find(&error).expect("typed not-applied error");
+        let payload = found.error_payload();
+        assert_eq!(payload["code"], HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(payload["reason"], "head_moved");
+        assert_eq!(payload["expected_head"], "b".repeat(64));
+        assert_eq!(payload["observed_head"], "e".repeat(64));
+        assert_eq!(payload["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(payload["retained_output_capture_hash"], "d".repeat(64));
+    }
+
+    #[test]
+    fn failed_completion_replaces_a_reported_success_with_the_typed_failure() {
+        let reported = ryeos_engine::contracts::ExecutionCompletion {
+            status: ryeos_engine::contracts::ThreadTerminalStatus::Completed,
+            outcome_code: Some("success".into()),
+            result: Some(serde_json::json!({"answer": 42})),
+            error: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            continuation_request: None,
+            metadata: None,
+        };
+        let failed = not_applied(ryeos_state::refs::ProjectHeadAdvanceRefusal::Conflict {
+            expected: "b".repeat(64),
+            observed: Some("e".repeat(64)),
+        })
+        .failed_completion(&reported);
+        assert_eq!(
+            failed.status,
+            ryeos_engine::contracts::ThreadTerminalStatus::Failed
+        );
+        assert_eq!(
+            failed.outcome_code.as_deref(),
+            Some(HEAD_ADVANCE_NOT_APPLIED)
+        );
+        assert!(
+            failed.result.is_none(),
+            "the unpublished result is not committed"
+        );
+        let error = failed.error.unwrap();
+        assert_eq!(error["code"], HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(error["reported_status"], "completed");
+        assert_eq!(error["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(error["observed_head"], "e".repeat(64));
+    }
+
+    #[test]
+    fn an_interrupted_advance_is_not_applied_unless_head_names_the_generation() {
+        let retained = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: Some("d".repeat(64)),
+        };
+        let base = "b".repeat(64);
+        let (code, payload) = interrupted_head_advance_outcome(&base, Some(&base), &retained);
+        assert_eq!(code, HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(payload["code"], HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(payload["reason"], "interrupted");
+        assert_eq!(payload["expected_head"], base);
+        assert_eq!(payload["observed_head"], base);
+        assert_eq!(payload["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(payload["retained_output_capture_hash"], "d".repeat(64));
+        assert!(
+            interrupted_head_advance_outcome(&base, None, &retained).1["observed_head"].is_null()
+        );
+    }
+
+    #[test]
+    fn an_advance_applied_before_the_interruption_is_recorded_as_such() {
+        let retained = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: None,
+        };
+        let base = "b".repeat(64);
+        let (code, payload) =
+            interrupted_head_advance_outcome(&base, Some(&"c".repeat(64)), &retained);
+        assert_eq!(code, HEAD_ADVANCED_BEFORE_INTERRUPTION);
+        assert_eq!(payload["code"], HEAD_ADVANCED_BEFORE_INTERRUPTION);
+        assert_eq!(payload["advanced_from"], base);
+        assert_eq!(payload["head"], "c".repeat(64));
+        assert_eq!(payload["snapshot_hash"], "c".repeat(64));
+        assert!(payload["output_capture_hash"].is_null());
+    }
+
+    #[test]
+    fn other_pre_write_refusals_keep_their_reason_and_no_observed_head() {
+        let payload = not_applied(ryeos_state::refs::ProjectHeadAdvanceRefusal::Fenced(
+            "handoff reservation".into(),
+        ))
+        .error_payload();
+        assert_eq!(payload["reason"], "fenced");
+        assert!(payload["observed_head"].is_null());
+        assert!(
+            HeadAdvanceNotApplied::find(&anyhow::anyhow!("fold-back capture failed")).is_none(),
+            "an untyped fold-back failure stays foldback_failed"
         );
     }
 }

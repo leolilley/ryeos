@@ -29,6 +29,10 @@ fn require_operator<'a>(
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
     profile_id: String,
+    /// How the profile becomes usable. Required, and fixed for the profile's
+    /// life: `{"kind":"ceremony"}` or
+    /// `{"kind":"delivered_secret","names":[...]}`.
+    activation: ryeos_app::runtime_db::CredentialActivation,
 }
 
 fn profile_home_id(owner: &str, profile_id: &str) -> Result<String> {
@@ -46,6 +50,13 @@ async fn create(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let owner = require_operator(&state, &ctx)?.to_owned();
+    let activation = match req.activation {
+        ryeos_app::runtime_db::CredentialActivation::DeliveredSecret { names } => {
+            ryeos_app::runtime_db::CredentialActivation::delivered_secret(names)
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
+        }
+        ceremony @ ryeos_app::runtime_db::CredentialActivation::Ceremony => ceremony,
+    };
     let home_id = profile_home_id(&owner, &req.profile_id).map_err(internal)?;
     let _operation_guard =
         ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
@@ -61,25 +72,39 @@ async fn create(
                 "credential profile identity conflicts with existing ownership".into(),
             ));
         }
+        if existing.activation != activation {
+            return Err(HandlerError::Structured {
+                code: "credential_profile_activation_mismatch".to_string(),
+                status: 409,
+                body: json!({
+                    "code":"credential_profile_activation_mismatch",
+                    "error":"credential_profile_activation_mismatch: the profile exists with a different activation source, which is fixed at creation; delete it and create it again to change it",
+                    "profile_id":existing.profile_id,
+                    "activation":existing.activation,
+                }),
+            });
+        }
         return Ok(json!({
             "profile_id":existing.profile_id,
             "home_id":existing.home_id,
             "credential_generation":existing.credential_generation,
             "state":existing.state,
+            "activation":existing.activation,
             "idempotent":true,
         }));
     }
     let state_dir = state.config.runtime_state_dir();
     ryeos_app::private_artifact_home::remove_empty_orphan(&state_dir, &home_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::private_artifact_home::create(&state_dir, &home_id, &Default::default())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if let Err(error) = state
         .state_store
         .create_credential_profile(NewCredentialProfile {
             profile_id: &req.profile_id,
             owner_principal: &owner,
             home_id: &home_id,
+            activation: activation.clone(),
         })
     {
         // RuntimeDb commits the revisioned live projection before folding it
@@ -111,6 +136,7 @@ async fn create(
         "home_id": created.home_id,
         "credential_generation": created.credential_generation,
         "state": created.state,
+        "activation": created.activation,
     }))
 }
 
@@ -234,13 +260,64 @@ async fn confirm(
             req.login_epoch,
             &req.expected_account_digest,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(ceremony_error)?;
     Ok(json!({
         "profile_id":req.profile_id,
         "state":"active",
         "credential_generation":generation,
         "confirmed_account_digest":req.expected_account_digest,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbandonLoginRequest {
+    profile_id: String,
+    login_epoch: u64,
+}
+
+/// Clear an expired, unlocked login the operator names by epoch. The profile
+/// returns to `unauthenticated` so a new login can begin; nothing else moves.
+async fn abandon_login(
+    req: AbandonLoginRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    let owner = require_operator(&state, &ctx)?.to_owned();
+    let _operation_guard =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
+            .await
+            .map_err(internal)?;
+    let profile = state
+        .state_store
+        .credential_profile(&req.profile_id)
+        .map_err(internal)?
+        .ok_or(HandlerError::NotFound)?;
+    ctx.require_owner(Some(&profile.owner_principal))?;
+    let authority_revision = state
+        .state_store
+        .abandon_credential_enrollment(&req.profile_id, &owner, req.login_epoch)
+        .map_err(ceremony_error)?;
+    Ok(json!({
+        "profile_id":req.profile_id,
+        "state":"unauthenticated",
+        "abandoned_login_epoch":req.login_epoch,
+        "authority_revision":authority_revision,
+        "credential_generation":profile.credential_generation,
+    }))
+}
+
+/// Ceremony refusals are state conflicts the operator can act on: 409 with
+/// the stable code. Anything else keeps the earlier 400 shape.
+fn ceremony_error(error: anyhow::Error) -> HandlerError {
+    match error.downcast_ref::<ryeos_app::runtime_db::CredentialCeremonyRefusal>() {
+        Some(refusal) => HandlerError::Structured {
+            code: refusal.code().to_string(),
+            status: 409,
+            body: refusal.body(),
+        },
+        None => HandlerError::BadRequest(format!("{error:#}")),
+    }
 }
 
 async fn revoke(
@@ -272,7 +349,7 @@ async fn revoke(
                 root,
             )
             .await
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
         {
             _root_operations.push(operation);
         }
@@ -298,7 +375,7 @@ async fn revoke(
         state
             .state_store
             .revoke_credential_profile(&req.profile_id, &owner, req.credential_generation)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
     };
 
     // Revocation is the first authoritative commit. Command contact checks
@@ -521,7 +598,7 @@ async fn delete(
         state
             .state_store
             .begin_credential_profile_deletion(&req.profile_id, &owner, req.credential_generation)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
     };
     ryeos_app::private_artifact_home::remove(&state.config.runtime_state_dir(), &profile.home_id)
         .map_err(internal)?;
@@ -533,7 +610,7 @@ async fn delete(
 }
 
 fn internal(error: impl std::fmt::Display) -> HandlerError {
-    HandlerError::Internal(error.to_string())
+    HandlerError::Internal(format!("{error:#}"))
 }
 
 pub const CREATE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -601,6 +678,19 @@ pub const CONFIRM_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     },
 };
 
+pub const ABANDON_LOGIN_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:credential-profiles/abandon-login",
+    endpoint: "credential-profiles.abandon-login",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.credential-profiles/abandon-login"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: AbandonLoginRequest = crate::handler_error::parse_request(params)?;
+            abandon_login(req, ctx, state).await.map_err(Into::into)
+        })
+    },
+};
+
 pub const DELETE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:credential-profiles/delete",
     endpoint: "credential-profiles.delete",
@@ -613,3 +703,92 @@ pub const DELETE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_app::runtime_db::CredentialCeremonyRefusal;
+
+    #[test]
+    fn confirm_errors_are_409_with_code() {
+        let refusals = [
+            CredentialCeremonyRefusal::ConfirmLockHeld {
+                profile_id: "p".into(),
+                login_epoch: 1,
+                lock_owner: "worker".into(),
+                holding_chain_root_id: Some("T-login".into()),
+            },
+            CredentialCeremonyRefusal::ConfirmExpired {
+                profile_id: "p".into(),
+                login_epoch: 1,
+                lock_owner: None,
+            },
+            CredentialCeremonyRefusal::ConfirmWrongState {
+                profile_id: "p".into(),
+                state: "active".into(),
+                current_login_epoch: 2,
+                requested_login_epoch: 1,
+            },
+            CredentialCeremonyRefusal::SlotBacked {
+                profile_id: "p".into(),
+            },
+        ];
+        for refusal in refusals {
+            let expected = refusal.code();
+            match ceremony_error(anyhow::Error::new(refusal).context("confirm")) {
+                HandlerError::Structured { code, status, body } => {
+                    assert_eq!(code, expected);
+                    assert_eq!(status, 409);
+                    assert_eq!(body["code"], expected);
+                }
+                other => panic!("expected a structured 409, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            ceremony_error(anyhow::anyhow!(
+                "credential confirmation account digest changed"
+            )),
+            HandlerError::BadRequest(_)
+        ));
+    }
+
+    #[test]
+    fn slot_backed_refusal_names_its_stable_code() {
+        let refusal = CredentialCeremonyRefusal::SlotBacked {
+            profile_id: "p".into(),
+        };
+        assert_eq!(refusal.code(), "credential_profile_slot_backed");
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("credential_profile_slot_backed:")
+        );
+    }
+
+    #[test]
+    fn create_requires_a_closed_activation() {
+        use ryeos_app::runtime_db::CredentialActivation;
+        assert!(serde_json::from_value::<CreateRequest>(json!({"profile_id":"p"})).is_err());
+        let ceremony: CreateRequest =
+            serde_json::from_value(json!({"profile_id":"p","activation":{"kind":"ceremony"}}))
+                .unwrap();
+        assert_eq!(ceremony.activation, CredentialActivation::Ceremony);
+        let slot: CreateRequest = serde_json::from_value(json!({
+            "profile_id":"p",
+            "activation":{"kind":"delivered_secret","names":["B_KEY","A_KEY"]},
+        }))
+        .unwrap();
+        assert_eq!(
+            slot.activation,
+            CredentialActivation::DeliveredSecret {
+                names: vec!["B_KEY".into(), "A_KEY".into()]
+            }
+        );
+        for bad in [
+            json!({"profile_id":"p","activation":{"kind":"other"}}),
+            json!({"profile_id":"p","activation":{"kind":"delivered_secret"}}),
+        ] {
+            assert!(serde_json::from_value::<CreateRequest>(bad).is_err());
+        }
+    }
+}

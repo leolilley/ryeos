@@ -7,8 +7,98 @@
 use serde::{Deserialize, Serialize};
 
 use super::event::{FieldStepDirection, RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
-use super::model::RyeOsDockEdge;
+use super::timeline::RyeOsTimelineEntryAction;
 use crate::view_set::FocusDirection;
+
+/// Descriptive help for this module's semantic matcher, not another keyboard registry.
+pub fn shortcut_entries() -> Vec<super::view_model::RyeOsShortcutEntryVm> {
+    let entry =
+        |category: &str, keys: &str, description: &str| super::view_model::RyeOsShortcutEntryVm {
+            category: category.to_string(),
+            keys: keys.to_string(),
+            description: description.to_string(),
+        };
+    vec![
+        entry(
+            "Move",
+            "↑ / ↓",
+            "Move the point through rows; else move focus",
+        ),
+        entry(
+            "Move",
+            "← / →",
+            "Navigate field hierarchy, expand row/feed details, or move focus",
+        ),
+        entry(
+            "Act",
+            "Enter",
+            "Activate the selected row; submit a non-filter input with text",
+        ),
+        entry(
+            "Act",
+            "Alt+Enter",
+            "Interrupt-submit a focused non-filter input with text",
+        ),
+        entry(
+            "Act",
+            "Tab / ⇧Tab",
+            "Cycle declared filter fields, accept completion, or cycle a declared route target",
+        ),
+        entry(
+            "Act",
+            "Esc",
+            "Close the focused dialog; otherwise end field query, blur input, cancel a running thread, or close the view",
+        ),
+        entry(
+            "Feed",
+            "y / ⇧Y",
+            "Copy the entry under the point as text / as its raw events",
+        ),
+        entry("Feed", "v", "Inspect the raw events behind the entry"),
+        entry("Feed", "f", "Fold or unfold the cluster under the point"),
+        entry("Feed", "r", "Retry a failed fetch in the focused view"),
+        entry(
+            "Feed",
+            "a / d",
+            "Answer the first pending ask with the key shown on its button",
+        ),
+        entry("Views", "Alt+←", "Return from a drill-in view"),
+        entry(
+            "Input",
+            "type",
+            "Edit only the focused View's declared input",
+        ),
+        entry(
+            "Lenses",
+            "Ctrl+K",
+            "Open the configured presentation launcher",
+        ),
+        entry("Lenses", "Ctrl+← / →", "Switch view-set tab"),
+        entry(
+            "Move",
+            "Ctrl+U / Ctrl+D",
+            "Jump the focused rows by half a screen",
+        ),
+        entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
+        entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
+        entry(
+            "Layout",
+            "Alt+M",
+            "Promote the focused tile in a master-and-stack layout",
+        ),
+        entry(
+            "Layout",
+            "Alt+T / Alt+B",
+            "Toggle the top / bottom presentation bar",
+        ),
+        entry(
+            "App",
+            "Alt+Q",
+            "Close the focused view; its running work is unaffected",
+        ),
+        entry("App", "Ctrl+C", "Quit"),
+    ]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,13 +130,18 @@ pub struct RyeOsKeyEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RyeOsKeyContext {
+    /// The attention overlay is open and takes the keys.
     pub overlay_open: bool,
+    pub dialog_open: bool,
+    /// The launcher is showing where a chosen view can land, and takes the
+    /// place keys.
+    pub launcher_places_open: bool,
+    /// A rename was requested and no client has taken it: the core edits the
+    /// name, so these keys are its.
+    pub rename_open: bool,
     pub input_visible: bool,
     /// The focused view instance owns an input buffer.
     pub input_focused: bool,
-    /// The focused input was reached as a dock/input focus and can return to
-    /// the prior view with Esc.
-    pub input_blurrable: bool,
     /// The focused input has a non-empty buffer. Plain Enter then submits
     /// (the chat convention) rather than activating a row — terminals
     /// can't reliably send Shift+Enter, so it can't be the only submit.
@@ -78,6 +173,15 @@ pub struct RyeOsKeyContext {
     pub focused_tree_collapsible: bool,
     /// The selected hierarchy row currently hides those descendants.
     pub focused_tree_collapsed: bool,
+    /// The focused timeline has an entry under the point.
+    pub focused_timeline_entry: bool,
+    /// The timeline point sits in a cluster that can be folded.
+    pub focused_timeline_foldable: bool,
+    /// The focused view's source fetch failed, so it can be retried.
+    pub focused_source_failed: bool,
+    /// The focused timeline's first pending ask has an answer a key cap
+    /// names.
+    pub focused_dock_answer: bool,
     /// Capabilities of the focused semantic field, if the focused instance is
     /// one. The keymap consumes capabilities rather than widget names or
     /// project roles, so every renderer gets the same actions.
@@ -104,6 +208,7 @@ pub struct RyeOsFieldKeyContext {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsKeyCommand {
+    CloseFocusedDialog,
     Ui {
         event: RyeOsUiEvent,
     },
@@ -114,10 +219,6 @@ pub enum RyeOsKeyCommand {
     MoveFocusedRowPage {
         direction: i32,
     },
-    InsertOverlayChar {
-        ch: char,
-    },
-    DeleteOverlayChar,
     SetFocusedFieldGroupCollapsed {
         collapsed: bool,
     },
@@ -143,11 +244,116 @@ pub enum RyeOsKeyCommand {
     Ignore,
 }
 
-pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeOsKeyCommand {
-    if context.overlay_open {
-        return overlay_key_command(event);
-    }
+/// The key hints for the focused context, in priority order, at most
+/// [`MAX_KEY_HINTS`]. `keys` is display text in the shell's one notation; the
+/// table sits beside the matcher and a test feeds every hint's keys through
+/// [`ryeos_key_command`], so a hint cannot drift from the binding it names.
+/// With retained lens frames the two back hints lead.
+pub fn key_hints(retained_lens_frames: bool) -> Vec<super::view_model::RyeOsKeyHintVm> {
+    let back: &[(&str, &str)] = if retained_lens_frames {
+        &[("⌫", "back"), ("alt+←", "back")]
+    } else {
+        &[]
+    };
+    let always: &[(&str, &str)] = &[
+        ("ctrl+k", "open"),
+        ("alt+o", "overlay"),
+        ("alt+t/b", "bars"),
+        ("ctrl+←/→", "tab"),
+        ("ctrl+↑/↓", "move"),
+        ("alt+r", "rename"),
+    ];
+    back.iter()
+        .chain(always)
+        .take(MAX_KEY_HINTS)
+        .map(|(keys, word)| super::view_model::RyeOsKeyHintVm {
+            keys: (*keys).to_string(),
+            word: (*word).to_string(),
+        })
+        .collect()
+}
 
+/// The key hints for the overlay sheet footer: move, open, acknowledge, close.
+pub fn overlay_key_hints() -> Vec<super::view_model::RyeOsKeyHintVm> {
+    [
+        ("↑/↓", "move"),
+        ("enter", "open"),
+        ("a", "acknowledge"),
+        ("esc", "close"),
+    ]
+    .into_iter()
+    .map(|(keys, word)| super::view_model::RyeOsKeyHintVm {
+        keys: keys.to_string(),
+        word: word.to_string(),
+    })
+    .collect()
+}
+
+/// The most hints the status bar carries.
+pub const MAX_KEY_HINTS: usize = 7;
+
+pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeOsKeyCommand {
+    // The overlay key works over any Surface, in any state, whatever edges the
+    // Surface hides.
+    if let RyeOsKey::Char(ch) = event.key
+        && ch.eq_ignore_ascii_case(&'o')
+        && event.modifiers.alt_only()
+    {
+        return ui(RyeOsUiEvent::ToggleOverlay);
+    }
+    if context.overlay_open {
+        return match event.key {
+            RyeOsKey::Escape if event.modifiers.none() => ui(RyeOsUiEvent::ToggleOverlay),
+            RyeOsKey::ArrowUp if event.modifiers.none() => {
+                ui(RyeOsUiEvent::MoveOverlay { delta: -1 })
+            }
+            RyeOsKey::ArrowDown if event.modifiers.none() => {
+                ui(RyeOsUiEvent::MoveOverlay { delta: 1 })
+            }
+            RyeOsKey::Enter if event.modifiers.none() => ui(RyeOsUiEvent::ActivateOverlay),
+            RyeOsKey::Char('c') if event.modifiers.ctrl_only() => RyeOsKeyCommand::Quit,
+            RyeOsKey::Char(ch) if event.modifiers.none_or_shift() => {
+                ui(RyeOsUiEvent::ActivateOverlayKey { ch })
+            }
+            _ => RyeOsKeyCommand::Ignore,
+        };
+    }
+    if context.rename_open {
+        return match event.key {
+            RyeOsKey::Escape if event.modifiers.none() => {
+                ui(RyeOsUiEvent::ResolveRename { title: None })
+            }
+            RyeOsKey::Enter if event.modifiers.none() => ui(RyeOsUiEvent::CommitRename),
+            RyeOsKey::Backspace if event.modifiers.none() => ui(RyeOsUiEvent::RenameBackspace),
+            RyeOsKey::Char('c') if event.modifiers.ctrl_only() => RyeOsKeyCommand::Quit,
+            RyeOsKey::Char(ch) if event.modifiers.none_or_shift() => {
+                ui(RyeOsUiEvent::RenameInsert { ch })
+            }
+            _ => RyeOsKeyCommand::Ignore,
+        };
+    }
+    if context.dialog_open && event.key == RyeOsKey::Escape && event.modifiers.none() {
+        return RyeOsKeyCommand::CloseFocusedDialog;
+    }
+    // With the launcher's places showing, their keys choose one instead of
+    // typing into the find line.
+    if context.launcher_places_open
+        && event.modifiers.none_or_shift()
+        && let RyeOsKey::Char(ch) = event.key
+        && matches!(ch.to_ascii_lowercase(), 't' | 's')
+    {
+        return ui(RyeOsUiEvent::ChooseLauncherPlace {
+            key: ch.to_ascii_lowercase(),
+        });
+    }
+    // Shell navigation remains available while a focused field edits its
+    // query; that field owns ordinary characters, not the launcher chord.
+    if let RyeOsKey::Char(ch) = event.key
+        && ch.eq_ignore_ascii_case(&'k')
+        && (event.modifiers.ctrl_only() || event.modifiers.alt_only())
+    {
+        return ui(RyeOsUiEvent::OpenLauncher);
+    }
     if let Some(field) = context.field.filter(|field| field.query_editing) {
         return match event.key {
             RyeOsKey::Escape if event.modifiers.none() => RyeOsKeyCommand::EndFocusedFieldQuery,
@@ -176,6 +382,12 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
 
     match event.key {
         RyeOsKey::Char('n') if event.modifiers.alt_only() => intent(RyeOsUiIntent::NewViewSet),
+        // Alt+R renames the view set in front; with Shift, the Surface.
+        RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'r') => {
+            ui(RyeOsUiEvent::RenameActive {
+                surface: event.modifiers.shift || c.is_uppercase(),
+            })
+        }
         // Ctrl+K is the reliable view-overlay binding: a control char that
         // terminals and tmux pass straight through. Alt+K is kept for
         // environments that deliver it, but Alt/ESC combos are eaten by
@@ -184,31 +396,8 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
                 && c.eq_ignore_ascii_case(&'k') =>
         {
-            ui(RyeOsUiEvent::OpenOverlay {
-                overlay_id: "views".to_string(),
-            })
+            ui(RyeOsUiEvent::OpenLauncher)
         }
-        // Most terminals cannot distinguish Ctrl+Shift+P from Ctrl+P, so the
-        // reliable command-overlay binding is Ctrl+P.
-        RyeOsKey::Char(c)
-            if (event.modifiers.ctrl_only() || event.modifiers.ctrl_shift())
-                && c.eq_ignore_ascii_case(&'p') =>
-        {
-            ui(RyeOsUiEvent::OpenOverlay {
-                overlay_id: "commands".to_string(),
-            })
-        }
-        RyeOsKey::Char(c) if event.modifiers.ctrl_only() && c.eq_ignore_ascii_case(&'h') => {
-            ui(RyeOsUiEvent::OpenOverlay {
-                overlay_id: "help".to_string(),
-            })
-        }
-        RyeOsKey::Char('/') if event.modifiers.ctrl_only() => ui(RyeOsUiEvent::OpenOverlay {
-            overlay_id: "shortcuts".to_string(),
-        }),
-        RyeOsKey::Backspace if event.modifiers.ctrl_only() => ui(RyeOsUiEvent::OpenOverlay {
-            overlay_id: "help".to_string(),
-        }),
         RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'q') => {
             intent(RyeOsUiIntent::CloseFocused)
         }
@@ -229,23 +418,54 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         {
             ui(RyeOsUiEvent::FocusInput)
         }
+        // Timeline entry actions act on the point, never while typing.
         RyeOsKey::Char(c)
-            if event.modifiers.none() && c.eq_ignore_ascii_case(&'s') && !context.input_focused =>
+            if context.focused_timeline_entry
+                && !context.input_focused
+                && event.modifiers.none_or_shift()
+                && c.eq_ignore_ascii_case(&'y') =>
         {
-            ui(RyeOsUiEvent::FocusDock {
-                edge: RyeOsDockEdge::Top,
+            let raw = event.modifiers.shift || c.is_uppercase();
+            ui(RyeOsUiEvent::TimelineEntry {
+                action: if raw {
+                    RyeOsTimelineEntryAction::CopyRaw
+                } else {
+                    RyeOsTimelineEntryAction::CopyText
+                },
             })
         }
-        RyeOsKey::Char(c)
-            if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
-                && c.eq_ignore_ascii_case(&'s') =>
+        RyeOsKey::Char('v')
+            if context.focused_timeline_entry
+                && !context.input_focused
+                && event.modifiers.none() =>
         {
-            intent(RyeOsUiIntent::ToggleBackdropBreak)
+            ui(RyeOsUiEvent::TimelineEntry {
+                action: RyeOsTimelineEntryAction::InspectRaw,
+            })
         }
-        RyeOsKey::ArrowUp if event.modifiers.ctrl_shift() => resize(FocusDirection::Up),
-        RyeOsKey::ArrowDown if event.modifiers.ctrl_shift() => resize(FocusDirection::Down),
-        RyeOsKey::ArrowLeft if event.modifiers.ctrl_shift() => resize(FocusDirection::Left),
-        RyeOsKey::ArrowRight if event.modifiers.ctrl_shift() => resize(FocusDirection::Right),
+        RyeOsKey::Char('f')
+            if context.focused_timeline_foldable
+                && !context.input_focused
+                && event.modifiers.none() =>
+        {
+            ui(RyeOsUiEvent::ToggleTimelineFold)
+        }
+        RyeOsKey::Char('r')
+            if context.focused_source_failed
+                && !context.input_focused
+                && event.modifiers.none() =>
+        {
+            intent(RyeOsUiIntent::Refresh)
+        }
+        // The key caps on a docked ask's buttons answer it; never while typing.
+        RyeOsKey::Char(c)
+            if context.focused_dock_answer
+                && !context.input_focused
+                && event.modifiers.none_or_shift()
+                && c.is_alphanumeric() =>
+        {
+            ui(RyeOsUiEvent::AnswerDockAsk { ch: c })
+        }
         RyeOsKey::ArrowUp if event.modifiers.ctrl_only() => {
             move_focused_tile(RyeOsStackMoveDirection::Up)
         }
@@ -265,10 +485,11 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             direction: RyeOsStackMoveDirection::Down,
         }),
         RyeOsKey::ArrowLeft if event.modifiers.alt_only() => ui(RyeOsUiEvent::PopLens),
-        RyeOsKey::Escape if event.modifiers.none() && context.input_blurrable => {
+        // Esc leaves a focused input first.
+        RyeOsKey::Escape if event.modifiers.none() && context.input_focused => {
             ui(RyeOsUiEvent::BlurInput)
         }
-        // Esc interrupts a running head thread (chat convention); otherwise it
+        // Otherwise Esc interrupts a running head thread (chat convention); else it
         // closes the focused tile.
         RyeOsKey::Escape if event.modifiers.none() && context.head_thread_running => {
             ui(RyeOsUiEvent::InterruptHead)
@@ -498,35 +719,6 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
     }
 }
 
-fn overlay_key_command(event: RyeOsKeyEvent) -> RyeOsKeyCommand {
-    match event.key {
-        RyeOsKey::Escape if event.modifiers.none() => ui(RyeOsUiEvent::CloseOverlay),
-        RyeOsKey::Enter if event.modifiers.none_or_shift() => ui(RyeOsUiEvent::ChooseOverlay {
-            secondary: event.modifiers.shift,
-        }),
-        RyeOsKey::ArrowUp if event.modifiers.none() => {
-            ui(RyeOsUiEvent::MoveOverlaySelection { delta: -1 })
-        }
-        RyeOsKey::ArrowDown if event.modifiers.none() => {
-            ui(RyeOsUiEvent::MoveOverlaySelection { delta: 1 })
-        }
-        RyeOsKey::ArrowLeft if event.modifiers.none() => {
-            ui(RyeOsUiEvent::FoldOverlayGroup { expand: false })
-        }
-        RyeOsKey::ArrowRight if event.modifiers.none() => {
-            ui(RyeOsUiEvent::FoldOverlayGroup { expand: true })
-        }
-        RyeOsKey::Backspace if event.modifiers.none() => RyeOsKeyCommand::DeleteOverlayChar,
-        RyeOsKey::Char(ch)
-            if !event.modifiers.ctrl && !event.modifiers.alt && !event.modifiers.meta =>
-        {
-            RyeOsKeyCommand::InsertOverlayChar { ch }
-        }
-        RyeOsKey::Char('c') if event.modifiers.ctrl_only() => RyeOsKeyCommand::Quit,
-        _ => RyeOsKeyCommand::Ignore,
-    }
-}
-
 fn ui(event: RyeOsUiEvent) -> RyeOsKeyCommand {
     RyeOsKeyCommand::Ui { event }
 }
@@ -537,10 +729,6 @@ fn intent(intent: RyeOsUiIntent) -> RyeOsKeyCommand {
 
 fn focus(direction: FocusDirection) -> RyeOsKeyCommand {
     ui(RyeOsUiEvent::FocusDirection { direction })
-}
-
-fn resize(direction: FocusDirection) -> RyeOsKeyCommand {
-    intent(RyeOsUiIntent::ResizeFocused { direction })
 }
 
 fn move_focused_tile(direction: RyeOsStackMoveDirection) -> RyeOsKeyCommand {
@@ -571,10 +759,6 @@ impl RyeOsKeyModifiers {
     fn ctrl_only(self) -> bool {
         self.ctrl && !self.shift && !self.alt && !self.meta
     }
-
-    fn ctrl_shift(self) -> bool {
-        self.ctrl && self.shift && !self.alt && !self.meta
-    }
 }
 
 impl super::model::RyeOsCore {
@@ -589,6 +773,16 @@ impl super::model::RyeOsCore {
     pub fn apply_key_command(&mut self, command: RyeOsKeyCommand) -> Vec<super::RyeOsEffect> {
         use super::{RyeOsEvent, RyeOsUiEvent};
         match command {
+            RyeOsKeyCommand::CloseFocusedDialog => {
+                let Some(instance_key) = self.focused_view_instance_key() else {
+                    return Vec::new();
+                };
+                // The second stage of the launcher closes before the sheet.
+                if self.leave_launcher_stage(&instance_key) {
+                    return Vec::new();
+                }
+                self.close_dialog(&instance_key)
+            }
             RyeOsKeyCommand::Ui { event } => self.dispatch(RyeOsEvent::Ui { event }),
             RyeOsKeyCommand::MoveFocusedRowOrFocus {
                 delta,
@@ -597,20 +791,6 @@ impl super::model::RyeOsCore {
             RyeOsKeyCommand::MoveFocusedRowPage { direction } => {
                 let page = (self.runtime.viewport.height as i32 / 2).max(6);
                 self.move_focused_row(direction.signum() * page).1
-            }
-            RyeOsKeyCommand::InsertOverlayChar { ch } => {
-                let mut query = self.ui.overlay.query.clone();
-                query.push(ch);
-                self.dispatch(RyeOsEvent::Ui {
-                    event: RyeOsUiEvent::SetOverlayQuery { query },
-                })
-            }
-            RyeOsKeyCommand::DeleteOverlayChar => {
-                let mut query = self.ui.overlay.query.clone();
-                query.pop();
-                self.dispatch(RyeOsEvent::Ui {
-                    event: RyeOsUiEvent::SetOverlayQuery { query },
-                })
             }
             RyeOsKeyCommand::SetFocusedFieldGroupCollapsed { collapsed } => {
                 let Some((instance_key, field)) = focused_field(self) else {
@@ -681,22 +861,14 @@ impl super::model::RyeOsCore {
                 let Some(instance_key) = focused_field_instance(self) else {
                     return Vec::new();
                 };
-                if self.view_sets[self.active_view_set]
-                    .field_query_editing
-                    .as_ref()
-                    != Some(&instance_key)
-                {
-                    self.view_sets[self.active_view_set].field_query_editing = Some(instance_key);
+                if self.field_query_editing.as_ref() != Some(&instance_key) {
+                    self.field_query_editing = Some(instance_key);
                     self.bump_generation();
                 }
                 Vec::new()
             }
             RyeOsKeyCommand::EndFocusedFieldQuery => {
-                if self.view_sets[self.active_view_set]
-                    .field_query_editing
-                    .take()
-                    .is_some()
-                {
+                if self.field_query_editing.take().is_some() {
                     self.bump_generation();
                 }
                 Vec::new()
@@ -775,11 +947,7 @@ impl super::model::RyeOsCore {
         let Some((instance_key, field)) = focused_field(self) else {
             return Vec::new();
         };
-        if self.view_sets[self.active_view_set]
-            .field_query_editing
-            .as_ref()
-            != Some(&instance_key)
-        {
+        if self.field_query_editing.as_ref() != Some(&instance_key) {
             return Vec::new();
         }
         let mut query = field.search.query;
@@ -812,48 +980,16 @@ impl super::model::RyeOsCore {
         }
     }
 
-    fn move_focused_row(&mut self, delta: i32) -> (bool, Vec<super::RyeOsEffect>) {
-        let vm = self.envelope(Vec::new()).view_model;
-        // A focused dock with selectable rows owns the point. A focused
-        // dock WITHOUT rows — the chat line — falls through to the
-        // focused center tile: the chat convention is that arrows walk
-        // the content behind the input while you type, and sessions now
-        // START with the input focused.
-        let dock_target = match self.focus_target() {
-            super::model::RyeOsFocusTarget::Dock { edge } => {
-                dock_vm_for_edge(&vm.view_set.docks, edge)
-                    .map(|dock| FocusedRowsTarget {
-                        instance_key: super::model::dock_view_instance_key(
-                            self.view_sets[self.active_view_set].id,
-                            edge,
-                        ),
-                        count_and_feed: selectable_of(&dock.view),
-                    })
-                    .filter(|target| target.count_and_feed.0 > 0)
-            }
-            super::model::RyeOsFocusTarget::ViewSetTile { .. } => None,
+    pub(crate) fn move_focused_row(&mut self, delta: i32) -> (bool, Vec<super::RyeOsEffect>) {
+        let Some(instance_key) = self.focused_view_instance_key() else {
+            return (false, Vec::new());
         };
-        let target = match self.focus_target() {
-            super::model::RyeOsFocusTarget::Dock { .. } if dock_target.is_some() => {
-                dock_target.unwrap()
-            }
-            _ => {
-                let focused = vm.view_set.focused_tile;
-                let Some(root) = vm.view_set.root.as_ref() else {
-                    return (false, Vec::new());
-                };
-                let Some(count_and_feed) = focused_selectable(root, &focused) else {
-                    return (false, Vec::new());
-                };
-                FocusedRowsTarget {
-                    instance_key: self.view_sets[self.active_view_set]
-                        .tiles
-                        .get(&self.view_sets[self.active_view_set].focused_tile)
-                        .map(|tile| tile.instance_key.clone())
-                        .expect("focused VM tile has view_set state"),
-                    count_and_feed,
-                }
-            }
+        let Some(view) = super::view_model::view_vm_for_instance(self, &instance_key) else {
+            return (false, Vec::new());
+        };
+        let target = FocusedRowsTarget {
+            instance_key,
+            count_and_feed: selectable_of(&view),
         };
         let (count, is_feed) = target.count_and_feed;
         if count == 0 {
@@ -949,10 +1085,7 @@ pub(crate) fn focused_field_key_context(
             .is_none_or(|item| item.can_continue)
     });
     Some(RyeOsFieldKeyContext {
-        query_editing: core.view_sets[core.active_view_set]
-            .field_query_editing
-            .as_ref()
-            == Some(&instance_key),
+        query_editing: core.field_query_editing.as_ref() == Some(&instance_key),
         query_has_text: !field.search.query.is_empty(),
         group_collapsible: group.is_some(),
         group_collapsed: group.is_some_and(|group| group.collapsed),
@@ -988,17 +1121,7 @@ fn focused_field(
 fn focused_field_instance(
     core: &super::model::RyeOsCore,
 ) -> Option<crate::ids::RyeOsViewInstanceKey> {
-    use super::model::RyeOsFocusTarget;
-    let instance_key = match core.focus_target() {
-        RyeOsFocusTarget::ViewSetTile { .. } => core.view_sets[core.active_view_set]
-            .tiles
-            .get(&core.view_sets[core.active_view_set].focused_tile)
-            .map(|tile| tile.instance_key.clone()),
-        RyeOsFocusTarget::Dock { edge } => Some(super::model::dock_view_instance_key(
-            core.view_sets[core.active_view_set].id,
-            edge,
-        )),
-    }?;
+    let instance_key = core.focused_view_instance_key()?;
     matches!(
         view_local_for_instance(core, &instance_key),
         Some(crate::view_set::ViewLocalState::Field(_))
@@ -1015,45 +1138,17 @@ fn view_local_for_instance<'a>(
     core: &'a super::model::RyeOsCore,
     instance_key: &crate::ids::RyeOsViewInstanceKey,
 ) -> Option<&'a crate::view_set::ViewLocalState> {
-    core.view_sets[core.active_view_set]
-        .tiles
-        .values()
-        .find(|tile| &tile.instance_key == instance_key)
-        .map(|tile| &tile.local)
-        .or_else(|| {
-            core.view_sets[core.active_view_set]
-                .dock_local
-                .get(instance_key)
-        })
+    core.mounted_local_state(instance_key)
 }
-
 fn view_local_for_instance_mut<'a>(
     core: &'a mut super::model::RyeOsCore,
     instance_key: &crate::ids::RyeOsViewInstanceKey,
 ) -> Option<&'a mut crate::view_set::ViewLocalState> {
-    let tile_id = core.view_sets[core.active_view_set]
-        .tiles
-        .iter()
-        .find_map(|(tile_id, tile)| (&tile.instance_key == instance_key).then_some(*tile_id));
-    if let Some(tile_id) = tile_id {
-        return core.view_sets[core.active_view_set]
-            .tiles
-            .get_mut(&tile_id)
-            .map(|tile| &mut tile.local);
+    let local = core.mounted_local_state_mut(instance_key)?;
+    if matches!(local, crate::view_set::ViewLocalState::None) {
+        *local = initial_list_local_state();
     }
-    if core
-        .visible_dock_views()
-        .iter()
-        .any(|(key, _)| key == instance_key)
-    {
-        return Some(
-            core.view_sets[core.active_view_set]
-                .dock_local
-                .entry(instance_key.clone())
-                .or_insert_with(initial_list_local_state),
-        );
-    }
-    None
+    Some(local)
 }
 
 fn initial_list_local_state() -> crate::view_set::ViewLocalState {
@@ -1061,40 +1156,10 @@ fn initial_list_local_state() -> crate::view_set::ViewLocalState {
         cursor: 0,
         scroll: 0,
         collapsed: std::collections::BTreeSet::new(),
+        timeline_folds: std::collections::BTreeMap::new(),
         expanded_rows: std::collections::BTreeSet::new(),
         collapsed_tree_rows: std::collections::BTreeSet::new(),
         changed_rows: std::collections::BTreeMap::new(),
-    }
-}
-
-fn dock_vm_for_edge(
-    docks: &super::view_model::RyeOsDockPlaneVm,
-    edge: RyeOsDockEdge,
-) -> Option<&super::view_model::RyeOsDockTileVm> {
-    match edge {
-        RyeOsDockEdge::Top => docks.top.as_ref(),
-        RyeOsDockEdge::Bottom => docks.bottom.as_ref(),
-        RyeOsDockEdge::Left => docks.left.as_ref(),
-        RyeOsDockEdge::Right => docks.right.as_ref(),
-    }
-}
-
-/// The focused tile's selectable count and whether it is a feed (timeline).
-/// Feeds count their coalesced entries and address them as distance-from-
-/// bottom; row lists count rows addressed top-down.
-fn focused_selectable(
-    node: &super::view_model::RyeOsLayoutNodeVm,
-    focused: &str,
-) -> Option<(usize, bool)> {
-    use super::view_model::RyeOsLayoutNodeVm;
-    match node {
-        RyeOsLayoutNodeVm::Tile { tile_id, view, .. } if tile_id == focused => {
-            Some(selectable_of(view))
-        }
-        RyeOsLayoutNodeVm::Tile { .. } => None,
-        RyeOsLayoutNodeVm::Split { first, second, .. } => {
-            focused_selectable(first, focused).or_else(|| focused_selectable(second, focused))
-        }
     }
 }
 
@@ -1150,104 +1215,197 @@ mod tests {
         }
     }
 
-    fn ctrl_shift(ch: char) -> RyeOsKeyEvent {
-        RyeOsKeyEvent {
-            key: RyeOsKey::Char(ch),
-            modifiers: RyeOsKeyModifiers {
-                ctrl: true,
-                shift: true,
-                ..Default::default()
-            },
-        }
-    }
-
-    fn context(overlay_open: bool, input_visible: bool) -> RyeOsKeyContext {
+    fn context(dialog_open: bool, input_visible: bool) -> RyeOsKeyContext {
         RyeOsKeyContext {
-            overlay_open,
+            dialog_open,
             input_visible,
             ..Default::default()
         }
     }
 
-    #[test]
-    fn ctrl_k_opens_the_views_overlay() {
-        assert!(matches!(
-            ryeos_key_command(ctrl('k'), context(false, true)),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::OpenOverlay { overlay_id }
-            } if overlay_id == "views"
-        ));
+    /// Parse a hint's display keys (`ctrl+k`, `alt+t/b`, `ctrl+←/→`, `⌫`) into
+    /// the events it names; `/` separates alternatives for the last key.
+    fn events_of_hint(keys: &str) -> Vec<RyeOsKeyEvent> {
+        let (mods, last) = match keys.rsplit_once('+') {
+            Some((mods, last)) => (mods, last),
+            None => ("", keys),
+        };
+        let mut modifiers = RyeOsKeyModifiers::default();
+        for modifier in mods.split('+').filter(|part| !part.is_empty()) {
+            match modifier {
+                "ctrl" => modifiers.ctrl = true,
+                "alt" => modifiers.alt = true,
+                other => panic!("unknown modifier {other:?} in hint {keys:?}"),
+            }
+        }
+        last.split('/')
+            .map(|name| {
+                let key = match name {
+                    "←" => RyeOsKey::ArrowLeft,
+                    "→" => RyeOsKey::ArrowRight,
+                    "↑" => RyeOsKey::ArrowUp,
+                    "↓" => RyeOsKey::ArrowDown,
+                    "⌫" => RyeOsKey::Backspace,
+                    "enter" => RyeOsKey::Enter,
+                    "esc" => RyeOsKey::Escape,
+                    single if single.chars().count() == 1 => {
+                        RyeOsKey::Char(single.chars().next().unwrap())
+                    }
+                    other => panic!("unknown key {other:?} in hint {keys:?}"),
+                };
+                RyeOsKeyEvent { key, modifiers }
+            })
+            .collect()
     }
 
     #[test]
-    fn ctrl_p_opens_the_commands_overlay() {
-        assert!(matches!(
-            ryeos_key_command(ctrl('p'), context(false, true)),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::OpenOverlay { overlay_id }
-            } if overlay_id == "commands"
-        ));
-    }
-
-    #[test]
-    fn ctrl_shift_p_also_opens_the_commands_overlay_when_reported() {
-        assert!(matches!(
-            ryeos_key_command(ctrl_shift('p'), context(false, true)),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::OpenOverlay { overlay_id }
-            } if overlay_id == "commands"
-        ));
-    }
-
-    #[test]
-    fn ctrl_h_opens_the_help_overlay() {
-        assert!(matches!(
-            ryeos_key_command(ctrl('h'), context(false, true)),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::OpenOverlay { overlay_id }
-            } if overlay_id == "help"
-        ));
-    }
-
-    #[test]
-    fn ctrl_slash_opens_the_shortcuts_overlay() {
-        assert!(matches!(
-            ryeos_key_command(ctrl('/'), context(false, true)),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::OpenOverlay { overlay_id }
-            } if overlay_id == "shortcuts"
-        ));
-    }
-
-    #[test]
-    fn ctrl_backspace_also_opens_the_help_overlay() {
-        assert!(matches!(
-            ryeos_key_command(
-                RyeOsKeyEvent {
-                    key: RyeOsKey::Backspace,
-                    modifiers: RyeOsKeyModifiers {
-                        ctrl: true,
-                        ..Default::default()
-                    },
-                },
-                context(false, true),
-            ),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::OpenOverlay { overlay_id }
-            } if overlay_id == "help"
-        ));
-    }
-
-    #[test]
-    fn ctrl_s_toggles_backdrop_break() {
-        assert!(matches!(
-            ryeos_key_command(ctrl('s'), context(false, true)),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::Activate {
-                    intent: RyeOsUiIntent::ToggleBackdropBreak
+    fn every_key_hint_maps_to_a_command_in_a_context_where_it_appears() {
+        for retained in [false, true] {
+            let hints = key_hints(retained);
+            assert!(hints.len() <= MAX_KEY_HINTS);
+            assert!(!hints.is_empty());
+            for hint in hints {
+                for event in events_of_hint(&hint.keys) {
+                    assert_ne!(
+                        ryeos_key_command(event, RyeOsKeyContext::default()),
+                        RyeOsKeyCommand::Ignore,
+                        "hint {:?} ({}) names a key the matcher ignores",
+                        hint.keys,
+                        hint.word
+                    );
                 }
             }
-        ));
+        }
+    }
+
+    #[test]
+    fn dock_keys_answer_only_when_a_pending_ask_is_docked_and_nothing_is_typed() {
+        let docked = RyeOsKeyContext {
+            focused_dock_answer: true,
+            ..Default::default()
+        };
+        for ch in ['a', 'd', 'A', 'D'] {
+            let event = RyeOsKeyEvent {
+                key: RyeOsKey::Char(ch),
+                modifiers: RyeOsKeyModifiers::default(),
+            };
+            assert_eq!(
+                ryeos_key_command(event, docked),
+                ui(RyeOsUiEvent::AnswerDockAsk { ch })
+            );
+            assert_eq!(
+                ryeos_key_command(event, RyeOsKeyContext::default()),
+                RyeOsKeyCommand::Ignore
+            );
+            let typing = RyeOsKeyContext {
+                input_focused: true,
+                ..docked
+            };
+            assert_eq!(
+                ryeos_key_command(event, typing),
+                ui(RyeOsUiEvent::InsertInputChar { ch })
+            );
+        }
+        // Ctrl+D keeps paging the rows.
+        let page = RyeOsKeyEvent {
+            key: RyeOsKey::Char('d'),
+            modifiers: RyeOsKeyModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            ryeos_key_command(page, docked),
+            RyeOsKeyCommand::MoveFocusedRowPage { direction: 1 }
+        );
+    }
+
+    #[test]
+    fn every_overlay_hint_maps_to_a_command_while_the_overlay_is_open() {
+        let open = RyeOsKeyContext {
+            overlay_open: true,
+            ..Default::default()
+        };
+        let hints = overlay_key_hints();
+        assert!(hints.len() <= MAX_KEY_HINTS);
+        assert_eq!(hints.len(), 4);
+        for hint in hints {
+            for event in events_of_hint(&hint.keys) {
+                assert_ne!(
+                    ryeos_key_command(event, open),
+                    RyeOsKeyCommand::Ignore,
+                    "overlay hint {:?} ({}) names a key the matcher ignores",
+                    hint.keys,
+                    hint.word
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_overlay_key_toggles_in_any_context_and_takes_the_keys_while_open() {
+        let alt_o = RyeOsKeyEvent {
+            key: RyeOsKey::Char('o'),
+            modifiers: RyeOsKeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        let toggle = RyeOsKeyCommand::Ui {
+            event: RyeOsUiEvent::ToggleOverlay,
+        };
+        for context in [
+            RyeOsKeyContext::default(),
+            RyeOsKeyContext {
+                dialog_open: true,
+                ..Default::default()
+            },
+            RyeOsKeyContext {
+                overlay_open: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(ryeos_key_command(alt_o, context), toggle);
+        }
+        let open = RyeOsKeyContext {
+            overlay_open: true,
+            ..Default::default()
+        };
+        assert_eq!(ryeos_key_command(key(RyeOsKey::Escape), open), toggle);
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::ArrowDown), open),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::MoveOverlay { delta: 1 }
+            }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Enter), open),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ActivateOverlay
+            }
+        );
+    }
+
+    #[test]
+    fn back_hints_appear_only_with_retained_lens_frames() {
+        let keys = |retained| -> Vec<String> {
+            key_hints(retained)
+                .into_iter()
+                .map(|hint| hint.keys)
+                .collect()
+        };
+        assert_eq!(
+            keys(false),
+            [
+                "ctrl+k",
+                "alt+o",
+                "alt+t/b",
+                "ctrl+←/→",
+                "ctrl+↑/↓",
+                "alt+r"
+            ]
+        );
+        assert_eq!(&keys(true)[..2], ["⌫", "alt+←"]);
     }
 
     #[test]
@@ -1388,7 +1546,6 @@ mod tests {
     fn escape_blurs_focused_input() {
         let mut ctx = context(false, true);
         ctx.input_focused = true;
-        ctx.input_blurrable = true;
         assert!(matches!(
             ryeos_key_command(key(RyeOsKey::Escape), ctx),
             RyeOsKeyCommand::Ui {
@@ -1418,50 +1575,157 @@ mod tests {
     }
 
     #[test]
-    fn overlay_keys_edit_query_and_choose_selection() {
-        let overlay = context(true, true);
+    fn configured_launcher_has_one_semantic_shortcut() {
         assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::Char('a')), overlay),
-            RyeOsKeyCommand::InsertOverlayChar { ch: 'a' }
-        ));
-        assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::Backspace), overlay),
-            RyeOsKeyCommand::DeleteOverlayChar
-        ));
-        assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::ArrowDown), overlay),
+            ryeos_key_command(ctrl('k'), context(false, false)),
             RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::MoveOverlaySelection { delta: 1 }
+                event: RyeOsUiEvent::OpenLauncher
             }
         ));
+        assert_eq!(
+            ryeos_key_command(ctrl('p'), context(false, false)),
+            RyeOsKeyCommand::Ignore
+        );
+        let mut editing = context(false, false);
+        editing.field = Some(RyeOsFieldKeyContext {
+            query_editing: true,
+            query_has_text: true,
+            ..Default::default()
+        });
         assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::Enter), overlay),
+            ryeos_key_command(ctrl('k'), editing),
             RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::ChooseOverlay { secondary: false }
-            }
-        ));
-        assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::Escape), overlay),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::CloseOverlay
+                event: RyeOsUiEvent::OpenLauncher
             }
         ));
     }
 
     #[test]
-    fn overlay_arrow_keys_fold_and_unfold_the_selected_group() {
-        let overlay = context(true, true);
+    fn help_describes_declared_input_and_contextual_escape_from_the_same_owner() {
+        let help = shortcut_entries();
+        assert!(
+            help.iter()
+                .any(|entry| entry.keys == "Ctrl+K" && entry.description.contains("configured"))
+        );
+        assert!(
+            !help
+                .iter()
+                .any(|entry| entry.description.contains("foot input")
+                    || entry.description.contains("launcher groups"))
+        );
+        assert_eq!(
+            ryeos_key_command(
+                key(RyeOsKey::Escape),
+                RyeOsKeyContext {
+                    dialog_open: true,
+                    ..Default::default()
+                }
+            ),
+            RyeOsKeyCommand::CloseFocusedDialog
+        );
         assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::ArrowLeft), overlay),
+            ryeos_key_command(
+                key(RyeOsKey::Escape),
+                RyeOsKeyContext {
+                    head_thread_running: true,
+                    ..Default::default()
+                }
+            ),
             RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::FoldOverlayGroup { expand: false }
+                event: RyeOsUiEvent::InterruptHead
             }
         ));
         assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::ArrowRight), overlay),
+            ryeos_key_command(
+                key(RyeOsKey::Enter),
+                RyeOsKeyContext {
+                    input_focused: true,
+                    input_has_text: true,
+                    ..Default::default()
+                }
+            ),
             RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::FoldOverlayGroup { expand: true }
+                event: RyeOsUiEvent::SubmitInput
             }
         ));
+        assert!(matches!(
+            ryeos_key_command(
+                key(RyeOsKey::Enter),
+                RyeOsKeyContext {
+                    input_focused: true,
+                    input_has_text: true,
+                    input_is_live_filter: true,
+                    ..Default::default()
+                }
+            ),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ActivateFocused
+            }
+        ));
+    }
+
+    #[test]
+    fn dialog_escape_is_exact_core_close_not_a_catalogue_command() {
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Escape), context(true, false)),
+            RyeOsKeyCommand::CloseFocusedDialog
+        );
+        assert!(!matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowDown), context(true, false)),
+            RyeOsKeyCommand::CloseFocusedDialog
+        ));
+    }
+
+    #[test]
+    fn place_keys_choose_only_while_the_launcher_shows_its_places() {
+        let places = RyeOsKeyContext {
+            dialog_open: true,
+            input_focused: true,
+            input_is_live_filter: true,
+            launcher_places_open: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('t')), places),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ChooseLauncherPlace { key: 't' }
+            }
+        );
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('S')), places),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ChooseLauncherPlace { key: 's' }
+            }
+        );
+        let typing = RyeOsKeyContext {
+            launcher_places_open: false,
+            ..places
+        };
+        assert!(!matches!(
+            ryeos_key_command(key(RyeOsKey::Char('t')), typing),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ChooseLauncherPlace { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn alt_r_renames_the_view_set_and_alt_shift_r_the_surface() {
+        let alt = |ch: char, shift: bool| RyeOsKeyEvent {
+            key: RyeOsKey::Char(ch),
+            modifiers: RyeOsKeyModifiers {
+                alt: true,
+                shift,
+                ..Default::default()
+            },
+        };
+        for (event, surface) in [(alt('r', false), false), (alt('R', true), true)] {
+            assert_eq!(
+                ryeos_key_command(event, RyeOsKeyContext::default()),
+                RyeOsKeyCommand::Ui {
+                    event: RyeOsUiEvent::RenameActive { surface }
+                }
+            );
+        }
     }
 }

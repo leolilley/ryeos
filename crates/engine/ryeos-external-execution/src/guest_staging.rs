@@ -1,6 +1,6 @@
 //! Descriptor-relative, private staging of one external guest-input package.
 //!
-//! This is not a Render adapter, a qualification verdict, or a Ready claim.
+//! This is not a provider adapter, a qualification verdict, or a Ready claim.
 //! It checks the wire and exact base CAS closure before returning a pinned
 //! private tree. Product/source authority and fixed-FD supervisor installation
 //! remain separate joined checks.
@@ -88,20 +88,53 @@ impl GuestStageIdentity {
     }
 }
 
-fn canonical_stage_name(name: &str) -> bool {
-    let mut parts = name.split('.');
-    let (Some("guest-input"), Some(pid), Some(nonce), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    pid.parse::<u32>()
-        .ok()
-        .is_some_and(|value| value != 0 && value.to_string() == pid)
-        && nonce
-            .parse::<u64>()
+/// Name prefix of a private guest package directory (`prepare_private_guest_package`).
+pub const GUEST_PACKAGE_PREFIX: &str = "guest-package";
+/// Name prefix of a staged guest-input generation (`stage_guest_package`).
+pub const GUEST_STAGE_PREFIX: &str = "guest-input";
+
+/// The closed set of children that guest producers create in the shared
+/// external guest package namespace. Recovery matches on this instead of
+/// re-deriving names, so a new producer prefix must be added here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestNamespaceEntry {
+    /// `guest-package.<pid>.<nonce>`: a directory holding one `payload` file.
+    Package,
+    /// `guest-input.<pid>.<nonce>`: a locked, staged package tree.
+    Stage,
+}
+
+impl GuestNamespaceEntry {
+    /// Classify a namespace entry name by the exact `<prefix>.<u32>.<u64>`
+    /// shape that `create_unique_child` produces, with canonical decimals.
+    pub fn classify(name: &str) -> Option<Self> {
+        let mut parts = name.split('.');
+        let (Some(prefix), Some(pid), Some(nonce), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let canonical = pid
+            .parse::<u32>()
             .ok()
-            .is_some_and(|value| value.to_string() == nonce)
+            .is_some_and(|value| value != 0 && value.to_string() == pid)
+            && nonce
+                .parse::<u64>()
+                .ok()
+                .is_some_and(|value| value.to_string() == nonce);
+        if !canonical {
+            return None;
+        }
+        match prefix {
+            GUEST_PACKAGE_PREFIX => Some(Self::Package),
+            GUEST_STAGE_PREFIX => Some(Self::Stage),
+            _ => None,
+        }
+    }
+}
+
+fn canonical_stage_name(name: &str) -> bool {
+    GuestNamespaceEntry::classify(name) == Some(GuestNamespaceEntry::Stage)
 }
 
 pub struct StagedGuestPackage {
@@ -294,7 +327,7 @@ pub fn stage_guest_package<R: Read>(
 ) -> Result<StagedGuestPackage> {
     parent.require_owner_private_directory()?;
     let owner = parent.try_clone()?;
-    let (name, stage) = parent.create_unique_child("guest-input", 0o700)?;
+    let (name, stage) = parent.create_unique_child(GUEST_STAGE_PREFIX, 0o700)?;
     let owner_lock = stage
         .try_lock_exclusive()?
         .context("new guest stage has a live owner; refusing to remove a contested generation")?;
@@ -440,7 +473,7 @@ pub(crate) fn recover_ticketed_guest_import(
         expected.maximum_regular_bytes,
     )?;
     ensure!(
-        manifest.framed_bytes()? == ticket.framed_bytes
+        ticket.framed_bytes <= manifest.framed_bytes_bound()?
             && manifest.total_regular_bytes == ticket.regular_bytes,
         "recovered guest manifest contradicts retained package bounds"
     );
@@ -517,6 +550,7 @@ impl<R: Read> Read for DeadlineReader<'_, R> {
                 "guest upload staging deadline expired",
             ));
         }
+        lillux::progress::beat();
         self.inner.read(buffer)
     }
 }
@@ -528,7 +562,9 @@ fn remove_staged_generation(
 ) -> Result<()> {
     root.remove_contents_recursive_bounded(staging_budget())?;
     ensure!(
-        parent.remove_empty_child_if_same(name, root)?,
+        parent
+            .remove_empty_child_if_same(name, root)
+            .map(|receipt| receipt.is_some())?,
         "guest staging generation changed before cleanup"
     );
     Ok(())
@@ -563,7 +599,9 @@ fn stage_guest_package_in_private_root<R: Read>(
     for links in product_symlinks.values() {
         ryeos_state::objects::validate_internal_symlink_graph(links.iter().copied())?;
     }
-    for entry in &manifest.entries {
+    let plan = manifest.payload_plan();
+    for (index, entry) in manifest.entries.iter().enumerate() {
+        lillux::progress::beat();
         let path = entry.path();
         let (parent_path, child_name) = match path.rsplit_once('/') {
             Some((parent_path, name)) => (Some(parent_path), name),
@@ -575,14 +613,34 @@ fn stage_guest_package_in_private_root<R: Read>(
                 let created = directory.create_child(OsStr::new(child_name), 0o700)?;
                 created.set_mode(*mode)?;
             }
-            GuestStagingEntry::RegularFile { mode, .. } => {
-                ensure!(
-                    stream.next_file().is_some_and(|next| next.path() == path),
-                    "guest staging file order changed"
-                );
+            GuestStagingEntry::RegularFile {
+                mode,
+                bytes,
+                sha256,
+                ..
+            } => {
                 let mut file =
                     directory.open_regular_create(OsStr::new(child_name), true, true, 0o600)?;
-                stream.copy_next_file(&mut file)?;
+                match plan.origin(index) {
+                    None => {
+                        ensure!(
+                            stream.next_file().is_some_and(|next| next.path() == path),
+                            "guest staging file order changed"
+                        );
+                        stream.copy_next_file(&mut file)?;
+                    }
+                    // Identical content crossed the wire once; take it from
+                    // the earlier staged file and prove the same bytes again.
+                    Some(origin) => {
+                        copy_staged_payload(stage, manifest.entries[origin].path(), &mut file)?;
+                        let (digest, _) =
+                            lillux::digest_open_regular_file_stable_exact(&file, *bytes)?;
+                        ensure!(
+                            digest == *sha256,
+                            "guest staging shared payload changed its bytes"
+                        );
+                    }
+                }
                 lillux::set_open_regular_file_mode(&file, *mode)?;
                 file.sync_all()?;
             }
@@ -622,6 +680,24 @@ fn stage_guest_package_in_private_root<R: Read>(
     Ok((manifest, base))
 }
 
+/// Copy one already staged regular file into `file`, both reached through
+/// the retained stage root. The caller re-verifies the written digest.
+fn copy_staged_payload(
+    stage: &lillux::PinnedDirectory,
+    origin: &str,
+    file: &mut std::fs::File,
+) -> Result<()> {
+    let (parent_path, name) = match origin.rsplit_once('/') {
+        Some((parent_path, name)) => (Some(parent_path), name),
+        None => (None, origin),
+    };
+    let source = open_staged_parent(stage, parent_path)?
+        .open_regular(OsStr::new(name), false)?
+        .context("guest staging shared payload origin disappeared")?;
+    std::io::copy(&mut &source, file)?;
+    Ok(())
+}
+
 /// Reopen each component through the retained root descriptor. Holding one
 /// directory per manifest entry would turn the entry bound into a file-
 /// descriptor exhaustion path; the contract already limits depth to 32.
@@ -640,7 +716,8 @@ fn open_staged_parent(
     Ok(directory)
 }
 
-fn staging_budget() -> lillux::DirectoryTraversalBudget {
+/// Traversal budget for removing one staged generation; recovery uses the same.
+pub fn staging_budget() -> lillux::DirectoryTraversalBudget {
     lillux::DirectoryTraversalBudget::new(MAX_GUEST_STAGING_ENTRIES + 1, 32)
 }
 
@@ -693,7 +770,7 @@ mod tests {
         };
         let recipe_digest = recipe.digest().unwrap();
         let requirement = ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             protocol: PROTOCOL.into(),
             connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
             execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
@@ -701,6 +778,7 @@ mod tests {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "product".into(),
+            runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe: recipe,
         };
         let qualification_use =
@@ -712,16 +790,18 @@ mod tests {
             resolver: ExternalNetworkInputSelection {
                 source: "/etc/resolv.conf".into(),
                 max_bytes: 65_536,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: "/etc/hosts".into(),
                 max_bytes: 65_536,
+                required: true,
             },
         };
         let bootstrap = ExternalSupervisorBootstrap {
-            schema: 7,
+            schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
             controller: ExternalControllerTransportContract {
-                schema: 2,
+                schema: 3,
                 network_inputs,
                 https_origin: "https://controller.example:7443".into(),
                 route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
@@ -729,7 +809,8 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
-            },
+                max_clock_skew_ms: None,
+            }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-staging-test".into(),
             occurrence_id: "occ-staging-test".into(),
@@ -744,10 +825,16 @@ mod tests {
                 qualification_use,
                 runtime_manifest_kind: EXTERNAL_CONTENT_MANIFEST_KIND.into(),
                 runtime_manifest_hash: "e".repeat(64),
-                runtime_witness_hash: "1".repeat(64),
+                runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
                 qualification_attestation_hash: "2".repeat(64),
                 selection_identity_digest: "3".repeat(64),
                 runtime_recipe_digest: recipe_digest,
+                placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                    workload_class: "fixture.workload".into(),
+                    lease: Vec::new(),
+                    guest: Vec::new(),
+                    ready_timeout_ms: 60_000,
+                },
             }
             .into(),
             guest_input_identity: inputs.identity_digest().unwrap(),
@@ -762,6 +849,15 @@ mod tests {
             post_execution_timeout_seconds: 120,
             candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
+            native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+                storage_bytes: 67_108_864,
+                allocator_steps: 2_000_000_000,
+                connections: 16,
+                operation_millis: 4_860_000,
+                cleanup_millis: 120_000,
+                cleanup_steps: 3_000_000,
+            },
+            report_capabilities: false,
         };
         bootstrap.canonical_bytes().unwrap()
     }
@@ -773,6 +869,7 @@ mod tests {
         let launcher = b"start".as_slice();
         let supervisor = b"runrun".as_slice();
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,
@@ -848,12 +945,12 @@ mod tests {
             supervisor_sha256: &manifest.supervisor_sha256,
             launcher_sha256: &manifest.launcher_sha256,
             maximum_regular_bytes: manifest.total_regular_bytes,
-            maximum_framed_bytes: manifest.framed_bytes().unwrap(),
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap(),
         };
         let mut stream =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
-        for payload in [bootstrap, configuration, launcher, supervisor] {
-            stream.copy_next_file(&mut payload.as_ref()).unwrap();
+        for mut payload in [bootstrap, configuration, launcher, supervisor] {
+            stream.copy_next_file(&mut payload).unwrap();
         }
         let bytes = stream.finish().unwrap();
         let private = tempfile::tempdir().unwrap();
@@ -871,8 +968,11 @@ mod tests {
     #[test]
     fn exact_base_closure_can_be_staged_without_publishing_it() {
         let state = tempfile::tempdir().unwrap();
-        let db = ryeos_state::StateDb::open(state.path(), Arc::new(ryeos_state::TrustStore::new()))
-            .unwrap();
+        let db = ryeos_state::test_support::TestState::open(
+            state.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -943,7 +1043,9 @@ mod tests {
         let mut entries = directory_entries;
         entries.extend(file_entries);
         let mut bootstrap = b"boot".to_vec();
-        let config = b"cfg".to_vec();
+        // The configuration carries the launcher's bytes: identical content
+        // crosses the wire once and is materialized twice with its own modes.
+        let config = b"start".to_vec();
         let launcher = b"start".to_vec();
         let supervisor = b"runrun".to_vec();
         let product_manifest_object = ryeos_state::objects::ExternalContentManifestObject {
@@ -1128,6 +1230,7 @@ mod tests {
         }
         entries.sort_by(|left, right| left.path().cmp(right.path()));
         let inputs = ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 56,
@@ -1235,7 +1338,7 @@ mod tests {
             supervisor_sha256: &manifest.supervisor_sha256,
             launcher_sha256: &manifest.launcher_sha256,
             maximum_regular_bytes: manifest.total_regular_bytes,
-            maximum_framed_bytes: manifest.framed_bytes().unwrap() + 128,
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap() + 128,
         };
         let mut stream =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
@@ -1837,6 +1940,7 @@ mod tests {
         assert!(
             scratch
                 .remove_empty_child_if_same(OsStr::new("ambient"), &ambient_scratch)
+                .map(|receipt| receipt.is_some())
                 .unwrap()
         );
         let opened =
@@ -1972,6 +2076,7 @@ mod tests {
         assert!(
             scratch
                 .remove_empty_child_if_same(OsStr::new("ambient"), &ambient)
+                .map(|receipt| receipt.is_some())
                 .unwrap()
         );
         let artifacts = private
@@ -2565,24 +2670,37 @@ mod tests {
             )
             .join("supervisor")
         );
-        assert_eq!(mounted_request.mounts.len(), 3);
+        assert_eq!(mounted_request.mounts.len(), 4);
         assert_eq!(
             mounted_request.mounts[0].access,
             lillux::LinuxSandboxMountAccess::ReadOnly
         );
+        // The private parent is the sole writable mount, at its fixed path.
         assert_eq!(
             mounted_request.mounts[1].destination,
-            std::path::PathBuf::from("/etc/resolv.conf")
+            std::path::PathBuf::from(
+                ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION
+            )
+        );
+        assert_eq!(
+            mounted_request.mounts[1].access,
+            lillux::LinuxSandboxMountAccess::Writable
         );
         assert_eq!(
             mounted_request.mounts[2].destination,
+            std::path::PathBuf::from("/etc/resolv.conf")
+        );
+        assert_eq!(
+            mounted_request.mounts[3].destination,
             std::path::PathBuf::from("/etc/hosts")
         );
         assert!(
             mounted_request
                 .mounts
                 .iter()
-                .all(|mount| { mount.access == lillux::LinuxSandboxMountAccess::ReadOnly })
+                .enumerate()
+                .all(|(index, mount)| index == 1
+                    || mount.access == lillux::LinuxSandboxMountAccess::ReadOnly)
         );
         assert_eq!(
             mounted_request
@@ -2599,7 +2717,7 @@ mod tests {
                 .all(|(source, _)| *source != mounted_request.mounts[0].source_fd)
         );
         let native_refusal = mounted
-            .prepare_held_in_dedicated_owner()
+            .prepare_held_in_dedicated_owner(None)
             .err()
             .expect("a structural source fixture must not reach native held launch");
         assert!(format!("{native_refusal:#}").contains("source was not sealed"));
@@ -2954,6 +3072,50 @@ mod tests {
                 }
             }
         }
+        // The product's executable is the node store's shared executable
+        // inode (0555, linked once per generation), as a realization binds
+        // it, not a 0755 copy: the package must still carry the portable
+        // mode its manifest declares.
+        let store_dir = tempfile::tempdir_in(source_fixture.path().parent().unwrap()).unwrap();
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            let runtime = lillux::PinnedDirectory::open_or_create(store_dir.path()).unwrap();
+            let store = ryeos_state::LargeObjectStore::open_with_chunk_bytes(&runtime, 8).unwrap();
+            let source = store_dir.path().join("tool-source");
+            std::fs::write(&source, b"tool").unwrap();
+            let file = std::fs::File::open(&source).unwrap();
+            let identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+                file: lillux::pinned_regular_file_identity(&file).unwrap(),
+                size: 4,
+            };
+            let tool = store
+                .ingest_open_regular(file, identity, "tool-source", None)
+                .unwrap()
+                .file_sha256;
+            let executable = store.lease_executable_object(&tool, 4).unwrap();
+            let generation =
+                lillux::PinnedDirectory::open_or_create(&store_dir.path().join("other-generation"))
+                    .unwrap();
+            store
+                .link_executable_object_into(
+                    &tool,
+                    &generation,
+                    OsStr::new("tool"),
+                    executable.file(),
+                )
+                .unwrap();
+            std::fs::remove_file(source_fixture.path().join("input-01/bin/tool")).unwrap();
+            let bin = lillux::PinnedDirectory::open(&source_fixture.path().join("input-01/bin"))
+                .unwrap()
+                .unwrap();
+            store
+                .link_executable_object_into(&tool, &bin, OsStr::new("tool"), executable.file())
+                .unwrap();
+            let linked =
+                std::fs::metadata(source_fixture.path().join("input-01/bin/tool")).unwrap();
+            assert_eq!(linked.permissions().mode() & 0o777, 0o555);
+            assert!(linked.nlink() >= 3);
+        }
         let source_root = lillux::PinnedDirectory::open(source_fixture.path())
             .unwrap()
             .unwrap();
@@ -3058,6 +3220,10 @@ mod tests {
             produced_manifest.guest_input_identity,
             manifest.guest_input_identity
         );
+        assert!(produced_manifest.entries.iter().any(|entry| {
+            matches!(entry, GuestStagingEntry::RegularFile { path, mode: 0o755, .. }
+                if path == "input-01/bin/tool")
+        }));
         for executable in ["supervisor", "launcher"] {
             assert!(produced_manifest.entries.iter().any(|entry| {
                 matches!(entry, GuestStagingEntry::RegularFile { path, mode: 0o500, .. }
@@ -3144,7 +3310,7 @@ mod tests {
         .unwrap();
         assert!(format!("{size_error:#}").contains("budget"));
         let short_frame = GuestStagingExpected {
-            maximum_framed_bytes: produced_manifest.framed_bytes().unwrap() - 1,
+            maximum_framed_bytes: produced_manifest.framed_bytes_bound().unwrap() - 1,
             ..produced_expected
         };
         assert!(

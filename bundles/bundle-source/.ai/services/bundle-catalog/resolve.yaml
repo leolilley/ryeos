@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-19T03:43:17Z:11f1ff7ef4ae9fb66ead6aefbac37d22cd9559539f5d6696958294e692eab2c4:C5k68eHmmrgR/bMAv1WVWcHfCQfHUvFMy1uYXML5yoc25yP1KfZxvGLfBgS7hVPBnfqCkXbN5BH/PGv438ewDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:491c9d02267a5e8b085b6c65e67b7814450c972383c5658ce7d6397e1c32919a:7IusNIdEEby1BWOCJrYy8o3bmHPq7WgSMxf8+4jJKorqQJ59H0GiMhzkOZX9vZGVJ4iSDrXpPAWnDXQ5uvd/Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
-endpoint: bundle_catalog.resolve
+endpoint: bundle-catalog.resolve
 required_caps: ["ryeos.execute.service.bundle-catalog/resolve"]
 result_retention: digest_only
 schema:

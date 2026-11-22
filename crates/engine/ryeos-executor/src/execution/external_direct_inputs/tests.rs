@@ -179,7 +179,9 @@ fn retained_inputs_capsule(
             "args":[{"kind":"admitted_source_entry"}], "cwd":live,
             "env":{"FARM_DATA":live.join("data.txt"),"RETAINED_ONLY":"retained-value"},
             "stdin":null, "timeout_secs":30
-        }, "executor_chain":[records.binding().owner.canonical_ref,capsule.executor_ref]}],
+        }, "executor_chain":[records.binding().owner.canonical_ref,capsule.executor_ref]},
+            // The plan builder always ends the subprocess with Complete.
+            {"node_type":"complete", "id":"complete"}],
         "entrypoint":"spawn", "capabilities":{"requires_model":false,
             "requires_subprocess":true,"requires_network":false,"custom":[]},
         "materialization_requirements":[], "network_authority_ceiling":"isolated",
@@ -188,7 +190,7 @@ fn retained_inputs_capsule(
         "endpoint_requirement":{"kind":"external","binding_id":"component-direct",
             "stdout_max_bytes":4096,"stderr_max_bytes":2048},
         "external_endpoint_binding":{"binding_id":"component-direct","binding_digest":"e".repeat(64)},
-        "resource_authority_ceiling":"node_policy", "cache_key":"component",
+        "subprocess_limits":null, "resource_authority_ceiling":"node_policy", "cache_key":"component",
         "thread_kind":"tool", "executor_chain":[records.binding().owner.canonical_ref,capsule.executor_ref],
         "executor_authorities":[], "runtime_identity":runtime_identity, "debug_raw":false
     })).unwrap();
@@ -229,7 +231,7 @@ fn direct_inputs_assemble_exact_retained_base_product_source_and_keep_source_lea
     use ryeos_external_execution_contract::{
         GuestMountAccess, GuestMountContentAuthority, GuestMountRole,
     };
-    let (root, state, records, source_bytes) =
+    let (root, _store_owner, state, records, source_bytes) =
         crate::execution::source_closure::tests::external_delivery::state_and_source();
     let live = root.path().join("mutable-project");
     let (capsule, product_hash, protocol) = retained_inputs_capsule(&state, &records, &live);
@@ -244,7 +246,7 @@ fn direct_inputs_assemble_exact_retained_base_product_source_and_keep_source_lea
     )
     .unwrap();
     let prepared =
-        prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN).unwrap();
+        prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN, None).unwrap();
     assert_eq!(
         prepared.authority.projection().environment,
         BTreeMap::from([
@@ -364,17 +366,18 @@ fn direct_inputs_assemble_exact_retained_base_product_source_and_keep_source_lea
 fn direct_input_assembly_refuses_storage_only_source_capsule_before_materialization() {
     use crate::execution::source_closure::tests::external_delivery::{capsule, state_and_source};
 
-    let (_root, state, records, _) = state_and_source();
+    let (_root, _store_owner, state, records, _) = state_and_source();
     let (capsule, _) = capsule(&records);
     // This fixture has genuine signed source records, but its sealed invocation
     // still carries the synthetic managed runtime route. The direct input owner
     // must not skip its production decoder merely because source CAS is valid.
     capsule.validate().unwrap();
     let (protocol, _) = signed_protocol();
-    let error = match prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN) {
-        Ok(_) => panic!("storage-only source capsule became executable input authority"),
-        Err(error) => error,
-    };
+    let error =
+        match prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN, None) {
+            Ok(_) => panic!("storage-only source capsule became executable input authority"),
+            Err(error) => error,
+        };
     assert!(
         format!("{error:#}")
             .contains("sealed executor route contradicts admitted capsule executor identity"),
@@ -393,7 +396,7 @@ fn direct_input_assembly_refuses_storage_only_source_capsule_before_materializat
 #[test]
 #[cfg(target_os = "linux")]
 fn direct_inputs_refuse_substituted_protocol_identity_and_interpretation() {
-    let (root, state, records, _) =
+    let (root, _store_owner, state, records, _) =
         crate::execution::source_closure::tests::external_delivery::state_and_source();
     let (capsule, _, protocol) = retained_inputs_capsule(&state, &records, root.path());
     for coordinate in ["ref", "digest", "signer", "descriptor"] {
@@ -405,11 +408,11 @@ fn direct_inputs_refuse_substituted_protocol_identity_and_interpretation() {
             "descriptor" => changed.descriptor.env_injections.clear(),
             _ => unreachable!(),
         }
-        let error = match prepare_external_direct_inputs(&state, &capsule, &changed, THREAD, CHAIN)
-        {
-            Ok(_) => panic!("accepted changed protocol {coordinate}"),
-            Err(error) => error,
-        };
+        let error =
+            match prepare_external_direct_inputs(&state, &capsule, &changed, THREAD, CHAIN, None) {
+                Ok(_) => panic!("accepted changed protocol {coordinate}"),
+                Err(error) => error,
+            };
         let expected = if coordinate == "descriptor" {
             "external direct protocol interpretation changed its retained document"
         } else {
@@ -418,6 +421,293 @@ fn direct_inputs_refuse_substituted_protocol_identity_and_interpretation() {
         assert!(
             format!("{error:#}").contains(expected),
             "{coordinate}: {error:#}"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn evaluator_input_custody_rejects_missing_and_b_snapshot_substitution() {
+    use ryeos_app::thread_lifecycle::{CandidateEvaluationAuthority, CandidateOperationPurpose};
+    let (root, _store_owner, state, records, _) =
+        crate::execution::source_closure::tests::external_delivery::state_and_source();
+    let path = root.path().join("candidate-materialization");
+    let (capsule, _, _) = retained_inputs_capsule(&state, &records, &path);
+    let ExecutionProjectAuthority::PinnedGeneration { snapshot_hash, .. } =
+        &capsule.project_authority
+    else {
+        unreachable!();
+    };
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("data.txt"), b"retained base data").unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
+    let c =
+        ryeos_state::PinnedProjectMaterialization::verify(&authority, &guard, snapshot_hash, &path)
+            .unwrap();
+    let evaluation = CandidateEvaluationAuthority {
+        schema_version: CandidateEvaluationAuthority::SCHEMA_VERSION,
+        source_chain_root_id: "T-00000000-0000-4000-8000-000000000001".to_owned(),
+        source_placement_thread_id: "T-00000000-0000-4000-8000-000000000002".to_owned(),
+        owner_principal: "node:input-custody-test".to_owned(),
+        base_snapshot_hash: "a".repeat(64),
+        candidate_snapshot_hash: snapshot_hash.clone(),
+        candidate_validation_hash: "b".repeat(64),
+        integration_operation_hash: None,
+        integration_launch_id: None,
+        purpose: CandidateOperationPurpose::Evaluate,
+    };
+    require_evaluator_execution_materialization(Some(&evaluation), snapshot_hash, Some(&c))
+        .unwrap();
+    assert!(
+        require_evaluator_execution_materialization(Some(&evaluation), snapshot_hash, None)
+            .is_err()
+    );
+    // A separately verified B snapshot with identical files is still the
+    // wrong generation: matching checkout contents cannot supply C custody.
+    let cas = authority.cas_store().unwrap();
+    let mut b_snapshot = ryeos_state::objects::ProjectSnapshot::from_value(
+        &cas.get_object(snapshot_hash).unwrap().unwrap(),
+    )
+    .unwrap();
+    b_snapshot.message = Some("distinct verified B generation".to_owned());
+    let b_hash = cas.store_object(&b_snapshot.to_value()).unwrap();
+    assert_ne!(b_hash, *snapshot_hash);
+    let b = ryeos_state::PinnedProjectMaterialization::verify(&authority, &guard, &b_hash, &path)
+        .unwrap();
+    assert!(
+        require_evaluator_execution_materialization(Some(&evaluation), snapshot_hash, Some(&b))
+            .is_err()
+    );
+    assert!(
+        require_evaluator_execution_materialization(Some(&evaluation), &b_hash, Some(&c)).is_err()
+    );
+    require_evaluator_execution_materialization(None, snapshot_hash, None).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn selected_member_capsule(mut capsule: AdmittedLaunchCapsule) -> AdmittedLaunchCapsule {
+    use ryeos_app::thread_lifecycle::{CandidateEvaluationAuthority, CandidateOperationPurpose};
+    let ExecutionProjectAuthority::PinnedGeneration { snapshot_hash, .. } =
+        &capsule.project_authority
+    else {
+        unreachable!();
+    };
+    let evaluation = CandidateEvaluationAuthority {
+        schema_version: CandidateEvaluationAuthority::SCHEMA_VERSION,
+        source_chain_root_id: "T-00000000-0000-4000-8000-000000000001".to_owned(),
+        source_placement_thread_id: "T-00000000-0000-4000-8000-000000000002".to_owned(),
+        owner_principal: "node:input-custody-test".to_owned(),
+        base_snapshot_hash: snapshot_hash.clone(),
+        candidate_snapshot_hash: snapshot_hash.clone(),
+        candidate_validation_hash: "b".repeat(64),
+        integration_operation_hash: None,
+        integration_launch_id: None,
+        purpose: CandidateOperationPurpose::Evaluate,
+    };
+    capsule.sealed_invocation["candidate_evaluation"] = serde_json::to_value(evaluation).unwrap();
+    capsule.exact_program =
+        admitted_launch_capsule::project_sealed_root_exact_program(&capsule.sealed_invocation)
+            .unwrap();
+    capsule.exact_program_hash = lillux::sha256_hex(
+        lillux::canonical_json(&capsule.exact_program)
+            .unwrap()
+            .as_bytes(),
+    );
+    let AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. } =
+        &mut capsule.execution_closure
+    else {
+        unreachable!();
+    };
+    execution_plan["nodes"][0]["spec"]["args"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "kind":"admitted_execution_project_file", "declaration": {
+                "relative_path":"data.txt", "destination":"/candidate-input", "max_bytes":4096,
+                "normalized_mode":420, "access":"read_only"
+            }
+        }));
+    let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+        execution_plan_hash,
+        ..
+    } = &mut capsule.artifact_identity
+    else {
+        unreachable!();
+    };
+    *execution_plan_hash =
+        lillux::sha256_hex(lillux::canonical_json(execution_plan).unwrap().as_bytes());
+    capsule.validate().unwrap();
+    capsule
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn selected_c_member_uses_sealed_cas_descriptor_and_refuses_missing_custody() {
+    use ryeos_app::thread_lifecycle::prepare_external_direct_project_file;
+    use ryeos_external_execution_contract::{GuestMountContentAuthority, GuestMountRole};
+    let (root, _store_owner, state, records, _) =
+        crate::execution::source_closure::tests::external_delivery::state_and_source();
+    let path = root.path().join("candidate-input-materialization");
+    let (ordinary, _, protocol) = retained_inputs_capsule(&state, &records, &path);
+    let capsule = selected_member_capsule(ordinary);
+    let ExecutionProjectAuthority::PinnedGeneration { snapshot_hash, .. } =
+        &capsule.project_authority
+    else {
+        unreachable!();
+    };
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("data.txt"), b"retained base data").unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
+    let c =
+        ryeos_state::PinnedProjectMaterialization::verify(&authority, &guard, snapshot_hash, &path)
+            .unwrap();
+    drop(guard);
+    // Changing the checkout after verification cannot replace the selected
+    // member: preparation reads the verified snapshot's CAS bytes.
+    std::fs::write(path.join("data.txt"), b"wrong live candidate").unwrap();
+    let prepared =
+        prepare_external_direct_inputs(&state, &capsule, &protocol, THREAD, CHAIN, Some(&c))
+            .unwrap();
+    let proof = prepared.project_file.as_ref().unwrap();
+    let file = proof.input().unwrap();
+    assert_eq!(file.role, GuestMountRole::Configuration);
+    assert_eq!(file.destination, "/candidate-input");
+    assert_eq!(file.normalized_mode, Some(0o644));
+    assert!(
+        matches!(&file.content_authority, GuestMountContentAuthority::RawFile { sha256 } if sha256 == &lillux::sha256_hex(b"retained base data"))
+    );
+    assert_eq!(
+        proof.input_authority().inherited_descriptor().unwrap(),
+        file.descriptor
+    );
+    assert_eq!(
+        proof
+            .input_authority()
+            .digest_regular_file_stable_exact(
+                &proof.input_authority().regular_file_observation().unwrap()
+            )
+            .unwrap(),
+        lillux::sha256_hex(b"retained base data")
+    );
+    assert_eq!(
+        prepared
+            .authority
+            .projection()
+            .inputs
+            .iter()
+            .filter(|input| input.role == GuestMountRole::Configuration)
+            .count(),
+        1
+    );
+    assert_eq!(
+        prepared
+            .authority
+            .projection()
+            .inputs
+            .iter()
+            .filter(|input| input.role == GuestMountRole::Source)
+            .count(),
+        1
+    );
+    // Carry the actual prepared C descriptor through package inventory,
+    // staging and guest content recheck. A private 0600 capture advertised
+    // as 0644 fails this boundary even when its bytes and digest agree.
+    assert_eq!(
+        proof
+            .input_authority()
+            .regular_file_observation()
+            .unwrap()
+            .permission_mode()
+            .unwrap(),
+        0o644
+    );
+    let package_parent = tempfile::tempdir().unwrap();
+    let package_parent = lillux::PinnedDirectory::open(package_parent.path())
+        .unwrap()
+        .unwrap();
+    // A package parent must be owner-private; a fresh temporary directory
+    // carries the process umask's mode.
+    package_parent.tighten_owner_private_directory().unwrap();
+    let bootstrap_bytes = b"candidate-file-package-bootstrap";
+    let supervisor_bytes = b"candidate-file-package-supervisor";
+    let launcher_bytes = b"candidate-file-package-launcher";
+    let bootstrap = lillux::sealed_memfd(c"candidate-package-bootstrap", bootstrap_bytes).unwrap();
+    let supervisor =
+        lillux::sealed_executable_memfd(c"candidate-package-supervisor", supervisor_bytes).unwrap();
+    let launcher =
+        lillux::sealed_executable_memfd(c"candidate-package-launcher", launcher_bytes).unwrap();
+    let expected = ryeos_external_execution_contract::staging_package::GuestStagingExpected {
+        inputs: prepared.authority.projection(),
+        activation_request_digest: &"d".repeat(64),
+        bootstrap_sha256: &lillux::sha256_hex(bootstrap_bytes),
+        supervisor_sha256: &lillux::sha256_hex(supervisor_bytes),
+        launcher_sha256: &lillux::sha256_hex(launcher_bytes),
+        maximum_regular_bytes: 16 * 1024 * 1024,
+        maximum_framed_bytes: 16 * 1024 * 1024,
+    };
+    let package = ryeos_external_execution::guest_package_producer::prepare_private_guest_package(
+        &package_parent,
+        &prepared.authority,
+        &bootstrap,
+        &supervisor,
+        &launcher,
+        &expected,
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+    )
+    .unwrap();
+    let configuration_index = prepared
+        .authority
+        .projection()
+        .inputs
+        .iter()
+        .position(|input| input.role == GuestMountRole::Configuration)
+        .unwrap();
+    let configuration_path = format!("input-{configuration_index:02}");
+    assert!(package.manifest().entries.iter().any(|entry| {
+        matches!(entry, ryeos_external_execution_contract::staging_package::GuestStagingEntry::RegularFile {
+            path, mode: 0o644, ..
+        } if path == &configuration_path)
+    }));
+    package.discard().unwrap();
+    assert!(prepare_external_direct_project_file(&capsule, &protocol, None).is_err());
+    let mut no_evaluate = capsule.clone();
+    no_evaluate.sealed_invocation["candidate_evaluation"] = serde_json::Value::Null;
+    no_evaluate.exact_program =
+        admitted_launch_capsule::project_sealed_root_exact_program(&no_evaluate.sealed_invocation)
+            .unwrap();
+    no_evaluate.exact_program_hash = lillux::sha256_hex(
+        lillux::canonical_json(&no_evaluate.exact_program)
+            .unwrap()
+            .as_bytes(),
+    );
+    assert!(prepare_external_direct_project_file(&no_evaluate, &protocol, Some(&c)).is_err());
+    for (field, value) in [
+        ("relative_path", json!("missing.py")),
+        ("max_bytes", json!(1)),
+        ("destination", json!("/proc/file")),
+        ("destination", json!("/.lillux-sealed-staging/file")),
+    ] {
+        let mut changed = capsule.clone();
+        let AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. } =
+            &mut changed.execution_closure
+        else {
+            unreachable!();
+        };
+        execution_plan["nodes"][0]["spec"]["args"][1]["declaration"][field] = value;
+        let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            execution_plan_hash,
+            ..
+        } = &mut changed.artifact_identity
+        else {
+            unreachable!();
+        };
+        *execution_plan_hash =
+            lillux::sha256_hex(lillux::canonical_json(execution_plan).unwrap().as_bytes());
+        assert!(
+            prepare_external_direct_project_file(&changed, &protocol, Some(&c)).is_err(),
+            "{field}"
         );
     }
 }

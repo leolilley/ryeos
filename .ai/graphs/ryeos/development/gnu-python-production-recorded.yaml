@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T14:41:33Z:c94f5404a53cf5d5c114d4fd785b00e77a07f7b65054e4b9c573ee404931a457:7Sw0JuQStxWRfxNGyWbx/mL3i4tX8ES2tUN7HRp6YM5+eYaGBcvpwk5AM/aBHRN+nu4xANl3EViTqsqJtEt3Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-30T04:44:55Z:e5be66c6dbe09aee11724a114472809ffd51c1f87c283c28097a4cf4cd53de42:F1N2qIKwAZVMkmX/KZy1zPEoHEkhpCBwsNl/0Nd7Oi9w0V7Yn2+pkZXOCwtIfBVlgsV8FMR3TDKeYCa7gjyKDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/development
 description: Reuse or run the exact retained GNU CPython distribution producer
@@ -19,11 +19,12 @@ config:
     properties:
       production_support_selection:
         type: object
-        required: [declaration_id, witness_hash, qualification_hash, witness_source]
+        required: [declaration_id, witness_hash, qualification_hash, witness_source, remote_testimony]
         properties:
           declaration_id: {type: string, enum: [production-support]}
           witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
           qualification_hash: {type: "null"}
+          remote_testimony: {type: [object, "null"]}
           witness_source:
             oneOf:
               - type: object

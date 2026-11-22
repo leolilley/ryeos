@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-13T04:25:00Z:5f9e77c52f75f7131f4d26e712629f78f15649e1cb0de908ad53fd93913d934f:ZGAEDcMYjFo073KGSP2ziL2x5D6AECerFgss9pfXNkPrhWFtb6V7M9yIMHChPLtGfYwth5kdGfbdjQTJnTAwDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/session/end
+path: /ui/api/session/end
+methods:
+  - POST
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 32
+response:
+  mode: browser_launch
+  source: "service:ui/session/end"

@@ -1,3 +1,6 @@
+/// Owner token carried by the secure temporaries this crate publishes.
+pub(crate) const RUNTIME_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("runtime");
+
 pub mod arg_binder;
 pub mod authorizer;
 pub mod callback;
@@ -5,6 +8,7 @@ pub mod callback_client;
 pub mod callback_contract;
 pub mod callback_uds;
 pub mod checkpoint;
+pub mod cognition;
 pub mod command;
 pub mod compiled_template;
 pub mod daemon_rpc;
@@ -14,6 +18,7 @@ pub mod events;
 pub mod process_outcome;
 pub use ryeos_expression as expression;
 pub mod framing;
+pub mod graph_result;
 pub mod hooks_eval;
 pub mod hooks_loader;
 pub mod method_wire;
@@ -32,12 +37,18 @@ pub use authorizer::{
     CapabilityParseError, canonical_cap, cap_matches,
 };
 pub use callback::{
-    ActionPayload, CallbackError, DispatchActionRequest, ProjectObservationPublishParams,
-    RUNTIME_FAILURE_KIND, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure,
-    RuntimeFailureDiagnosticLocator, TerminalCompletion, client_from_env, parse_hook_action,
-    validate_runtime_thread_id,
+    ActionPayload, CallbackError, DispatchActionRequest, EventAppendOptions, EventAttachment,
+    ProjectObservationPublishParams, RUNTIME_FAILURE_KIND, ReplayResponse, ReplayedEventRecord,
+    RuntimeCallbackAPI, RuntimeFailure, RuntimeFailureDiagnosticLocator, TerminalCompletion,
+    client_from_env, parse_hook_action, validate_runtime_thread_id,
 };
 pub use checkpoint::CheckpointWriter;
+pub use cognition::{
+    CognitionFramePayload, CognitionInput, CognitionOutPayload, CognitionUsage, DroppedImage,
+    FINISH_INTERRUPTED, FrameRecord, FrameRequestOptions, MalformedCall,
+    TOOL_RESULT_PARTIAL_PREFIX, TOOL_RESULT_SPILLED, ToolResultGuard, ToolResultPayload,
+    ToolResultSpill, TurnMarker,
+};
 pub use command::{
     CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,
     CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandControlFlag, CommandDef,
@@ -55,8 +66,8 @@ pub use events::{
     CognitionInAssembler, CognitionInAssembly, CognitionInChunk, HOOK_FAILURE_SCHEMA,
     HOOK_OBSERVATION_SCHEMA, HookEvidenceDescriptor, HookFailedPayload, HookFailureClass,
     HookObservationRecordedPayload, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
-    MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass, encode_bounded_text_payloads,
-    encode_cognition_in_payloads,
+    MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass, cognition_out_is_progressive,
+    encode_bounded_text_payloads, encode_cognition_in_batch, encode_cognition_in_payloads,
 };
 pub use expression::{
     CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,

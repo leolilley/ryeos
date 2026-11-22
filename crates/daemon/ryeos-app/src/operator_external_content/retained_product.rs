@@ -5,7 +5,7 @@
 //! pass the existing exact-manifest bind checks for its eventual consumer.
 
 use super::*;
-use crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
+use ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord;
 use ryeos_state::external_content::products::ProductCaptureEvidence;
 use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, ProductWitnessLookup, VerifiedProductWitness,
@@ -108,7 +108,7 @@ pub(super) fn import_with_verified<T>(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
         })?;
     let stage = begin_fresh_stage(
         &authority,
@@ -135,7 +135,7 @@ pub(super) fn validate_import_bounds(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
-    policy: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    policy: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     maximum_bytes: u64,
     exact: &VerifiedProductWitness,
 ) -> anyhow::Result<()> {
@@ -354,8 +354,11 @@ mod tests {
     #[test]
     fn repeated_product_imports_receive_independent_fresh_stages() {
         let temp = tempfile::tempdir().unwrap();
-        let db = ryeos_state::StateDb::open(temp.path(), Arc::new(ryeos_state::TrustStore::new()))
-            .unwrap();
+        let db = ryeos_state::test_support::TestState::open(
+            temp.path(),
+            Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let manifest_hash = authority

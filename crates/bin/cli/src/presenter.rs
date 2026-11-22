@@ -6,7 +6,7 @@ use crate::exec_stream::StreamOutcome;
 use crate::transport::http::SseEvent;
 
 pub enum Presenter {
-    Plain(crate::tty::Console),
+    Plain(crate::exec_stream::PlainStream),
     Tty(Box<TtyPresenter>),
 }
 
@@ -21,7 +21,7 @@ impl Presenter {
         if console.capabilities().tty() {
             Self::Tty(Box::new(TtyPresenter::new(console.clone())))
         } else {
-            Self::Plain(console.clone())
+            Self::Plain(crate::exec_stream::PlainStream::new(console.clone()))
         }
     }
 
@@ -60,14 +60,26 @@ impl Presenter {
 
     pub fn stream_event(&mut self, ev: &SseEvent) -> io::Result<StreamOutcome> {
         match self {
-            Self::Plain(console) => crate::exec_stream::render_event(console, ev),
+            Self::Plain(plain) => plain.event(ev),
             Self::Tty(tty) => tty.stream_event(ev),
         }
     }
 
-    pub fn finish_stream(&mut self) -> io::Result<()> {
-        if let Self::Tty(tty) = self {
-            tty.finish_stream()?;
+    /// Follow the run's timeline on a plain stream. A terminal stream draws its
+    /// own frame and has no use for one.
+    pub fn attach_timeline(
+        &mut self,
+        source: std::sync::Arc<dyn crate::exec_stream::TimelineSource>,
+    ) {
+        if let Self::Plain(plain) = self {
+            plain.attach_timeline(source);
+        }
+    }
+
+    pub async fn finish_stream(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(plain) => plain.finish().await?,
+            Self::Tty(tty) => tty.finish_stream()?,
         }
         Ok(())
     }

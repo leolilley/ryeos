@@ -1,0 +1,593 @@
+//! Guest role: runs inside a restored sandbox as the administrator. It
+//! re-measures the subject, reproduces it manifest-identically from its own
+//! owner bytes, binds that copy in a private mount namespace,
+//! serves a loopback controller whose ephemeral key signs the occurrence
+//! assignment, runs the subject's owner exactly as shipped, and reports what
+//! happened. The product carries no controller key, so what runs is
+//! byte-for-byte the subject's owner product.
+
+pub mod controller;
+pub mod fixture;
+
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::Path;
+
+use anyhow::{Context as _, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
+use ryeos_external_execution::guest_runtime_product::{OWNER_NAME, produce_guest_owner_runtime};
+use ryeos_external_execution_contract::restored_runtime_measurement::{
+    CONSUMER_INPUT_RECORD_NAME, ConsumerRuntimeChallenge, MAX_CONSUMER_INPUT_RECORD_BYTES,
+    MAX_RESTORED_OWNER_CHALLENGE_BYTES, RemoteVerificationPurpose,
+};
+use ryeos_external_execution_contract::runtime_snapshot::{
+    LaunchControllerTransport, LaunchNetworkInputs, LaunchSandboxNetworkPolicy,
+};
+use ryeos_external_execution_contract::{
+    EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA, EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+};
+use ryeos_state::external_content::qualification_consumer_record::RemoteProbeInputRecord;
+
+use crate::evidence::{
+    AppliedLaunchEvidence, EVIDENCE_SCHEMA, GuestWireEvidence, LauncherSpecEvidence, OwnerExit,
+    ProbeEvidence, SchemaDigest, SchemaPins, SubjectEvidence,
+};
+use crate::loopback_tls::{EphemeralPki, LoopbackHttpsServer};
+
+pub const RUNTIME_ROOT: &str = "/ryeos/guest-runtime";
+pub const ACTIVATION_ROOT: &str = "/ryeos/activation";
+pub const OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
+pub const SUPERVISOR_MEMBER: &str = "ryeos-external-candidate-supervisor";
+pub const LAUNCHER_MEMBER: &str = "ryeos-external-candidate-launcher";
+const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CONTROLLER_BODY: usize = 1024 * 1024;
+
+pub fn parse_challenge(encoded: &str) -> Result<ConsumerRuntimeChallenge> {
+    ensure!(
+        !encoded.is_empty() && encoded.len() <= (MAX_RESTORED_OWNER_CHALLENGE_BYTES + 2048) * 2,
+        "consumer challenge exceeds argument bound"
+    );
+    let bytes = URL_SAFE_NO_PAD.decode(encoded)?;
+    ensure!(
+        URL_SAFE_NO_PAD.encode(&bytes) == encoded,
+        "consumer challenge is not canonical base64url"
+    );
+    ConsumerRuntimeChallenge::parse(&bytes)
+}
+
+/// The record delivered beside the executable, joined to the challenge.
+pub fn read_record(
+    archive: &Path,
+    challenge: &ConsumerRuntimeChallenge,
+) -> Result<RemoteProbeInputRecord> {
+    let bytes = std::fs::read(archive.join(CONSUMER_INPUT_RECORD_NAME))
+        .context("probe input record is absent")?;
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= MAX_CONSUMER_INPUT_RECORD_BYTES,
+        "probe input record exceeds its bound"
+    );
+    let record = RemoteProbeInputRecord::from_value(&serde_json::from_slice(&bytes)?)?;
+    let RemoteVerificationPurpose::ConsumerRuntime {
+        coordinate,
+        guest_runtime_manifest_hash,
+        ..
+    } = &challenge.intent.purpose
+    else {
+        bail!("challenge is not a consumer runtime challenge");
+    };
+    ensure!(
+        coordinate == &record.coordinate
+            && challenge.selection == record.selection
+            && *guest_runtime_manifest_hash == record.purpose.subject_manifest_hash,
+        "probe record differs from the challenge"
+    );
+    Ok(record)
+}
+
+/// Read each delivered member and require its registered digest.
+pub fn read_members(
+    archive: &Path,
+    record: &RemoteProbeInputRecord,
+) -> Result<(BTreeMap<String, String>, Vec<u8>, Vec<u8>)> {
+    let digests = crate::origin::registered_member_digests(record)?;
+    let mut supervisor = None;
+    let mut launcher = None;
+    for (name, expected) in &digests {
+        let path = archive.join(name);
+        let metadata =
+            std::fs::metadata(&path).with_context(|| format!("member {name} is absent"))?;
+        ensure!(
+            metadata.is_file() && metadata.len() <= MAX_MEMBER_BYTES,
+            "member {name} is unusable"
+        );
+        let bytes = std::fs::read(&path)?;
+        ensure!(
+            lillux::sha256_hex(&bytes) == *expected,
+            "delivered member {name} differs from its registered digest"
+        );
+        match name.as_str() {
+            SUPERVISOR_MEMBER => supervisor = Some(bytes),
+            LAUNCHER_MEMBER => launcher = Some(bytes),
+            _ => bail!("unexpected archive member {name}"),
+        }
+    }
+    Ok((
+        digests,
+        supervisor.context("supervisor member absent")?,
+        launcher.context("launcher member absent")?,
+    ))
+}
+
+fn encode_public_root(key: &lillux::crypto::VerifyingKey) -> String {
+    format!(
+        "ed25519:{}",
+        base64::engine::general_purpose::STANDARD.encode(key.to_bytes())
+    )
+}
+
+/// Everything the probe needs besides the restored filesystem.
+pub struct ProbeRequest {
+    pub challenge_digest: String,
+    pub expected_subject: SubjectEvidence,
+    pub member_digests: BTreeMap<String, String>,
+    pub supervisor: Vec<u8>,
+    pub launcher: Vec<u8>,
+    /// The challenge's attempt deadline; the owner run never outlives it.
+    pub attempt_deadline: lillux::time::MonotonicDeadline,
+    /// The network-input sources the challenge's declared launch shape names.
+    pub network_inputs: LaunchNetworkInputs,
+}
+
+/// The launch shape the challenge declares. This verifier builds exactly one
+/// shape, https with a sandbox allow-list; any other declared shape is refused
+/// by name and nothing is built in its place.
+pub fn require_buildable_shape(
+    challenge: &ConsumerRuntimeChallenge,
+) -> Result<LaunchNetworkInputs> {
+    let RemoteVerificationPurpose::ConsumerRuntime { launch_shape, .. } = &challenge.intent.purpose
+    else {
+        bail!("challenge is not a consumer runtime challenge");
+    };
+    ensure!(
+        launch_shape.controller_transport == LaunchControllerTransport::Https
+            && matches!(
+                launch_shape.sandbox_network_policy,
+                LaunchSandboxNetworkPolicy::AllowList { .. }
+            ),
+        "this verifier builds only the https allow_list launch shape; the challenge declares {launch_shape:?}"
+    );
+    launch_shape
+        .network_inputs
+        .clone()
+        .context("the declared https launch shape names no network inputs")
+}
+
+/// Read the delivered record and members, then execute.
+pub fn run_probe(
+    challenge: &ConsumerRuntimeChallenge,
+    archive: &Path,
+    attempt_deadline: lillux::time::MonotonicDeadline,
+) -> Result<Vec<u8>> {
+    let network_inputs = require_buildable_shape(challenge)?;
+    let record = read_record(archive, challenge)?;
+    let (member_digests, supervisor, launcher) = read_members(archive, &record)?;
+    execute(&ProbeRequest {
+        challenge_digest: challenge.intent.consumer_challenge_digest()?,
+        expected_subject: SubjectEvidence {
+            owner_executable_sha256: record.prerequisite.owner_executable_sha256.clone(),
+            manifest_hash: record.prerequisite.manifest_hash.clone(),
+        },
+        member_digests,
+        supervisor,
+        launcher,
+        attempt_deadline,
+        network_inputs,
+    })
+}
+
+/// Execute the probe and return the canonical evidence bytes.
+pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
+    let supervisor = &request.supervisor;
+    let launcher = &request.launcher;
+    // 1. The subject must be exactly what the daemon measured.
+    let runtime_root = lillux::PinnedDirectory::open(Path::new(RUNTIME_ROOT))?
+        .context("restored guest has no owner-product root")?;
+    let subject_runtime = ObservedGuestRuntime::observe(&runtime_root)?;
+    let identity = subject_runtime.measure_exact_owner_product()?;
+    let subject = SubjectEvidence {
+        owner_executable_sha256: identity.owner_executable_sha256.clone(),
+        manifest_hash: identity.manifest_hash.clone(),
+    };
+    ensure!(
+        subject == request.expected_subject,
+        "restored subject differs from the daemon-retained owner measurement"
+    );
+
+    // 2. Private work area; its owner is the effective user.
+    let ryeos = lillux::PinnedDirectory::open(Path::new("/ryeos"))?.context("/ryeos is absent")?;
+    let (_, work) = ryeos.create_unique_child("guest-wire-probe", 0o700)?;
+    let euid = lillux::effective_uid()?;
+    ensure!(
+        euid == 0,
+        "the guest probe requires the administrator account"
+    );
+
+    let root_key = lillux::crypto::generate_signing_key();
+    let controller_key = lillux::crypto::generate_signing_key();
+
+    // 3. Reproduce the subject owner product from its own owner bytes and
+    // profile. The product carries no controller key, so the reproduction
+    // must be manifest-identical to the subject; the private mount namespace
+    // needs a distinct tree to overlay at the runtime root (a directory bound
+    // onto itself does not replace it).
+    let profile = subject_runtime.profile().clone();
+    let bin = runtime_root
+        .open_child_directory(OsStr::new("bin"))?
+        .context("subject has no bin directory")?;
+    let owner_file = bin
+        .open_pinned_regular(OsStr::new(OWNER_NAME), false)?
+        .context("subject has no owner executable")?;
+    let owner_bytes = owner_file.observation()?.size();
+    let owner_authority = owner_file.inherited_descriptor_authority()?;
+    let parent = work.create_child(OsStr::new("runtime-parent"), 0o700)?;
+    let product = produce_guest_owner_runtime(
+        &parent,
+        OsStr::new("probe-runtime"),
+        &owner_authority,
+        owner_bytes,
+        &subject.owner_executable_sha256,
+        &profile,
+    )?;
+    let probe_identity =
+        ObservedGuestRuntime::observe(product.root())?.measure_exact_owner_product()?;
+    ensure!(
+        probe_identity.owner_executable_sha256 == subject.owner_executable_sha256
+            && probe_identity.manifest_hash == subject.manifest_hash
+            && product.manifest_hash() == subject.manifest_hash,
+        "probe product differs from the subject owner product"
+    );
+    // A restored guest holds the product as the snapshot archive installs it
+    // (bin 0755, owner 0755, profile 0644), not in the node-private storage
+    // form the producer writes; the owner reads it as its unprivileged
+    // account after the account transition, so the copy takes the guest form.
+    let copy_bin = product
+        .root()
+        .open_child_directory(OsStr::new("bin"))?
+        .context("probe product has no bin directory")?;
+    copy_bin.set_mode(0o755)?;
+    copy_bin
+        .open_pinned_regular(OsStr::new(OWNER_NAME), false)?
+        .context("probe product has no owner executable")?
+        .set_mode(0o755)?;
+    product
+        .root()
+        .open_pinned_regular(OsStr::new("guest-owner-profile.json"), false)?
+        .context("probe product has no owner profile")?
+        .set_mode(0o644)?;
+    ensure!(
+        ObservedGuestRuntime::observe(product.root())?
+            .measure_exact_owner_product()?
+            .manifest_hash
+            == subject.manifest_hash,
+        "probe product in guest form differs from the subject owner product"
+    );
+
+    // 4. Loopback controller identity and the controller-side fixtures.
+    let pki = EphemeralPki::generate()?;
+    let server = LoopbackHttpsServer::bind(&pki)?;
+    let prepared = fixture::prepare(&fixture::FixtureInputs {
+        work: &work,
+        root_key: &root_key,
+        controller_key: &controller_key,
+        probe_manifest_hash: &subject.manifest_hash,
+        supervisor,
+        launcher,
+        tls_root_der: pki.root_der(),
+        port: server.port(),
+        network_inputs: &request.network_inputs,
+    })?;
+    // 4a. The provider sandbox's real network files, read before the overlay
+    // can hide or replace anything. The supervisor must report, in its Ready,
+    // the same bytes it sees mounted.
+    let provider_network_inputs =
+        controller::read_provider_network_inputs(&request.network_inputs)?;
+    let package_bytes = prepared.package.bytes();
+    std::fs::create_dir_all(ACTIVATION_ROOT)?;
+    std::fs::create_dir_all(OCCURRENCES_ROOT)?;
+
+    // 5. Private mount namespace. Nothing before this point mutated the
+    // subject's view, and no thread exists yet.
+    let activation_limits = lillux::sandbox::TmpfsLimits {
+        size_bytes: package_bytes * 2 + 16 * 1024 * 1024,
+        inodes: 4096,
+    };
+    let occurrence_limits = lillux::sandbox::TmpfsLimits {
+        size_bytes: package_bytes * 4 + profile.private_source_max_bytes + 64 * 1024 * 1024,
+        inodes: 1 << 16,
+    };
+    lillux::sandbox::enter_root_overlay_namespace(&[
+        // Writable, as a restored guest's runtime root is: before dropping to
+        // its account the owner grants that account read-only traversal of the
+        // root, which changes the root directory's permissions. The tree is
+        // this probe's private copy, so the subject is never touched.
+        lillux::sandbox::RootOverlay::Bind {
+            source: product.root(),
+            target: Path::new(RUNTIME_ROOT),
+            read_only: false,
+        },
+        lillux::sandbox::RootOverlay::Tmpfs {
+            target: Path::new(ACTIVATION_ROOT),
+            limits: activation_limits,
+        },
+        lillux::sandbox::RootOverlay::Tmpfs {
+            target: Path::new(OCCURRENCES_ROOT),
+            limits: occurrence_limits,
+        },
+    ])
+    .map_err(anyhow::Error::msg)?;
+
+    // 6. Deliver the signed import and package. The network inputs are the
+    // provider sandbox's own files, read in step 4a; none is written here.
+    let activation = lillux::PinnedDirectory::open(Path::new(ACTIVATION_ROOT))?
+        .context("activation overlay is absent")?;
+    fixture::write_file(
+        &activation,
+        fixture::IMPORT_NAME,
+        &prepared.signed_import,
+        0o600,
+    )?;
+    let payload = prepared.package.payload();
+    let observation = payload.observation()?;
+    let payload_bytes = payload
+        .read_stable_bounded(&observation, package_bytes)
+        .map_err(anyhow::Error::msg)?;
+    fixture::write_file(&activation, fixture::PACKAGE_NAME, &payload_bytes, 0o600)?;
+    drop(payload_bytes);
+
+    // 7. Serve the controller while the owner runs as shipped.
+    let controller = controller::Controller::new(
+        &prepared.bootstrap_bytes,
+        controller_key,
+        prepared.expected_ready_inputs.clone(),
+        request.network_inputs.clone(),
+        provider_network_inputs,
+    )?;
+    let assignment = URL_SAFE_NO_PAD.encode(&prepared.signed_assignment);
+    let remaining = request.attempt_deadline.remaining();
+    ensure!(
+        !remaining.is_zero(),
+        "consumer attempt deadline elapsed before the owner could run"
+    );
+    let owner_timeout = f64::from(profile.owner_timeout_seconds)
+        .min(240.0)
+        .min(remaining.as_secs_f64());
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs_f64(owner_timeout + 30.0).min(remaining);
+    let mut controller = controller;
+    let (owner_result, served) = std::thread::scope(|scope| {
+        let served = scope.spawn(|| {
+            server.serve(deadline, &stop, MAX_CONTROLLER_BODY, |request| {
+                controller.handle(request)
+            })
+        });
+        let result = lillux::run(lillux::SubprocessRequest {
+            cmd: format!("{RUNTIME_ROOT}/bin/{OWNER_NAME}"),
+            argv0: None,
+            args: vec!["--assignment-b64".into(), assignment.clone()],
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: owner_timeout,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        });
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        let served = served.join();
+        (result, served)
+    });
+    match served {
+        Ok(result) => result.context("loopback controller failed")?,
+        Err(_) => bail!("loopback controller thread panicked"),
+    }
+    let outcome = controller.outcome()?;
+    if !outcome.command_terminated {
+        // Everything here is fixture-local (ephemeral keys, loopback
+        // controller), so the owner's own diagnostics may travel with the
+        // refusal; without them a failed exchange cannot be told apart.
+        let stderr = owner_result.stderr.trim();
+        let start = (stderr.len().saturating_sub(1200)..=stderr.len())
+            .find(|index| stderr.is_char_boundary(*index))
+            .unwrap_or(stderr.len());
+        let tail = &stderr[start..];
+        bail!(
+            "the exchange ended before the direct command's terminal acknowledgement \
+             (frames {}, receipt {}, program {}, launcher spec {}, launcher occurrence {}; \
+             owner exit_code {} timed_out {}; controller dropped connections {:?}; \
+             owner stderr tail: {})",
+            outcome.frame_count,
+            outcome.applied_launch_receipt_digest.is_some(),
+            outcome.candidate_program_digest.is_some(),
+            outcome.launcher_spec_digest.is_some(),
+            outcome.launcher_occurrence_digest.is_some(),
+            owner_result.exit_code,
+            owner_result.timed_out,
+            server.dropped_connections(),
+            tail
+        );
+    }
+    let owner_exit = OwnerExit {
+        success: owner_result.success && !owner_result.timed_out && owner_result.exit_code == 0,
+        detail: format!(
+            "exit_code {} timed_out {}",
+            owner_result.exit_code, owner_result.timed_out
+        ),
+    };
+    if !owner_exit.success {
+        bail!(
+            "guest owner failed: {} {}",
+            owner_exit.detail,
+            owner_result.stderr.trim()
+        );
+    }
+    let probe_manifest_hash = subject.manifest_hash.clone();
+    let evidence = GuestWireEvidence {
+        schema: EVIDENCE_SCHEMA.into(),
+        challenge_digest: request.challenge_digest.clone(),
+        euid,
+        subject,
+        probe: ProbeEvidence {
+            manifest_hash: probe_manifest_hash,
+            public_key: encode_public_root(&root_key.verifying_key()),
+        },
+        projection: SchemaDigest {
+            schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+            digest: prepared.projection.identity_digest()?,
+        },
+        launcher_spec: LauncherSpecEvidence {
+            schema: EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
+            expected_digest: outcome
+                .launcher_spec_digest
+                .context("launcher specification digest absent")?,
+        },
+        applied_launch: AppliedLaunchEvidence {
+            occurrence_digest: outcome
+                .launcher_occurrence_digest
+                .context("applied launch carried no launcher occurrence digest")?,
+        },
+        exchange_transcript_digest: outcome.transcript_digest,
+        exchange_frame_count: outcome.frame_count,
+        applied_launch_receipt_digest: outcome
+            .applied_launch_receipt_digest
+            .context("no applied-launch receipt crossed the exchange")?,
+        candidate_program_digest: outcome
+            .candidate_program_digest
+            .context("applied launch named no candidate program")?,
+        owner_exit,
+        member_digests: request.member_digests.clone(),
+        schema_pins: SchemaPins {
+            guest_inputs: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+            launcher_spec: EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
+        },
+    };
+    evidence.canonical_bytes()
+}
+
+/// Entry for `--consumer-challenge-b64`: evidence to fd 1, nothing else on stdout.
+pub fn run(encoded: &str) -> Result<()> {
+    let challenge = parse_challenge(encoded)?;
+    let remaining = challenge.intent.attempt_deadline_ms - lillux::time::timestamp_millis();
+    ensure!(remaining > 0, "consumer attempt deadline already elapsed");
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(
+        u64::try_from(remaining)?,
+    ));
+    // SAFETY: exclusive synchronous startup, before any thread or other owner
+    // of descriptor 1 exists; this process alone writes the evidence stream.
+    let mut output = unsafe {
+        lillux::inherited_pipes::InheritedPipeOutput::take_inherited_output(1, 4096, deadline)
+    }
+    .context("consumer evidence output is not an owned write pipe")?;
+    let archive = std::env::current_exe()?
+        .parent()
+        .context("verifier executable has no directory")?
+        .to_path_buf();
+    let bytes = run_probe(&challenge, &archive, deadline)?;
+    for chunk in bytes.chunks(4096) {
+        output
+            .write_all(chunk, deadline)
+            .context("evidence delivery failed; no resend")?;
+    }
+    output
+        .write_all(b"\n", deadline)
+        .context("evidence terminator delivery failed; no resend")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
+        ConsumerRuntimeVerifierSelection, RestoredVerifierAttemptIntent,
+    };
+    use ryeos_external_execution_contract::runtime_snapshot::{LaunchNetworkInputs, LaunchShape};
+
+    fn challenge(shape: LaunchShape) -> ConsumerRuntimeChallenge {
+        let hash = "a".repeat(64);
+        let mut intent = RestoredVerifierAttemptIntent {
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
+            operation_id: String::new(),
+            qualification_operation_id: hash.clone(),
+            restored_occurrence_id: "sbx-probe".into(),
+            verifier_artifact_hash: hash.clone(),
+            upload_sha256: hash.clone(),
+            upload_bytes: 1,
+            attempt_deadline_ms: 100,
+            purpose: RemoteVerificationPurpose::ConsumerRuntime {
+                coordinate: ConsumerRuntimeVerificationCoordinate {
+                    schema: 1,
+                    accepted_root_id: "T-root".into(),
+                    accepted_capsule_hash: hash.clone(),
+                    qualification_purpose_digest: hash.clone(),
+                    scenario_id: "guest_wire".into(),
+                    scenario_source_digest: hash.clone(),
+                    subject_digest: hash.clone(),
+                    use_digest: hash.clone(),
+                    prerequisite_measurement_attempt_id: hash.clone(),
+                    prerequisite_measurement_observation_digest: hash.clone(),
+                },
+                nonce_hex: hash.clone(),
+                guest_runtime_manifest_hash: hash.clone(),
+                launch_shape: shape,
+            },
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        ConsumerRuntimeChallenge {
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
+            intent,
+            selection: ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: hash.clone(),
+                verifier_artifact_hash: hash,
+                archive_budget: ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_https_allow_list_shape_is_built() {
+        let mut declared = LaunchNetworkInputs::operator();
+        declared.hosts.source = "/ryeos/test-owned/hosts".into();
+        let shape =
+            LaunchShape::https_allow_list(["controller.invalid".to_owned()], declared.clone());
+        // The bootstrap is built from the declared sources, not a constant.
+        assert_eq!(
+            require_buildable_shape(&challenge(shape)).unwrap(),
+            declared
+        );
+    }
+
+    #[test]
+    fn another_declared_shape_is_refused_by_name_before_anything_is_built() {
+        let relay = challenge(LaunchShape::relay_deny_all());
+        let error = require_buildable_shape(&relay).unwrap_err().to_string();
+        assert!(
+            error.contains("Relay") && error.contains("DenyAll"),
+            "{error}"
+        );
+        // The refusal precedes reading the archive: a missing archive would
+        // otherwise be the error.
+        let missing = Path::new("/nonexistent-guest-wire-archive");
+        let deadline =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(1000));
+        let error = run_probe(&relay, missing, deadline)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("launch shape") && error.contains("Relay"),
+            "{error}"
+        );
+    }
+}

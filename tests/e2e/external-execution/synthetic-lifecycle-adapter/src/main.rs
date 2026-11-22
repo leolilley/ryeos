@@ -5,6 +5,12 @@
 //! directory, stages only descriptor-supplied bytes, and launches the real
 //! supervisor/launcher chain. It is never installed by a production bundle.
 
+/// Owner token carried by the secure temporaries this adapter publishes.
+const SYNTHETIC_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("synthetic");
+
+mod lease_lane;
+mod snapshot_lane;
+
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -42,6 +48,11 @@ const READY_FILE: &str = "ready.json";
 const TERMINATE_FILE: &str = "terminate.json";
 const TERMINAL_FILE: &str = "terminal.json";
 const FAILURE_FILE: &str = "failure.json";
+const OWNER_LAUNCH_FILE: &str = "guest-owner.json";
+const OWNER_IMPORT_FILE: &str = "signed-import.json";
+const OWNER_PACKAGE_FILE: &str = "guest-package";
+const OWNER_ASSIGNMENT_FILE: &str = "assignment.b64";
+const OWNER_REPORT_FILE: &str = "owner-report.json";
 const BOOTSTRAP_FILE: &str = "bootstrap.json";
 const SUPERVISOR_FILE: &str = "supervisor";
 const LAUNCHER_FILE: &str = "launcher";
@@ -169,6 +180,7 @@ fn record_lifecycle_contact(
         prior.as_ref(),
         &bytes,
         0o600,
+        SYNTHETIC_TEMP_PURPOSE,
     )
 }
 
@@ -183,6 +195,40 @@ struct SyntheticSettings {
     startup_timeout_ms: u64,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     faults: BTreeSet<SyntheticFault>,
+    /// A provider whose snapshot already holds the installed guest runtime:
+    /// activation runs that runtime's real owner on the daemon's signed
+    /// inputs instead of starting the supervisor directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guest_owner: Option<GuestOwnerSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuestOwnerSettings {
+    /// The preinstalled guest runtime tree.
+    runtime_root: PathBuf,
+    /// Files the sandbox makes visible inside the guest (the binding's
+    /// network input sources). The guest's `/tmp` is private to the owner, so
+    /// these live elsewhere.
+    host_files: Vec<GuestHostFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuestHostFile {
+    /// Where the file is on the machine running the adapter.
+    from: PathBuf,
+    /// Where the guest sees it.
+    guest_path: PathBuf,
+}
+
+/// Retained in the occurrence for the owner process the server starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuestOwnerLaunch {
+    schema: u32,
+    runtime_root: PathBuf,
+    host_files: Vec<GuestHostFile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -296,9 +342,24 @@ struct FailureRecord {
     message: String,
 }
 
+/// The provider state root this invocation opened, so a failure can be left
+/// where the tests retain it: the daemon deliberately never surfaces adapter
+/// diagnostics, and this adapter holds no real credentials.
+static OPENED_STATE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn main() {
     if let Err(error) = run() {
-        eprintln!("ryeos-synthetic-external-lifecycle-adapter: {error:#}");
+        let message = format!("{error:#}");
+        eprintln!("ryeos-synthetic-external-lifecycle-adapter: {message}");
+        if let Some(root) = OPENED_STATE_ROOT.get() {
+            let operation = std::env::args().nth(1).unwrap_or_default();
+            let name = format!(
+                "adapter-failure-{}-{}.txt",
+                operation.replace(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-', "_"),
+                std::process::id()
+            );
+            let _ = std::fs::write(root.join(name), message.as_bytes());
+        }
         std::process::exit(126);
     }
 }
@@ -322,6 +383,22 @@ fn run() -> Result<()> {
     match operation.as_str() {
         "inspect" => inspect(&adapter),
         "operate" => operate(&adapter),
+        "admit-lease" => lease_lane::admit(),
+        "await-lease-ready" => lease_lane::await_ready(),
+        "produce-snapshot" => snapshot_lane::produce_snapshot(&adapter),
+        "produce-snapshot-upload" => snapshot_lane::produce_snapshot_upload(&adapter),
+        "produce-snapshot-create" => snapshot_lane::produce_snapshot_create(&adapter),
+        "observe-snapshot-readiness" => snapshot_lane::observe_snapshot_readiness(&adapter),
+        "list-provider-resources" => snapshot_lane::list_provider_resources(&adapter),
+        "qualify-snapshot-create" => snapshot_lane::qualify_snapshot_create(&adapter),
+        "qualify-snapshot-verify" => snapshot_lane::qualify_snapshot_verify(&adapter),
+        "qualify-snapshot-observe" => snapshot_lane::observe_snapshot_qualification(&adapter),
+        "qualify-snapshot-terminate" => {
+            snapshot_lane::terminate_snapshot_qualification(&adapter, true)
+        }
+        "observe-snapshot-termination" => {
+            snapshot_lane::terminate_snapshot_qualification(&adapter, false)
+        }
         "serve-occurrence" => {
             let occurrence = PathBuf::from(
                 arguments
@@ -335,20 +412,32 @@ fn run() -> Result<()> {
                 arguments.next().is_none(),
                 "synthetic server has extra arguments"
             );
-            let result = serve_occurrence(&occurrence, &nonce);
-            if let Err(error) = &result {
-                if let Ok(Some(directory)) = lillux::PinnedDirectory::open(&occurrence) {
-                    let message = format!("{error:#}");
-                    if message.len() <= 64 * 1024 {
-                        let _ = ensure_document(
-                            &directory,
-                            FAILURE_FILE,
-                            &FailureRecord { schema: 1, message },
-                        );
-                    }
+            let result = serve_occurrence(&adapter, &occurrence, &nonce);
+            if let Err(error) = &result
+                && let Ok(Some(directory)) = lillux::PinnedDirectory::open(&occurrence)
+            {
+                let message = format!("{error:#}");
+                if message.len() <= 64 * 1024 {
+                    let _ = ensure_document(
+                        &directory,
+                        FAILURE_FILE,
+                        &FailureRecord { schema: 1, message },
+                    );
                 }
             }
             result
+        }
+        "run-guest-owner" => {
+            let occurrence = PathBuf::from(
+                arguments
+                    .next()
+                    .context("synthetic occurrence path is absent")?,
+            );
+            ensure!(
+                arguments.next().is_none(),
+                "synthetic guest owner process has extra arguments"
+            );
+            run_guest_owner(&occurrence)
         }
         _ => bail!("unsupported lifecycle adapter operation"),
     }
@@ -392,6 +481,32 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
             },
         )?;
     }
+    let observed_snapshot_spec = request
+        .snapshot_production_spec
+        .as_ref()
+        .map(|inspection| -> Result<String> {
+            // SAFETY: the lifecycle runner transferred this exact descriptor
+            // once into this single-threaded inspection process.
+            let authority =
+                unsafe { lillux::take_inherited_descriptor_authority(inspection.descriptor) }
+                    .map_err(anyhow::Error::msg)?;
+            let bytes = lillux::read_sealed_inherited_descriptor(
+                authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                usize::try_from(
+                    ryeos_external_execution_contract::MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
+                )?,
+            )
+            .map_err(anyhow::Error::msg)?;
+            ensure!(
+                u64::try_from(bytes.len())? == inspection.bytes
+                    && lillux::sha256_hex(&bytes) == inspection.digest,
+                "snapshot production spec differs from its signed inspection identity"
+            );
+            Ok(inspection.digest.clone())
+        })
+        .transpose()?;
     let response = LifecycleAdapterInspectionResponse {
         schema: 1,
         protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
@@ -402,7 +517,10 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         target: request.target.clone(),
         effective_capabilities: request.declared_capabilities.clone(),
         observed_provider_spec_sha256: request.provider_spec.digest.clone(),
-        observed_snapshot_production_spec_sha256: None,
+        observed_snapshot_production_spec_sha256: observed_snapshot_spec,
+        // This adapter has no materialized-source bootstrap path, so it
+        // observes no bootstrap profile and cannot authorize one.
+        observed_bootstrap_profile_digest: None,
         artifacts: request.artifacts.clone(),
     };
     response.validate_for(&request)?;
@@ -553,6 +671,17 @@ impl SyntheticSettings {
             "unsupported synthetic lifecycle settings schema"
         );
         require_absolute_normalized(&self.state_root)?;
+        if let Some(owner) = &self.guest_owner {
+            require_absolute_normalized(&owner.runtime_root)?;
+            ensure!(
+                owner.host_files.len() <= 8,
+                "too many guest owner host files"
+            );
+            for file in &owner.host_files {
+                require_absolute_normalized(&file.from)?;
+                require_absolute_normalized(&file.guest_path)?;
+            }
+        }
         ensure!(
             lillux::valid_hash(&self.expected_credential_sha256)
                 && (1..=500_000).contains(&self.maximum_copy_entries)
@@ -605,6 +734,7 @@ fn reconcile_allocation(
                 "allocation_absent",
                 &serde_json::json!({"request_digest": request_digest}),
             )?,
+            reason: "allocation_absent".into(),
         });
     };
     let record: AllocationRecord = read_document(&occurrence, ALLOCATION_FILE)?;
@@ -638,6 +768,8 @@ fn activate(
         return Ok(LifecycleAdapterResponse::SupervisorPending {
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: None,
+            contact_failure: None,
         });
     };
     phase_lock.ensure_protects(&occurrence_root)?;
@@ -724,166 +856,176 @@ fn activate(
     // semantic identity. Descriptor numbers were allocated in the controller;
     // the adapter does not open them as local authority. Import the inherited
     // package under the exact joined projection and retained coordinates.
-    let package = unsafe {
-        lillux::take_inherited_descriptor_authority_from_env(LIFECYCLE_GUEST_PACKAGE_FD_ENV)
-    }
-    .map_err(anyhow::Error::msg)?;
-    ensure!(
-        package.inherited_descriptor().map_err(anyhow::Error::msg)? == guest_package.descriptor,
-        "synthetic guest package descriptor changed at handoff"
-    );
-    let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
-    let import_context = ryeos_external_execution_contract::staging_package::GuestImportContext {
-        binding_hash: &request.common().binding_hash,
-        allocation_request_digest: &occurrence.request_digest,
-        occurrence_id: &retained.occurrence_id,
-        activation_request_digest: &retained.activation_request_digest,
-    };
-    ensure!(
-        import_ticket.bootstrap_sha256 == bootstrap_sha256
-            && import_ticket.supervisor_sha256 == retained.supervisor_digest
-            && import_ticket.launcher_sha256 == retained.launcher_digest,
-        "synthetic import ticket changed retained bootstrap or executable authority"
-    );
-    let expected = import_ticket.staging_expected(&import_context, guest_input_projection)?;
-    let mut reader = package.stable_regular_reader_exact(
-        guest_package.framed_bytes,
-        &guest_package.payload_sha256,
-        guest_package.framed_bytes,
-    )?;
-    let staged = ryeos_external_execution::guest_staging::stage_guest_package(
-        &mut reader,
-        &occurrence_root,
-        &expected,
-    )?;
-    if let Err(error) = reader.finish() {
-        staged
-            .discard()
-            .context("discard package after failed stable read")?;
-        return Err(error);
-    }
-    let installation = (|| -> Result<()> {
-        import_ticket.validate_verified_manifest(
-            &import_context,
-            staged.manifest(),
+    if let Some(owner) = &settings.guest_owner {
+        stage_owner_inputs(&occurrence_root, owner, guest_package)?;
+    } else {
+        let package = unsafe {
+            lillux::take_inherited_descriptor_authority_from_env(LIFECYCLE_GUEST_PACKAGE_FD_ENV)
+        }
+        .map_err(anyhow::Error::msg)?;
+        ensure!(
+            package.inherited_descriptor().map_err(anyhow::Error::msg)? == guest_package.descriptor,
+            "synthetic guest package descriptor changed at handoff"
+        );
+        let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
+        let import_context =
+            ryeos_external_execution_contract::staging_package::GuestImportContext {
+                binding_hash: &request.common().binding_hash,
+                allocation_request_digest: &occurrence.request_digest,
+                occurrence_id: &retained.occurrence_id,
+                activation_request_digest: &retained.activation_request_digest,
+            };
+        ensure!(
+            import_ticket.bootstrap_sha256 == bootstrap_sha256
+                && import_ticket.supervisor_sha256 == retained.supervisor_digest
+                && import_ticket.launcher_sha256 == retained.launcher_digest,
+            "synthetic import ticket changed retained bootstrap or executable authority"
+        );
+        let expected = import_ticket.staging_expected(&import_context, guest_input_projection)?;
+        let mut reader = package.stable_regular_reader_exact(
+            guest_package.framed_bytes,
             &guest_package.payload_sha256,
             guest_package.framed_bytes,
         )?;
-        ryeos_external_execution::guest_content::recheck_staged_guest_content(
-            &staged,
-            guest_input_projection,
+        let staged = ryeos_external_execution::guest_staging::stage_guest_package(
+            &mut reader,
+            &occurrence_root,
+            &expected,
         )?;
-        let guest_inputs = guest_input_projection;
-        let staged_root = staged.root();
-        let runtime = occurrence_root.create_child(OsStr::new(CANDIDATE_RUNTIME_DIR), 0o700)?;
-        let base = staged_root
-            .open_child_directory(OsStr::new("base"))?
-            .context("staged guest base is absent")?;
-        ryeos_project_capture::install_project_snapshot_transfer(
-            &base,
-            &runtime,
-            &ryeos_project_capture::ProjectSnapshotTransferMeasurement {
-                snapshot_hash: guest_inputs.base_snapshot.snapshot_hash.clone(),
-                closure_digest: guest_inputs.base_snapshot.closure_digest.clone(),
-                object_count: guest_inputs.base_snapshot.object_count,
-                blob_count: guest_inputs.base_snapshot.blob_count,
-                total_bytes: guest_inputs.base_snapshot.total_bytes,
-            },
-        )?;
-        occurrence_root.create_child(OsStr::new(SUPERVISOR_STATE_DIR), 0o700)?;
-        occurrence_root.create_child(OsStr::new(CANDIDATE_PRIVATE_DIR), 0o700)?;
-        let mounts = occurrence_root.create_child(OsStr::new(MOUNTS_DIR), 0o700)?;
-        if let Some(outputs) = &guest_inputs.workspace_outputs {
-            let output = staged_root
-                .open_pinned_regular(OsStr::new("workspace_outputs"), false)?
-                .context("staged workspace-output authority is absent")?
-                .inherited_descriptor_authority()?;
-            stage_regular(
-                &occurrence_root,
-                WORKSPACE_OUTPUT_FILE,
-                &output,
-                outputs.bytes,
-                &outputs.authority_hash,
-                0o600,
-            )?;
+        if let Err(error) = reader.finish() {
+            staged
+                .discard()
+                .context("discard package after failed stable read")?;
+            return Err(error);
         }
-        let mut record_index = 0;
-        for (index, input) in guest_inputs.inputs.iter().enumerate() {
-            let name = mount_name(index);
-            for (_, digest, bytes) in input.content_authority.record_descriptors() {
-                let source = staged_root
-                    .open_pinned_regular(OsStr::new(&format!("record-{record_index:02}")), false)?
-                    .context("staged guest content record is absent")?
+        let installation = (|| -> Result<()> {
+            import_ticket.validate_verified_manifest(
+                &import_context,
+                staged.manifest(),
+                &guest_package.payload_sha256,
+                guest_package.framed_bytes,
+            )?;
+            ryeos_external_execution::guest_content::recheck_staged_guest_content(
+                &staged,
+                guest_input_projection,
+            )?;
+            let guest_inputs = guest_input_projection;
+            let staged_root = staged.root();
+            let runtime = occurrence_root.create_child(OsStr::new(CANDIDATE_RUNTIME_DIR), 0o700)?;
+            let base = staged_root
+                .open_child_directory(OsStr::new("base"))?
+                .context("staged guest base is absent")?;
+            ryeos_project_capture::install_project_snapshot_transfer(
+                &base,
+                &runtime,
+                &ryeos_project_capture::ProjectSnapshotTransferMeasurement {
+                    snapshot_hash: guest_inputs.base_snapshot.snapshot_hash.clone(),
+                    closure_digest: guest_inputs.base_snapshot.closure_digest.clone(),
+                    object_count: guest_inputs.base_snapshot.object_count,
+                    blob_count: guest_inputs.base_snapshot.blob_count,
+                    total_bytes: guest_inputs.base_snapshot.total_bytes,
+                },
+            )?;
+            occurrence_root.create_child(OsStr::new(SUPERVISOR_STATE_DIR), 0o700)?;
+            occurrence_root.create_child(OsStr::new(CANDIDATE_PRIVATE_DIR), 0o700)?;
+            let mounts = occurrence_root.create_child(OsStr::new(MOUNTS_DIR), 0o700)?;
+            if let Some(outputs) = &guest_inputs.workspace_outputs {
+                let output = staged_root
+                    .open_pinned_regular(OsStr::new("workspace_outputs"), false)?
+                    .context("staged workspace-output authority is absent")?
                     .inherited_descriptor_authority()?;
                 stage_regular(
-                    &mounts,
-                    &content_record_name(record_index),
-                    &source,
-                    bytes,
-                    digest,
+                    &occurrence_root,
+                    WORKSPACE_OUTPUT_FILE,
+                    &output,
+                    outputs.bytes,
+                    &outputs.authority_hash,
                     0o600,
                 )?;
-                record_index += 1;
             }
-            match input.kind {
-                ryeos_external_execution_contract::GuestMountKind::Directory => {
-                    if matches!(
-                        input.content_authority,
-                        ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch { .. }
-                    ) {
-                        mounts.create_child(OsStr::new(&name), 0o700)?;
-                    } else {
+            let mut record_index = 0;
+            for (index, input) in guest_inputs.inputs.iter().enumerate() {
+                let name = mount_name(index);
+                for (_, digest, bytes) in input.content_authority.record_descriptors() {
+                    let source = staged_root
+                        .open_pinned_regular(
+                            OsStr::new(&format!("record-{record_index:02}")),
+                            false,
+                        )?
+                        .context("staged guest content record is absent")?
+                        .inherited_descriptor_authority()?;
+                    stage_regular(
+                        &mounts,
+                        &content_record_name(record_index),
+                        &source,
+                        bytes,
+                        digest,
+                        0o600,
+                    )?;
+                    record_index += 1;
+                }
+                match input.kind {
+                    ryeos_external_execution_contract::GuestMountKind::Directory => {
+                        if matches!(
+                            input.content_authority,
+                            ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch { .. }
+                        ) {
+                            mounts.create_child(OsStr::new(&name), 0o700)?;
+                        } else {
+                            let staged_name = format!("input-{index:02}");
+                            let observed = staged_root
+                                .entry_no_follow(OsStr::new(&staged_name))?
+                                .context("staged guest directory input is absent")?;
+                            ensure!(
+                                staged_root.move_child_if_same_noreplace_to(&observed, &mounts)?,
+                                "staged guest directory destination is occupied"
+                            );
+                            let moved = mounts
+                                .open_child_directory(OsStr::new(&staged_name))?
+                                .context("moved guest directory input is absent")?;
+                            mounts.rename_child_directory_noreplace(
+                                OsStr::new(&staged_name),
+                                OsStr::new(&name),
+                                &moved,
+                            )?;
+                        }
+                    }
+                    ryeos_external_execution_contract::GuestMountKind::RegularFile => {
+                        ensure!(
+                        !matches!(input.content_authority, ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch { .. }),
+                        "synthetic private scratch must be a directory"
+                    );
                         let staged_name = format!("input-{index:02}");
                         let observed = staged_root
                             .entry_no_follow(OsStr::new(&staged_name))?
-                            .context("staged guest directory input is absent")?;
+                            .context("staged guest regular input is absent")?;
                         ensure!(
                             staged_root.move_child_if_same_noreplace_to(&observed, &mounts)?,
-                            "staged guest directory destination is occupied"
+                            "staged guest regular destination is occupied"
                         );
                         let moved = mounts
-                            .open_child_directory(OsStr::new(&staged_name))?
-                            .context("moved guest directory input is absent")?;
-                        mounts.rename_child_directory_noreplace(
+                            .open_regular(OsStr::new(&staged_name), false)?
+                            .context("moved guest regular input is absent")?;
+                        mounts.rename_regular_child_noreplace_atomic(
                             OsStr::new(&staged_name),
                             OsStr::new(&name),
                             &moved,
                         )?;
                     }
                 }
-                ryeos_external_execution_contract::GuestMountKind::RegularFile => {
-                    ensure!(
-                    !matches!(input.content_authority, ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch { .. }),
-                    "synthetic private scratch must be a directory"
-                );
-                    let staged_name = format!("input-{index:02}");
-                    let observed = staged_root
-                        .entry_no_follow(OsStr::new(&staged_name))?
-                        .context("staged guest regular input is absent")?;
-                    ensure!(
-                        staged_root.move_child_if_same_noreplace_to(&observed, &mounts)?,
-                        "staged guest regular destination is occupied"
-                    );
-                    let moved = mounts
-                        .open_regular(OsStr::new(&staged_name), false)?
-                        .context("moved guest regular input is absent")?;
-                    mounts.rename_regular_child_noreplace_atomic(
-                        OsStr::new(&staged_name),
-                        OsStr::new(&name),
-                        &moved,
-                    )?;
-                }
             }
-        }
-        Ok(())
-    })();
-    let cleanup = staged.discard();
-    match (installation, cleanup) {
-        (Ok(()), Ok(())) => {}
-        (Err(error), Ok(())) => return Err(error),
-        (Ok(()), Err(error)) => return Err(error.context("guest package cleanup failed")),
-        (Err(error), Err(cleanup)) => {
-            return Err(error.context(format!("guest package cleanup also failed: {cleanup:#}")));
+            Ok(())
+        })();
+        let cleanup = staged.discard();
+        match (installation, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(()), Err(error)) => return Err(error.context("guest package cleanup failed")),
+            (Err(error), Err(cleanup)) => {
+                return Err(
+                    error.context(format!("guest package cleanup also failed: {cleanup:#}"))
+                );
+            }
         }
     }
 
@@ -941,6 +1083,22 @@ fn activate(
         READY_FILE,
         lillux::time::Duration::from_millis(settings.startup_timeout_ms),
     )?;
+    if settings.guest_owner.is_some() {
+        // A provider reads the owner's run stream: report what it said, once.
+        let report = wait_for_document::<
+            ryeos_external_execution_contract::guest_owner_report::GuestOwnerActivationReport,
+        >(
+            &occurrence_root,
+            OWNER_REPORT_FILE,
+            lillux::time::Duration::from_millis(settings.startup_timeout_ms),
+        )?;
+        return Ok(LifecycleAdapterResponse::SupervisorPending {
+            operation_id: request.common().operation_id.clone(),
+            activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: Some(report),
+            contact_failure: None,
+        });
+    }
     Ok(LifecycleAdapterResponse::SupervisorStarted {
         operation_id: request.common().operation_id.clone(),
         activation_request_digest: activation.activation_request_digest.clone(),
@@ -959,6 +1117,8 @@ fn reconcile_activation(
         return Ok(LifecycleAdapterResponse::SupervisorPending {
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: None,
+            contact_failure: None,
         });
     };
     phase_lock.ensure_protects(&occurrence_root)?;
@@ -967,6 +1127,8 @@ fn reconcile_activation(
         return Ok(LifecycleAdapterResponse::SupervisorPending {
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: None,
+            contact_failure: None,
         });
     };
     let mut retained: ActivationRecord = decode_document(&file)?;
@@ -1013,6 +1175,8 @@ fn reconcile_activation(
     Ok(LifecycleAdapterResponse::SupervisorPending {
         operation_id: request.common().operation_id.clone(),
         activation_request_digest: activation.activation_request_digest.clone(),
+        guest_owner: None,
+        contact_failure: None,
     })
 }
 
@@ -1051,6 +1215,7 @@ fn fence_staging_for_termination(
             Some(&incumbent),
             &canonical_bytes(activation)?,
             0o600,
+            SYNTHETIC_TEMP_PURPOSE,
         )?;
     }
     Ok(activation.phase == ActivationPhase::FencedBeforeSpawn)
@@ -1082,6 +1247,7 @@ fn author_spawn_intent(
         Some(&incumbent),
         &canonical_bytes(activation)?,
         0o600,
+        SYNTHETIC_TEMP_PURPOSE,
     )?;
     Ok(true)
 }
@@ -1218,7 +1384,11 @@ fn reconcile_termination(
     })
 }
 
-fn serve_occurrence(path: &Path, nonce: &str) -> Result<()> {
+fn serve_occurrence(
+    adapter: &lillux::InheritedDescriptorAuthority,
+    path: &Path,
+    nonce: &str,
+) -> Result<()> {
     require_absolute_normalized(path)?;
     ensure!(
         lillux::valid_hash(nonce),
@@ -1247,6 +1417,19 @@ fn serve_occurrence(path: &Path, nonce: &str) -> Result<()> {
             .is_none(),
         "synthetic occurrence was terminated before supervisor spawn"
     );
+    if occurrence
+        .open_pinned_regular(OsStr::new(OWNER_LAUNCH_FILE), false)?
+        .is_some()
+    {
+        return serve_guest_owner(
+            adapter,
+            &occurrence,
+            phase_lock,
+            activation,
+            &server_process,
+            path,
+        );
+    }
     let bootstrap_file = occurrence
         .open_pinned_regular(OsStr::new(BOOTSTRAP_FILE), false)?
         .context("synthetic supervisor bootstrap is absent")?;
@@ -1409,6 +1592,248 @@ fn serve_occurrence(path: &Path, nonce: &str) -> Result<()> {
     )
 }
 
+/// Retain what the daemon delivered for the installed guest owner: its signed
+/// import, its node-signed assignment and the exact guest package, unchanged.
+fn stage_owner_inputs(
+    occurrence: &lillux::PinnedDirectory,
+    owner: &GuestOwnerSettings,
+    guest_package: &ryeos_external_execution_contract::LifecycleGuestPackageDelivery,
+) -> Result<()> {
+    use base64::Engine as _;
+    use ryeos_external_execution_contract::guest_import_authorization::{
+        MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
+    };
+    let import = read_sealed_env(
+        ryeos_external_execution_contract::LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+        MAX_GUEST_IMPORT_AUTHORIZATION_BYTES + 256,
+    )?;
+    let assignment = read_sealed_env(
+        ryeos_external_execution_contract::LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+        MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
+    )?;
+    ensure_document_bytes(occurrence, OWNER_IMPORT_FILE, &import, 0o600)?;
+    ensure_document_bytes(
+        occurrence,
+        OWNER_ASSIGNMENT_FILE,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(&assignment)
+            .as_bytes(),
+        0o600,
+    )?;
+    // SAFETY: the admitted runner installed this descriptor once.
+    let package = unsafe {
+        lillux::take_inherited_descriptor_authority_from_env(LIFECYCLE_GUEST_PACKAGE_FD_ENV)
+    }
+    .map_err(anyhow::Error::msg)?;
+    ensure!(
+        package.inherited_descriptor().map_err(anyhow::Error::msg)? == guest_package.descriptor,
+        "synthetic guest package descriptor changed at handoff"
+    );
+    stage_regular(
+        occurrence,
+        OWNER_PACKAGE_FILE,
+        &package,
+        guest_package.framed_bytes,
+        &guest_package.payload_sha256,
+        0o600,
+    )?;
+    ensure_document(
+        occurrence,
+        OWNER_LAUNCH_FILE,
+        &GuestOwnerLaunch {
+            schema: 1,
+            runtime_root: owner.runtime_root.clone(),
+            host_files: owner.host_files.clone(),
+        },
+    )
+}
+
+/// The server of a guest-owner occurrence: it starts a dedicated process that
+/// runs the real owner in a root enclosure, and keeps the occurrence's ready,
+/// terminate and terminal records exactly as the direct supervisor server does.
+fn serve_guest_owner(
+    adapter: &lillux::InheritedDescriptorAuthority,
+    occurrence: &lillux::PinnedDirectory,
+    phase_lock: lillux::PinnedDirectoryLock,
+    activation: ActivationRecord,
+    server_process: &lillux::ExactProcessIdentity,
+    path: &Path,
+) -> Result<()> {
+    let path = path.to_str().context("occurrence path is not UTF-8")?;
+    let mut process = lillux::SubprocessRequest {
+        cmd: String::new(),
+        argv0: Some("ryeos-synthetic-external-lifecycle-adapter".into()),
+        args: vec!["run-guest-owner".into(), path.into()],
+        cwd: Some("/".into()),
+        envs: vec![(
+            LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV.into(),
+            SUPERVISOR_EXECUTABLE_FD.to_string(),
+        )],
+        stdin_data: None,
+        timeout: 3_600.0,
+        limits: Some(lillux::SubprocessLimits {
+            max_open_files: Some(256),
+            max_stdout_bytes: Some(64 * 1024),
+            max_stderr_bytes: Some(256 * 1024),
+            ..lillux::SubprocessLimits::default()
+        }),
+        inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
+        supervised_status: None,
+    };
+    adapter
+        .bind_as_subprocess_executable(&mut process, SUPERVISOR_EXECUTABLE_FD)
+        .map_err(anyhow::Error::msg)?;
+    ensure!(
+        occurrence
+            .open_pinned_regular(OsStr::new(TERMINATE_FILE), false)?
+            .is_none(),
+        "synthetic occurrence was terminated during owner preparation"
+    );
+    let running = lillux::spawn(process)
+        .map_err(|failure| anyhow::anyhow!("launch guest owner process: {}", failure.stderr))?;
+    let owner_process = lillux::capture_exact_process_identity(running.pid, Some(running.pid))
+        .map_err(anyhow::Error::msg)?;
+    ensure_document(
+        occurrence,
+        READY_FILE,
+        &ReadyRecord {
+            schema: 1,
+            activation_request_digest: activation.activation_request_digest.clone(),
+            server_process_digest: server_process
+                .incarnation_digest()
+                .map_err(anyhow::Error::msg)?,
+            supervisor_process: owner_process.clone(),
+        },
+    )?;
+    drop(phase_lock);
+    let result = running.wait_interruptible(|| {
+        occurrence
+            .open_pinned_regular(OsStr::new(TERMINATE_FILE), false)
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    ensure_document(
+        occurrence,
+        TERMINAL_FILE,
+        &TerminalRecord {
+            schema: 1,
+            activation_request_digest: activation.activation_request_digest,
+            server_process_digest: server_process
+                .incarnation_digest()
+                .map_err(anyhow::Error::msg)?,
+            supervisor_process_digest: owner_process
+                .incarnation_digest()
+                .map_err(anyhow::Error::msg)?,
+            supervisor_success: result.success,
+            supervisor_exit_code: result.exit_code,
+            supervisor_timed_out: result.timed_out,
+            supervisor_stderr: result.stderr,
+        },
+    )
+}
+
+/// The dedicated process of one guest-owner occurrence: lay out the installed
+/// runtime, the daemon's signed import and package in a root enclosure (the
+/// rehearsal host's own layout), start the real owner with the signed
+/// assignment, and record what its stdout report says.
+fn run_guest_owner(path: &Path) -> Result<()> {
+    use ryeos_external_execution_contract::guest_owner_report::{
+        GuestOwnerActivationReport, GuestOwnerStdout, GuestOwnerTerminal,
+    };
+    require_absolute_normalized(path)?;
+    let occurrence =
+        lillux::PinnedDirectory::open(path)?.context("synthetic occurrence disappeared")?;
+    let launch: GuestOwnerLaunch = read_document(&occurrence, OWNER_LAUNCH_FILE)?;
+    ensure!(launch.schema == 1, "unsupported guest owner launch record");
+    let runtime = lillux::PinnedDirectory::open(&launch.runtime_root)?
+        .context("preinstalled guest runtime is absent")?;
+    let import = occurrence
+        .open_pinned_regular(OsStr::new(OWNER_IMPORT_FILE), false)?
+        .context("signed guest import is absent")?;
+    let package = occurrence
+        .open_pinned_regular(OsStr::new(OWNER_PACKAGE_FILE), false)?
+        .context("guest package is absent")?;
+    let assignment = occurrence
+        .open_pinned_regular(OsStr::new(OWNER_ASSIGNMENT_FILE), false)?
+        .context("signed guest assignment is absent")?;
+    let assignment_b64 = String::from_utf8(assignment.read_bounded(256 * 1024)?)?;
+    let host_files = launch
+        .host_files
+        .iter()
+        .map(|file| {
+            lillux::open_pinned_regular_file_no_follow(&file.from)
+                .with_context(|| format!("open enclosure host file {}", file.from.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let observed =
+        ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime::observe(
+            &runtime,
+        )?;
+    let manifest = observed.manifest_hash().to_owned();
+    let deadline =
+        lillux::time::Duration::from_secs(u64::from(observed.profile().owner_timeout_seconds) + 60);
+    let host_inputs = launch
+        .host_files
+        .iter()
+        .zip(&host_files)
+        .map(|(path, file)| (path.guest_path.as_path(), file))
+        .collect::<Vec<_>>();
+    let mut stdout = GuestOwnerStdout::new();
+    let mut reported = false;
+    let mut on_stdout = |text: &str| {
+        if reported {
+            return;
+        }
+        let report = match stdout.push(text) {
+            Ok(None) => return,
+            Ok(Some(GuestOwnerTerminal::Held)) => GuestOwnerActivationReport::Held {
+                last_phase: stdout.last_phase(),
+                supervisor_exit: None,
+            },
+            Ok(Some(GuestOwnerTerminal::Refused(step))) => GuestOwnerActivationReport::Refused {
+                step,
+                last_phase: stdout.last_phase(),
+                detail: stdout.refusal_detail().map(str::to_owned),
+                site: stdout.refusal_site(),
+            },
+            Err(_) => GuestOwnerActivationReport::MalformedReport {
+                last_phase: stdout.last_phase(),
+            },
+        };
+        reported = true;
+        if let Err(error) = ensure_document(&occurrence, OWNER_REPORT_FILE, &report) {
+            eprintln!("guest owner report could not be recorded: {error:#}");
+        }
+    };
+    let code = ryeos_external_execution::guest_start_rehearsal::run_guest_owner_in_enclosure(
+        &ryeos_external_execution::guest_start_rehearsal::GuestOwnerEnclosureRequest {
+            runtime: &runtime,
+            runtime_manifest_hash: &manifest,
+            signed_import: &import,
+            package: &package,
+            assignment_b64: &assignment_b64,
+            owner_deadline: deadline,
+            host_files: &host_inputs,
+        },
+        &mut on_stdout,
+    )?;
+    // The enclosure's init recorded any report from inside; if the owner
+    // ended without one, say so.
+    if occurrence
+        .open_pinned_regular(OsStr::new(OWNER_REPORT_FILE), false)?
+        .is_none()
+    {
+        ensure_document(
+            &occurrence,
+            OWNER_REPORT_FILE,
+            &GuestOwnerActivationReport::ExitedBeforeReport { last_phase: None },
+        )?;
+    }
+    std::process::exit(code);
+}
+
 fn require_occurrence(
     root: &lillux::PinnedDirectory,
     request: &LifecycleAdapterRequest,
@@ -1444,6 +1869,7 @@ fn require_allocation(
 }
 
 fn open_state_root(settings: &SyntheticSettings) -> Result<lillux::PinnedDirectory> {
+    let _ = OPENED_STATE_ROOT.set(settings.state_root.clone());
     let root = lillux::PinnedDirectory::open(&settings.state_root)?
         .context("synthetic lifecycle state root is absent")?;
     root.require_owner_private_directory()?;
@@ -1595,7 +2021,13 @@ fn ensure_document_bytes(
         );
         return Ok(());
     }
-    directory.atomic_write_pinned_if_same(OsStr::new(name), None, bytes, mode)
+    directory.atomic_write_pinned_if_same(
+        OsStr::new(name),
+        None,
+        bytes,
+        mode,
+        SYNTHETIC_TEMP_PURPOSE,
+    )
 }
 
 fn replace_document<T: Serialize>(
@@ -1611,6 +2043,7 @@ fn replace_document<T: Serialize>(
         Some(&existing),
         &canonical_bytes(value)?,
         0o600,
+        SYNTHETIC_TEMP_PURPOSE,
     )
 }
 
@@ -1861,10 +2294,9 @@ mod tests {
         for content in &contents {
             let staged = stage_content_records(&mounts, content, &mut index, |descriptor| {
                 adopted.push(descriptor);
-                Ok(root
-                    .open_pinned_regular(OsStr::new(&format!("input-{descriptor}")), false)?
+                root.open_pinned_regular(OsStr::new(&format!("input-{descriptor}")), false)?
                     .context("fixture descriptor absent")?
-                    .inherited_descriptor_authority()?)
+                    .inherited_descriptor_authority()
             })
             .unwrap();
             assert_eq!(staged.len(), content.record_descriptors().count());
@@ -1909,10 +2341,9 @@ mod tests {
         let missing = root.create_child(OsStr::new("missing"), 0o700).unwrap();
         let result = stage_content_records(&missing, &content, &mut missing_index, |descriptor| {
             ensure!(descriptor == 101, "fixture manifest descriptor absent");
-            Ok(root
-                .open_pinned_regular(OsStr::new("binding"), false)?
+            root.open_pinned_regular(OsStr::new("binding"), false)?
                 .unwrap()
-                .inherited_descriptor_authority()?)
+                .inherited_descriptor_authority()
         });
         assert!(
             result
@@ -1929,10 +2360,10 @@ mod tests {
             ensure_document_bytes(&mounts, "wrong", wrong_bytes, 0o600).unwrap();
             let mut index = 0;
             let result = stage_content_records(&mounts, &content, &mut index, |_| {
-                Ok(mounts
+                mounts
                     .open_pinned_regular(OsStr::new("wrong"), false)?
                     .unwrap()
-                    .inherited_descriptor_authority()?)
+                    .inherited_descriptor_authority()
             });
             assert!(
                 result
@@ -2048,8 +2479,9 @@ mod tests {
                 activation_request_digest: self.activation.activation_request_digest.clone(),
                 supervisor_runtime_hash: "4".repeat(64),
                 launcher_artifact_hash: self.activation.launcher_digest.clone(),
-                attachment_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap()
-                    + 60_000,
+                guest_runtime_artifact_hash: None,
+                guest_runtime_artifact_bytes: None,
+                attachment_deadline_ms: lillux::time::timestamp_millis() + 60_000,
                 execution_timeout_seconds: 60,
                 post_execution_timeout_seconds: 1,
                 channel_max_bytes: 1024,
@@ -2162,6 +2594,7 @@ mod tests {
             maximum_copy_depth: 8,
             startup_timeout_ms: 1_000,
             faults: BTreeSet::new(),
+            guest_owner: None,
         };
         valid.validate().unwrap();
         let mut invalid = valid.clone();

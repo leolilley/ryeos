@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 #
-# ryeosd-full:dev — fast local dev image.
+# ryeosd-standard:dev — fast local dev image of the standard set.
 # Copies host-built release binaries + already-published bundles
 # instead of compiling inside the image. Run scripts/populate-bundles.sh
 # on the host first.
 #
 # Build:
-#   docker build -f Dockerfile.dev -t ryeosd-full:dev .
+#   docker build -f Dockerfile.dev -t ryeosd-standard:dev .
 # Run (explicitly trust the dev/custom publisher baked into this image):
-#   docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-full:dev
+#   docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-standard:dev
 
 # debian:trixie ships glibc 2.41+, matching modern host toolchains. The
 # previous base (debian:bookworm-slim, glibc 2.36) refused to load
@@ -21,11 +21,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 
 WORKDIR /app
+
+# Node account. The daemon, `ryeos init` and every operator command in this
+# image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
+# root as the recorded actor of `ryeos node allow-restart` and
+# `ryeos node capacity reissue`, so a node running as root could never have
+# its restart inhibition cleared from inside its own container. The
+# entrypoint script is pid 1 and starts as root only to hand /data (a
+# platform volume, mounted root-owned) to this account, then replaces itself
+# with tini running as ryeos, so the init and the daemon share one uid and
+# the init needs no capability to forward the stop signal. The script runs
+# again under tini before any ryeos command.
+RUN groupadd --gid 10000 ryeos && \
+    useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
+      --shell /usr/sbin/nologin ryeos && \
+    install -d -o ryeos -g ryeos -m 0750 /data /data/app
 
 # Host-built binaries (release profile, x86_64-unknown-linux-gnu).
 COPY target/release/ryeosd             /usr/local/bin/ryeosd
@@ -35,23 +51,25 @@ COPY target/release/ryeos-core-tools   /usr/local/bin/ryeos-core-tools
 # Already-published bundles (CAS rebuilt by populate-bundles.sh).
 COPY bundles/.ai         /opt/ryeos/.ai
 COPY bundles/core        /opt/ryeos/core
-COPY bundles/central-auth /opt/ryeos/central-auth
-COPY bundles/standard    /opt/ryeos/standard
+COPY bundles/scheduling /opt/ryeos/scheduling
+COPY bundles/knowledge /opt/ryeos/knowledge
+COPY bundles/directive /opt/ryeos/directive
+COPY bundles/graph /opt/ryeos/graph
+COPY bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY bundles/web         /opt/ryeos/web
 COPY bundles/browser     /opt/ryeos/browser
 COPY bundles/ryeos-ui     /opt/ryeos/ryeos-ui
-COPY bundles/hosted-node /opt/ryeos/hosted-node
 COPY bundles/codex       /opt/ryeos/codex
-COPY bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY bundles/opencode    /opt/ryeos/opencode
-COPY bundles/local-inference /opt/ryeos/local-inference
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
-ENV RYEOS_INIT_NODE_PROFILE=full
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+ENV RYEOS_INIT_NODE_PROFILE=standard
 EXPOSE 8000
 
 # Image-level provenance only. The binary's own revision is baked in by the
@@ -66,4 +84,4 @@ LABEL org.opencontainers.image.created="$BUILD_DATE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

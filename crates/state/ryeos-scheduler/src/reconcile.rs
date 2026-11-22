@@ -55,8 +55,12 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     if drained > 0 {
         tracing::info!(drained, "scheduler: recovered durable fire-journal outbox");
     }
-    let live_ids =
-        projection::rebuild_specs_from_dir(&schedules_dir, &db, ctx.schedule_trust_store())?;
+    let live_ids = projection::rebuild_specs_from_dir(
+        &schedules_dir,
+        &db,
+        ctx.schedule_trust_store(),
+        ctx.schedule_signer_fingerprint(),
+    )?;
 
     let specs = db.list_specs(false, None)?;
     let now = lillux::time::timestamp_millis();
@@ -151,7 +155,7 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                                     tracing::warn!(
                                         fire_id = %fire.fire_id,
                                         thread_id = %thread_id,
-                                        error = %e,
+                                        error = %format!("{e:#}"),
                                         "recovered: failed to inspect completed thread result"
                                     );
                                     None
@@ -361,13 +365,13 @@ mod tests {
     }
 
     impl MockContext {
-        fn new() -> Self {
+        fn new(db: Arc<crate::db::SchedulerDb>) -> Self {
             let app_root = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(app_root.path().join(ryeos_engine::AI_DIR).join("state"))
                 .unwrap();
             Self {
                 app_root,
-                db: Arc::new(crate::db::SchedulerDb::new_in_memory().unwrap()),
+                db,
                 gate: Arc::new(RwLock::new(())),
                 trust: TrustStore::empty(),
                 statuses: Mutex::new(HashMap::new()),
@@ -391,6 +395,10 @@ mod tests {
 
         fn schedule_trust_store(&self) -> &TrustStore {
             &self.trust
+        }
+
+        fn schedule_signer_fingerprint(&self) -> &str {
+            ""
         }
 
         fn get_thread_status(&self, thread_id: &str) -> anyhow::Result<Option<String>> {
@@ -434,11 +442,21 @@ mod tests {
                 admitted_capsule_hash: "44".repeat(32),
             })
         }
+
+        async fn auto_pause_schedule(
+            &self,
+            _schedule_id: &str,
+            _expected_spec_hash: &str,
+            _reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
     }
 
     #[tokio::test]
     async fn recover_completed_fire_uses_result_failed_outcome() {
-        let ctx = MockContext::new();
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = MockContext::new(store.shared());
         let thread_id = crate::types::thread_id_from_fire("sched@1000");
         let fire = FireRecord {
             fire_id: "sched@1000".to_string(),
@@ -483,7 +501,8 @@ mod tests {
 
     #[tokio::test]
     async fn current_projection_startup_does_not_replay_fire_jsonl() {
-        let ctx = MockContext::new();
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = MockContext::new(store.shared());
         ctx.db.begin_fire_projection_rebuild().unwrap();
         ctx.db.finish_fire_projection_rebuild().unwrap();
 

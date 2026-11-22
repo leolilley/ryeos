@@ -19,7 +19,7 @@
 //! Each test brings up its own daemon in a tempdir to avoid cross-test
 //! interference. The daemon binds `127.0.0.1:0` (kernel-assigned port).
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::{DaemonHarness, run_service_standalone_fresh, ryeos_binary, ryeosd_binary};
 
@@ -41,7 +41,7 @@ async fn live_execute_service_node_status_over_tcp() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_run_service_node_status() {
-    let (out, _sd, _us) = run_service_standalone_fresh("service:node/status", None)
+    let (out, _node) = run_service_standalone_fresh("service:node/status", None)
         .await
         .expect("run-service");
     assert!(
@@ -90,12 +90,16 @@ async fn cli_initialized_but_stopped_suggests_start() {
     // fails before lifecycle preflight can report the stopped node.
     let (_core_tmp, state_path) = common::copy_core_to_temp();
     let user_space = tempfile::tempdir().expect("user tempdir");
-    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
-        .expect("populate initialized state");
+    let fixture = common::fast_fixture::populate_initialized_state_with_profile(
+        &state_path,
+        user_space.path(),
+        common::fast_fixture::FastFixtureProfile::Standard,
+    )
+    .expect("populate Standard-profile state");
     common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core");
-    common::fast_fixture::register_standard_bundle(&state_path, &fixture)
-        .expect("register standard");
+    common::fast_fixture::register_standard_composition(&state_path, &fixture)
+        .expect("register Standard composition");
     common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");
 
     let ryeos = ryeos_binary();
@@ -141,7 +145,7 @@ async fn stopped_node_service_errors_when_daemon_up() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_only_service_errors_via_run_service() {
-    let (out, _sd, _us) = run_service_standalone_fresh(
+    let (out, _node) = run_service_standalone_fresh(
         "service:commands/submit",
         Some(r#"{"thread_id":"T-test","command_type":"noop","params":{}}"#),
     )
@@ -442,14 +446,18 @@ async fn uds_namespace_rejects_service_methods() {
 async fn state_lock_prevents_concurrent_daemons() {
     let (_core_tmp, state_path) = common::copy_core_to_temp();
     let user_space = tempfile::tempdir().expect("user tempdir");
-    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
-        .expect("populate initialized state");
+    let fixture = common::fast_fixture::populate_initialized_state_with_profile(
+        &state_path,
+        user_space.path(),
+        common::fast_fixture::FastFixtureProfile::Core,
+    )
+    .expect("populate Core-profile state");
     common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core bundle");
     common::fast_fixture::seal_initialized_state(&state_path).expect("seal initialized state");
 
-    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&state_path),
+    let _state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&state_path),
     )
     .expect("hold first daemon state lock");
 
@@ -562,6 +570,56 @@ async fn daemon_startup_proves_bundle_yamls_parse() {
     );
 }
 
+// ── Node state signed by a pinned non-node key is refused at startup ──
+//   Everything under the app root's `.ai/node/` is node state. A route there
+//   signed by the fixture publisher (a pinned, item-trusted key) must not
+//   load: startup refuses it with `node_document_wrong_signer`.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn app_root_route_signed_by_publisher_is_refused_at_startup() {
+    let result = DaemonHarness::start_fast_with(
+        |state_path, _user_space, fixture| {
+            let routes_dir = state_path.join(".ai").join("node").join("routes");
+            std::fs::create_dir_all(&routes_dir)?;
+            let body = r#"id: planted/publisher
+path: /planted/publisher
+methods:
+  - GET
+auth: none
+limits:
+  body_bytes_max: 1024
+  timeout_ms: 1000
+  concurrent_max: 1
+response:
+  mode: json
+  body_b64: e30=
+"#;
+            let signed = lillux::signature::sign_content_at(
+                body,
+                &fixture.publisher,
+                "#",
+                None,
+                common::fast_fixture::FAST_FIXTURE_TIME,
+            );
+            std::fs::write(routes_dir.join("planted.yaml"), signed)?;
+            Ok(())
+        },
+        |_cmd| {},
+    )
+    .await;
+
+    match result {
+        Ok(_) => panic!("daemon must refuse an app-root route signed by a non-node key"),
+        Err(e) => {
+            let err_msg = format!("{:#}", e);
+            assert!(
+                err_msg.contains("node_document_wrong_signer"),
+                "error should name node_document_wrong_signer, got: {err_msg}"
+            );
+        }
+    }
+}
+
 // ── Test 13: legacy structural fields rejected by daemon startup ──
 //   Node config identity is derived from the path. A node YAML body that still
 //   declares `section` must fail during startup rather than being tolerated as
@@ -606,7 +664,7 @@ response:
         Err(e) => {
             let err_msg = format!("{:#}", e);
             assert!(
-                err_msg.contains("legacy structural field 'section'"),
+                err_msg.contains("declares path-owned structural field 'section'"),
                 "error should mention legacy section rejection, got: {err_msg}"
             );
         }

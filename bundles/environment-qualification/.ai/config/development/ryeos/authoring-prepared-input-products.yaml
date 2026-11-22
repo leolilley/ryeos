@@ -1,0 +1,130 @@
+# ryeos:signed:2026-10-17T01:18:26Z:5c2683789cee8fb069a07cf523cdfb1168c788665f99eb74e32dbbce959d7498:BbBIB1tOCOJsS8KxVvuMZ9RdDfHHZvbAm1QjE700PW8epPLI/0vTJxlPKByMWaNAK4XdM+5UVYnOIm0i9dYNAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.0"
+description: Named retained output from the exact authoring input preparation recipe
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: prepared_inputs
+      path: products/authoring-prepared-inputs
+      storage: large_content
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+  products:
+    - name: prepared_inputs
+      source: {kind: workspace_output, root: prepared_inputs}
+      path: products/authoring-prepared-inputs/tree
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 1024
+        maximum_depth: 32
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: prepared_inputs_to_environment_production
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-prepared-inputs-production
+        recipe_binding: product_recipe
+        product_name: prepared_inputs
+        parameters: {}
+      consumer:
+        canonical_ref: graph:ryeos/development/authoring-environment-production
+        declaration_id: assembly-inputs
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: prepared_inputs_to_gnu_python_production
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-prepared-inputs-production
+        recipe_binding: product_recipe
+        product_name: prepared_inputs
+        parameters: {}
+      consumer:
+        canonical_ref: graph:ryeos/development/gnu-python-production
+        declaration_id: production-support
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: prepared_inputs_to_gnu_python_private_production
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-prepared-inputs-production
+        recipe_binding: product_recipe
+        product_name: prepared_inputs
+        parameters: {}
+      consumer:
+        canonical_ref: graph:ryeos/development/gnu-python-private-production
+        declaration_id: production-support
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: prepared_inputs_to_gnu_python_private_qualification
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-prepared-inputs-production
+        recipe_binding: product_recipe
+        product_name: prepared_inputs
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/environments/qualification/gnu-python-private
+        declaration_id: gnu-python-support
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: prepared_inputs_to_native_authoring_qualification
+      producer:
+        canonical_ref: graph:ryeos/development/authoring-prepared-inputs-production
+        recipe_binding: product_recipe
+        product_name: prepared_inputs
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/environments/qualification/native-authoring/verify
+        declaration_id: prepared-inputs
+      required_product:
+        shape: tree
+        storage: large_content
+        bounds:
+          maximum_entries: 1024
+          maximum_depth: 32
+          maximum_file_bytes: 134217728
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []

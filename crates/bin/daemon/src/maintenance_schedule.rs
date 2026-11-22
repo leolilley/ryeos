@@ -22,23 +22,25 @@
 //! parameters, and capabilities are all required signed policy fields;
 //! this adapter supplies no behavioral defaults.
 
+/// Owner token carried by the managed maintenance spec publication.
+const MAINTENANCE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("daemon");
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use ryeos_app::identity::NodeIdentity;
-use ryeos_app::node_document;
-use ryeos_app::node_policy::sections::maintenance::{
-    NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy,
-};
 use ryeos_app::state::AppState;
+use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::node_document;
+use ryeos_scheduler_contract::{NodeMaintenancePolicy, NodeMaintenanceSchedulePolicy};
 
 /// Exact ownership discriminator written into generated schedule specs.
 /// Both fields must match before reconciliation may mutate or remove a spec.
 const MANAGED_BY_TYPE: &str = "node_maintenance_policy";
 const MANAGED_BY_SOURCE: &str = ryeos_scheduler::types::NODE_MAINTENANCE_POLICY_SOURCE;
+const MANAGED_SPEC_VERSION: u32 = 2;
 
 /// Materialize the mandatory node maintenance policy as signed schedule specs.
 pub fn ensure_maintenance_schedule(state: &AppState) -> Result<()> {
@@ -71,11 +73,51 @@ fn apply_maintenance_schedules(
         .map(|schedule| schedule.schedule_id.clone())
         .collect::<HashSet<_>>();
 
-    let node_directory = lillux::PinnedDirectory::open_or_create(node_dir)
-        .context("establish no-follow node configuration root")?;
-    let schedules_directory = node_directory
-        .open_or_create_child(std::ffi::OsStr::new("schedules"), 0o777)
-        .context("establish no-follow schedules directory")?;
+    // A policy with no declarations only retires previously managed specs, so
+    // it never creates the schedules directory: an absent directory has
+    // nothing to retire, and creating it would leave scheduler-shaped state on
+    // a node that never held a schedule. Only a missing entry is skipped: a
+    // regular file, a symlink or any other non-directory at that name is
+    // refused, never read past as if no schedules existed.
+    let schedules_name = std::ffi::OsStr::new("schedules");
+    let schedules_directory = if declarations.is_empty() {
+        let Some(node_directory) = lillux::PinnedDirectory::open(node_dir)
+            .context("open no-follow node configuration root")?
+        else {
+            return Ok(());
+        };
+        let Some(entry) = node_directory
+            .entry_no_follow(schedules_name)
+            .context("observe the no-follow schedules entry")?
+        else {
+            return Ok(());
+        };
+        let not_a_directory = || {
+            anyhow::anyhow!(
+                "maintenance schedules cannot be retired: {} is not a directory",
+                node_directory.path().join(schedules_name).display()
+            )
+        };
+        if !matches!(entry.entry_type, lillux::PinnedEntryType::Directory) {
+            return Err(not_a_directory());
+        }
+        match node_directory
+            .open_entry(schedules_name, false)
+            .context("open no-follow schedules directory")?
+        {
+            Some(lillux::PinnedDirectoryEntry::Directory(schedules_directory)) => {
+                schedules_directory
+            }
+            Some(lillux::PinnedDirectoryEntry::Regular(_)) | None => {
+                return Err(not_a_directory());
+            }
+        }
+    } else {
+        lillux::PinnedDirectory::open_or_create(node_dir)
+            .context("establish no-follow node configuration root")?
+            .open_or_create_child(schedules_name, 0o777)
+            .context("establish no-follow schedules directory")?
+    };
     let _schedules_lock = schedules_directory.lock_exclusive()?;
     let schedules_dir = schedules_directory.path();
     let existing_files = scan_schedule_files(&schedules_directory)?;
@@ -247,7 +289,7 @@ fn scan_schedule_files(
             .file_stem()
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| anyhow::anyhow!("schedule filename must be UTF-8"))?;
-        ryeos_scheduler::crontab::validate_schedule_id(schedule_id)?;
+        ryeos_scheduler_contract::validate_schedule_id(schedule_id)?;
         by_id.entry(schedule_id.to_string()).or_default().push(path);
     }
     Ok(by_id)
@@ -286,31 +328,28 @@ fn load_managed_specs(
 fn load_managed_spec_file(
     path: &Path,
     file: &lillux::PinnedRegularFile,
-    trust_store: &ryeos_engine::trust::TrustStore,
+    _trust_store: &ryeos_engine::trust::TrustStore,
     identity: &NodeIdentity,
 ) -> Result<Option<ManagedSpec>> {
     // This is ownership reconciliation, not schedule admission. Authenticate
     // the existing node document without decoding its disposable execution
     // payload. Only pause and registration metadata survive regeneration;
     // all execution authority comes from the current signed node policy.
-    let verified = node_document::verify_pinned_signed_yaml(file, trust_store)
+    let verified = node_document::verify_node_signed_document_file(file, identity.verifying_key())
         .with_context(|| format!("verify existing schedule {}", path.display()))?;
     let body = verified.body;
     if !is_managed_maintenance_spec(&body) {
         return Ok(None);
     }
-    if verified.signer_fingerprint != identity.fingerprint() {
-        bail!(
-            "managed maintenance schedule {} is not signed by this node",
-            path.display()
-        );
-    }
     let ownership: MaintenanceScheduleOwnership = serde_json::from_value(body.clone())
         .context("decode maintenance schedule ownership metadata")?;
-    if ownership.spec_version == 0 || ownership.spec_version > 2 {
+    if ownership.spec_version != MANAGED_SPEC_VERSION {
         bail!(
-            "unsupported managed schedule source version {}",
-            ownership.spec_version
+            "managed maintenance schedule {} has spec_version {}, not {}; \
+             remove that file and restart the node to regenerate it from node policy",
+            path.display(),
+            ownership.spec_version,
+            MANAGED_SPEC_VERSION
         );
     }
     let schedule_id = loaded_id(&body, path)?;
@@ -379,7 +418,7 @@ fn maintenance_spec_body(
 ) -> Value {
     // The node is both signer and acting principal for its own maintenance.
     serde_json::json!({
-        "spec_version": 2,
+        "spec_version": MANAGED_SPEC_VERSION,
         "schedule_id": decl.schedule_id,
         "item_ref": decl.item_ref,
         "ref_bindings": decl.ref_bindings,
@@ -420,7 +459,13 @@ fn write_maintenance_spec(
 ) -> Result<()> {
     let bytes = node_document::render_signed_item("schedules", &decl.schedule_id, body, identity)?;
     let name = format!("{}.yaml", decl.schedule_id);
-    schedules_dir.atomic_write_pinned_if_same(std::ffi::OsStr::new(&name), expected, &bytes, 0o600)
+    schedules_dir.atomic_write_pinned_if_same(
+        std::ffi::OsStr::new(&name),
+        expected,
+        &bytes,
+        0o600,
+        MAINTENANCE_TEMP_PURPOSE,
+    )
 }
 
 #[cfg(test)]
@@ -498,7 +543,10 @@ mod tests {
         .unwrap();
     }
 
-    const POLICY: &str = r#"schema: 1
+    const POLICY: &str = r#"schema: 5
+offline_native: {}
+remote_offline_operations: []
+offline_reset: null
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
@@ -620,43 +668,27 @@ schedules:
     }
 
     #[test]
-    fn regenerates_owned_schedule_without_reusing_predecessor_execution() {
+    fn refuses_owned_schedule_with_other_spec_version_without_replacement() {
         let tmp = tempfile::tempdir().unwrap();
         let node_dir = tmp.path().join(".ai/node");
         let id = identity();
         let trust = trust_store(&id);
         let policy = policy(POLICY);
-        let mut predecessor = maintenance_spec_body(&policy.schedules[0], false, 1234, &id);
-        predecessor["spec_version"] = serde_json::json!(1);
-        predecessor["execution"] = serde_json::json!({
-            "requester_fingerprint": id.fingerprint(),
-            "capabilities": ["ryeos.execute.service.unwanted/task"],
-        });
-        let path = node_document::write_signed_item(
-            &node_dir,
-            "schedules",
-            "maintenance-gc",
-            &predecessor,
-            &id,
-        )
-        .unwrap();
-        assert!(ryeos_scheduler::projection::load_verified_schedule_source(&path, &trust).is_err());
+        let mut body = maintenance_spec_body(&policy.schedules[0], false, 1234, &id);
+        body["spec_version"] = serde_json::json!(1);
+        let path =
+            node_document::write_signed_item(&node_dir, "schedules", "maintenance-gc", &body, &id)
+                .unwrap();
+        let before = std::fs::read(&path).unwrap();
 
-        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
-        let verified =
-            ryeos_scheduler::projection::load_verified_schedule_source(&path, &trust).unwrap();
+        let error = apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap_err();
+
+        let message = format!("{error:#}");
         assert!(
-            !verified.record.enabled,
-            "operator pause must survive regeneration"
+            message.contains("remove that file and restart the node"),
+            "{message}"
         );
-        assert_eq!(verified.record.registered_at, 1234);
-        assert_eq!(
-            serde_json::to_value(verified.record).unwrap(),
-            maintenance_spec_body(&policy.schedules[0], false, 1234, &id)
-        );
-        let regenerated = std::fs::read(&path).unwrap();
-        apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), regenerated);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -687,7 +719,12 @@ schedules:
         .unwrap();
         let before = std::fs::read(&path).unwrap();
         let error = apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap_err();
-        assert!(format!("{error:#}").contains("not signed by this node"));
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(ryeos_engine::trust::NODE_DOCUMENT_WRONG_SIGNER),
+            "{message}"
+        );
+        assert!(message.contains("only the node key"), "{message}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
@@ -751,8 +788,11 @@ schedules:
         write_operator_schedule(&node_dir, &id, "operator-job");
 
         let empty = NodeMaintenancePolicy {
-            schema: 1,
+            schema: 5,
+            offline_reset: None,
+            offline_native: Default::default(),
             schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
         };
         apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
 
@@ -763,6 +803,81 @@ schedules:
         assert!(
             node_dir.join("schedules/operator-job.yaml").exists(),
             "unowned schedules must not be removed"
+        );
+    }
+
+    #[test]
+    fn empty_policy_never_creates_the_schedules_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = tmp.path().join(".ai").join("node");
+        let id = identity();
+        let trust = trust_store(&id);
+        let empty = NodeMaintenancePolicy {
+            schema: 5,
+            offline_reset: None,
+            offline_native: Default::default(),
+            schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
+        };
+
+        apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
+        assert!(
+            !node_dir.exists(),
+            "no declarations must not create the node root"
+        );
+
+        std::fs::create_dir_all(&node_dir).unwrap();
+        apply_maintenance_schedules(&node_dir, &id, &trust, &empty).unwrap();
+        assert!(
+            !node_dir.join("schedules").exists(),
+            "no declarations must not create the schedules directory"
+        );
+    }
+
+    #[test]
+    fn empty_policy_refuses_a_non_directory_schedules_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = tmp.path().join(".ai").join("node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let id = identity();
+        let trust = trust_store(&id);
+        let empty = NodeMaintenancePolicy {
+            schema: 5,
+            offline_reset: None,
+            offline_native: Default::default(),
+            schedules: Vec::new(),
+            remote_offline_operations: Vec::new(),
+        };
+        let schedules = node_dir.join("schedules");
+
+        std::fs::write(&schedules, b"not a directory").unwrap();
+        let refusal = apply_maintenance_schedules(&node_dir, &id, &trust, &empty)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("is not a directory"), "{refusal}");
+        assert_eq!(std::fs::read(&schedules).unwrap(), b"not a directory");
+
+        std::fs::remove_file(&schedules).unwrap();
+        let target = tmp.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        lillux::PinnedDirectory::open(&node_dir)
+            .unwrap()
+            .unwrap()
+            .create_symlink(
+                std::ffi::OsStr::new("schedules"),
+                target.as_os_str().as_encoded_bytes(),
+            )
+            .unwrap();
+        let refusal = apply_maintenance_schedules(&node_dir, &id, &trust, &empty)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("is not a directory"), "{refusal}");
+        assert!(
+            std::fs::symlink_metadata(&schedules)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the refused symlink stays in place"
         );
     }
 }

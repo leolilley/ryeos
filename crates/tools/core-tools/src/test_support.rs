@@ -67,7 +67,7 @@ fn signing_key_path() -> PathBuf {
     }
 
     if let Some(app_root) = std::env::var_os("RYEOS_APP_ROOT") {
-        let key = PathBuf::from(app_root).join(".ai/config/keys/signing/private_key.pem");
+        let key = PathBuf::from(app_root).join(".ai/node/operator/signing/private_key.pem");
         if key.is_file() {
             return key;
         }
@@ -75,7 +75,7 @@ fn signing_key_path() -> PathBuf {
 
     let home =
         std::env::var_os("HOME").expect("$HOME must be set to locate dev publisher signing key");
-    PathBuf::from(home).join(".local/share/ryeos/.ai/config/keys/signing/private_key.pem")
+    PathBuf::from(home).join(".local/share/ryeos/.ai/node/operator/signing/private_key.pem")
 }
 
 /// Recursive copy that dereferences symlinks (so the destination tree

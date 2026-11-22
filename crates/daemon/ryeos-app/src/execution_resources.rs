@@ -9,12 +9,12 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 
-use crate::node_policy::sections::execution::{
-    NodeExecutionResourceDescriptor, NodeExecutionResourcePolicy,
-};
 use ryeos_engine::contracts::{
     ExecutionResourceAccess, ExecutionResourceEnforcement, ExecutionResourceFactValue,
     ExecutionResourceRequirement, ExecutionResourceSelection, ExecutionTargetRequirement,
+};
+use ryeos_node_runtime::node_policy::sections::execution::{
+    NodeExecutionResourceDescriptor, NodeExecutionResourcePolicy,
 };
 
 #[derive(Debug, Clone)]
@@ -455,8 +455,11 @@ pub fn prepare_process_resource_scope(
         daemon_generation_id: crate::runtime_db::daemon_generation_id().to_owned(),
         selections: selected.selections.clone(),
         allocation_limit,
-        scope_allocation: allocation.clone(),
-        scope_recovery: None,
+        runtime_custody: None,
+        launch_authority: crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+            allocation: allocation.clone(),
+            recovery: None,
+        },
     };
     state
         .state_store
@@ -502,7 +505,7 @@ pub fn prepare_process_resource_scope(
             )),
         });
     }
-    reservation.scope_recovery = Some(recovery);
+    reservation.launch_authority.bind_local_scope(&recovery)?;
     Ok(Some(PreparedProcessResourceScope {
         reservation,
         scope: Some(scope),
@@ -534,8 +537,11 @@ pub fn reserve_bound_process_resource_scope(
         allocation_limit: selected
             .max_concurrent_exclusive_allocations
             .context("resource-bearing launch lacks an allocation ceiling")?,
-        scope_allocation: allocation.clone(),
-        scope_recovery: Some(recovery.clone()),
+        runtime_custody: None,
+        launch_authority: crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+            allocation: allocation.clone(),
+            recovery: Some(recovery.clone()),
+        },
     };
     state
         .state_store
@@ -550,14 +556,30 @@ pub fn cleanup_process_resource_reservation(
     state: &crate::state::AppState,
     reservation: &crate::runtime_db::ProcessResourceReservationRecord,
 ) -> anyhow::Result<()> {
-    match reservation.scope_recovery.as_ref() {
-        Some(recovery) => recovery
-            .terminate_and_wait(state.isolation.process_scope_control_timeout()?)
-            .map_err(anyhow::Error::msg)?,
-        None => reservation
-            .scope_allocation
-            .discard_unlaunched()
-            .map_err(anyhow::Error::msg)?,
+    match &reservation.launch_authority {
+        crate::runtime_db::ProcessResourceLaunchAuthority::LocalProcessScope {
+            allocation,
+            recovery,
+        } => match recovery {
+            Some(recovery) => recovery
+                .terminate_and_wait(state.isolation.process_scope_control_timeout()?)
+                .map_err(anyhow::Error::msg)?,
+            None => allocation
+                .discard_unlaunched()
+                .map_err(anyhow::Error::msg)?,
+        },
+        crate::runtime_db::ProcessResourceLaunchAuthority::TrustedProcessGroup {
+            phase: crate::runtime_db::TrustedResourceLaunchPhase::Reserved,
+            ..
+        } => {}
+        crate::runtime_db::ProcessResourceLaunchAuthority::TrustedProcessGroup {
+            phase: crate::runtime_db::TrustedResourceLaunchPhase::SpawnIntent,
+            ..
+        } => {
+            bail!(
+                "trusted spawn intent is quarantined: process and driver retirement are unproved"
+            );
+        }
     }
     state
         .state_store
@@ -823,6 +845,31 @@ pub fn issue_process_resource_operations(
     Ok(())
 }
 
+/// Preserve the SAME original window when issuing the retained operation.
+/// The financial anchor's filesystem work is not claimed bounded by SQL hooks.
+pub fn issue_process_resource_operations_until(
+    state: &crate::state::AppState,
+    bindings: &[ryeos_accounting::ResourceOperationBinding],
+    deadline: lillux::time::MonotonicDeadline,
+) -> anyhow::Result<()> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    let accounting = state
+        .accounting
+        .as_ref()
+        .context("resource operation issue requires the shared accounting ledger")?;
+    for binding in bindings {
+        accounting.issue_resource_operation_until(
+            binding.operation_id.as_str(),
+            binding.request_digest.as_str(),
+            lillux::time::timestamp_millis(),
+            deadline,
+        )?;
+    }
+    Ok(())
+}
+
 /// Revalidate the exact financial owner immediately before live process
 /// release. This is deliberately separate from issuing the operation: an
 /// idempotent historical issue result is not a current release capability.
@@ -838,6 +885,26 @@ pub fn authorize_process_resource_release(
         .as_ref()
         .context("resource-owner release requires the shared accounting ledger")?
         .authorize_resource_owner_release(bindings, lillux::time::timestamp_millis())
+}
+
+/// Revalidate existing release bindings under the SAME original window.
+pub fn authorize_process_resource_release_until(
+    state: &crate::state::AppState,
+    bindings: &[ryeos_accounting::ResourceOperationBinding],
+    deadline: lillux::time::MonotonicDeadline,
+) -> anyhow::Result<()> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    state
+        .accounting
+        .as_ref()
+        .context("resource-owner release requires the shared accounting ledger")?
+        .authorize_resource_owner_release_until(
+            bindings,
+            lillux::time::timestamp_millis(),
+            deadline,
+        )
 }
 
 pub fn release_unissued_process_resource_operations(
@@ -930,10 +997,8 @@ pub fn settle_process_resource_operations_with_accounting(
         .iter()
         .map(|binding| accounting.resource_operation_state(binding.operation_id.as_str()))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let retains_unknown_advisory_liability = end.is_none()
-        && states
-            .iter()
-            .any(|state| *state == ryeos_accounting::ResourceBudgetState::AdvisoryIssued);
+    let retains_unknown_advisory_liability =
+        end.is_none() && states.contains(&ryeos_accounting::ResourceBudgetState::AdvisoryIssued);
     accounting.mark_resource_owner_cleanup_proved(
         owner_gate_id.as_str(),
         owner_incarnation.as_str(),
@@ -1122,6 +1187,7 @@ mod tests {
                 allowed_access: vec![ExecutionResourceAccess::DeploymentVisible],
             },
             cleanup_allowance_ms: 1_000,
+            trusted_cleanup_contract_digest: None,
             resources: vec![descriptor()],
         }
     }
@@ -1149,15 +1215,16 @@ mod tests {
             // the empty selection without relaxing its resource invariant.
             let mut identity: crate::process::ExecutionProcessIdentity =
                 serde_json::from_value(serde_json::json!({
-                    "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
-                    "boot_id": "fixture-boot", "target_pid": 40,
-                    "target_start_time_ticks": 200, "group_leader_pid": 39,
-                    "group_leader_start_time_ticks": 190, "process_scope": null,
-                    "resource_selections": [], "resource_operations": [],
-                    "resource_allocation_limit": null,
-                    "resource_occupancy_start": null, "resource_occupancy_limit": null,
-                    "resource_cleanup_allowance_ms": null,
-                }))
+                        "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                        "boot_id": "fixture-boot", "target_pid": 40,
+                        "target_start_time_ticks": 200, "group_leader_pid": 39,
+                        "group_leader_start_time_ticks": 190, "pid_namespace": lillux::current_pid_namespace().unwrap(), "process_scope": null,
+                        "resource_selections": [], "resource_operations": [],
+                "resource_settlement_authority": null,
+                        "resource_allocation_limit": null,
+                        "resource_occupancy_start": null, "resource_occupancy_limit": null,
+                        "resource_cleanup_allowance_ms": null,
+                    }))
                 .unwrap();
             identity
                 .bind_execution_resources(

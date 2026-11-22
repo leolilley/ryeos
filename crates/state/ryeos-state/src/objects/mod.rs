@@ -31,6 +31,7 @@ where
 pub mod admitted_launch_capsule;
 pub mod attestation;
 pub mod bundle_event;
+pub mod bundle_source_evidence;
 pub mod chain_state;
 pub mod chain_writer_transition;
 pub mod effect_record;
@@ -41,6 +42,7 @@ pub mod external_content_activation;
 pub mod external_content_binding;
 pub mod external_content_manifest;
 pub mod external_large_content_manifest;
+pub mod guest_runtime_materialization;
 pub mod item_source;
 pub mod live_input;
 pub mod persistent_session_capsule;
@@ -51,10 +53,15 @@ pub mod project_file;
 pub mod project_snapshot;
 pub mod project_snapshot_policy;
 pub mod project_tree;
+pub mod qualification_fixture;
+pub mod qualification_worker_transcript;
+pub mod retained_lifecycle_artifacts;
+pub mod retired_chain;
 pub mod source_closure;
 pub mod source_manifest;
 pub mod state_anchor;
 pub mod state_manifest;
+pub mod thread_attachment;
 pub mod thread_event;
 pub mod thread_snapshot;
 pub mod worker_session_restore;
@@ -64,14 +71,21 @@ pub use admitted_launch_capsule::{
     ADMITTED_DIRECT_COMMAND_ROOT, ADMITTED_DIRECT_PROJECT_ROOT,
     ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, AdmittedAccountingScope, AdmittedDirectCommandClosure,
     AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, AdmittedLaunchAuthority,
-    AdmittedLaunchCapsule, DirectExecutableIdentity, DirectRootSourceIdentity,
-    DirectRuntimeIdentity, DirectRuntimeSourceSpace, admitted_direct_command_execution_path,
+    AdmittedLaunchCapsule, BundleExecutorMemberSourceProofV1, BundleExecutorRequestOriginV1,
+    DirectExecutableIdentity, DirectRootSourceIdentity, DirectRuntimeIdentity,
+    DirectRuntimeSourceSpace, MAX_ADMITTED_LAUNCH_CAPSULE_BYTES, REBOUND_PREPARED_LAUNCH_FIELDS,
+    RetainedItemSpaceV1, RetainedRuntimeBinarySelectionV1, RetainedRuntimeDefinitionOwnerV1,
+    RetainedTrustClassV1, SelectedBundleIdentityV1, admitted_direct_command_execution_path,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{
     BUNDLE_EVENT_KIND, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
     MAX_BUNDLE_EVENT_ATTACHMENT_BYTES, MAX_BUNDLE_EVENT_ATTACHMENTS,
     MAX_BUNDLE_EVENT_SERIALIZED_BYTES, hash_bundle_event, validate_bundle_identifier,
+};
+pub use bundle_source_evidence::{
+    RetainedBundleExecutorSource, RetainedBundleSignerKey, RetainedSignatureEnvelope,
+    RetainedSignedBundleItem, RetainedSignedBundleManifest,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use chain_writer_transition::{
@@ -94,7 +108,7 @@ pub use execution_project_authority::{
     ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
     ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionOwnershipAuthority,
     ExecutionProjectAuthority, ExecutionRecoveryAuthority, LiveAccessAuthority,
-    LiveFilesystemConfinement, LiveProjectAccess, LiveSymlinkPolicy,
+    LiveFilesystemConfinement, LiveProjectAccess, LiveProjectIntent, LiveSymlinkPolicy,
     OperationalProjectAuthorityTransition, PinnedChildProjectRealization, PinnedProjectRealization,
     PinnedTerminalPublication,
 };
@@ -116,16 +130,17 @@ pub use external_content_binding::{
 };
 pub use external_content_manifest::{
     EXECUTION_RUNTIME_REALIZATIONS_ROOT, EXTERNAL_CONTENT_MANIFEST_KIND,
-    EXTERNAL_CONTENT_TREE_SCHEMA, EXTERNAL_REALIZATIONS_DERIVED_KEY, ExternalContentKind,
-    ExternalContentManifestEntry, ExternalContentManifestEntryKind, ExternalContentManifestObject,
-    ExternalContentMode, ExternalContentMountRoot, ExternalContentRealization,
-    ExternalContentRealizationSet, ExternalRealizationDelivery, FILE_REALIZATION_ENTRY_PATH,
-    MAX_EXTERNAL_CONTENT_ENTRIES, MAX_EXTERNAL_CONTENT_FILE_BYTES,
-    MAX_EXTERNAL_CONTENT_MANIFEST_BYTES, MAX_EXTERNAL_CONTENT_PATH_BYTES,
-    MAX_EXTERNAL_CONTENT_TOTAL_BYTES, MAX_EXTERNAL_REALIZATION_ENTRIES,
-    MAX_INLINE_SYMLINK_TARGET_BYTES, MAX_INTERNAL_SYMLINK_EXPANSIONS,
-    MAX_REALIZATION_CLAIMED_BYTES, MAX_SYMLINK_TARGET_BYTES, validate_internal_symlink_graph,
-    validate_internal_symlink_target,
+    EXTERNAL_CONTENT_TREE_SCHEMA, EXTERNAL_REALIZATION_DESCRIPTORS_ENV,
+    EXTERNAL_REALIZATION_DESCRIPTORS_SCHEMA, EXTERNAL_REALIZATIONS_DERIVED_KEY,
+    ExternalContentKind, ExternalContentManifestEntry, ExternalContentManifestEntryKind,
+    ExternalContentManifestObject, ExternalContentMode, ExternalContentMountRoot,
+    ExternalContentRealization, ExternalContentRealizationSet, ExternalRealizationDelivery,
+    ExternalRealizationDescriptors, FILE_REALIZATION_ENTRY_PATH, MAX_EXTERNAL_CONTENT_ENTRIES,
+    MAX_EXTERNAL_CONTENT_FILE_BYTES, MAX_EXTERNAL_CONTENT_MANIFEST_BYTES,
+    MAX_EXTERNAL_CONTENT_PATH_BYTES, MAX_EXTERNAL_CONTENT_TOTAL_BYTES,
+    MAX_EXTERNAL_REALIZATION_ENTRIES, MAX_INLINE_SYMLINK_TARGET_BYTES,
+    MAX_INTERNAL_SYMLINK_EXPANSIONS, MAX_REALIZATION_CLAIMED_BYTES, MAX_SYMLINK_TARGET_BYTES,
+    validate_internal_symlink_graph, validate_internal_symlink_target,
 };
 pub use external_large_content_manifest::{
     EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, EXTERNAL_LARGE_CONTENT_SCHEMA,
@@ -134,26 +149,39 @@ pub use external_large_content_manifest::{
     MAX_LARGE_CONTENT_MANIFEST_BYTES, MAX_LARGE_CONTENT_MANIFEST_ENTRIES,
     MAX_LARGE_CONTENT_TOTAL_BYTES, MIN_LARGE_CONTENT_CHUNK_BYTES, load_if_large_content_manifest,
 };
+pub use guest_runtime_materialization::{
+    GUEST_RUNTIME_MATERIALIZATION_SCHEMA, GUEST_RUNTIME_MATERIALIZATION_SOURCE_KIND,
+    GUEST_RUNTIME_MATERIALIZATION_SUBJECT_KIND, GuestRuntimeMaterializationSourceEvidence,
+    GuestRuntimeMaterializationSubject,
+};
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use persistent_session_capsule::{
-    AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
+    AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile, ConfigurationAbsence,
     CredentialSubjectProjectionContract, ExecutableSearchPathEntry,
-    MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
-    MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES, MAX_SESSION_AUXILIARY_CONFIGS,
-    MAX_SESSION_CONFIGURATION_FILE_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES,
-    MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES, MAX_STRUCTURED_SESSION_PROFILE_BYTES,
-    PERSISTENT_SESSION_CAPSULE_KIND, PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION,
-    PersistentSessionAuthority, PersistentSessionLifecycleContract, PersistentSessionWireContract,
-    PortableSessionStateClass, PortableSessionStateContract, PortableSessionStateSelector,
-    PreparedSessionProcessEnvironment, RetainedExternalRuntimeQualification,
-    SESSION_PROCESS_ENVIRONMENT_ENV, SESSION_RUNTIME_ENDPOINTS_ROOT, SESSION_RUNTIME_VIEWS_ROOT,
-    SessionConfigurationFile, SessionProcessEnvironmentPathKind, SessionProcessEnvironmentValue,
-    SessionRuntimeConfigurationFile, SessionRuntimeViewDelivery, runtime_view_mount_destination,
-    session_runtime_endpoint_destination, validate_session_auxiliary_configs,
-    validate_session_configuration_destination, validate_session_process_environment,
-    validate_session_process_environment_name, validate_session_process_environment_relative_path,
-    validate_session_runtime_configs, validate_session_runtime_configuration_destination,
+    MAX_CONFIGURATION_ABSENCE_ANCESTORS, MAX_CONFIGURATION_ABSENCE_ENTRIES,
+    MAX_CONFIGURATION_ABSENCE_INSPECTIONS, MAX_CONFIGURATION_ABSENCE_PATH_BYTES,
+    MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_CAPSULE_BYTES,
+    MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES, MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES,
+    MAX_SESSION_AUXILIARY_CONFIGS, MAX_SESSION_CONFIGURATION_FILE_BYTES,
+    MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES, MAX_SESSION_DELIVERED_SECRETS,
+    MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES,
+    MAX_STRUCTURED_SESSION_PROFILE_BYTES, PERSISTENT_SESSION_CAPSULE_KIND,
+    PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION, PersistentSessionAuthority,
+    PersistentSessionLifecycleContract, PersistentSessionWireContract, PortableSessionStateClass,
+    PortableSessionStateContract, PortableSessionStateSelector, PreparedSessionProcessEnvironment,
+    RetainedExternalRuntimeContentQualification, RetainedExternalRuntimeQualification,
+    RetainedRemoteQualificationTestimony, SESSION_PROCESS_ENVIRONMENT_ENV,
+    SESSION_RUNTIME_ENDPOINTS_ROOT, SESSION_RUNTIME_VIEWS_ROOT,
+    STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, SessionConfigurationFile,
+    SessionProcessEnvironmentPathKind, SessionProcessEnvironmentValue,
+    SessionRuntimeConfigurationFile, SessionRuntimeViewDelivery,
+    StructuredSessionProfileSchemaRefusal, runtime_view_mount_destination,
+    session_process_environment_delivered_secret_names, session_runtime_endpoint_destination,
+    validate_session_auxiliary_configs, validate_session_configuration_destination,
+    validate_session_process_environment, validate_session_process_environment_name,
+    validate_session_process_environment_relative_path, validate_session_runtime_configs,
+    validate_session_runtime_configuration_destination,
 };
 pub use placement_runtime_seed::{
     MAX_PLACEMENT_RUNTIME_METADATA_BYTES, PLACEMENT_RUNTIME_SEED_KIND,
@@ -171,6 +199,25 @@ pub use project_file::ProjectFile;
 pub use project_snapshot::ProjectSnapshot;
 pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
+pub use qualification_worker_transcript::{
+    MAX_QUALIFICATION_WORKER_BATCH_TOTAL_BYTES, MAX_QUALIFICATION_WORKER_FINAL_BYTES,
+    MAX_QUALIFICATION_WORKER_TRANSCRIPT_BYTES, MAX_QUALIFICATION_WORKER_TRANSCRIPT_CHUNK_BYTES,
+    QUALIFICATION_WORKER_TRANSCRIPT_KIND, QUALIFICATION_WORKER_TRANSCRIPT_SCHEMA,
+    QUALIFICATION_WORKER_TRANSCRIPT_STREAM_SCHEMA, QualificationWorkerTranscriptChunk,
+    QualificationWorkerTranscriptChunkResponse, QualificationWorkerTranscriptChunkSelection,
+    QualificationWorkerTranscriptManifest, QualificationWorkerTranscriptReference,
+    QualificationWorkerTranscriptStream,
+};
+pub use retained_lifecycle_artifacts::{
+    RETAINED_LIFECYCLE_ARTIFACTS_KIND, RETAINED_LIFECYCLE_ARTIFACTS_SCHEMA,
+    RetainedLifecycleArtifacts, RetainedLifecycleExecutable, RetainedLifecycleExecutableRole,
+    RetainedLifecycleSpec, RetainedLifecycleSpecRole,
+};
+pub use retired_chain::{
+    EvidenceCoordinate, FencedChainKinds, MAX_RETIRED_CHAIN_CLOSURE_PAGE_BYTES,
+    MAX_RETIRED_CHAIN_CLOSURE_PAGE_ENTRIES, PrefixTip, RETIRED_CHAIN_CLOSURE_PAGE_KIND,
+    RETIRED_CHAIN_MANIFEST_KIND, RetiredChainClosurePage, RetiredChainManifest,
+};
 pub use source_closure::{
     EFFECTIVE_SOURCE_BINDING_KIND, EFFECTIVE_SOURCE_BINDING_SCHEMA, EffectiveSourceBinding,
     EffectiveSourceClosureProjection, LogicalSourceRoot, MAX_SOURCE_BINDING_BYTES,
@@ -189,11 +236,17 @@ pub use state_manifest::{
     MAX_STATE_MANIFEST_OBJECTS, STATE_MANIFEST_KIND, STATE_MANIFEST_SCHEMA_VERSION, StateManifest,
     StateManifestBlob,
 };
+pub use thread_attachment::{
+    MAX_THREAD_ATTACHMENT_BYTES, MAX_THREAD_ATTACHMENT_MEDIA_TYPE_BYTES, THREAD_ATTACHMENT_KIND,
+    THREAD_ATTACHMENT_SCHEMA, ThreadAttachment,
+};
 pub use thread_event::{
     ACCOUNTING_ALLOWANCE_TRANSFER_KIND, ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA,
-    AccountingAllowanceTransfer, EventDurability, MAX_HOSTED_SESSION_OBSERVATION_EVENTS,
-    MAX_STRUCTURED_OBSERVATION_BATCH_BYTES, MAX_THREAD_EVENT_SERIALIZED_BYTES,
+    ATTACHMENT_REFS_FIELD, AccountingAllowanceTransfer, EventDurability,
+    MAX_HOSTED_SESSION_OBSERVATION_EVENTS, MAX_STRUCTURED_OBSERVATION_BATCH_BYTES,
+    MAX_THREAD_EVENT_ATTACHMENT_REFS, MAX_THREAD_EVENT_SERIALIZED_BYTES,
     REMOTE_CONTINUATION_AUTHORITY_SCHEMA, RemoteContinuationAuthority, ThreadEvent,
+    payload_attachment_refs,
 };
 pub use thread_snapshot::{
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,

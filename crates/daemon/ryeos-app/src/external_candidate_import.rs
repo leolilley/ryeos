@@ -352,7 +352,6 @@ mod tests {
 
     struct CandidateFixture {
         root: std::path::PathBuf,
-        store: Arc<StateStore>,
         pool: Arc<ExternalCandidateImportPool>,
         binding: ExecutionChannelBinding,
         owner: lillux::crypto::SigningKey,
@@ -362,6 +361,9 @@ mod tests {
         quiesce_sequence: u64,
         quiesce_digest: String,
         completion_request_digest: String,
+        /// Owner of `store`. Fields drop in declaration order, so the pool
+        /// and Store shares drop before it closes the Store.
+        store_owner: crate::state_store::test_native::TestStateStore,
     }
 
     struct CandidateContent {
@@ -382,7 +384,8 @@ mod tests {
             use crate::vault::external_channel::ExternalChannelAuthority;
 
             let root = tempfile::tempdir().unwrap().keep();
-            let store = Arc::new(open_store(&root));
+            let store_owner = open_store(&root);
+            let store = Arc::clone(store_owner.store());
             let authority = store.external_candidate_test_authority();
             let guard = authority.acquire_shared_guard().unwrap();
             let cas = authority.cas_store().unwrap();
@@ -412,7 +415,7 @@ mod tests {
             let channel_authority = ExternalChannelAuthority::test_fixture(&"3".repeat(64));
             let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
             let supervisor = lillux::crypto::generate_signing_key();
-            let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+            let now = lillux::time::timestamp_millis();
             let startup_deadline =
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(60));
             let reservation = ExternalAllocationReservation {
@@ -431,6 +434,7 @@ mod tests {
                 channel_authority_generation: "3".repeat(64),
                 channel_owner_public_key: channel_authority.owner_public_key(),
                 channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
+                admitted_adapter_request_base64: None,
                 request_digest: "e".repeat(64),
                 max_active: 1,
                 timeout_seconds: 60,
@@ -549,6 +553,7 @@ mod tests {
                 ExecutionChannelPayload::Ready {
                     supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                     base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    boot: None,
                 },
             );
             crate::external_placement::exchange_external_supervisor_frame_and_wake_imports(
@@ -600,7 +605,6 @@ mod tests {
                 .unwrap();
             Self {
                 root,
-                store,
                 pool,
                 binding,
                 owner,
@@ -610,6 +614,7 @@ mod tests {
                 quiesce_sequence: quiesce.frame().sequence,
                 quiesce_digest: quiesce.digest().to_owned(),
                 completion_request_digest,
+                store_owner,
             }
         }
 
@@ -625,7 +630,7 @@ mod tests {
                 payload,
             );
             crate::external_placement::exchange_external_supervisor_frame_and_wake_imports(
-                &self.store,
+                self.store_owner.store(),
                 &self.pool,
                 &self.binding.placement_thread_id,
                 &wire,
@@ -648,7 +653,8 @@ mod tests {
                 self.quiesce_sequence,
                 payload,
             );
-            self.store
+            self.store_owner
+                .store()
                 .exchange_external_supervisor_frame(
                     &self.binding.placement_thread_id,
                     &wire,
@@ -676,28 +682,20 @@ mod tests {
         }
     }
 
-    fn open_store(root: &std::path::Path) -> StateStore {
+    fn open_store(root: &std::path::Path) -> crate::state_store::test_native::TestStateStore {
         let identity_path = root.join("node-key.pem");
         let identity = if identity_path.exists() {
-            crate::identity::NodeIdentity::load(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         } else {
-            crate::identity::NodeIdentity::create(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::create(&identity_path).unwrap()
         };
         let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
         let mut trust = ryeos_state::refs::TrustStore::new();
         trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-        let state_dir = root.join(".ai/state");
-        StateStore::new_with_head_trust(
-            root.to_owned(),
-            state_dir.clone(),
-            state_dir.join("runtime.sqlite3"),
-            signer,
-            crate::write_barrier::WriteBarrier::new(),
-            Arc::new(trust),
-        )
-        .unwrap()
+        crate::state_store::test_native::TestStateStore::open(root, signer, Arc::new(trust))
+            .unwrap()
     }
 
     fn signed_wire(
@@ -731,7 +729,10 @@ mod tests {
     }
 
     fn candidate_content(fixture: &CandidateFixture) -> CandidateContent {
-        let authority = fixture.store.external_candidate_test_authority();
+        let authority = fixture
+            .store_owner
+            .store()
+            .external_candidate_test_authority();
         let cas = authority.cas_store().unwrap();
         let base: ProjectSnapshot = ProjectSnapshot::from_value(
             &cas.get_object(&fixture.binding.base_snapshot_hash)
@@ -849,7 +850,8 @@ mod tests {
         let (seal_sequence, seal_digest) = send_candidate(&mut fixture, &content, true);
         assert!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .recoverable_external_candidate_imports(Some(&fixture.binding.placement_thread_id))
                 .unwrap()
                 .is_empty()
@@ -858,20 +860,23 @@ mod tests {
         fixture.pool.wait_for_idle(Duration::from_secs(2)).unwrap();
         assert!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .active_resume_snapshot_roots()
                 .unwrap()
                 .contains(&content.snapshot_hash)
         );
         assert!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .external_execution_blob_roots()
                 .unwrap()
                 .contains(&content.evidence_hash)
         );
         fixture
-            .store
+            .store_owner
+            .store()
             .reconcile_external_candidate_import(
                 &fixture.binding.placement_thread_id,
                 seal_sequence,
@@ -879,7 +884,10 @@ mod tests {
             )
             .unwrap();
 
-        let authority = fixture.store.external_candidate_test_authority();
+        let authority = fixture
+            .store_owner
+            .store()
+            .external_candidate_test_authority();
         let cas = authority.cas_store().unwrap();
         std::fs::remove_file(lillux::shard_path(
             cas.root(),
@@ -890,7 +898,8 @@ mod tests {
         .unwrap();
         assert!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .reconcile_external_candidate_import(
                     &fixture.binding.placement_thread_id,
                     seal_sequence,
@@ -909,14 +918,18 @@ mod tests {
         let (seal_sequence, seal_digest) = send_candidate(&mut fixture, &content, false);
         fixture.acknowledge_quiesce(false);
         fixture
-            .store
+            .store_owner
+            .store()
             .claim_external_candidate_import_test_fixture(
                 &fixture.binding.placement_thread_id,
                 seal_sequence,
                 &seal_digest,
             )
             .unwrap();
-        let authority = fixture.store.external_candidate_test_authority();
+        let authority = fixture
+            .store_owner
+            .store()
+            .external_candidate_test_authority();
         let cas = authority.cas_store().unwrap();
         let ExecutionChannelPayload::ExportObjectChunk {
             object_hash,
@@ -934,7 +947,8 @@ mod tests {
         let placement = fixture.binding.placement_thread_id.clone();
         drop(fixture);
 
-        let store = Arc::new(open_store(&root));
+        let store_owner = open_store(&root);
+        let store = Arc::clone(store_owner.store());
         let pool = Arc::new(ExternalCandidateImportPool::default());
         assert_eq!(
             pool.wake_recoverable(Arc::clone(&store), Some(&placement))
@@ -965,14 +979,16 @@ mod tests {
         fixture.pool.wait_for_idle(Duration::from_secs(2)).unwrap();
         assert!(
             !fixture
-                .store
+                .store_owner
+                .store()
                 .active_resume_snapshot_roots()
                 .unwrap()
                 .contains(&content.snapshot_hash)
         );
         assert_eq!(
             fixture
-                .store
+                .store_owner
+                .store()
                 .recoverable_external_candidate_imports(Some(&fixture.binding.placement_thread_id))
                 .unwrap(),
             [
@@ -992,23 +1008,30 @@ mod tests {
         send_candidate(&mut pending, &pending_content, false);
         pending.acknowledge_quiesce(false);
         pending
-            .store
+            .store_owner
+            .store()
             .author_external_owner_revocation(&pending.binding.placement_thread_id, &pending.owner)
             .unwrap();
         assert!(
             pending
-                .store
+                .store_owner
+                .store()
                 .recoverable_external_candidate_imports(Some(&pending.binding.placement_thread_id,))
                 .unwrap()
                 .is_empty()
         );
+        // One test Store per thread: close the pending node before the
+        // claimed one opens.
+        pending.pool.wait_for_idle(Duration::from_secs(2)).unwrap();
+        drop(pending);
 
         let mut claimed = CandidateFixture::new();
         let claimed_content = candidate_content(&claimed);
         let (seal_sequence, seal_digest) = send_candidate(&mut claimed, &claimed_content, false);
         claimed.acknowledge_quiesce(false);
         claimed
-            .store
+            .store_owner
+            .store()
             .claim_external_candidate_import_test_fixture(
                 &claimed.binding.placement_thread_id,
                 seal_sequence,
@@ -1016,14 +1039,15 @@ mod tests {
             )
             .unwrap();
         claimed
-            .store
+            .store_owner
+            .store()
             .author_external_owner_revocation(&claimed.binding.placement_thread_id, &claimed.owner)
             .unwrap();
         assert_eq!(
             claimed
                 .pool
                 .wake_recoverable(
-                    Arc::clone(&claimed.store),
+                    Arc::clone(claimed.store_owner.store()),
                     Some(&claimed.binding.placement_thread_id),
                 )
                 .unwrap(),
@@ -1032,7 +1056,8 @@ mod tests {
         claimed.pool.wait_for_idle(Duration::from_secs(2)).unwrap();
         assert!(
             claimed
-                .store
+                .store_owner
+                .store()
                 .active_resume_snapshot_roots()
                 .unwrap()
                 .contains(&claimed_content.snapshot_hash)

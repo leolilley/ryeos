@@ -49,7 +49,7 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
         use std::os::unix::process::CommandExt as _;
         let error = std::process::Command::new(&target).args(arguments).exec();
         Err(format!(
-            "exec admitted session target {}: {error}",
+            "exec admitted session target {}: {error:#}",
             target.display()
         ))
     }

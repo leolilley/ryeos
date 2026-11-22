@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-23T04:20:49Z:ae69b567190cfc87b4b3a43115ceb20bfde8975a5435b0240fc529cadbaeb90e:Rp0JnaU1Hhx6/erJ5sRO/gZ9t+9g64PBIzOS9QkB9RWpWqbaeXqv6beT9wfHWV68XPn4a1AqvfSeogSJ8mw6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:d85b3fc8ef24485a455c1a0006f4d8ab26812cdaf4fa8af9285499566cbe6979:s0RsTmdBH+W4cVr+y4SARtf1PwB/qrMM5PIv9kqmNFG4TgILGnwrgIiR8GNX8KBz9Js5i8pq3omp7uQL4f4kAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-build
 version: "1.0.0"
 description: Build exactly the payloads selected by a verified release-input plan into a new clean tree.
-endpoint: bundle_release.generation_build
+endpoint: bundle-release.generation-build
 availability: daemon_only
 required_caps:
   - ryeos.execute.config.bundle-release/execution-environment-products

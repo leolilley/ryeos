@@ -1,11 +1,11 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 
 use ryeos_api::handlers::external_content_activate::{Request, handle};
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::AuthorizedKeyPrincipalClass;
 use ryeos_app::managed_external_content_operation::AcquisitionMode;
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 
 fn context(class: AuthorizedKeyPrincipalClass, origin_site_id: Option<String>) -> HandlerContext {
     HandlerContext::new_with_authority(
@@ -18,8 +18,8 @@ fn context(class: AuthorizedKeyPrincipalClass, origin_site_id: Option<String>) -
 }
 
 #[tokio::test]
-async fn managed_activation_admits_an_origin_bound_remote_operator() {
-    let (_tmp, state) = test_state::build_test_state();
+async fn managed_activation_admits_an_origin_bound_remote_principal() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let error = handle(
         Request {
             activation_ref: "config:fixture/missing-activation".to_owned(),
@@ -27,7 +27,7 @@ async fn managed_activation_admits_an_origin_bound_remote_operator() {
             offline_archive_root: None,
         },
         context(
-            AuthorizedKeyPrincipalClass::RemoteOperator,
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
             Some(format!("site:{}", "b".repeat(64))),
         ),
         Arc::new(state),
@@ -38,13 +38,13 @@ async fn managed_activation_admits_an_origin_bound_remote_operator() {
     let detail = format!("{error:#}");
     assert!(
         !detail.contains("local_client configured operator"),
-        "managed activation must preserve admitted remote-operator authority: {detail}"
+        "managed activation must preserve admitted remote-principal authority: {detail}"
     );
 }
 
 #[tokio::test]
 async fn managed_activation_rejects_a_remote_node_principal() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let error = handle(
         Request {
             activation_ref: "config:fixture/missing-activation".to_owned(),

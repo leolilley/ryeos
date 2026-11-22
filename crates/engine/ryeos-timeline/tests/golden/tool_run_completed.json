@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "item": "entry",
+      "id": "out:T-0001",
+      "type": "outcome",
+      "state": "completed",
+      "tone": "good",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": null,
+      "counts_as": null,
+      "slots": {
+        "headline": "exit:0"
+      },
+      "seq": [
+        3,
+        3
+      ],
+      "ts": [
+        "2026-11-16T00:32:01Z",
+        "2026-11-16T00:32:01Z"
+      ]
+    }
+  ],
+  "undeclared": {},
+  "notice_noun": {
+    "key": "system_event",
+    "one": "system event",
+    "many": "system events"
+  },
+  "lane_matches": [
+    {
+      "label": "Working",
+      "entry": null,
+      "status": "running"
+    }
+  ]
+}

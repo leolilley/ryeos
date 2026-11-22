@@ -1,0 +1,10 @@
+# ryeos:signed:2026-10-17T02:53:53Z:fd8ec7b73df62f10e7304f175b45e5a4a676cdb59e73825be73d7d3feb6bad00:MLj5zV+TF+EaSCSYEAWDYwicdBWeZ4O2gj0qXSRSKLzqIZa3+t4g6wil21ag1mg0QPRNwcPpaZzVuXedsqeAAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: environment-qualification
+version: 0.1.0
+description: 'Qualification of release and development environment products: policies, verifier tools, authoring'
+provides_kinds: []
+requires_kinds:
+- config
+- tool
+- protocol
+uses_kinds: []

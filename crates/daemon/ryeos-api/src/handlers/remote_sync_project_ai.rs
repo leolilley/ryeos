@@ -28,7 +28,7 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)?;
     let remote_cfg = loaded_remote.config.clone();
     let binding = config::resolve_loaded_project_binding(&loaded_remote, &req.project)?;
@@ -40,7 +40,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
     let expected_deployed_hash = if req.expected_deployed_hash.is_some() {
         req.expected_deployed_hash.clone()
     } else {
@@ -66,7 +66,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Apply the remote's ingest ignore rules client-side so files the
     // remote would later reject (e.g. `__pycache__/`, `*.pyc`) are
     // dropped before we POST the manifest.
-    let remote_ignore = ryeos_app::ignore::IgnoreMatcher::from_config(&remote_cfg.ingest_ignore)?;
+    let remote_ignore = ryeos_app::ignore::IgnoreMatcher::from_config(remote_cfg.ingest_rules()?)?;
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;

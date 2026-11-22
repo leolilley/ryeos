@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-19T03:38:25Z:1ba5e736e8079023aad4751372f7dcd3d373d861da6aa3502d04ba95741a7145:j6yFfWZL/wDJ3OTk2i3cv8DNAe0F05lAISSobHdirxVR+WPcmP9yyGwVRpbCLtD4DTR8awvfNi5+xRlmUiOyAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T01:55:23Z:81869958735eaace5f0488809da077ec236a04fe37973c0c7ab735bf82bcd25f:2pj4MTyHSVoZ8NfJzMLH8n2iouqJzKOhmfenOTPO9xApURjiQ7wmRPv2iimawDmHe2UFxHF/TnxDMtIVprNkDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
 title: "RyeOS UI Visual Language and Composition Rules"
 description: "Contributor specification for Gruvbox styling, nested tiled view sets, view groups, contextual input and renderer ownership"
 entry_type: reference
-version: "3.0.0"
+version: "3.1.0"
 ```
 
 # RyeOS UI visual language and composition rules
@@ -17,28 +17,26 @@ corrected design agreed on 2026-09-16. Read it with `ui-development.md`,
 `signing.md` and `dependency-constitution.md`.
 
 The approved visual study is in
-`crates/clients/web/tests/browser/design/`. It is standalone HTML/CSS with
+`crates/clients/rune/design/`. It is standalone HTML/CSS with
 synthetic content, not the production renderer. Its appearance was approved;
 its controls, named view sets, grouped tabs and operational claims are not
 implementation evidence. Reproduce the treatment through real shared UI
 contracts, not hardcoded specimen DOM.
 
 This revision supersedes the previous neutral-charcoal replacement palette,
-blanket removal of ambient layers, page/sidebar-first composition and advice
+page/sidebar-first composition and advice
 to limit this work to the existing master/stack layout. Those directions did
 not represent the user's intention. Do not use the rejected earlier screenshots
 as a design target.
 
-The full execution plan is
-`.tmp/ryeos-ui-visual-language-and-composition-implementation-plan.md` in the
-main checkout. This tracked guide retains the decisions even when temporary
-planning files are unavailable.
+This tracked guide is the record of the decisions; working plans come and go,
+and nothing here depends on one being available.
 
 ## Design identity
 
 RyeOS is a composable working environment, not a website dashboard with a fixed
 sidebar and a single page. Preserve the launcher, view sets, views, tiling,
-optional edge slots and authored background/scene character. Improve their
+optional edge slots. Improve their
 proportions and relationships rather than removing them.
 
 One-line direction: **A precise Gruvbox working environment with editorial
@@ -80,12 +78,6 @@ cannot rely on that divider alone. Measure actual foreground/background pairs:
 normal text 4.5:1, essential indicators 3:1. Do not assume small orange text
 or white-on-orange passes.
 
-Ambient/background content remains an authored surface decision. Retain the
-geometric identity where declared; tune contrast and opacity so content stays
-legible. Do not globally erase scenes, force every view transparent, or add
-background exceptions keyed to view refs. Main reading areas may be opaque
-while the surrounding view set retains its background.
-
 ## Typography and geometry
 
 - Use sans-serif for human titles, navigation, prose, forms and row labels.
@@ -100,7 +92,7 @@ while the surrounding view set retains its background.
 - Selected labels do not all become bold. Uppercase and tracking are for short
   metadata, not all text. Use tabular figures for aligned values.
 - Start with 12px region gaps, 24px content padding (16px when constrained),
-  34px tile headers, 48px shell header and 28px status strip.
+  34px tile headers, a compact 28px system line and 28px status strip.
   These are web measurements, not semantic contract fields or TUI row counts.
 - Use 36px minimum ordinary rows, allowing wrapped content to grow; provide
   44px touch targets. Respect browser zoom and text enlargement.
@@ -121,13 +113,76 @@ dependency. System stacks are acceptable until an exact family is selected.
 
 ## Composition contract: intended implementation
 
+The agreed container hierarchy has a session owning shared presentation and
+Surface instances. Each Surface instance contains top-level tabs → one live
+view-set instance per tab → nested groups/views. A tab hosts a composition;
+it is not the composition definition. A one-view composition uses the same
+model. Group-local tabs select member views. An authored Surface defines a
+collection of tabs/compositions; one open instance is one presentation, not
+a new authenticated session. Session manages membership and one seat/producer
+per independently presented Rust core, usable with zero Surfaces open.
+No additional Window entity, collection kind or browser application model.
+See `ui-development.md` for current implementation gaps and seat ownership.
+
+Use a typed signed config under the existing config kind to author shared
+presentation: shared dialog View references and initial Surface
+references. "Session shell" names a responsibility, not another
+kind, user identity or execution owner. Shared launcher/shortcuts Views must
+remain available with no Surface open. Surface-specific dialog Views may be
+contributed with scoped identities and their own admitted bindings.
+
+The generic opening is Home and the shared launcher. Home is an observation-only
+overview of the node's work (projects, recent threads and work, then the
+Development, Work and Review sets); it reads and never acts, so it is not a
+maintenance console. Purpose-specific authored presentations and Surfaces
+can provide their own Views, tab arrangements and admitted operations. They use
+the same composition model and design system; they do not become a second browser
+application. Installation never silently replaces the user's composition.
+
+Home need not poll domains or contain a conversation input, catalogue or initial
+tile. The background and shared launcher are a complete quiet opening. Surface
+discovery is a deliberate shared dialog with bounded coverage, distinct from
+the selected composition's local View library. Listing a Surface is not a grant
+to open it; unavailable actions and failed sources remain visibly distinct from
+empty data. Do not automatically inject installed bundle Views or tabs.
+Search belongs to that View's existing source input, not a second browser
+catalogue. Preserve response bounds/coverage when narrowing the query.
+
+Presentation is not an access role. Identity, node, exact subject and current
+admission govern available reads and actions; do not introduce public/operator
+display modes as authority. Maintenance actions belong in explicit specialised
+arrangements, with the same normal admission as any other operation.
+
+The current focus is presentation foundations and platform-aligned inspection;
+ARC and other application-specific arrangements are later consumers.
+Conversation continuity, automatic context following and provider chat
+integration are deferred. Existing conversation/input Views keep explicit
+routes; do not encode a preferred conversation-history model into layout geometry.
+
+A Surface normally opens as a fresh surface instance in the existing session;
+adding it to the existing surface instance is explicit. A single set normally opens in
+a new tab; a single view is placed in the current set. These are presentation
+defaults only, never execution or credential authority.
+
+Chrome direction agreed 2026-10-03: a compact top line identifies the actual
+presentation surface instance by human-facing title (number only once its scope is real),
+with node connection status at the right. The bottom line carries contextual
+shortcuts and an orange-highlighted RyeOS button at the far right that opens
+the launcher. Do not repeat node status and launch controls on both bars. Keep
+canonical refs in inspectable details. Do not label principal fallback text as
+the node. Connection chrome reports transport state, not node-wide health; use
+authenticated session identity context without requiring domain polling. A future node/session details dialog must distinguish principal,
+entry node, surface/attachments and per-view targets; it is not permission to
+invent a generic settings framework or unrestricted configuration writes.
+
 The view-set model supports arbitrary nested horizontal/vertical splits,
 with a group of view tabs at each leaf. This is an extension of the existing
 shared layout machinery, not another UI framework.
 
 - A surface signs the available views, sources, actions and initial arrangements.
-- A view set owns its live layout, view groups, selection/focus and optional
-  anchored slots. Top-level tabs select view sets, not hardcoded product pages.
+- A view set owns its live layout, view groups and selection/focus. Top-level
+  tabs select view sets, not hardcoded product pages. Edge placement is just
+  ordinary splits of views and tiles; there is no separate edge-mount concept.
 - A split allocates space. A group orders view-instance references, selects an
   active member, and may carry one bounded authored label for its stable role
   in the arrangement. The renderer presents that label separately from the
@@ -137,9 +192,11 @@ shared layout machinery, not another UI framework.
   arrange operation, not a second mutable ordered-layout authority.
 - Move preserves view identity, draft, local state and bound subject.
   Explicitly opening another instance creates independent local state.
-- Optional edge slots remain anchored supporting regions, using the same
-  view/group machinery where practical. Top/left/right/bottom remain available;
-  none is globally required or forbidden.
+- A supporting region at an edge is an ordinary split of views and tiles in the
+  view set's layout, using the same view/group machinery. Surface/tab changes
+  preserve shared dialog mounts in the document; multiple documents need
+  reviewed independent mount/producer ownership before shared mutable state is
+  exposed.
 - Contextual input belongs to the exact mounted view instance it serves. A
   bottom-slot conversation or terminal is still an ordinary view; it does not
   control whichever other view was most recently focused. Its subject and
@@ -181,7 +238,8 @@ do not silently persist sensitive message text with a saved arrangement.
 
 | Concern | Owner |
 |---|---|
-| Available views, initial arrangements, labels, context declarations, sources and actions | Signed surface/view contracts in the UI bundle and existing schema/compiler |
+| Shared dialogs and initial Surface selections | Typed signed shared presentation config, existing config resolution and UI binding compiler |
+| Surface tab collections, available views, labels, context declarations, sources and actions | Signed surface/view contracts in the UI bundle and existing schema/compiler |
 | Layout tree, group edits, instance identity, focus, draft/target semantics | Existing shared client model and reducers |
 | Pixel geometry, fonts, DOM, pointer gestures, renderer tokens | Web client |
 | Cell geometry, glyphs, keyboard rendering | Terminal client |
@@ -212,7 +270,7 @@ reasons; focus returns predictably. Content headers prefer authored human
 titles, with exact refs still inspectable. Errors, stale observations and
 unknown delivery must remain distinguishable from success or zero results.
 
-Keep tile contents diverse: prose, tables, files, diffs, timelines and scenes
+Keep tile contents diverse: prose, tables, files, diffs, timelines and fields
 need appropriate internal composition. The consistent layer is typography,
 palette, linework, chrome and interaction—not forcing every view into one card.
 
@@ -233,7 +291,7 @@ with at most two jobs. No full build/reinstall cycle for CSS iteration.
 DOM tests are not visual approval. Source tests, reviewed screenshots, installed
 boot/seat acceptance and real execution evidence are distinct gates.
 
-Explicitly deferred: floating/overlapping windows, cross-browser dragging,
+Explicitly deferred: floating/overlapping surface instances, cross-browser dragging,
 collaborative layout editing, a new theme system and native terminal emulation.
 Nested composition, tab groups, contextual input, keyboard/TUI support and saved
 arrangements are not deferred behind cosmetic work.

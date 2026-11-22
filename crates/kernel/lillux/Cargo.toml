@@ -14,6 +14,14 @@ path = "src/lib.rs"
 name = "lillux"
 path = "src/main.rs"
 
+[features]
+# Arms Lillux interruption hooks from test code; never enable outside
+# [dev-dependencies].
+test-support = []
+# Process-kill qualification hook between the move and the unlink of a planned
+# removal; never enable outside test builds.
+crash-qualification-test-support = []
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -27,10 +35,9 @@ rand = { workspace = true }
 ring = "0.17.14"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 chacha20poly1305 = "0.10"
-hkdf = "0.12"
 hmac = { workspace = true }
 zeroize = { workspace = true }
-hickory-resolver = { version = "0.25.2", default-features = false, features = ["tokio", "system-config"] }
+hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio", "system-config"] }
 tokio = { workspace = true, features = ["rt", "net", "time", "sync", "io-util"] }
 
 [dev-dependencies]
@@ -42,12 +49,23 @@ path = "tests/invocation_startup.rs"
 harness = false
 
 [[test]]
+name = "environment_capture"
+path = "tests/environment_capture.rs"
+harness = false
+
+[[test]]
 name = "private_source_owner"
 path = "tests/private_source_owner.rs"
 harness = false
 
+[[test]]
+name = "root_overlay_native"
+path = "tests/root_overlay_native.rs"
+harness = false
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+signal-hook = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -55,3 +73,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_Security",
 ] }
+
+[lints]
+workspace = true

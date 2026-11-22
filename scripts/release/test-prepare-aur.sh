@@ -38,7 +38,7 @@ while IFS= read -r bundle; do
     mkdir -p "$bundle_root/$bundle/.ai"
     cp "$bundle_root/.ai/PUBLISHER_TRUST.toml" \
         "$bundle_root/$bundle/PUBLISHER_TRUST.toml"
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_bundle_set_names standard)
 mkdir -p "$bundle_root/.ai/node/init/profiles"
 while IFS= read -r node_init_profile; do
     {
@@ -72,7 +72,7 @@ grep -Fq 'ryeos-bundles-$pkgver-x86_64.tar.gz::https://github.com/leolilley/ryeo
     "$tmp/out/ryeos/PKGBUILD"
 grep -Fq "'$expected_bundle'" "$tmp/out/ryeos/PKGBUILD"
 ! grep -Fq "$expected_bundle" "$tmp/out/ryeos-mcp/PKGBUILD"
-grep -Fq 'ryeos init --node-profile full' "$tmp/out/ryeos/ryeos.install"
+grep -Fq 'ryeos init --node-profile standard --host-class local' "$tmp/out/ryeos/ryeos.install"
 
 mv "$bundle_root/.ai/node/init/profiles/hosted-workflow.yaml" \
     "$tmp/hosted-workflow.yaml"

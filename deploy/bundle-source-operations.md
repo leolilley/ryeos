@@ -88,11 +88,15 @@ consumers. For the `bundle-source` role this means Core genesis followed by
 A later publication replacing just one member is the independent-update proof.
 
 At first initialization the deployment must pass the resolved image digest and
-the substrate compatibility protocol explicitly; mutable tags and environment
-discovery are not authority:
+the substrate compatibility protocol explicitly, and name the host class whose
+signed capability floor the node holds; mutable tags and environment discovery
+are not authority. `bundle-source` declares `hosted` for a hosting provider's
+container, where jobs run without a sandbox (its catalog services execute no
+captured source), and `local` (enforced sandbox) or `local_unconfined` on a
+host the operator runs:
 
 ```sh
-ryeos init --non-interactive --node-profile bundle-source \
+ryeos init --non-interactive --node-profile bundle-source --host-class hosted \
   --substrate-image-digest sha256:<64-lowercase-hex> \
   --substrate-protocol 1
 ```
@@ -110,10 +114,14 @@ running image reference pinned by digest) and `RYEOS_SUBSTRATE_PROTOCOL` on
 first boot for **every** image using it, not just the bundle-source image.
 Set these in the deployment's runtime environment; an image cannot embed its
 own eventual registry digest. `RYEOS_INIT_NODE_PROFILE` remains the image's
-explicit seed selector. A restart preserves the installed generation rather
+explicit seed selector, and the deployment must also set
+`RYEOS_INIT_HOST_CLASS` (`hosted` for `bundle-source` in a provider container)
+whenever the entrypoint
+initializes from that profile; the image never sets it. A node keeps the host
+class it was initialized under. A restart preserves the installed generation rather
 than reconciling it against image contents.
 
-This release accepts only `ryeos/init-completion/v3`, including its signed
+This release accepts only `ryeos/init-completion/v5`, including its signed
 substrate-identity binding. Existing volumes with a different completion schema
 are not an in-place image-swap deployment target. Keep them stopped and backed
 up; do not delete the bundle directory, edit completion JSON, or use policy
@@ -128,3 +136,16 @@ volume for rollback; never run the previous image against newly written state.
 Before production rollout, prove one complete native-bundle release and one
 portable-data release on the actual target, followed by a stopped consumer
 update and restart. Source/static checks are not substitutes for this gate.
+
+## Pre-start update in a container
+
+A hosted container can update its bundles from the catalog before the daemon
+starts. Set `RYEOS_PRESTART_BUNDLE_SET_REQUEST` to the absolute path of a
+stopped bundle-set update request file. On each start, after first-boot
+initialization and before ryeosd, `deploy/entrypoint.sh` runs
+`ryeos node bundle-set update <request> --app-root /data/app --json` against
+the stopped node. The command pins its remote and verifies the catalog; it
+exits zero when it installs a set and when the node already holds it, and the
+start continues. Any failure prints a refusal and exits the container without
+starting ryeosd. Unset or empty leaves the start unchanged. The route is not
+supported with `RYEOS_HOST_RUNTIME_BINDING`.

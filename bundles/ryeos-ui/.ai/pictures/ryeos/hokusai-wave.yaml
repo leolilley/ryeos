@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:16Z:2b0a1702f16d4c950009d2b5cd7d40f20c2901c94f06f095d248b13dd9133d50:87tpvi1I7YlDbaOtOSEZOQsKZqkxUbf+i2g4XcWgpuwW7uW2dpmRGP17sYmNOOyfw1dDf9w4ToDyPGJtmC+yBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Under the Wave off Kanagawa (Kanagawa oki nami ura), also known as The Great Wave, from the series Thirty-six Views of Mount Fuji (Fugaku sanjūrokkei)"
+artist: "Katsushika Hokusai"
+date: "ca. 1830–32"
+source_url: https://www.metmuseum.org/art/collection/search/45434
+licence: cc0
+derived_from:
+  - "Met object 45434, Under the Wave off Kanagawa (Kanagawa oki nami ura), also known as The Great Wave, from the series Thirty-six Views of Mount Fuji (Fugaku sanjūrokkei) (https://www.metmuseum.org/art/collection/search/45434)"
+transform: "greyscale crop of the Met open-access image; the Met holds further impressions of the same design (e.g. 39799); re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "7126d9093fbecf9fbc74b2034219463640b74505d2f0954e05462911735f8d31"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 347638
+  - role: card
+    sha256: "3a81a1f840c7fc8dc6c76442cbb84091edc67b558d6653903ee50dc5fcf49c6b"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 38206

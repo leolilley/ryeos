@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T07:22:30Z:a1c21494b1bc96373608cb2dbac4db19c1a3f72877665260ed0a1711c9eb16f0:0Nlte0zthDKT7IvLkGaj/EjvFhla8X5vYzeZ1B/DC0QrfgJCTk8l9EuvBnBrF+5sBq4YW74jDmGqtrKkzYHKBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:41Z:07daec042c9c4b58ec9073439fcdb3d1361b723f533eb50960fbf71f7b6526be:wwnqTbV3Fdb//PP+iYIXR050AsleFicqFL89MTm1i9PdescZKncRYYWF56YItxJRMfrWO77XOR3dsgSOMmMlAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: view-set-library
 title: Saved view sets
 version: "1.0.0"
@@ -8,6 +8,60 @@ sources:
   library:
     ref: service:ui/ryeos-ui/config/get
 affordances:
+  - id: open-reusable-surface
+    label: Open reusable Surface
+    presentation_operation: surface_opening
+    invoke:
+      plane: rye
+      ref: service:ui/session/surfaces/open
+      args:
+        placement: { kind: new_surface }
+        selection:
+          kind: reusable
+          id: "{record.id}"
+          expected_revision: "{record.expected_revision}"
+          fresh_subjects: "{record.fresh_subjects}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: Reusable Surface opened.
+  - id: import-reusable-surface-tabs
+    label: Open reusable tabs here
+    presentation_operation: surface_opening
+    invoke:
+      plane: rye
+      ref: service:ui/session/surfaces/open
+      args:
+        placement: "{record.opening_placement}"
+        selection:
+          kind: reusable
+          id: "{record.id}"
+          expected_revision: "{record.expected_revision}"
+          fresh_subjects: "{record.fresh_subjects}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: Reusable tabs opened.
+  - id: resume-particular-surface
+    label: Resume particular Surface
+    presentation_operation: resume_particular_surface
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/surfaces/resume
+      args:
+        id: "{record.id}"
+        expected_revision: "{record.expected_revision}"
+        view_set_expected_revision: "{record.view_set_expected_revision}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: Particular Surface resumed.
+  - id: duplicate-particular-surface
+    label: Open independent copy of particular Surface
+    presentation_operation: resume_particular_surface
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/surfaces/resume
+      args:
+        id: "{record.id}"
+        expected_revision: "{record.expected_revision}"
+        view_set_expected_revision: "{record.view_set_expected_revision}"
+        creation_request_id: "{record.creation_request_id}"
+      notice: Independent Surface copy opened; existing presentation unchanged.
   - id: open
     label: Open saved composition
     invoke:
@@ -17,6 +71,7 @@ affordances:
         id: "{record.id}"
         name: "{record.name}"
         composition: "{record.composition}"
+        relationships: "{record.relationships}"
   - id: save
     label: Save current view set
     invoke:
@@ -39,11 +94,15 @@ affordances:
   - id: resume-particular
     label: Resume particular view set
     producer: selection
+    presentation_operation: resume_particular_view_set
     invoke:
       plane: rye
       ref: service:ui/ryeos-ui/view-sets/resume
       args:
         id: "{record.id}"
+        expected_revision: "{record.expected_revision}"
+        surface_ref: "{record.surface_ref}"
+        creation_request_id: "{record.creation_request_id}"
   - id: save-particular
     label: Retain this particular view set
     invoke:
@@ -63,7 +122,80 @@ affordances:
           expected_revision: "{record.expected_revision}"
           particular_view_sets: "{record.particular_view_sets}"
       notice: Particular view set retained.
+  - id: save-surface
+    label: Save reusable Surface
+    invoke:
+      plane: ui
+      operation: save_active_surface
+      persist_affordance: persist-surface
+      value: "{record.context}"
+  - id: persist-surface
+    label: Persist captured Surface
+    producer: selection
+    visible_when: { field: captured, equals: true }
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/config/update
+      args:
+        reusable_surface_library:
+          expected_revision: "{record.expected_revision}"
+          reusable_surfaces: "{record.reusable_surfaces}"
+      notice: Reusable Surface saved.
+  - id: save-particular-surface
+    label: Retain this particular Surface
+    invoke:
+      plane: ui
+      operation: save_particular_surface
+      persist_affordance: persist-particular-surface
+      value: "{record.context}"
+  - id: persist-particular-surface
+    label: Persist particular Surface and its view sets
+    producer: selection
+    visible_when: { field: captured, equals: true }
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/config/update
+      args:
+        particular_surface_library:
+          expected_revision: "{record.expected_revision}"
+          particular_surfaces: "{record.particular_surfaces}"
+        particular_view_set_library:
+          expected_revision: "{record.view_set_expected_revision}"
+          particular_view_sets: "{record.particular_view_sets}"
+      notice: Particular Surface retained.
 sections:
+  - title: Reusable Surfaces
+    source_channel: library
+    collection: reusable_surfaces
+    projection:
+      primary: title
+    activate: open-reusable-surface
+  - title: Particular Surfaces
+    source_channel: library
+    collection: particular_surfaces
+    projection:
+      primary: title
+    activate: resume-particular-surface
+  - title: Independent copies of particular Surfaces
+    source_channel: library
+    collection: particular_surfaces
+    projection:
+      primary: title
+    activate: duplicate-particular-surface
+  - title: Save Surface composition
+    source_channel: library
+    collection: reusable_surface_save_context
+    projection:
+      primary: label
+      secondary: description
+    activate: save-surface
+  - title: Retain Surface subjects
+    source_channel: library
+    collection: particular_surface_save_context
+    projection:
+      primary: label
+      secondary: description
+    activate: save-particular-surface
   - title: Save composition
     source_channel: library
     collection: view_set_save_context

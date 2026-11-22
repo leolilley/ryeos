@@ -1396,7 +1396,6 @@ enum ComposerStrategy {
 enum ValueType {
     String,
     Mapping,
-    #[serde(alias = "array")]
     Sequence,
     Boolean,
     Number,
@@ -2759,6 +2758,30 @@ mod tests {
     }
 
     #[test]
+    fn expect_value_type_array_is_refused_in_favor_of_sequence() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                {
+                    "name": "commands",
+                    "strategy": "keyed_seq_merge_root_last",
+                    "key": "id",
+                    "expect_value_type": "array"
+                }
+            ]
+        });
+        let (_, message) = run(cfg, json!({ "ext": "p" }), vec![]).unwrap_err();
+        assert!(
+            message.contains("expect_value_type") || message.contains("unknown variant `array`"),
+            "refusal must name the key or the bad variant, got: {message}"
+        );
+        assert!(
+            message.contains("sequence"),
+            "refusal must name the accepted spelling, got: {message}"
+        );
+    }
+
+    #[test]
     fn dict_merge_string_seq_root_last_isolated() {
         let cfg = json!({
             "extends_field": "ext",
@@ -2788,7 +2811,7 @@ mod tests {
                     "name": "commands",
                     "strategy": "keyed_seq_merge_root_last",
                     "key": "id",
-                    "expect_value_type": "array"
+                    "expect_value_type": "sequence"
                 }
             ]
         });

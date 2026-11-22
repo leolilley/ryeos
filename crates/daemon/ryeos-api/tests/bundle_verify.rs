@@ -1,11 +1,11 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 
 use ryeos_api::handlers::bundle_verify::{DESCRIPTOR, Request};
 use ryeos_api::registry::build_service_registry;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use serde_json::{Value, json};
 
 const CAP: &str = "ryeos.execute.service.bundle/verify";
@@ -59,16 +59,18 @@ fn signed_command_and_service_use_the_same_dual_mode_node_endpoint() {
 
 #[tokio::test]
 async fn node_path_inspection_refuses_unauthenticated_remote_and_wrong_local_callers() {
-    let (_tmp, state) = test_state::build_test_state();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
-    let local = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let local =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let contexts = [
         HandlerContext::anonymous(),
         HandlerContext::new_with_authority(
             local.principal_id(),
             vec![CAP.into()],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:remote".into()),
         ),
         HandlerContext::new_with_authority(
@@ -108,8 +110,10 @@ async fn node_path_inspection_refuses_unauthenticated_remote_and_wrong_local_cal
 
 #[tokio::test]
 async fn configured_local_operator_reaches_strict_request_validation() {
-    let (_tmp, state) = test_state::build_test_state();
-    let local = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let local =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let context = HandlerContext::new_with_authority(
         local.principal_id(),
         vec![CAP.into()],

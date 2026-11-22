@@ -7,10 +7,12 @@
 //! The crate does NOT own the signing key (daemon passes a [`Signer`] trait),
 //! item resolution (engine), or low-level CAS primitives (lillux).
 
+/// Owner token carried by the secure temporaries this crate publishes.
+pub const STATE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("state");
+
 pub mod admission;
 pub mod bundle_events;
 pub mod bundle_outbox;
-pub mod bundle_projection;
 pub mod capability;
 pub mod chain;
 pub mod event_types;
@@ -19,12 +21,15 @@ pub mod external_execution;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;
+pub mod immutable_testimony;
 pub mod large_object_store;
 pub mod locators;
+pub mod node_guarantees;
 pub mod object_closure;
 pub mod objects;
 pub mod operational;
 mod pending_publication;
+pub mod private_cas;
 pub mod project_discovery;
 pub mod project_materialization;
 pub mod project_observation;
@@ -41,6 +46,15 @@ pub mod source_verification;
 pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
+/// Whether an owner recorded in process `process` is only a copy here: this
+/// is a forked child, supervised or not, or another process altogether. Reads
+/// one atomic and the process id; no lock and no allocation.
+pub(crate) fn foreign_process(process: u32) -> bool {
+    lillux::exec::in_forked_child() || process != std::process::id()
+}
 pub mod verify;
 
 pub use admission::{AdmissionRequest, AdmissionResult, admit_root};
@@ -53,9 +67,6 @@ pub use bundle_outbox::{
     ensure_bundle_outbox_schema, get_bundle_outbox_message, mark_bundle_outbox_delivered,
     mark_bundle_outbox_failed,
 };
-pub use bundle_projection::{
-    BundleProjectionCursor, BundleProjectionDb, BundleProjectionSyncReport,
-};
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
 pub use external_content::{
     DigestOnlyExternalContentSink, ExternalCapturePolicy, ExternalContentBlobSink,
@@ -63,31 +74,39 @@ pub use external_content::{
     LargeContentCapturePolicy, LaunchCaptureBudget, MAX_CAPTURE_BYTES, MAX_CAPTURE_DEPTH,
     MAX_CAPTURE_ENTRIES, MAX_CAPTURE_FILE_BYTES, VerifiedExternalContentClosure,
     capture_external_content_at, capture_file_at, capture_large_file, capture_large_tree,
-    capture_tree, external_content_manifest_digest, observe_external_content_tree_exact,
+    capture_tree, capture_tree_exact, external_content_manifest_digest,
+    observe_external_content_tree_exact,
 };
 pub use head_cache::{CachedHead, HeadCache};
 pub use large_object_store::{
-    IngestedLargeObject, LargeObjectIntegrityFinding, LargeObjectScrubReport,
-    LargeObjectStagingSweepReport, LargeObjectStore, LargeObjectSweepReport, LeasedLargeObject,
-    PinnedLargeObjectSourceIdentity,
+    IngestedLargeObject, LARGE_OBJECT_REFERENCE_SCHEMA, LargeObjectIntegrityFinding,
+    LargeObjectQuarantinePurgeReport, LargeObjectQuarantined, LargeObjectReference,
+    LargeObjectReferenceRefused, LargeObjectScrubReport, LargeObjectStagingSweepReport,
+    LargeObjectStore, LargeObjectSweepReport, LeasedLargeObject, PinnedLargeObjectSourceIdentity,
+    ReferenceRefusalCode, ReferenceRoot, ReferenceRootRefusal, ReferenceRoots, ReferenceSource,
+    install_reference_roots,
 };
 pub use locators::ThreadLocator;
 pub use objects::{
     Attestation, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,
     CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
-    CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, ChainState,
-    IncompatibleCurrentObjectSchema, MAX_TERMINAL_DURATION_SECONDS, ThreadHistoryRetention,
-    parse_canonical_timestamp, thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot,
-    thread_snapshot::ThreadUsage, thread_snapshot::UsageSubject,
+    CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, ChainState, EvidenceCoordinate,
+    FencedChainKinds, IncompatibleCurrentObjectSchema, MAX_RETIRED_CHAIN_CLOSURE_PAGE_BYTES,
+    MAX_RETIRED_CHAIN_CLOSURE_PAGE_ENTRIES, MAX_TERMINAL_DURATION_SECONDS, PrefixTip,
+    RETIRED_CHAIN_CLOSURE_PAGE_KIND, RETIRED_CHAIN_MANIFEST_KIND, RetiredChainClosurePage,
+    RetiredChainManifest, ThreadHistoryRetention, parse_canonical_timestamp,
+    thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
+    thread_snapshot::UsageSubject,
 };
 pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
-    CasEntryAttribution, CasEntryKind, CasEntryState, FinishSyncJobAttempt,
-    NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
-    OperationalCredentialProfileRecord, OperationalDb, ReplayIndexActivationRequired,
-    ReplayIndexNamespace, ReplayIndexRecord, ReplayLookupOutcome, ReplayPublishOutcome,
-    ReplayRecordVerification, SYNC_JOB_UNBOUNDED_ATTEMPTS,
+    CasEntryAttribution, CasEntryKind, CasEntryState, ClosedOriginalOperational,
+    FinishSyncJobAttempt, NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob,
+    NewSyncJobAttempt, OperationalCredentialProfileRecord, OperationalDb,
+    OriginalOperationalFailure, OriginalOperationalMutationAuthority, PreparedReplayIndexReset,
+    ReplayIndexActivationRequired, ReplayIndexNamespace, ReplayIndexRecord, ReplayLookupOutcome,
+    ReplayPublishOutcome, ReplayRecordVerification, SYNC_JOB_UNBOUNDED_ATTEMPTS,
     SYNC_JOB_UNBOUNDED_RETAINED_TERMINAL_ATTEMPTS, SyncJobAttemptRecord, SyncJobAttemptState,
     SyncJobRecord, SyncJobState, SyncJobUpdate, sync_job_attempt_count_is_valid,
     sync_job_attempts_are_unbounded, sync_job_attempts_exhausted,
@@ -102,7 +121,8 @@ pub use project_observation::{
     ProjectObservationRequest, project_observation_id,
 };
 pub use projection::{
-    ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
+    ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, MAX_DUE_FENCED_CHAIN_SLICE,
+    ProjectionDb,
 };
 pub use provider_call_observation::{
     PROVIDER_CALL_OBSERVATION_SCHEMA, ProviderCallObservationDraft,
@@ -111,23 +131,37 @@ pub use provider_call_observation::{
 };
 pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
-    DurableExternalCandidateReceipt, HeadOperation, PendingChainHeadTransition,
-    PendingTransitionCursor, ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION,
-    RecoveryStore, StagedCasRootHashes, StagedCasRootLease, TransitionPhase,
+    DurableExternalCandidateReceipt, EXECUTION_HISTORY_SCRATCH_REPAIR, EvidenceValidator,
+    HeadOperation, PendingChainHeadTransition, PendingTransitionCursor,
+    ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION, RecoveryStore, RetiredChainClosure,
+    RetiredChainClosureDraft, RetiredChainFence, RetiredThreadHistoryDiscardMarker,
+    RetirementEvidenceDiscard, StagedCasRootHashes, StagedCasRootLease,
+    ThreadHistoryDiscardAcknowledgementRefused, ThreadHistoryDiscardOperationRef, TransitionPhase,
+    read_retired_chain_closure,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;
+pub use state_db::LiveStateDatabaseOpenFailure;
 pub use state_db::{
+    AddThreadWithEventSuccessorRequest, AnchoredThreadAppend,
     AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
     AuthoritativeRootGenesisReadback, AuthoritativeRootThreadReadback,
     AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
     AuthoritativeThreadAppendAnchorReadback, AuthoritativeThreadAppendHistoryReadback,
-    AuthoritativeThreadEventChainReadback, AuthoritativeThreadHistoryDiscardProgress,
-    AuthoritativeThreadHistoryDiscardReport, AuthoritativeThreadPairReadback,
-    AuthoritativeThreadSnapshotReadback, AuthoritativeThreadSnapshotWithLastEventReadback,
-    CommittedWrite, CreateChainWithEventSuccessorRequest, PendingRemoveHeadState,
-    PendingReplayReport, PinnedStateAuthority, ProjectionRecoveryObserver,
-    ProjectionRecoveryProgress, ProjectionRecoveryStage, ProjectionRepairRequest,
-    ProjectionRepairSink, ProjectionStatus, RuntimeLivenessInspector, StateDb,
+    AuthoritativeThreadEventChainReadback, AuthoritativeThreadEventReadAnchor,
+    AuthoritativeThreadEventReadPage, AuthoritativeThreadEventReadProgress,
+    AuthoritativeThreadHistoryDiscardProgress, AuthoritativeThreadHistoryDiscardReport,
+    AuthoritativeThreadPairReadback, AuthoritativeThreadSnapshotReadback,
+    AuthoritativeThreadSnapshotWithLastEventReadback, CommittedWrite,
+    ConditionalThreadEventAppendResult, ConditionalThreadEventPairAppendResult,
+    CreateChainWithEventSuccessorRequest, EvidenceObligationDependency, MixedCutDependencies,
+    OrderedPairThreadAppend, PendingRemoveHeadState, PendingReplayReport, PinnedStateAuthority,
+    PreparedOfflineProjection, ProjectionRecoveryObserver, ProjectionRecoveryProgress,
+    ProjectionRecoveryStage, ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus,
+    RetiredChainDependency, RuntimeLivenessInspector, SingleAnchorAdmissionView,
+    SingleAnchorThreadAppend, StateDb, TwoAnchorAdmissionView, TwoAnchorThreadAppend,
+};
+pub use state_db::{
+    ChainRetirement, ChainRetirementReport, FencedRetirementReplay, RetirementEvidenceRef,
 };
 pub use sync::ImportAttribution;

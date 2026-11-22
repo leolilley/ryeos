@@ -1,7 +1,8 @@
-# ryeos:signed:2026-07-06T12:24:55Z:beae07bcab0859d38811faa7347776dc7b06ff555c8d76bc4ab7813181738491:hQVAsqTLvbWSf5T6L05dE6N2w6sWh+P2z1coDsh0zd71nMgG7Qq5XwWJLBHi3iCkHBFD76NMENeV34FaFlkNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:ae94d43d54b12d717ffda281996cc70eba29fdeae7972a26b9e91114d768e0bf:kmuljhvHVq7zsbmGYB7UjRTalWMqzMD0VxGREbF3XJawxIKikc20pH6U8SeraM8bBnjKS9kpBFNx3BmaH9OfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
+required_caps: ["ryeos.execute.service.ui/ryeos-ui/config/update"]
 name: ryeos-ui/config/update
 version: "1.0.0"
-description: Update durable local RyeOS UI user preferences.
+description: Update principal-owned UI preferences and reusable/particular view-set and Surface libraries with independent expected revisions. Saved Surface records do not grant authority or resume live sessions.
 endpoint: ui.ryeos.config.update
 availability: daemon_only

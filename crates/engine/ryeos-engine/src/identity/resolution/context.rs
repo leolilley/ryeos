@@ -462,6 +462,8 @@ pub(crate) struct RawLoadedItem {
     pub source_root: ItemSourceRoot,
     pub winner_ai_root: PathBuf,
     pub matched_ext: String,
+    /// Exact checked-generation signature embedding used for this source.
+    pub signature_envelope: crate::contracts::SignatureEnvelope,
     pub trust_class: TrustClass,
     pub signer_fingerprint: Option<String>,
     /// Original file content (signature intact) — the parser's input.
@@ -476,6 +478,42 @@ pub(crate) struct RawLoadedItem {
 }
 
 pub(crate) fn load_item_raw(
+    kinds: &KindRegistry,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    ref_: &CanonicalRef,
+    referenced_by: &str,
+    step: ResolutionStepName,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<RawLoadedItem, ResolutionError> {
+    let started = std::time::Instant::now();
+    let outcome = read_and_verify_item(
+        kinds,
+        roots,
+        trust_store,
+        ref_,
+        referenced_by,
+        step,
+        project_authority,
+    );
+    tracing::debug!(
+        target: "ryeos_engine::timing",
+        work = "item_load",
+        item_ref = %ref_,
+        source_content_digest = outcome
+            .as_ref()
+            .map_or("", |item| item.source_content_digest.as_str()),
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "engine work timing"
+    );
+    outcome
+}
+
+/// Discover one item, read its source and verify its signature.
+fn read_and_verify_item(
     kinds: &KindRegistry,
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
@@ -513,6 +551,11 @@ pub(crate) fn load_item_raw(
             return Err(ResolutionError::MissingItem {
                 item_ref: ref_.to_string(),
                 referenced_by: referenced_by.to_string(),
+            });
+        }
+        Err(refusal @ EngineError::ProjectShadowsBundleItem { .. }) => {
+            return Err(ResolutionError::ProjectShadowsBundleItem {
+                refusal: Box::new(refusal),
             });
         }
         Err(EngineError::ItemResolutionUnavailable { .. }) => {
@@ -563,11 +606,21 @@ pub(crate) fn load_item_raw(
         crate::item_resolution::parse_signature_header(&content, &source_format.signature);
     let (trust_class, signer_fingerprint) = match &sig_header {
         Some(header) => {
+            let signer_project_root = roots
+                .logical_project_root
+                .as_deref()
+                .or_else(|| project_authority.map(|(root, _)| root))
+                .or_else(|| roots.project_root());
             let (contract_trust, signer) = crate::trust::verify_item_signature(
                 &content,
                 header,
                 &source_format.signature,
                 trust_store,
+                &crate::trust::SignerContext::new(
+                    result.winner_space,
+                    &ref_.kind,
+                    signer_project_root,
+                ),
             )
             .map_err(|e| ResolutionError::IntegrityFailure {
                 item_ref: ref_.to_string(),
@@ -608,6 +661,7 @@ pub(crate) fn load_item_raw(
         source_root: result.winner_root_identity,
         winner_ai_root: result.winner_ai_root,
         matched_ext: result.matched_ext,
+        signature_envelope: source_format.signature.clone(),
         trust_class,
         signer_fingerprint,
         content,
@@ -731,6 +785,7 @@ pub(crate) fn field_as_list(
 fn parser_failure_class(error: &EngineError) -> ResolutionFailureClass {
     match error {
         EngineError::Shared(error) => parser_failure_class(error),
+        EngineError::ProcessCreationBusy { .. } => ResolutionFailureClass::ProcessCreationBusy,
         EngineError::ParserFailed {
             kind: ParseErrKind::Syntax | ParseErrKind::Schema,
             ..
@@ -751,6 +806,18 @@ fn parser_failure_class(error: &EngineError) -> ResolutionFailureClass {
     }
 }
 
+/// Canonicalize a possibly-bare ID against a default kind.
+///
+/// `directive:foo/bar` and `@alias` pass through unchanged.
+/// A bare `foo/bar` becomes `<default_kind>:foo/bar`.
+pub(crate) fn ensure_canonical(id: &str, default_kind: &str) -> String {
+    if id.starts_with('@') || id.contains(':') {
+        id.to_string()
+    } else {
+        format!("{default_kind}:{id}")
+    }
+}
+
 #[cfg(test)]
 mod parser_failure_class_tests {
     use super::*;
@@ -768,16 +835,16 @@ mod parser_failure_class_tests {
             ResolutionFailureClass::InvalidDefinition
         );
     }
-}
 
-/// Canonicalize a possibly-bare ID against a default kind.
-///
-/// `directive:foo/bar` and `@alias` pass through unchanged.
-/// A bare `foo/bar` becomes `<default_kind>:foo/bar`.
-pub(crate) fn ensure_canonical(id: &str, default_kind: &str) -> String {
-    if id.starts_with('@') || id.contains(':') {
-        id.to_string()
-    } else {
-        format!("{default_kind}:{id}")
+    #[test]
+    fn busy_parser_spawn_is_process_creation_busy() {
+        let error = EngineError::Shared(Arc::new(EngineError::ProcessCreationBusy {
+            subject: "parser:test/example".to_string(),
+            detail: "timed out after 5000 ms".to_string(),
+        }));
+        assert_eq!(
+            parser_failure_class(&error),
+            ResolutionFailureClass::ProcessCreationBusy
+        );
     }
 }

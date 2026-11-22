@@ -37,7 +37,6 @@ pub struct ExternalContentActivationReceipt {
 }
 
 impl ExternalContentActivationReceipt {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         activation_ref: String,
         activation_program_digest: String,

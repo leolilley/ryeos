@@ -37,6 +37,7 @@ pub fn normalize_selected_parameters(
     }
     let effective = engine
         .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
                 .map_err(|e| e.to_string())?,
             expected_kind: None,
@@ -65,12 +66,15 @@ pub enum CommandProjectPolicyError {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CommandInvocationControls {
+    pub validation_scope: ryeos_runtime::command::ValidationScope,
     pub async_launch: bool,
     pub pin_project_at_admission: bool,
     pub pin_current_head_at_admission: bool,
     /// Exact published project snapshot to execute read-only.
     pub project_snapshot: Option<String>,
     pub retain_child_results: bool,
+    /// Demand the live project explicitly (`--live-project`).
+    pub live_project: bool,
     pub exclude_operator_vault: bool,
     pub stream: Option<bool>,
     pub debug_raw: bool,
@@ -118,13 +122,24 @@ pub fn compile_command_invocation(
     {
         tail = strip_project_control_flags(&tail);
     }
-    let mut controls =
-        strip_declared_control_flags(&mut tail, &command.control_flags).map_err(Invalid)?;
+    let control_flags = control_flags_with_implicit_json(command);
+    let mut controls = strip_declared_control_flags(&mut tail, &control_flags).map_err(Invalid)?;
     let mut overlay = arguments.clone();
     let direct_execute = matches!(
         command.dispatch,
         CommandDispatch::DirectExecuteItemRef { .. }
     );
+    // Project selectors may appear anywhere in the tail. Separate them before
+    // any positional matching so a selector (or its value) can never be taken
+    // for the item ref or a positional slot.
+    let mut selectors = serde_json::Map::new();
+    if direct_execute || (!command.forms.is_empty() && command.project.is_some()) {
+        let (rest, found) = separate_project_control_flags(&tail).map_err(Invalid)?;
+        tail = rest;
+        selectors = found;
+    } else if !command.forms.is_empty() {
+        tail = strip_no_project_flags(&tail);
+    }
     let (item_ref, validate_only) = match &command.dispatch {
         CommandDispatch::ExecuteRef { execute, .. } => (execute.clone(), false),
         CommandDispatch::DirectExecuteItemRef {
@@ -134,8 +149,18 @@ pub fn compile_command_invocation(
         } => {
             // A positional target leaves all structured item fields untouched.
             // If the target is supplied structurally, consume that field only.
-            let target = if tail.first().is_some_and(|s| !s.starts_with('-')) {
-                tail.remove(0)
+            let positional = if tail.first().is_some_and(|s| !s.starts_with('-')) {
+                Some(0)
+            } else {
+                // Item ref after other flags: first non-flag token that is
+                // a canonical ref (flag values are not canonical refs).
+                tail.iter().position(|s| {
+                    !s.starts_with('-')
+                        && ryeos_engine::canonical_ref::CanonicalRef::parse(s).is_ok()
+                })
+            };
+            let target = if let Some(index) = positional {
+                tail.remove(index)
             } else {
                 overlay
                     .as_object_mut()
@@ -189,8 +214,8 @@ pub fn compile_command_invocation(
         )));
     }
     let (mut parameters, project_path) = if direct_execute {
-        let (payload, selectors) = separate_project_control_flags(&tail).map_err(Invalid)?;
-        let mut selectors = Value::Object(selectors);
+        let payload = tail.clone();
+        let mut selectors = Value::Object(std::mem::take(&mut selectors));
         let project_path = apply_project_policy_with_context(
             command,
             &mut selectors,
@@ -214,6 +239,19 @@ pub fn compile_command_invocation(
     } else {
         let mut parameters =
             bind_command_input(binding_command, &tail, &overlay, &load_input).map_err(Invalid)?;
+        if !selectors.is_empty() {
+            let object = parameters
+                .as_object_mut()
+                .ok_or_else(|| Invalid("command parameters must be a JSON object".into()))?;
+            for (field, value) in std::mem::take(&mut selectors) {
+                if object.contains_key(&field) {
+                    return Err(Invalid(format!(
+                        "parameter '{field}' conflicts with the command's runtime-bound project selector"
+                    )));
+                }
+                object.insert(field, value);
+            }
+        }
         let path = apply_project_policy_with_context(
             command,
             &mut parameters,
@@ -223,18 +261,45 @@ pub fn compile_command_invocation(
         (parameters, path)
     };
     // The signed descriptor is mandatory, not merely another argv default.
+    if controls.validation_scope == ryeos_runtime::command::ValidationScope::SourceObservation
+        && (!validate_only
+            || project_path.is_some()
+            || controls.async_launch
+            || controls.stream == Some(true)
+            || controls.call_method.is_some()
+            || controls.call_args.is_some()
+            || controls.state_root.is_some()
+            || !controls.ref_bindings.is_empty()
+            || controls.product_selections.is_some())
+    {
+        return Err(Invalid(
+            "source observation requires projectless buffered validation without execution controls"
+                .to_owned(),
+        ));
+    }
     controls.pin_project_at_admission |=
         command.project.as_ref().is_some_and(|p| p.pin_at_admission);
     for (requested, flag) in [
         (controls.pin_project_at_admission, "--pin-project"),
         (controls.pin_current_head_at_admission, "--current-head"),
         (controls.retain_child_results, "--retain-child-results"),
+        (controls.live_project, "--live-project"),
     ] {
         if requested && project_path.is_none() {
             return Err(Invalid(format!(
                 "{flag} requires a project root; it cannot be combined with --no-project"
             )));
         }
+    }
+    if controls.live_project
+        && (controls.pin_project_at_admission
+            || controls.pin_current_head_at_admission
+            || controls.project_snapshot.is_some())
+    {
+        return Err(Invalid(
+            "--live-project cannot be combined with --pin-project, --current-head or --project-snapshot"
+                .into(),
+        ));
     }
     if controls.pin_project_at_admission && controls.pin_current_head_at_admission {
         return Err(Invalid(
@@ -315,13 +380,18 @@ pub fn command_execution_policy(
     } else {
         ExecutionPolicy::projectless(response)
     };
+    if controls.live_project {
+        policy = policy.demand_live_project().map_err(|e| format!("{e:#}"))?;
+    }
     if controls.retain_child_results {
-        policy = policy.retain_child_results().map_err(|e| e.to_string())?;
+        policy = policy
+            .retain_child_results()
+            .map_err(|e| format!("{e:#}"))?;
     }
     if controls.exclude_operator_vault {
         policy = policy.exclude_operator_vault();
     }
-    policy.validate().map_err(|e| e.to_string())?;
+    policy.validate().map_err(|e| format!("{e:#}"))?;
     Ok(policy)
 }
 
@@ -358,13 +428,14 @@ pub fn bind_command_input(
         }
     }
     let mut input = source.map(load_input).transpose()?;
-    if input.is_none() && binding.is_some_and(|b| b.single_json_object_arg) && residual.len() == 1 {
-        if let Ok(value) = serde_json::from_str::<Value>(&residual[0])
-            && value.is_object()
-        {
-            input = Some(value);
-            residual.clear();
-        }
+    if input.is_none()
+        && binding.is_some_and(|b| b.single_json_object_arg)
+        && residual.len() == 1
+        && let Ok(value) = serde_json::from_str::<Value>(&residual[0])
+        && value.is_object()
+    {
+        input = Some(value);
+        residual.clear();
     }
     if let Some(mut input) = input {
         if command.forms.is_empty() {
@@ -409,6 +480,33 @@ pub fn bind_command_input(
         );
     }
     ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(&residual, Some(command), overlay)
+}
+
+/// `--json` selects buffered output on every command. A command that does not
+/// declare a `json` flag (or alias) and has no `json` parameter field gets the
+/// buffered-output binding implicitly, so the flag never reaches the service
+/// as an unknown field.
+pub fn control_flags_with_implicit_json(command: &CommandDef) -> Vec<CommandControlFlag> {
+    let mut flags = command.control_flags.clone();
+    let declared = flags
+        .iter()
+        .any(|f| f.flag == "json" || f.aliases.iter().any(|a| a == "json"));
+    let is_field = command
+        .forms
+        .iter()
+        .flat_map(|form| form.slots.iter())
+        .any(|slot| slot.field == "json")
+        || command.defaults.contains_key("json");
+    if !declared && !is_field {
+        flags.push(CommandControlFlag {
+            flag: "json".to_owned(),
+            help: "Print the buffered JSON result".to_owned(),
+            binding: ControlFlagBinding::StreamOff,
+            ref_binding_name: None,
+            aliases: Vec::new(),
+        });
+    }
+    flags
 }
 
 pub fn strip_declared_control_flags(
@@ -472,7 +570,7 @@ pub fn strip_declared_control_flags(
                             format!("--{name} must be a typed product-selection list: {error}")
                         })?;
                     let canonical = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(parsed)
-                        .map_err(|error| format!("--{name}: {error}"))?;
+                        .map_err(|error| format!("--{name}: {error:#}"))?;
                     controls.product_selections =
                         Some(serde_json::to_value(canonical).map_err(|error| error.to_string())?);
                 }
@@ -517,12 +615,17 @@ pub fn strip_declared_control_flags(
             continue;
         }
         match binding {
+            ControlFlagBinding::SourceObservation => {
+                controls.validation_scope =
+                    ryeos_runtime::command::ValidationScope::SourceObservation;
+            }
             ControlFlagBinding::LaunchModeAccepted => controls.async_launch = true,
             ControlFlagBinding::PinProjectAtAdmission => controls.pin_project_at_admission = true,
             ControlFlagBinding::PinCurrentHeadAtAdmission => {
                 controls.pin_current_head_at_admission = true
             }
             ControlFlagBinding::RetainChildResults => controls.retain_child_results = true,
+            ControlFlagBinding::LiveProject => controls.live_project = true,
             ControlFlagBinding::ExcludeOperatorVault => controls.exclude_operator_vault = true,
             ControlFlagBinding::DebugRaw => controls.debug_raw = true,
             ControlFlagBinding::StreamOn => {
@@ -542,6 +645,16 @@ pub fn strip_declared_control_flags(
     }
     *tail = parameters;
     Ok(controls)
+}
+
+/// Drop the projectless selector from a tail whose command has no project
+/// policy: it is meaningless there, and left in place its bare-flag binding
+/// would swallow the next positional as its value.
+fn strip_no_project_flags(tail: &[String]) -> Vec<String> {
+    tail.iter()
+        .filter(|t| *t != "--no-project" && !t.starts_with("--no-project="))
+        .cloned()
+        .collect()
 }
 
 pub fn strip_project_control_flags(tail: &[String]) -> Vec<String> {
@@ -829,6 +942,110 @@ mod tests {
             source_file: PathBuf::new(),
             provenance: Default::default(),
         }
+    }
+
+    #[test]
+    fn json_is_an_implicit_control_flag_that_never_reaches_parameters() {
+        let definition = command();
+        let compiled = compile_command_invocation(
+            &definition,
+            &["--json".to_owned()],
+            &Value::Null,
+            None,
+            None,
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(compiled.controls.stream, Some(false));
+        assert!(
+            compiled.parameters.get("json").is_none(),
+            "{:?}",
+            compiled.parameters
+        );
+    }
+
+    #[test]
+    fn json_stays_a_parameter_when_the_command_declares_the_field() {
+        let mut definition = command();
+        definition
+            .defaults
+            .insert("json".to_owned(), Value::Bool(false));
+        assert_eq!(
+            control_flags_with_implicit_json(&definition),
+            definition.control_flags
+        );
+    }
+
+    #[test]
+    fn source_observation_is_typed_validate_control_not_worker_input() {
+        let mut definition = command();
+        definition.dispatch = CommandDispatch::DirectExecuteItemRef {
+            item_ref_arg: "item_ref".into(),
+            validate_only: true,
+            availability: Default::default(),
+        };
+        let project = definition.project.as_mut().unwrap();
+        project.request_project_path = true;
+        project.bind_parameter = None;
+        definition.control_flags.push(CommandControlFlag {
+            flag: "source-only".into(),
+            help: String::new(),
+            binding: ControlFlagBinding::SourceObservation,
+            ref_binding_name: None,
+            aliases: vec![],
+        });
+        let arguments = vec![
+            "worker:example/author".into(),
+            "--source-only".into(),
+            "--no-project".into(),
+        ];
+        let observed = compile_command_invocation(
+            &definition,
+            &arguments,
+            &Value::Null,
+            None,
+            None,
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert!(observed.validate_only);
+        assert_eq!(
+            observed.controls.validation_scope,
+            ryeos_runtime::command::ValidationScope::SourceObservation
+        );
+        assert_eq!(observed.parameters, serde_json::json!({}));
+        assert!(observed.project_path.is_none());
+
+        let ordinary = compile_command_invocation(
+            &definition,
+            &["worker:example/author".into()],
+            &Value::Null,
+            None,
+            None,
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(
+            ordinary.controls.validation_scope,
+            ryeos_runtime::command::ValidationScope::CompleteExecution
+        );
+
+        if let CommandDispatch::DirectExecuteItemRef { validate_only, .. } =
+            &mut definition.dispatch
+        {
+            *validate_only = false;
+        }
+        assert!(
+            compile_command_invocation(
+                &definition,
+                &arguments,
+                &Value::Null,
+                None,
+                None,
+                |_| unreachable!(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! no product selector grants another owner's bytes or ambient filesystem access.
 
 use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
@@ -14,46 +15,27 @@ use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
+pub mod candidate_program;
+pub mod consumer_qualification_context;
+pub mod content_qualification;
 pub mod product_build;
 pub mod product_composition;
+pub mod product_program;
 pub mod product_qualification;
 pub mod product_receipt;
 pub mod products;
+pub mod qualification_launch;
+pub mod qualification_testimony;
+pub mod rebind;
+pub mod remote_testimony_inspection;
 mod retained_binding;
 mod retained_product;
 mod retained_result;
 
 const BINDING_HEAD_NAMESPACE: &str = ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE;
-
-/// Retire every predecessor external-content binding head while the node is
-/// stopped. Manifest-schema cuts change the binding coordinate itself; old
-/// active heads cannot remain roots under the new decoder and are never
-/// translated.
-pub fn discard_binding_heads_offline(
-    config: &crate::config::Config,
-    dry_run: bool,
-) -> anyhow::Result<usize> {
-    let _state_lock = crate::state_lock::StateLock::acquire(&crate::state_lock::default_lock_path(
-        &config.app_root,
-    ))
-    .context("external-content binding reset requires the daemon to be stopped")?;
-    let runtime_state_dir = config.runtime_state_dir();
-    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)
-        .context("load node identity for external-content binding reset")?;
-    let mut trust = ryeos_state::refs::TrustStore::new();
-    trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
-    let state = ryeos_state::StateDb::open_for_projection_rebuild(
-        &runtime_state_dir,
-        std::sync::Arc::new(trust),
-    )
-    .context("open pinned state authority for external-content binding reset")?;
-    let authority = state.pinned_authority()?;
-    let guard = authority.acquire_exclusive_guard(!dry_run)?;
-    state.discard_external_content_binding_heads(&guard, dry_run)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +54,27 @@ pub enum ImportStorage {
     LargeContent,
 }
 
+/// Whether an imported large file is copied into the store or held where
+/// the root keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportHold {
+    /// Hold the file by reference, in place. The root must be declared in
+    /// place by node policy and proven at an accepted grade.
+    InPlace,
+    /// Copy the bytes into the store, whatever the root declares.
+    Owned,
+}
+
+impl ImportHold {
+    fn label(self) -> &'static str {
+        match self {
+            Self::InPlace => "in_place",
+            Self::Owned => "owned",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesystemImportRequest {
@@ -82,6 +85,10 @@ pub struct FilesystemImportRequest {
     pub maximum_bytes: u64,
     #[serde(default)]
     pub expected_file_sha256: Option<String>,
+    /// Absent, the root's own declaration decides: a root declared in place
+    /// holds by reference, any other copies.
+    #[serde(default)]
+    pub hold: Option<ImportHold>,
 }
 
 /// Source selection is explicit and closed. Neither a snapshot hash nor a
@@ -179,54 +186,73 @@ pub enum BindConsumerKind {
 
 impl BindRequest {
     pub fn validate_consumer_request(&self) -> anyhow::Result<()> {
-        match (&self.product_selections, &self.product_owner_principal) {
-            (Some(selections), Some(owner)) => {
-                product_composition::validate_selection_batch(selections)?;
-                let fingerprint = owner.strip_prefix("fp:").ok_or_else(|| {
-                    anyhow::anyhow!("selected binding product_owner_principal is not canonical")
-                })?;
-                if !lillux::valid_hash(fingerprint)
-                    || fingerprint.bytes().any(|byte| byte.is_ascii_uppercase())
-                {
-                    anyhow::bail!("selected binding product_owner_principal is not canonical");
-                }
+        validate_consumer_fields(
+            self.consumer_kind,
+            self.project_snapshot_hash.as_deref(),
+            self.project_path.as_deref(),
+            self.product_selections.as_deref(),
+            self.product_owner_principal.as_deref(),
+        )
+    }
+}
+
+/// The consumer coordinate shared by bind, the binding inventory and rebind:
+/// an installed bundle names no generation; a pinned project names exactly
+/// one snapshot and its logical project path; a product selection always
+/// names its exact owner.
+pub(crate) fn validate_consumer_fields(
+    consumer_kind: BindConsumerKind,
+    project_snapshot_hash: Option<&str>,
+    project_path: Option<&std::path::Path>,
+    product_selections: Option<
+        &[ryeos_state::external_content::products::composition::ProductSelection],
+    >,
+    product_owner_principal: Option<&str>,
+) -> anyhow::Result<()> {
+    match (product_selections, product_owner_principal) {
+        (Some(selections), Some(owner)) => {
+            product_composition::validate_selection_batch(selections)?;
+            let fingerprint = owner.strip_prefix("fp:").ok_or_else(|| {
+                anyhow::anyhow!("selected binding product_owner_principal is not canonical")
+            })?;
+            if !lillux::valid_hash(fingerprint)
+                || fingerprint.bytes().any(|byte| byte.is_ascii_uppercase())
+            {
+                anyhow::bail!("selected binding product_owner_principal is not canonical");
             }
-            (Some(_), None) => {
-                anyhow::bail!("selected binding requires an exact product_owner_principal")
-            }
-            (None, Some(_)) => {
-                anyhow::bail!("unselected binding cannot carry product_owner_principal")
-            }
-            (None, None) => {}
         }
-        match self.consumer_kind {
-            BindConsumerKind::InstalledBundle
-                if self.project_snapshot_hash.is_none() && self.project_path.is_none() =>
+        (Some(_), None) => {
+            anyhow::bail!("selected binding requires an exact product_owner_principal")
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("unselected binding cannot carry product_owner_principal")
+        }
+        (None, None) => {}
+    }
+    match consumer_kind {
+        BindConsumerKind::InstalledBundle
+            if project_snapshot_hash.is_none() && project_path.is_none() =>
+        {
+            Ok(())
+        }
+        BindConsumerKind::PinnedProject
+            if project_snapshot_hash.is_some() && project_path.is_some() =>
+        {
+            let snapshot = project_snapshot_hash.expect("checked pinned-project snapshot");
+            if !lillux::valid_hash(snapshot)
+                || snapshot.bytes().any(|byte| byte.is_ascii_uppercase())
             {
-                Ok(())
+                anyhow::bail!(
+                    "pinned-project binding project_snapshot_hash is not a canonical digest"
+                );
             }
-            BindConsumerKind::PinnedProject
-                if self.project_snapshot_hash.is_some() && self.project_path.is_some() =>
-            {
-                let snapshot = self
-                    .project_snapshot_hash
-                    .as_deref()
-                    .expect("checked pinned-project snapshot");
-                if !lillux::valid_hash(snapshot)
-                    || snapshot.bytes().any(|byte| byte.is_ascii_uppercase())
-                {
-                    anyhow::bail!(
-                        "pinned-project binding project_snapshot_hash is not a canonical digest"
-                    );
-                }
-                Ok(())
-            }
-            BindConsumerKind::InstalledBundle => anyhow::bail!(
-                "installed-bundle binding cannot carry project snapshot or path fields"
-            ),
-            BindConsumerKind::PinnedProject => anyhow::bail!(
-                "pinned-project binding requires project_snapshot_hash and project_path"
-            ),
+            Ok(())
+        }
+        BindConsumerKind::InstalledBundle => {
+            anyhow::bail!("installed-bundle binding cannot carry project snapshot or path fields")
+        }
+        BindConsumerKind::PinnedProject => {
+            anyhow::bail!("pinned-project binding requires project_snapshot_hash and project_path")
         }
     }
 }
@@ -275,6 +301,10 @@ pub struct ScrubResponse {
     pub objects_verified: usize,
     pub bytes_verified: u64,
     pub object_findings: Vec<ryeos_state::LargeObjectIntegrityFinding>,
+    /// Byte-damaged objects this scrub moved into quarantine. Each active
+    /// binding that needs one now appears in `binding_findings` as refused
+    /// for quarantine until its bytes are re-imported.
+    pub objects_quarantined: Vec<String>,
     pub bindings_verified: usize,
     pub binding_findings: Vec<BindingIntegrityFinding>,
     pub abandoned_staging_removed: usize,
@@ -321,7 +351,7 @@ async fn import_filesystem(
         bail!("expected_file_sha256 is not a canonical sha256 digest");
     }
     let policy = state.node_policy.require::<
-        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
     let root_policy = policy
         .roots
@@ -332,15 +362,19 @@ async fn import_filesystem(
     }
     let source_root = lillux::PinnedDirectory::open(&root_policy.path)?
         .ok_or_else(|| anyhow::anyhow!("external-content import root is unavailable"))?;
-    let (root_device, root_inode) = source_root.device_inode()?;
-    if root_policy.containing_device != root_device || root_policy.root_inode != root_inode {
+    let root_identity = source_root.identity()?;
+    if root_policy.root_identity != root_identity {
         bail!("external-content import root filesystem identity changed");
+    }
+    let hold = resolve_import_hold(&request, root_policy)?;
+    if let ResolvedHold::InPlace { accept } = &hold {
+        require_in_place_proof(&request, &root_policy.path, accept)?;
     }
     let request_digest = import_request_digest(
         &request,
+        hold.label(),
         &policy.limits,
-        root_device,
-        root_inode,
+        &root_identity,
         state.ignore_matcher.as_ref(),
     )?;
     let publication_key =
@@ -355,14 +389,21 @@ async fn import_filesystem(
     } else {
         policy.limits.max_entries
     };
+    // A file held in place writes no bytes to the state filesystem: it needs
+    // room for the manifest, a sidecar and a record, and counts nothing
+    // against the large-store budget.
+    let in_place = matches!(hold, ResolvedHold::InPlace { .. });
+    if in_place {
+        large_store.require_reference_root(&request.root, &root_identity)?;
+    }
     require_import_store_capacity(
         "external-content CAS",
         cas.filesystem_capacity()?,
         policy.limits.minimum_free_bytes,
-        request.maximum_bytes,
+        if in_place { 0 } else { request.maximum_bytes },
         maximum_entries,
     )?;
-    if request.storage == ImportStorage::LargeContent {
+    if request.storage == ImportStorage::LargeContent && !in_place {
         require_import_store_capacity(
             "external-content large store",
             large_store.filesystem_capacity()?,
@@ -371,7 +412,7 @@ async fn import_filesystem(
             maximum_entries,
         )?;
     }
-    if request.storage == ImportStorage::LargeContent {
+    if request.storage == ImportStorage::LargeContent && !in_place {
         let maximum_store_after = large_store
             .total_stored_bytes()?
             .checked_add(request.maximum_bytes)
@@ -385,7 +426,7 @@ async fn import_filesystem(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
         })?;
     let mut stage = authority
         .require_recovery()?
@@ -401,7 +442,6 @@ async fn import_filesystem(
             &request,
             &policy.limits,
             &source_root,
-            root_device,
             state.ignore_matcher.as_ref(),
             &guard,
             &cas,
@@ -412,13 +452,13 @@ async fn import_filesystem(
             &request,
             &policy.limits,
             &source_root,
-            root_device,
             state.ignore_matcher.as_ref(),
             &guard,
             &cas,
             &large_store,
             &mut stage,
             request_digest,
+            in_place.then_some(root_identity),
         )?,
     };
     source_root.ensure_path_binding()?;
@@ -426,6 +466,79 @@ async fn import_filesystem(
     drop(_permit);
     drop(guard);
     Ok(response)
+}
+
+/// How one filesystem import holds its bytes, decided from the request and
+/// the root's declaration in signed node policy.
+enum ResolvedHold {
+    Owned,
+    InPlace { accept: Vec<String> },
+}
+
+impl ResolvedHold {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Owned => ImportHold::Owned.label(),
+            Self::InPlace { .. } => ImportHold::InPlace.label(),
+        }
+    }
+}
+
+fn resolve_import_hold(
+    request: &FilesystemImportRequest,
+    root_policy: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot,
+) -> anyhow::Result<ResolvedHold> {
+    let wanted = request.hold.unwrap_or(if root_policy.in_place.is_some() {
+        ImportHold::InPlace
+    } else {
+        ImportHold::Owned
+    });
+    match (wanted, root_policy.in_place.as_ref()) {
+        (ImportHold::Owned, _) => Ok(ResolvedHold::Owned),
+        (ImportHold::InPlace, None) => bail!(
+            "external-content import root `{}` is not declared for use in place by node policy",
+            request.root
+        ),
+        (ImportHold::InPlace, Some(policy)) => {
+            if request.shape != ImportShape::File {
+                bail!(
+                    "a tree cannot be held in place: only whole files are served by reference, so \
+                     a tree import from root `{}` is refused; import it with hold `owned`",
+                    request.root
+                );
+            }
+            if request.storage != ImportStorage::LargeContent {
+                bail!("only large-content storage can hold a file in place");
+            }
+            Ok(ResolvedHold::InPlace {
+                accept: policy.accept.clone(),
+            })
+        }
+    }
+}
+
+/// Re-measure the root now and require the proof to meet the grades the
+/// root's declaration accepts. Nothing is copied on trust of an earlier
+/// measurement.
+fn require_in_place_proof(
+    request: &FilesystemImportRequest,
+    root_path: &Path,
+    accept: &[String],
+) -> anyhow::Result<()> {
+    let facts = lillux::process_control::ImmutableRootFacts::observe(root_path);
+    let evidence = lillux::process_control::decide_immutable_root(&facts).map_err(|reason| {
+        anyhow::anyhow!(
+            "root `{}` is not proven immutable, so it cannot hold files in place: {reason}",
+            request.root
+        )
+    })?;
+    lillux::process_control::admit_immutable_root_proof(accept, &evidence).map_err(|reason| {
+        anyhow::anyhow!(
+            "root `{}` is proven immutable only at a grade its declaration does not accept: \
+             {reason}",
+            request.root
+        )
+    })
 }
 
 /// Import one already-verified managed-activation component from a node-owned
@@ -457,7 +570,7 @@ pub fn import_managed_activation_component(
     let expected_file_sha256 = component.expected_file_sha256.clone();
     validate_relative_path(staged_name)?;
     let import_policy = state.node_policy.require::<
-        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
     let policy = import_policy.managed_activation.require_enabled()?;
     activation.document.validate_portable()?;
@@ -474,6 +587,7 @@ pub fn import_managed_activation_component(
         },
         maximum_bytes,
         expected_file_sha256,
+        hold: Some(ImportHold::Owned),
     };
     if maximum_depth > import_policy.limits.max_depth
         || maximum_entries > import_policy.limits.max_entries
@@ -482,18 +596,19 @@ pub fn import_managed_activation_component(
     {
         bail!("managed external-content component exceeds current node import policy");
     }
-    let limits = crate::node_policy::sections::external_content::ExternalContentImportLimits {
-        max_depth: maximum_depth,
-        max_entries: maximum_entries,
-        max_file_bytes: maximum_file_bytes,
-        max_total_bytes: maximum_bytes,
-        store_budget_bytes: policy
-            .store_budget_bytes
-            .min(import_policy.limits.store_budget_bytes),
-        minimum_free_bytes: policy
-            .minimum_free_bytes
-            .max(import_policy.limits.minimum_free_bytes),
-    };
+    let limits =
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
+            max_depth: maximum_depth,
+            max_entries: maximum_entries,
+            max_file_bytes: maximum_file_bytes,
+            max_total_bytes: maximum_bytes,
+            store_budget_bytes: policy
+                .store_budget_bytes
+                .min(import_policy.limits.store_budget_bytes),
+            minimum_free_bytes: policy
+                .minimum_free_bytes
+                .max(import_policy.limits.minimum_free_bytes),
+        };
     let policy_digest = crate::managed_external_content_operation::managed_policy_digest(
         &import_policy.limits,
         policy,
@@ -514,7 +629,6 @@ pub fn import_managed_activation_component(
     }))?;
     let publication_key =
         ryeos_state::DurableCasPublicationKey::external_content_import(&request_digest)?;
-    let (root_device, _) = source_root.device_inode()?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
@@ -549,7 +663,7 @@ pub fn import_managed_activation_component(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire managed external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire managed external-content write permit: {error:#}")
         })?;
     let mut stage = authority
         .require_recovery()?
@@ -565,7 +679,6 @@ pub fn import_managed_activation_component(
             &request,
             &limits,
             source_root,
-            root_device,
             state.ignore_matcher.as_ref(),
             &guard,
             &cas,
@@ -576,13 +689,13 @@ pub fn import_managed_activation_component(
             &request,
             &limits,
             source_root,
-            root_device,
             state.ignore_matcher.as_ref(),
             &guard,
             &cas,
             &large_store,
             &mut stage,
             request_digest,
+            None,
         )?,
     };
     if response.manifest_hash != component.expected_manifest_hash
@@ -912,7 +1025,7 @@ async fn bind_authorized(
             .write_barrier
             .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|error| {
-                anyhow::anyhow!("cannot acquire external-content epoch write permit: {error}")
+                anyhow::anyhow!("cannot acquire external-content epoch write permit: {error:#}")
             })?;
         let epoch_guard = authority.acquire_exclusive_guard(true)?;
         state
@@ -957,7 +1070,7 @@ async fn bind_authorized(
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content binding write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content binding write permit: {error:#}")
         })?;
     let mut stage = recovery.open_durable_cas_upload_admitted(
         &guard,
@@ -1144,7 +1257,7 @@ async fn bind_authorized(
         )
     })?;
     if let Err(error) = stage.finish_admitted(&guard, &binding_hash) {
-        tracing::warn!(%error, staging_id = %request.staging_id, "binding head published while import receipt remained retryable");
+        tracing::warn!(error = %format!("{error:#}"), staging_id = %request.staging_id, "binding head published while import receipt remained retryable");
     }
     Ok(BindResponse {
         binding_subject_id,
@@ -1182,6 +1295,52 @@ fn settle_current_binding_receipt(
     stage.finish_admitted(guard, binding_hash)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnregisterRequest {
+    pub file_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnregisterResponse {
+    pub file_sha256: String,
+    /// A reference record existed and was removed. The file it named is not
+    /// touched.
+    pub unregistered: bool,
+    /// The object is still resident because the store also owns a copy.
+    pub still_resident_owned: bool,
+}
+
+/// Remove the reference record of one object held in place. The file in the
+/// root is never touched. An execution that holds the object refuses it.
+pub async fn unregister(
+    state: Arc<AppState>,
+    context: HandlerContext,
+    request: UnregisterRequest,
+) -> anyhow::Result<UnregisterResponse> {
+    crate::operator_authority::require_local_configured_operator(&state, &context)?;
+    if !lillux::valid_hash(&request.file_sha256) {
+        bail!("unregister names a large object by its 64-hex sha256");
+    }
+    let authority = state.state_store.pinned_state_authority()?;
+    let _guard = authority.acquire_shared_guard()?;
+    let _permit = state
+        .write_barrier
+        .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
+        .map_err(|error| {
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
+        })?;
+    let store = authority.large_object_store()?;
+    let unregistered = store.unregister_reference(&request.file_sha256)?;
+    let still_resident_owned = store.has_owned_object(&request.file_sha256)?;
+    Ok(UnregisterResponse {
+        file_sha256: request.file_sha256,
+        unregistered,
+        still_resident_owned,
+    })
+}
+
 pub async fn scrub(state: Arc<AppState>, context: HandlerContext) -> anyhow::Result<ScrubResponse> {
     crate::operator_authority::require_local_configured_operator(&state, &context)?;
     let authority = state.state_store.pinned_state_authority()?;
@@ -1190,7 +1349,7 @@ pub async fn scrub(state: Arc<AppState>, context: HandlerContext) -> anyhow::Res
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| {
-            anyhow::anyhow!("cannot acquire external-content write permit: {error}")
+            anyhow::anyhow!("cannot acquire external-content write permit: {error:#}")
         })?;
     let cas = authority.cas_store()?;
     let store = authority.large_object_store()?;
@@ -1273,10 +1432,36 @@ pub async fn scrub(state: Arc<AppState>, context: HandlerContext) -> anyhow::Res
         objects_verified: report.objects_verified,
         bytes_verified: report.bytes_verified,
         object_findings: report.findings,
+        objects_quarantined: report.quarantined,
         bindings_verified,
         binding_findings,
         abandoned_staging_removed,
     })
+}
+
+/// Explicit stopped-node discard of the large-object quarantine scrub fills.
+/// The caller holds the node StateLock; this pins and locks the runtime
+/// namespace for the whole purge, so no daemon or other maintainer can
+/// lease, scrub or ingest meanwhile. `dry_run` only counts. A node that has
+/// never created the store purges nothing.
+pub fn purge_quarantined_large_objects(
+    config: &ryeos_node_runtime::config::Config,
+    _state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    dry_run: bool,
+) -> anyhow::Result<ryeos_state::LargeObjectQuarantinePurgeReport> {
+    let runtime_dir = config.runtime_state_dir();
+    let runtime = lillux::PinnedDirectory::open(&runtime_dir)?
+        .with_context(|| format!("runtime state is absent: {}", runtime_dir.display()))?;
+    let _namespace = runtime
+        .lock_exclusive()
+        .context("lock runtime state namespace for large-object quarantine purge")?;
+    match ryeos_state::LargeObjectStore::open_under(&runtime)? {
+        Some(store) => store.purge_quarantine(dry_run),
+        None => Ok(ryeos_state::LargeObjectQuarantinePurgeReport {
+            dry_run,
+            ..Default::default()
+        }),
+    }
 }
 
 pub async fn release(
@@ -1392,6 +1577,9 @@ fn release_under_guard(
     let released_hash = stage.store_object_admitted(guard, &cas, &released.to_value()?)?;
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
     state.state_store.with_state_db(|db| {
+        // As bind does: never write a current-schema object into a namespace
+        // whose epoch is not this binary's.
+        db.ensure_current_external_content_binding_epoch(guard)?;
         db.advance_generic_head_ref(
             BINDING_HEAD_NAMESPACE,
             binding_subject_id,
@@ -1402,7 +1590,7 @@ fn release_under_guard(
         )
     })?;
     if let Err(error) = stage.finish_admitted(guard) {
-        tracing::warn!(%error, %binding_subject_id, "released binding head published while temporary root remained recoverable");
+        tracing::warn!(error = %format!("{error:#}"), %binding_subject_id, "released binding head published while temporary root remained recoverable");
     }
     Ok(ReleaseResponse {
         binding_subject_id: released.binding_subject_id,
@@ -1514,6 +1702,9 @@ pub fn active_binding_from_store(
     else {
         return Ok(None);
     };
+    if head.signer != target_node_fingerprint {
+        bail!("external-content binding head is not signed by the target node");
+    }
     let value = cas
         .get_object(&head.target_hash)?
         .ok_or_else(|| anyhow::anyhow!("external-content binding head target is absent"))?;
@@ -1559,12 +1750,10 @@ struct ResolvedConsumer {
     grant_max_total_bytes: Option<u64>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_content_import(
     request: &FilesystemImportRequest,
-    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
-    root_device: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
     guard: &ryeos_state::CasMutationGuard,
     cas: &lillux::CasStore,
@@ -1585,7 +1774,7 @@ fn capture_content_import(
     let mut sink = DurableContentSink { _guard: guard, cas };
     let manifest = match request.shape {
         ImportShape::Tree => {
-            let target = open_admitted_source_tree(source_root, &request.path, root_device)?;
+            let target = open_admitted_source_tree(source_root, &request.path)?;
             let manifest =
                 ryeos_state::capture_tree(&target, &[], &capture_policy, &mut budget, &mut sink)?;
             target.ensure_path_binding()?;
@@ -1596,9 +1785,7 @@ fn capture_content_import(
             let entry = parent
                 .entry_no_follow(OsStr::new(name))?
                 .ok_or_else(|| anyhow::anyhow!("external-content source file is unavailable"))?;
-            if entry.entry_type != lillux::PinnedEntryType::Regular
-                || entry.containing_device != root_device
-            {
+            if entry.entry_type != lillux::PinnedEntryType::Regular {
                 bail!("external-content source file is not an admitted regular inode");
             }
             let manifest = ryeos_state::capture_file_at(
@@ -1639,18 +1826,17 @@ fn capture_content_import(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_large_import(
     request: &FilesystemImportRequest,
-    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     source_root: &lillux::PinnedDirectory,
-    root_device: u64,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
     guard: &ryeos_state::CasMutationGuard,
     cas: &lillux::CasStore,
     large_store: &ryeos_state::LargeObjectStore,
     stage: &mut ryeos_state::DurableCasUploadStage,
     request_digest: String,
+    hold_in_place: Option<lillux::PinnedDirectoryIdentity>,
 ) -> anyhow::Result<ImportResponse> {
     let bounds = ryeos_state::LargeContentCaptureBounds {
         max_depth: limits.max_depth,
@@ -1670,17 +1856,21 @@ fn capture_large_import(
         cas,
         stage,
         store: large_store,
+        in_place: hold_in_place.map(|root_identity| InPlaceTarget {
+            root_name: request.root.as_str(),
+            root_identity,
+        }),
     };
     let manifest = match request.shape {
         ImportShape::Tree => {
-            let target = open_admitted_source_tree(source_root, &request.path, root_device)?;
+            let target = open_admitted_source_tree(source_root, &request.path)?;
             let manifest = ryeos_state::capture_large_tree(&target, &capture_policy, &mut sink)?;
             target.ensure_path_binding()?;
             manifest
         }
         ImportShape::File => {
             let (parent, file, source_identity) =
-                open_pinned_source_file(source_root, &request.path, root_device)?;
+                open_pinned_source_file(source_root, &request.path)?;
             let manifest = ryeos_state::capture_large_file(
                 file,
                 source_identity,
@@ -1720,7 +1910,6 @@ fn capture_large_import(
 fn open_pinned_source_file(
     source_root: &lillux::PinnedDirectory,
     relative: &str,
-    root_device: u64,
 ) -> anyhow::Result<(
     lillux::PinnedDirectory,
     std::fs::File,
@@ -1730,40 +1919,29 @@ fn open_pinned_source_file(
     let entry = parent
         .entry_no_follow(OsStr::new(name))?
         .ok_or_else(|| anyhow::anyhow!("external-content source file is unavailable"))?;
-    if entry.entry_type != lillux::PinnedEntryType::Regular
-        || entry.containing_device != root_device
-    {
+    if entry.entry_type != lillux::PinnedEntryType::Regular {
         bail!("external-content source file is not an admitted regular inode");
     }
     let file = parent
         .open_regular(OsStr::new(name), false)?
         .ok_or_else(|| anyhow::anyhow!("external-content source file vanished"))?;
+    parent.ensure_open_regular_same_mount(&file)?;
     let observed = lillux::observe_open_regular_file(&file)?;
     if !observed.matches_directory_entry(&entry) {
         bail!("external-content source file changed inode during admission");
     }
-    Ok((
-        parent,
-        file,
-        ryeos_state::PinnedLargeObjectSourceIdentity {
-            containing_device: entry.containing_device,
-            inode: entry.inode,
-            size: observed.size(),
-        },
-    ))
+    let identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+        file: lillux::pinned_regular_file_identity(&file)?,
+        size: observed.size(),
+    };
+    Ok((parent, file, identity))
 }
 
 fn open_admitted_source_tree(
     source_root: &lillux::PinnedDirectory,
     relative: &str,
-    root_device: u64,
 ) -> anyhow::Result<lillux::PinnedDirectory> {
-    let target = open_directory_relative(source_root, relative)?;
-    let (target_device, _) = target.device_inode()?;
-    if target_device != root_device {
-        bail!("external-content source tree crossed the admitted root filesystem");
-    }
-    Ok(target)
+    open_directory_relative(source_root, relative)
 }
 
 struct DurableContentSink<'a> {
@@ -1806,6 +1984,7 @@ fn resolve_installed_external_content_consumer(
         state
             .engine
             .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: canonical,
                 expected_kind: None,
                 project_root: None,
@@ -1904,11 +2083,19 @@ fn resolve_external_content_consumer_from_resolution(
     })
 }
 
+/// The root a large file is held in place in.
+struct InPlaceTarget<'a> {
+    root_name: &'a str,
+    root_identity: lillux::PinnedDirectoryIdentity,
+}
+
 struct DurableLargeSink<'a> {
     guard: &'a ryeos_state::CasMutationGuard,
     cas: &'a lillux::CasStore,
     stage: &'a mut ryeos_state::DurableCasUploadStage,
     store: &'a ryeos_state::LargeObjectStore,
+    /// Set when large files are registered by reference instead of copied.
+    in_place: Option<InPlaceTarget<'a>>,
 }
 
 impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
@@ -1919,9 +2106,22 @@ impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
         relative_path: &str,
         expected_sha256: Option<&str>,
     ) -> anyhow::Result<ryeos_state::IngestedLargeObject> {
-        let ingested =
-            self.store
-                .ingest_open_regular(file, identity, relative_path, expected_sha256)?;
+        let ingested = match &self.in_place {
+            Some(target) => self.store.register_reference(
+                file,
+                identity,
+                ryeos_state::ReferenceSource {
+                    root_name: target.root_name,
+                    root_identity: target.root_identity,
+                    relative_path,
+                },
+                expected_sha256,
+            )?,
+            None => {
+                self.store
+                    .ingest_open_regular(file, identity, relative_path, expected_sha256)?
+            }
+        };
         self.stage
             .protect_large_object_hash(self.guard, &ingested.file_sha256)?;
         Ok(ingested)
@@ -1952,9 +2152,9 @@ impl ryeos_state::ExternalLargeContentSink for DurableLargeSink<'_> {
 
 fn import_request_digest(
     request: &FilesystemImportRequest,
-    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
-    root_device: u64,
-    root_inode: u64,
+    hold: &str,
+    limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
+    root_identity: &lillux::PinnedDirectoryIdentity,
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
 ) -> anyhow::Result<String> {
     let canonical = lillux::canonical_json(&serde_json::json!({
@@ -1967,11 +2167,11 @@ fn import_request_digest(
             },
             "maximum_bytes": request.maximum_bytes,
             "expected_file_sha256": request.expected_file_sha256,
+            "hold": hold,
         },
         "selected_root_identity": {
             "logical_name": request.root,
-            "containing_device": root_device,
-            "root_inode": root_inode,
+            "root_identity": root_identity,
         },
         "limits": limits,
         "capture_floor_rules": ryeos_state::project_sync::durable_content_capture_floor_rules(),
@@ -1982,6 +2182,34 @@ fn import_request_digest(
 
 fn validate_relative_path(value: &str) -> anyhow::Result<()> {
     ryeos_state::objects::validate_canonical_project_relative_path(value)
+}
+
+fn open_directory_relative(
+    base: &lillux::PinnedDirectory,
+    relative: &str,
+) -> anyhow::Result<lillux::PinnedDirectory> {
+    let mut current = base.try_clone()?;
+    for component in relative.split('/') {
+        let child = current
+            .open_child_directory(OsStr::new(component))?
+            .ok_or_else(|| anyhow::anyhow!("external-content source directory is unavailable"))?;
+        current.ensure_open_child_same_mount(&child)?;
+        current = child;
+    }
+    Ok(current)
+}
+
+fn open_file_parent<'a>(
+    base: &lillux::PinnedDirectory,
+    relative: &'a str,
+) -> anyhow::Result<(lillux::PinnedDirectory, &'a str)> {
+    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    let parent = if parent.is_empty() {
+        base.try_clone()?
+    } else {
+        open_directory_relative(base, parent)?
+    };
+    Ok((parent, name))
 }
 
 #[cfg(test)]
@@ -2014,7 +2242,6 @@ mod tests {
                 )
                 .unwrap();
             let root = lillux::PinnedDirectory::open(&source).unwrap().unwrap();
-            let (device, _) = root.device_inode().unwrap();
             let request = FilesystemImportRequest {
                 root: "fixture".into(),
                 path: "tree".into(),
@@ -2022,9 +2249,10 @@ mod tests {
                 storage,
                 maximum_bytes: 4096,
                 expected_file_sha256: None,
+                hold: None,
             };
             let limits =
-                crate::node_policy::sections::external_content::ExternalContentImportLimits {
+                ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
                     max_depth: 8,
                     max_entries: 32,
                     max_file_bytes: 4096,
@@ -2051,7 +2279,6 @@ mod tests {
                     &request,
                     &limits,
                     &root,
-                    device,
                     &ignore,
                     &guard,
                     &cas,
@@ -2067,13 +2294,13 @@ mod tests {
                         &request,
                         &limits,
                         &root,
-                        device,
                         &ignore,
                         &guard,
                         &cas,
                         &large,
                         &mut stage,
                         "a".repeat(64),
+                        None,
                     )
                     .unwrap()
                 }
@@ -2171,6 +2398,7 @@ mod tests {
                 witness_hash: "f".repeat(64),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             };
         let selected_bundle = BindRequest {
             product_selections: Some(vec![selection.clone()]),
@@ -2234,6 +2462,7 @@ mod tests {
                         witness_hash: "f".repeat(64),
                         witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                         qualification_hash: None,
+                        remote_testimony: None,
                     }
                 ]),
                 ..bundle.clone()
@@ -2278,6 +2507,67 @@ mod tests {
     }
 
     #[test]
+    fn a_file_from_an_in_place_root_is_held_in_place_and_a_tree_is_refused() {
+        use ryeos_node_runtime::node_policy::sections::external_content::{
+            ExternalContentImportRoot, InPlaceRootPolicy,
+        };
+        let root_identity: lillux::PinnedDirectoryIdentity =
+            serde_json::from_value(serde_json::json!({"filesystem": {"device": 7}, "inode": 11}))
+                .unwrap();
+        let root = |in_place| ExternalContentImportRoot {
+            path: std::path::PathBuf::from("/opt/image"),
+            root_identity,
+            in_place,
+        };
+        let declared = root(Some(InPlaceRootPolicy {
+            accept: vec!["measured".to_owned()],
+        }));
+        let plain = root(None);
+        let request = |shape, storage, hold| FilesystemImportRequest {
+            root: "image".to_owned(),
+            path: "executable".to_owned(),
+            shape,
+            storage,
+            maximum_bytes: 4096,
+            expected_file_sha256: None,
+            hold,
+        };
+        let file = |hold| request(ImportShape::File, ImportStorage::LargeContent, hold);
+        let tree = |hold| request(ImportShape::Tree, ImportStorage::LargeContent, hold);
+
+        // The root's own declaration decides when the request does not.
+        match resolve_import_hold(&file(None), &declared).unwrap() {
+            ResolvedHold::InPlace { accept } => assert_eq!(accept, ["measured"]),
+            ResolvedHold::Owned => panic!("a declared root holds a file in place"),
+        }
+        assert!(matches!(
+            resolve_import_hold(&file(None), &plain).unwrap(),
+            ResolvedHold::Owned
+        ));
+        assert!(matches!(
+            resolve_import_hold(&file(Some(ImportHold::Owned)), &declared).unwrap(),
+            ResolvedHold::Owned
+        ));
+        // A root that did not declare it cannot be asked to hold in place.
+        let error = resolve_import_hold(&file(Some(ImportHold::InPlace)), &plain)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("not declared for use in place"));
+        // A tree is refused rather than half served; owned copies still work.
+        for hold in [None, Some(ImportHold::InPlace)] {
+            let error = resolve_import_hold(&tree(hold), &declared).err().unwrap();
+            assert!(error.to_string().contains("only whole files"), "{error}");
+        }
+        assert!(matches!(
+            resolve_import_hold(&tree(Some(ImportHold::Owned)), &declared).unwrap(),
+            ResolvedHold::Owned
+        ));
+        // Small-content storage never holds in place.
+        let content = request(ImportShape::File, ImportStorage::Content, None);
+        assert!(resolve_import_hold(&content, &declared).is_err());
+    }
+
+    #[test]
     fn import_identity_is_path_free_and_commits_the_open_root_identity() {
         let request = FilesystemImportRequest {
             root: "models".to_owned(),
@@ -2286,8 +2576,9 @@ mod tests {
             storage: ImportStorage::Content,
             maximum_bytes: 4096,
             expected_file_sha256: None,
+            hold: None,
         };
-        let limits = crate::node_policy::sections::external_content::ExternalContentImportLimits {
+        let limits = ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
             max_depth: 8,
             max_entries: 32,
             max_file_bytes: 4096,
@@ -2299,28 +2590,45 @@ mod tests {
             patterns: Vec::new(),
         })
         .unwrap();
-        let first = import_request_digest(&request, &limits, 7, 11, &ignore).unwrap();
-        let same_open_root = import_request_digest(&request, &limits, 7, 11, &ignore).unwrap();
-        let rebound_root = import_request_digest(&request, &limits, 8, 11, &ignore).unwrap();
+        let identity = |device: u64, inode: u64| -> lillux::PinnedDirectoryIdentity {
+            serde_json::from_value(
+                serde_json::json!({"filesystem": {"device": device}, "inode": inode}),
+            )
+            .unwrap()
+        };
+        let first =
+            import_request_digest(&request, "owned", &limits, &identity(7, 11), &ignore).unwrap();
+        let same_open_root =
+            import_request_digest(&request, "owned", &limits, &identity(7, 11), &ignore).unwrap();
+        let rebound_root =
+            import_request_digest(&request, "owned", &limits, &identity(8, 11), &ignore).unwrap();
         assert_eq!(first, same_open_root);
         assert_ne!(first, rebound_root);
+        let in_place =
+            import_request_digest(&request, "in_place", &limits, &identity(7, 11), &ignore)
+                .unwrap();
+        assert_ne!(first, in_place);
     }
 
     #[test]
-    fn source_tree_must_remain_on_the_admitted_root_filesystem() {
+    fn source_tree_must_remain_on_the_admitted_mount() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("tree")).unwrap();
         let root = lillux::PinnedDirectory::open(directory.path())
             .unwrap()
             .unwrap();
-        let (device, _) = root.device_inode().unwrap();
-        open_admitted_source_tree(&root, "tree", device).unwrap();
-        assert!(
-            open_admitted_source_tree(&root, "tree", device.saturating_add(1))
-                .unwrap_err()
-                .to_string()
-                .contains("crossed")
-        );
+        open_admitted_source_tree(&root, "tree").unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let filesystem = lillux::PinnedDirectory::open(std::path::Path::new("/"))
+                .unwrap()
+                .unwrap();
+            if let Some(proc) = filesystem.open_child_directory(OsStr::new("proc")).unwrap()
+                && filesystem.ensure_open_child_same_mount(&proc).is_err()
+            {
+                assert!(open_admitted_source_tree(&filesystem, "proc").is_err());
+            }
+        }
     }
 
     #[test]
@@ -2443,30 +2751,4 @@ mod tests {
             .is_err()
         );
     }
-}
-
-fn open_directory_relative(
-    base: &lillux::PinnedDirectory,
-    relative: &str,
-) -> anyhow::Result<lillux::PinnedDirectory> {
-    let mut current = base.try_clone()?;
-    for component in relative.split('/') {
-        current = current
-            .open_child_directory(OsStr::new(component))?
-            .ok_or_else(|| anyhow::anyhow!("external-content source directory is unavailable"))?;
-    }
-    Ok(current)
-}
-
-fn open_file_parent<'a>(
-    base: &lillux::PinnedDirectory,
-    relative: &'a str,
-) -> anyhow::Result<(lillux::PinnedDirectory, &'a str)> {
-    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
-    let parent = if parent.is_empty() {
-        base.try_clone()?
-    } else {
-        open_directory_relative(base, parent)?
-    };
-    Ok((parent, name))
 }

@@ -1,0 +1,18 @@
+# ryeos:signed:2026-11-13T10:01:36Z:fbe97f7c6b65f503f5df5b9d2e20667c39ab72e032b910b70003ff2bd636f4b6:qVTWR2o9oT3h32ejdb1D86jmpQpwBT9NKoX2IS0RD5n5gIKSkeQodThTjCJUcaofbavOS6J21WyHrv9Ox0I+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, push-product]
+description: Push an exact admitted product to a configured pinned remote
+forms:
+  - slots:
+      - field: remote
+      - field: witness_hash
+      - field: origin_admission_hash
+  - slots:
+      - field: remote
+      - field: witness_hash
+      - field: origin_admission_hash
+      - field: maximum_bytes
+help:
+  usage: ryeos external-content push-product <remote> <witness-hash> <origin-admission-hash> [maximum-bytes]
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/push-product

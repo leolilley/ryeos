@@ -21,11 +21,11 @@ use ryeos_executor::execution::effective_program_projection::{
 };
 use ryeos_executor::executor::ServiceAvailability;
 
+use super::signed_item_topology::{TopologyGraph, TopologyNode};
 use super::ui_field::{
     FieldEvidenceRef, FieldExpansionRequest, FieldFactEntity, FieldFactRelation, FieldFactSubject,
     FieldFactsBuilder, apply_bounded_expansions,
 };
-use super::ui_graph_topology::{TopologyGraph, TopologyNode};
 
 const SERVICE_REF: &str = "service:ui/ryeos-ui/field/project";
 const ENDPOINT: &str = "ui.ryeos.field.project";
@@ -60,20 +60,20 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .map(|access| access.path().to_string_lossy().into_owned());
     let project_query_identity = caller.project_query_identity()?;
     let root_surface = match &caller {
-        crate::seat_auth::SeatCaller::Attachment(attachment) => {
-            Some(attachment.surface_ref.clone())
-        }
+        crate::seat_auth::SeatCaller::Attachment(attachment) => Some(attachment.root_ref.clone()),
         crate::seat_auth::SeatCaller::Operator { .. } => None,
     };
-    let topology = super::ui_graph_topology::build_topology(
+    let topology = super::signed_item_topology::build_topology(
         &state,
         project_root.clone(),
+        project_access.as_ref(),
         project_query_identity
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
         root_surface,
     );
     let plan_context = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),
@@ -92,11 +92,17 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         validate_only: true,
     };
     let ui_state = crate::state::get_ui_state(&state).context("UI state is not registered")?;
-    let mut projection_session = EffectiveProgramProjectionSession::new(
-        &state.engine,
-        &plan_context,
-        project_root.as_deref().map(std::path::Path::new),
-    )?;
+    // The project is reached only through its retained directory owner; its
+    // descriptor pathname is a resolution coordinate, never walked.
+    let mut projection_session = match project_access.as_ref() {
+        Some(access) => EffectiveProgramProjectionSession::new_under_project_authority(
+            &state.engine,
+            &plan_context,
+            access.path(),
+            access.content_authority(),
+        )?,
+        None => EffectiveProgramProjectionSession::new(&state.engine, &plan_context, None)?,
+    };
     let mut projections = BTreeMap::new();
     let mut projection_warnings = Vec::new();
     for node in topology
@@ -133,10 +139,11 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             )
         })
         .unwrap_or_else(|| "project:node".to_string());
-    let admission = project_root.as_deref().map(|root| {
-        ryeos_app::admission_events::read_admission_events(
+    let admission = project_query_identity.as_deref().map(|root| {
+        ryeos_app::admission_events::read_admission_events_for_principal(
             &state.state_store,
-            std::path::Path::new(root),
+            root,
+            caller.principal_id(),
             MAX_ADMISSION_FACTS,
         )
     });
@@ -149,7 +156,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     )?;
     if !request.expansions.is_empty() {
         document = apply_bounded_expansions(document, &request.expansions, &ui_state, SERVICE_REF)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     }
     serde_json::to_value(document).map_err(Into::into)
 }
@@ -159,7 +166,7 @@ fn project_facts(
     project_identity: String,
     projections: &BTreeMap<String, EffectiveProgramProjection>,
     projection_warnings: Vec<String>,
-    admission: Option<anyhow::Result<ryeos_state::BundleEventChainPage>>,
+    admission: Option<anyhow::Result<ryeos_app::admission_events::PrincipalAdmissionEvents>>,
 ) -> Result<super::ui_field::FieldFactsDocument> {
     let subject = FieldFactSubject {
         kind: "project".to_string(),
@@ -204,10 +211,11 @@ fn project_facts(
                 provenance: builder.provenance(Vec::new()),
             })?;
             if let Some(projection) = projections.get(&node.id) {
-                let effective_topology = super::ui_graph_topology::build_effective_graph_topology(
-                    &projection.canonical_ref,
-                    &projection.resolution.composed.composed,
-                )?;
+                let effective_topology =
+                    super::signed_item_topology::build_effective_graph_topology(
+                        &projection.canonical_ref,
+                        &projection.resolution.composed.composed,
+                    )?;
                 let effective_ids = super::ui_field_definition::add_current_effective_definition(
                     &mut builder,
                     &projection.canonical_ref,
@@ -393,12 +401,13 @@ fn project_facts(
 
 const MAX_ADMISSION_FACTS: usize = 50;
 
-/// Project the newest admission events (finalizer decisions) for this
-/// project as `admission:` facts. History unavailability degrades to a
-/// warning — admission evidence must never take the project document down.
+/// Project the newest admission events (finalizer decisions) the calling
+/// principal owns for this project as `admission:` facts. History
+/// unavailability degrades to a warning — admission evidence must never take
+/// the project document down.
 fn add_admission_facts(
     builder: &mut FieldFactsBuilder,
-    admission: Option<anyhow::Result<ryeos_state::BundleEventChainPage>>,
+    admission: Option<anyhow::Result<ryeos_app::admission_events::PrincipalAdmissionEvents>>,
 ) -> Result<()> {
     let Some(read) = admission else {
         return Ok(());
@@ -408,12 +417,12 @@ fn add_admission_facts(
         Err(error) => {
             builder.warn(
                 "admission_history_unavailable",
-                format!("admission history was not projected: {error}"),
+                format!("admission history was not projected: {error:#}"),
             );
             return Ok(());
         }
     };
-    if page.next_cursor.is_some() {
+    if page.incomplete {
         builder.mark_truncated();
         builder.warn(
             "admission_history_truncated",
@@ -599,7 +608,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ui_graph_topology::{
+    use super::super::signed_item_topology::{
         NodeStatus, TopologyEdge, TopologyMetadata, TopologyNode, TopologyViewDefaults,
         TopologyViewFilters, TopologyViewHints,
     };

@@ -1,11 +1,11 @@
-# ryeos:signed:2026-09-14T10:03:09Z:5aa3f880e54fa471be66c474736e1b65d6814511501e7d93121d52338719ddd3:Q7+1IpS8yZM6Mh44LJA0mF2EqpNWqnUl0He1vJatMQJoHpNaKL3TH+A6IrYpoFvoL8e83zdxImosVwjOtP5fDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:655b2aebe883fd91b5b4615c6cc1166ad15d66bbdb6ab9e5d5b06cb1548ae21b:5R2ElH4T3LOUPmJ6KpXAXZeftq8PQuA6ACOYUKpLW7TgY/dPaXtjEXdG7x5cRwKFhaanV2NCU5i57mJmZNaGAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/activity
 version: "1.0.0"
 description: >-
-  Node-wide execution pulse — running and window-settled thread counts,
-  continuation-deduped usage totals, and the latest durable events across
-  every thread on the node.
+  Caller-authorized activity observations: bounded thread status counts and
+  authenticated recent events with explicit coverage. Counts are not node-wide
+  totals; scoped signed usage accounting is reported unavailable.
 endpoint: ui.ryeos.node.activity
 ui_read_only: true
 state_access: read_only_existing

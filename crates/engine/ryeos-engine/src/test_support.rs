@@ -46,17 +46,42 @@ pub fn core_bundle_root() -> PathBuf {
     workspace_root().join("bundles/core")
 }
 
-/// Absolute path to the canonical standard bundle shipped in this repo.
-pub fn standard_bundle_root() -> PathBuf {
-    workspace_root().join("bundles/standard")
+/// Absolute path to the knowledge bundle shipped in this repo.
+pub fn knowledge_bundle_root() -> PathBuf {
+    workspace_root().join("bundles/knowledge")
+}
+
+/// Absolute path to the graph bundle shipped in this repo.
+pub fn graph_bundle_root() -> PathBuf {
+    workspace_root().join("bundles/graph")
+}
+
+/// Absolute path to the directive bundle shipped in this repo.
+pub fn directive_bundle_root() -> PathBuf {
+    workspace_root().join("bundles/directive")
+}
+
+/// Absolute path to the ryeos-docs bundle shipped in this repo.
+pub fn docs_bundle_root() -> PathBuf {
+    workspace_root().join("bundles/ryeos-docs")
+}
+
+/// The workflow bundle roots (knowledge, directive, graph) that sit on
+/// top of core, in install order.
+pub fn workflow_bundle_roots() -> [PathBuf; 3] {
+    [
+        knowledge_bundle_root(),
+        directive_bundle_root(),
+        graph_bundle_root(),
+    ]
 }
 
 /// Platform-author verifying key (`09674c8...`) that signs every
-/// artifact shipped in `bundles/core/` and `bundles/standard/`
+/// artifact shipped in `bundles/core/` and the workflow bundles
 /// in the dev tree — kind schemas, handler descriptor YAMLs, and the
 /// binary `item_source.json` sidecars all anchor to this single key.
 /// Public-key bytes are pinned here so the engine doesn't have to read
-/// `<app_root>/.ai/config/keys/signing/private_key.pem` from operator state.
+/// `<app_root>/.ai/node/operator/signing/private_key.pem` from operator state.
 ///
 /// PEM source: `crates/bin/daemon/tests/fixtures/trusted_signers/<fp>.toml`.
 pub fn platform_author_verifying_key() -> VerifyingKey {
@@ -105,7 +130,7 @@ pub fn live_trust_store() -> TrustStore {
     ])
 }
 
-/// Load the signed kind schemas from the live Core and Standard bundles.
+/// Load the signed kind schemas from the live core, workflow and ryeos-ui bundles.
 pub fn load_live_kind_registry() -> KindRegistry {
     let trust_store = live_trust_store();
     KindRegistry::load_base(
@@ -113,17 +138,27 @@ pub fn load_live_kind_registry() -> KindRegistry {
             core_bundle_root()
                 .join(crate::AI_DIR)
                 .join(crate::KIND_SCHEMAS_DIR),
-            standard_bundle_root()
+            knowledge_bundle_root()
+                .join(crate::AI_DIR)
+                .join(crate::KIND_SCHEMAS_DIR),
+            directive_bundle_root()
+                .join(crate::AI_DIR)
+                .join(crate::KIND_SCHEMAS_DIR),
+            graph_bundle_root()
+                .join(crate::AI_DIR)
+                .join(crate::KIND_SCHEMAS_DIR),
+            workspace_root()
+                .join("bundles/ryeos-ui")
                 .join(crate::AI_DIR)
                 .join(crate::KIND_SCHEMAS_DIR),
         ],
         &trust_store,
     )
-    .expect("live kind registry must load from bundles/{core,standard}")
+    .expect("live kind registry must load from bundles/{core,knowledge,directive,graph,ryeos-ui}")
 }
 
-/// Load the live `HandlerRegistry` from both `bundles/core/` and
-/// `bundles/standard/` using the standard test trust store.
+/// Load the live `HandlerRegistry` from `bundles/core/`,
+/// `bundles/graph/` and `bundles/directive/` using the standard test trust store.
 /// Requires that the handler binaries have been built and the bundle
 /// manifest signed (e.g. via `populate-bundles.sh`).
 ///
@@ -131,11 +166,11 @@ pub fn load_live_kind_registry() -> KindRegistry {
 /// load for tests that drive the parser/composer dispatcher.
 pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
     let core_root = core_bundle_root();
-    let std_root = standard_bundle_root();
     let trust_store = live_trust_store();
     let tagged_roots: Vec<(PathBuf, TrustClass)> = vec![
         (core_root, TrustClass::TrustedBundle),
-        (std_root, TrustClass::TrustedBundle),
+        (graph_bundle_root(), TrustClass::TrustedBundle),
+        (directive_bundle_root(), TrustClass::TrustedBundle),
     ];
     let registry = HandlerRegistry::load_base_for_authoring(&tagged_roots, &trust_store)
         .unwrap_or_else(|err| {
@@ -145,13 +180,13 @@ pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
                 "PRECONDITION FAILED: bundle bin trees are signed with a key this test \
                  harness does not trust.\n\n  {detail}\n\n\
                  The harness trusts the platform-author and dev-publisher (741a8bc6…) keys \
-                 only. This usually means bundles/{{core,standard}}/.ai/bin was last signed \
+                 only. This usually means bundles/{{core,graph,directive}}/.ai/bin was last signed \
                  with a different (e.g. operator) key. Re-sign with the dev key:\n\n  \
                  ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner \"RyeOS Development\"\n\n\
                  then re-run. Every live-registry test fails with this same message until then."
             );
         }
-        panic!("live HandlerRegistry must load from bundles/{{core,standard}}/: {detail}");
+        panic!("live HandlerRegistry must load from bundles/{{core,graph,directive}}/: {detail}");
         });
     Arc::new(registry)
 }
@@ -168,4 +203,123 @@ where
         ParserRegistry::from_entries(parser_descriptors),
         load_live_handler_registry(),
     )
+}
+
+// ── Signer registry fixtures ────────────────────────────────────────
+
+/// Write the minimal public identity document for `node_key` under
+/// `app_root` unless the node already has one, so a fixture that created
+/// only the private key can load the signer registry.
+pub fn write_node_public_identity(app_root: &std::path::Path, node_vk: &VerifyingKey) {
+    let public_path = crate::trust::node_public_identity_path(app_root);
+    if public_path.exists() {
+        return;
+    }
+    let doc = serde_json::json!({
+        "kind": "identity/v1",
+        "principal_id": format!("fp:{}", crate::trust::compute_fingerprint(node_vk)),
+        "signing_key": format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(node_vk.as_bytes())
+        ),
+    });
+    std::fs::write(&public_path, doc.to_string()).expect("write fixture public identity");
+}
+
+/// Pin `verifying_key` in the node signer registry under `app_root`, the
+/// way the trust operations do, so fixtures exercise the real loader.
+///
+/// The node key is read from `<app_root>/.ai/node/identity/private_key.pem`;
+/// when the node has no identity yet, one is created along
+/// with a minimal public identity document. Returns the pinned fingerprint.
+pub fn pin_signer(
+    app_root: &std::path::Path,
+    verifying_key: &VerifyingKey,
+    label: &str,
+    role: crate::trust::SignerRole,
+    scope: crate::trust::SignerScope,
+) -> String {
+    let identity_dir = app_root.join(crate::AI_DIR).join("node").join("identity");
+    std::fs::create_dir_all(&identity_dir).expect("create fixture node identity dir");
+    let key_path = identity_dir.join("private_key.pem");
+    let node_key = if key_path.exists() {
+        lillux::crypto::load_signing_key(&key_path).expect("load fixture node key")
+    } else {
+        lillux::crypto::create_signing_key(&key_path).expect("create fixture node key")
+    };
+    write_node_public_identity(app_root, &node_key.verifying_key());
+    pin_signer_with_node_key(app_root, &node_key, verifying_key, label, role, scope)
+}
+
+/// Like [`pin_signer`] for fixtures that already own the node signing key.
+pub fn pin_signer_with_node_key(
+    app_root: &std::path::Path,
+    node_key: &lillux::crypto::SigningKey,
+    verifying_key: &VerifyingKey,
+    label: &str,
+    role: crate::trust::SignerRole,
+    scope: crate::trust::SignerScope,
+) -> String {
+    pin_signer_chained(app_root, node_key, verifying_key, label, role, scope, None)
+}
+
+/// Pin a signer the way the registry does: the record names a node-signed
+/// event appended to the hash-chained key-event log, so the registry verifies
+/// and later operations can extend it. `signed_at` fixes the signature time of
+/// the record and its event for byte-stable fixtures; `None` signs now.
+pub fn pin_signer_chained(
+    app_root: &std::path::Path,
+    node_key: &lillux::crypto::SigningKey,
+    verifying_key: &VerifyingKey,
+    label: &str,
+    role: crate::trust::SignerRole,
+    scope: crate::trust::SignerScope,
+    signed_at: Option<&str>,
+) -> String {
+    let sign = |body: &str| match signed_at {
+        Some(at) => lillux::signature::sign_content_at(body, node_key, "#", None, at),
+        None => lillux::signature::sign_content(body, node_key, "#", None),
+    };
+    let mut record = crate::trust::SignerRecord::new(
+        verifying_key,
+        label,
+        role,
+        scope,
+        crate::trust::SignerStatus::Active,
+    );
+    let events = crate::trust::events_dir(app_root);
+    std::fs::create_dir_all(&events).expect("create fixture key-event dir");
+    let mut chain = std::fs::read_dir(&events)
+        .expect("read fixture key-event dir")
+        .map(|entry| {
+            let path = entry.expect("fixture key-event entry").path();
+            let text = std::fs::read_to_string(&path).expect("read fixture key event");
+            serde_yaml::from_str::<crate::trust::TrustEvent>(
+                &lillux::signature::strip_signature_lines(&text),
+            )
+            .expect("parse fixture key event")
+        })
+        .collect::<Vec<_>>();
+    chain.sort_by_key(|event| event.seq);
+    let node_fingerprint = crate::trust::compute_fingerprint(&node_key.verifying_key());
+    let event = crate::trust::TrustEvent {
+        schema: crate::trust::TRUST_EVENT_SCHEMA.to_string(),
+        seq: chain.len() as u64 + 1,
+        previous: chain.last().map(crate::trust::TrustEvent::digest),
+        kind: crate::trust::TrustEventKind::Pinned,
+        signer: record.fingerprint.clone(),
+        record_digest: record.content_digest(),
+        request_digest: lillux::cas::sha256_hex(b"fixture"),
+        operator: node_fingerprint,
+        predecessor: None,
+    };
+    let event_body = serde_yaml::to_string(&event).expect("serialize fixture key event");
+    std::fs::write(events.join(event.file_name()), sign(&event_body))
+        .expect("write fixture key event");
+    record.event = event.digest();
+    let dir = crate::trust::signers_dir(app_root);
+    std::fs::create_dir_all(&dir).expect("create fixture signer registry dir");
+    let body = serde_yaml::to_string(&record).expect("serialize fixture signer record");
+    std::fs::write(dir.join(record.file_name()), sign(&body)).expect("write fixture signer record");
+    record.fingerprint
 }

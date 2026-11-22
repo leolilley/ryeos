@@ -1,4 +1,8 @@
-//! `objects/get` — retrieve blobs and objects from the CAS.
+//! `objects/get` — retrieve blobs and objects from the CAS under a root.
+//!
+//! Every read names a typed root the caller may see and serves only hashes
+//! reachable from it; see `crate::objects_read_scope`. `objects/get-any` is
+//! the operator-only unscoped read.
 //!
 //! Batch get accepts typed object and blob hash sets. The namespace is part of
 //! the request so an equal digest present in both namespaces is never resolved
@@ -11,17 +15,26 @@
 use std::io::{Read as _, Seek as _};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::objects_read_scope::{
+    ReadRoot, require_blobs_in_scope, require_large_object_in_scope, require_objects_in_scope,
+    resolve_scope, root_required,
+};
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// The root the read is anchored at. Required by `objects/get`; the
+    /// operator-only `objects/get-any` takes none.
+    #[serde(default)]
+    pub root: Option<ReadRoot>,
     #[serde(
         default,
         deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
@@ -34,6 +47,8 @@ pub struct Request {
     pub blob_hashes: Vec<String>,
     #[serde(default)]
     pub blob_chunk: Option<BlobChunkRequest>,
+    #[serde(default)]
+    pub large_object_chunk: Option<LargeObjectChunkRequest>,
 }
 
 #[derive(serde::Deserialize)]
@@ -44,19 +59,70 @@ pub struct BlobChunkRequest {
     pub length: usize,
 }
 
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LargeObjectChunkRequest {
+    pub hash: String,
+    pub offset: u64,
+    pub length: usize,
+}
+
 pub const MAX_BLOB_CHUNK_BYTES: usize = 512 * 1024;
 pub const MAX_INLINE_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_INLINE_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+/// Scoped read: serve only what is reachable from the request's root.
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let root = req
+        .root
+        .clone()
+        .ok_or_else(|| root_required("objects/get"))?;
     validate_typed_hash_request(&req.object_hashes, &req.blob_hashes)?;
+    validate_request_modes(&req)?;
+    let scope = resolve_scope(&root, &ctx, &state)?;
+    require_objects_in_scope(&scope, &root, &req.object_hashes)?;
+    require_blobs_in_scope(&scope, &root, &req.blob_hashes)?;
+    if let Some(chunk) = &req.blob_chunk {
+        require_blobs_in_scope(&scope, &root, std::slice::from_ref(&chunk.hash))?;
+    }
+    if let Some(chunk) = &req.large_object_chunk {
+        require_large_object_in_scope(&scope, &root, &chunk.hash)?;
+    }
+    serve(req, state).await
+}
+
+/// Unscoped read for the node operator. The configured operator already
+/// owns the node's CAS; nothing else may name a hash without a root.
+pub async fn handle_any(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).map_err(|_| {
+        crate::handler_error::HandlerError::Forbidden(
+            "objects/get-any is restricted to the node operator".into(),
+        )
+    })?;
+    if req.root.is_some() {
+        return Err(crate::handler_error::HandlerError::BadRequest(
+            "objects/get-any reads unscoped and takes no root; use objects/get to read under a root"
+                .into(),
+        )
+        .into());
+    }
+    validate_typed_hash_request(&req.object_hashes, &req.blob_hashes)?;
+    validate_request_modes(&req)?;
+    serve(req, state).await
+}
+
+async fn serve(req: Request, state: Arc<AppState>) -> Result<Value> {
+    if let Some(chunk) = &req.large_object_chunk {
+        validate_large_object_chunk(chunk)?;
+        let chunk = chunk.clone();
+        return tokio::task::spawn_blocking(move || serve_large_object_chunk(&chunk, &state))
+            .await
+            .context("large-object chunk read task stopped")?;
+    }
     let cas_read = state.acquire_cas_read()?;
     let cas = cas_read.cas();
 
     if let Some(chunk) = req.blob_chunk {
-        if !req.object_hashes.is_empty() || !req.blob_hashes.is_empty() {
-            anyhow::bail!("objects/get cannot mix hash batches with a blob chunk request");
-        }
         if chunk.length == 0 || chunk.length > MAX_BLOB_CHUNK_BYTES {
             anyhow::bail!("objects/get blob chunk length is outside the bounded range");
         }
@@ -92,25 +158,23 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
     if req.object_hashes.is_empty() && req.blob_hashes.is_empty() {
         anyhow::bail!(
-            "objects/get requires typed object_hashes/blob_hashes or one blob chunk request"
+            "objects/get requires typed object_hashes/blob_hashes, one blob chunk request, or one large-object chunk request"
         );
     }
 
     let mut entries = Vec::with_capacity(req.object_hashes.len() + req.blob_hashes.len());
 
     for hash in &req.object_hashes {
-        match cas.open_object(hash)? {
-            Some((mut source, size)) => {
-                if size > MAX_INLINE_OBJECT_BYTES {
-                    anyhow::bail!("object {hash} exceeds the inline response limit");
-                }
-                let mut bytes = vec![0_u8; usize::try_from(size)?];
-                source.read_exact(&mut bytes)?;
-                if lillux::sha256_hex(&bytes) != *hash {
-                    anyhow::bail!("CAS object {hash} failed content-address verification");
-                }
+        match cas.get_object_raw_bytes_bounded_with_capsule_ceiling(
+            hash,
+            MAX_INLINE_OBJECT_BYTES,
+            ryeos_state::objects::MAX_ADMITTED_LAUNCH_CAPSULE_BYTES as u64,
+        )? {
+            Some(bytes) => {
                 let value: Value = serde_json::from_slice(&bytes)?;
-                if lillux::canonical_json(&value)?.as_bytes() != bytes {
+                let maximum = usize::try_from(MAX_INLINE_OBJECT_BYTES)
+                    .context("inline object ceiling exceeds this platform")?;
+                if lillux::canonical_json_bounded(&value, maximum)?.as_slice() != bytes {
                     anyhow::bail!("CAS object {hash} is not canonical JSON");
                 }
                 entries.push(serde_json::json!({
@@ -158,6 +222,77 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }))
 }
 
+/// A request is exactly one of: typed hash batches, one blob chunk, or one
+/// large-object chunk. Mixing is refused before any store is opened.
+fn validate_request_modes(req: &Request) -> Result<()> {
+    let batches = !req.object_hashes.is_empty() || !req.blob_hashes.is_empty();
+    if req.blob_chunk.is_some() && req.large_object_chunk.is_some() {
+        anyhow::bail!("objects/get cannot mix a blob chunk with a large-object chunk request");
+    }
+    if batches && req.blob_chunk.is_some() {
+        anyhow::bail!("objects/get cannot mix hash batches with a blob chunk request");
+    }
+    if batches && req.large_object_chunk.is_some() {
+        anyhow::bail!("objects/get cannot mix hash batches with a large-object chunk request");
+    }
+    Ok(())
+}
+
+fn validate_large_object_chunk(chunk: &LargeObjectChunkRequest) -> Result<()> {
+    if chunk.length == 0 || chunk.length > MAX_BLOB_CHUNK_BYTES {
+        anyhow::bail!("objects/get large-object chunk length is outside the bounded range");
+    }
+    if !is_canonical_sha256(&chunk.hash) {
+        anyhow::bail!("objects/get large-object chunk hash is not canonical SHA-256");
+    }
+    Ok(())
+}
+
+/// Serve one bounded range of a resident large object. The shared lease is
+/// held for the whole read so a budget sweep cannot evict the file mid-range.
+fn serve_large_object_chunk(chunk: &LargeObjectChunkRequest, state: &AppState) -> Result<Value> {
+    let missing = || {
+        serde_json::json!({
+            "large_object_chunk": {
+                "hash": chunk.hash,
+                "kind": "missing"
+            }
+        })
+    };
+    let authority = state.state_store.pinned_state_authority()?;
+    let Some(store) = ryeos_state::LargeObjectStore::open_under(authority.runtime_directory())?
+    else {
+        return Ok(missing());
+    };
+    let Some(total_size) = store.object_size(&chunk.hash)? else {
+        return Ok(missing());
+    };
+    // The object can be evicted between the size probe and the lease; that is
+    // an absent object, not a fault.
+    let Some(leased) = store.try_lease_object(&chunk.hash, total_size)? else {
+        return Ok(missing());
+    };
+    if chunk.offset > total_size {
+        anyhow::bail!("objects/get large-object chunk offset exceeds object size");
+    }
+    let mut file = leased.file();
+    file.seek(std::io::SeekFrom::Start(chunk.offset))?;
+    let remaining = total_size - chunk.offset;
+    let requested = u64::try_from(chunk.length)?.min(remaining);
+    let mut bytes = vec![0_u8; usize::try_from(requested)?];
+    file.read_exact(&mut bytes)?;
+    Ok(serde_json::json!({
+        "large_object_chunk": {
+            "hash": chunk.hash,
+            "kind": "large_object_chunk",
+            "offset": chunk.offset,
+            "total_size": total_size,
+            "eof": chunk.offset + requested == total_size,
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }))
+}
+
 fn validate_typed_hash_request(object_hashes: &[String], blob_hashes: &[String]) -> Result<()> {
     for (namespace, hashes) in [("object", object_hashes), ("blob", blob_hashes)] {
         let mut seen = std::collections::BTreeSet::new();
@@ -186,10 +321,23 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "objects.get",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.objects/get"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
+        })
+    },
+};
+
+pub const ANY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:objects/get-any",
+    endpoint: "objects.get-any",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.objects/get-any"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: Request = crate::handler_error::parse_request(params)?;
+            handle_any(req, ctx, state).await
         })
     },
 };
@@ -209,9 +357,11 @@ mod tests {
         assert_eq!(
             descriptor["schema"],
             serde_json::json!({
+                "root": "object",
                 "object_hashes": "string[]?",
                 "blob_hashes": "string[]?",
                 "blob_chunk": "object?",
+                "large_object_chunk": "object?",
             })
         );
         let hash = "ab".repeat(32);
@@ -219,8 +369,8 @@ mod tests {
             "object_hashes": [hash.clone()], "blob_hashes": [hash.clone()]
         }))
         .unwrap();
-        assert_eq!(batch.object_hashes, [hash.clone()]);
-        assert_eq!(batch.blob_hashes, [hash.clone()]);
+        assert_eq!(batch.object_hashes, std::slice::from_ref(&hash));
+        assert_eq!(batch.blob_hashes, std::slice::from_ref(&hash));
         assert!(batch.blob_chunk.is_none());
         let chunk: Request = serde_json::from_value(serde_json::json!({
             "blob_chunk": {"hash": hash, "offset": 0, "length": 64}
@@ -228,6 +378,90 @@ mod tests {
         .unwrap();
         assert!(chunk.object_hashes.is_empty() && chunk.blob_hashes.is_empty());
         assert_eq!(chunk.blob_chunk.unwrap().length, 64);
+        assert!(chunk.large_object_chunk.is_none());
+        let large: Request = serde_json::from_value(serde_json::json!({
+            "large_object_chunk": {"hash": hash, "offset": 4096, "length": 128}
+        }))
+        .unwrap();
+        let large = large.large_object_chunk.unwrap();
+        assert_eq!((large.offset, large.length), (4096, 128));
+    }
+
+    fn parse(value: Value) -> Request {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn large_object_chunk_rejects_unknown_fields_and_missing_coordinates() {
+        let hash = "ab".repeat(32);
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "large_object_chunk": {"hash": hash, "offset": 0, "length": 1, "extra": 1}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "large_object_chunk": {"hash": hash, "offset": 0}
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn large_object_chunk_is_exclusive_of_batches_and_blob_chunks() {
+        let hash = "ab".repeat(32);
+        let large = serde_json::json!({"hash": hash, "offset": 0, "length": 64});
+        validate_request_modes(&parse(serde_json::json!({"large_object_chunk": large}))).unwrap();
+        let with_batch = parse(serde_json::json!({
+            "object_hashes": [hash.clone()], "large_object_chunk": large
+        }));
+        assert!(
+            validate_request_modes(&with_batch)
+                .unwrap_err()
+                .to_string()
+                .contains("hash batches with a large-object chunk")
+        );
+        let with_blob_batch = parse(serde_json::json!({
+            "blob_hashes": [hash.clone()], "large_object_chunk": large
+        }));
+        assert!(validate_request_modes(&with_blob_batch).is_err());
+        let with_blob_chunk = parse(serde_json::json!({
+            "blob_chunk": large, "large_object_chunk": large
+        }));
+        assert!(
+            validate_request_modes(&with_blob_chunk)
+                .unwrap_err()
+                .to_string()
+                .contains("blob chunk with a large-object chunk")
+        );
+        let blob_with_batch = parse(serde_json::json!({
+            "object_hashes": [hash], "blob_chunk": large
+        }));
+        assert!(
+            validate_request_modes(&blob_with_batch)
+                .unwrap_err()
+                .to_string()
+                .contains("hash batches with a blob chunk")
+        );
+    }
+
+    #[test]
+    fn large_object_chunk_validates_hash_and_length_bounds() {
+        let chunk = |hash: String, length: usize| LargeObjectChunkRequest {
+            hash,
+            offset: 0,
+            length,
+        };
+        let hash = "ab".repeat(32);
+        assert!(validate_large_object_chunk(&chunk(hash.clone(), 1)).is_ok());
+        assert!(validate_large_object_chunk(&chunk(hash.clone(), MAX_BLOB_CHUNK_BYTES)).is_ok());
+        assert!(validate_large_object_chunk(&chunk(hash.clone(), 0)).is_err());
+        assert!(
+            validate_large_object_chunk(&chunk(hash.clone(), MAX_BLOB_CHUNK_BYTES + 1)).is_err()
+        );
+        assert!(validate_large_object_chunk(&chunk(hash.to_ascii_uppercase(), 8)).is_err());
+        assert!(validate_large_object_chunk(&chunk("short".to_owned(), 8)).is_err());
     }
 
     #[test]

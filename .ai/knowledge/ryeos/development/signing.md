@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T08:24:14Z:1551863305c5c111b016205c4110d900e2b8cc6c661fe31ec18edc07a5762e8b:MKGleTXknvAR4lBmX2RizU6TuovDhXX7/rnRf9hEzleIotwa4iC88D488ODRaK1p/nUU0iTCXmFq9ae5L0RZDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:14:24Z:32b3f7bd0488d44bb3114b20d7db33dc3dc7ac69becdf774831a132327adbe6e:jn0chPlxqlV6Xi/Ni/pml2K0gDK2NhcKp3hrkJzuLbBJ4TpMDismR7RLU8Kh7nRUepY0c2Kp+EzETUtiQBl+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -34,6 +34,22 @@ Run it after:
 - a fresh checkout, because bundle bins/CAS are derived;
 - any `hash mismatch` or stale manifest failure.
 
+## Init profiles
+
+An init profile (`.ai/node/init/profiles/<name>.yaml` under an init source
+directory) is signed by the publisher whose key `ryeos init` pins, and init
+verifies it before it trusts anything the profile names. A consumer that ships
+its own bundle and profile signs the profile with its own publisher key:
+
+```bash
+ryeos bundle profile-sign <source>/.ai/node/init/profiles/<name>.yaml <publisher.pem>
+```
+
+The profile is parsed and validated first, so a malformed one is refused
+rather than signed. Without the key file argument the app root's operator signing key
+signs. An unchanged profile signed again by the same key is left untouched.
+The key path is read and never printed.
+
 ## Dev key
 
 Use only the checked-in dev publisher key for dev bundles:
@@ -61,7 +77,7 @@ signature against the trust store. A stale header is not reusable.
 Quick check:
 
 ```bash
-head -1 bundles/standard/.ai/config/ryeos-runtime/model-providers/zen.yaml
+head -1 bundles/directive/.ai/config/ryeos-runtime/model-providers/zen.yaml
 # trailing fingerprint should begin 741a8bc...
 ```
 
@@ -73,7 +89,9 @@ For stale signatures, stale bundle binaries, stale CAS, or wrong-key signing:
 ./scripts/gate.sh --refresh-bundles --no-tests
 
 target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core
-target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core
+target/release/ryeos-core-tools bundle-verify bundles/graph --registry-root bundles/core
+target/release/ryeos-core-tools bundle-verify bundles/knowledge --registry-root bundles/core
+target/release/ryeos-core-tools bundle-verify bundles/directive --registry-root bundles/core --registry-root bundles/knowledge
 ```
 
 Then reinitialize the system space you are actually using:
@@ -96,7 +114,7 @@ public development publisher fixture, as specified in
 `source-local-bundle-development.md`. Sign selected edited items in place:
 
 ```bash
-scripts/dev/sign-dev.sh .ai/knowledge/ryeos/development/<entry>.md
+.ai/tools/ryeos/development/maintainer/lib/sign-dev.sh .ai/knowledge/ryeos/development/<entry>.md
 ```
 
 This existing source-authoring entry does not need an installed node, runtime
@@ -155,7 +173,7 @@ with the node's retained identity and configured authorization directory.
 There is no worker Tool for this operation and no key mount into a subprocess.
 The external core-tools entry remains only for explicit host bootstrap; it
 shares request validation and the same writer, not a second grant protocol.
-Remote-operator grants require an exact origin site and reject wildcards.
+Remote-principal grants require an exact origin site and reject wildcards.
 Existing remote-node grants are maintained with
 `--remote-node-origin-site-id`; this preserves the admitted node's principal
 class while reconciling its exact scopes through the same locked writer.

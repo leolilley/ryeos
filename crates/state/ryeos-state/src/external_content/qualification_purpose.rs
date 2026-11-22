@@ -1,0 +1,482 @@
+//! One qualification intent with explicit source provenance.
+//!
+//! The application derives this value from authenticated source records and
+//! signed consumer allowances. Structural validation does not admit a launch
+//! or authorize claims; sealed-root admission remains responsible for both.
+
+use std::collections::BTreeMap;
+
+use crate::objects::canonical_value_digest;
+use anyhow::{Context as _, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::external_execution::admission::ExternalCandidateQualificationUse;
+
+use super::products::qualification::remote_verifier_source::QualificationRemoteVerifierSource;
+use super::products::qualification::{
+    MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES, ProductProducerRecipeSourceIdentity,
+    ProductQualificationConsumerContentIdentity, ProductQualificationConsumerDefinitionIdentity,
+    ProductQualificationPolicySource, bounded, exact_coordinate, validate_claims,
+};
+use super::products::transfer::ProductWitnessSource;
+use super::products::{validate_canonical_unsuffixed_ref, validate_hash, validate_name};
+use super::qualification_execution::QualificationExecutionPurposeView;
+use super::qualification_subject::ContentQualificationSubject;
+
+pub const QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str = "ryeos.qualification_launch_purpose.v7";
+
+/// These sources have different authentication and CAS retention rules. An
+/// activation receipt is never a producer witness or product relationship.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QualificationSubject {
+    CapturedProduct {
+        product_witness_hash: String,
+        witness_source: ProductWitnessSource,
+        relationship_name: String,
+    },
+    ActivatedContent {
+        content: ContentQualificationSubject,
+    },
+}
+
+impl QualificationSubject {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::CapturedProduct {
+                product_witness_hash,
+                witness_source,
+                relationship_name,
+            } => {
+                validate_hash("qualification product witness", product_witness_hash)?;
+                witness_source.validate()?;
+                validate_name(relationship_name)
+            }
+            Self::ActivatedContent { content } => content.validate(),
+        }
+    }
+
+    /// Product owners use this checked projection before consulting product
+    /// relationships or selections. No content subject can enter that lane.
+    pub fn captured_product(&self) -> Result<(&str, &ProductWitnessSource, &str)> {
+        match self {
+            Self::CapturedProduct {
+                product_witness_hash,
+                witness_source,
+                relationship_name,
+            } => Ok((product_witness_hash, witness_source, relationship_name)),
+            Self::ActivatedContent { .. } => {
+                bail!("qualification subject is not a captured product")
+            }
+        }
+    }
+}
+
+/// What a remote consumer attempt is bound to. The split is derived from the
+/// signed policy (a consumer context selects the Worker lane, its absence the
+/// probe lane), never from separately stored nullable fields.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QualificationRemoteUse<'a> {
+    /// A Worker consumer with an admitted use of the restored runtime.
+    Worker {
+        qualified_use: &'a ExternalCandidateQualificationUse,
+    },
+    /// A Worker-less probe: the signed scenario's opaque input.
+    Probe { input: &'a serde_json::Value },
+}
+
+impl QualificationRemoteUse<'_> {
+    /// Digest the consumer coordinate binds as its `use_digest`.
+    pub fn use_digest(&self) -> Result<String> {
+        match self {
+            Self::Worker { qualified_use } => {
+                canonical_value_digest(&serde_json::to_value(qualified_use)?)
+            }
+            Self::Probe { input } => canonical_value_digest(input),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationLaunchPurpose {
+    pub schema: String,
+    pub launch_id: String,
+    pub owner_fingerprint: String,
+    pub subject: QualificationSubject,
+    pub policy_source: ProductQualificationPolicySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_definitions: Option<ProductQualificationConsumerDefinitionIdentity>,
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
+    /// Invocation selectors authenticated before root birth, separate from signed policy.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub consumer_invocation: Option<ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub producer_recipe_sources: BTreeMap<String, ProductProducerRecipeSourceIdentity>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remote_verifier_sources: BTreeMap<String, QualificationRemoteVerifierSource>,
+    /// Verifier-side subject slot; it may differ from the consuming source's
+    /// declaration ID. Its manifest must still identify the same exact bytes.
+    pub subject_declaration_id: String,
+    pub subject_manifest_hash: String,
+    pub required_claims: Vec<String>,
+    pub admitted_parameters_digest: String,
+    pub verifier_ref: String,
+    pub verifier_effective_definition_digest: String,
+    pub verifier_realized_definition_digest: String,
+}
+
+impl QualificationLaunchPurpose {
+    /// Data agreement shared by controller admission and the guest consumer.
+    /// This does not authenticate a born root, signatures, occurrence liveness
+    /// or provider contact. Those remain with the enclosing execution owner.
+    pub fn validate_remote_consumer_coordinate(
+        &self,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+        selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
+    ) -> Result<()> {
+        self.validate()?;
+        selection.validate_coordinate(coordinate)?;
+        self.consumer_invocation
+            .as_ref()
+            .context("remote consumer purpose has no sealed invocation")?
+            .require_coordinate(coordinate)?;
+        if canonical_value_digest(&serde_json::to_value(self)?)?
+            != coordinate.qualification_purpose_digest
+            || canonical_value_digest(&serde_json::to_value(&self.subject)?)?
+                != coordinate.subject_digest
+        {
+            bail!("consumer coordinate differs from sealed qualification purpose");
+        }
+        let source = self
+            .remote_verifier_sources
+            .get(&coordinate.scenario_id)
+            .context("sealed qualification purpose has no selected remote verifier")?;
+        if self.remote_use(&coordinate.scenario_id)?.use_digest()? != coordinate.use_digest {
+            bail!("consumer coordinate differs from accepted consumer use");
+        }
+        if source.scenario_source_digest != selection.scenario_source_digest
+            || source.executor.payload_blob_hash != selection.verifier_artifact_hash
+        {
+            bail!("consumer verifier differs from accepted signed source artifact");
+        }
+        Ok(())
+    }
+
+    /// The typed use a remote scenario's attempts are bound to: the admitted
+    /// Worker use when the signed policy has a consumer context, otherwise the
+    /// scenario's signed probe input.
+    pub fn remote_use(&self, scenario_id: &str) -> Result<QualificationRemoteUse<'_>> {
+        let policy = &self.policy_source.policy;
+        let scenario = policy
+            .producer_scenarios
+            .get(scenario_id)
+            .context("remote qualification scenario is absent from signed policy")?;
+        if scenario.remote_verifier.is_none() {
+            bail!("qualification scenario is not remote");
+        }
+        match (
+            &policy.consumer_execution_context,
+            &scenario.remote_probe_input,
+        ) {
+            (Some(_), None) => Ok(QualificationRemoteUse::Worker {
+                qualified_use: self
+                    .consumer_content
+                    .as_ref()
+                    .and_then(|content| content.qualification_use.as_ref())
+                    .context("accepted consumer purpose has no admitted use")?,
+            }),
+            (None, Some(input)) => Ok(QualificationRemoteUse::Probe { input }),
+            _ => bail!("remote scenario use differs from signed consumer context"),
+        }
+    }
+
+    /// Join the operation separately: it is intentionally absent from the
+    /// consumer coordinate. Structural agreement alone grants no contact.
+    pub fn require_consumer_invocation(
+        &self,
+        qualification_operation_id: &str,
+        coordinate: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerificationCoordinate,
+    ) -> Result<()> {
+        self.validate()?;
+        let invocation = self
+            .consumer_invocation
+            .as_ref()
+            .context("remote consumer purpose has no sealed invocation")?;
+        if invocation.qualification_operation_id != qualification_operation_id {
+            bail!("consumer operation differs from sealed invocation");
+        }
+        invocation.require_coordinate(coordinate)
+    }
+
+    pub fn execution_view(&self) -> Result<QualificationExecutionPurposeView<'_>> {
+        QualificationExecutionPurposeView::from_purpose(self)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != QUALIFICATION_LAUNCH_PURPOSE_SCHEMA {
+            bail!("unsupported qualification launch purpose schema");
+        }
+        if self.launch_id.len() != 34
+            || !self.launch_id.starts_with("L-")
+            || !self.launch_id[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("qualification launch id is not canonical");
+        }
+        exact_coordinate("qualification launch owner", &self.owner_fingerprint)?;
+        self.subject.validate()?;
+        self.policy_source.validate()?;
+        match (
+            &self.policy_source.policy.consumer_execution_context,
+            &self.consumer_definitions,
+            &self.consumer_content,
+        ) {
+            (Some(context), Some(definitions), Some(content)) => {
+                definitions.validate_for(context)?;
+                content.validate_for(context, definitions)?;
+                if content.runtime_realization.manifest_hash != self.subject_manifest_hash {
+                    bail!("consumer runtime manifest differs from qualification subject");
+                }
+                use super::products::qualification::QualificationConsumerDeclarationAuthority;
+                match (&self.subject, &content.declaration_authority) {
+                    (
+                        QualificationSubject::CapturedProduct { .. },
+                        QualificationConsumerDeclarationAuthority::CapturedProduct { .. },
+                    ) => {}
+                    (
+                        QualificationSubject::ActivatedContent { content: subject },
+                        QualificationConsumerDeclarationAuthority::ActivatedContent {
+                            declaration_id,
+                            allowance,
+                            ..
+                        },
+                    ) => {
+                        allowance.validate_policy_source(&self.policy_source)?;
+                        if subject.consumer_ref != definitions.worker.canonical_ref
+                            || subject.declaration_id != *declaration_id
+                            || context.product_declaration_id != *declaration_id
+                            || allowance.required_claims != self.required_claims
+                            || content.runtime_realization != subject.realization
+                        {
+                            bail!(
+                                "activated consumer declaration differs from qualification purpose"
+                            );
+                        }
+                    }
+                    _ => bail!("consumer declaration authority differs from qualification subject"),
+                }
+                if self.policy_source.policy.producer_scenarios.is_empty() {
+                    bail!("consumer qualification has no signed direct producer scenario");
+                }
+            }
+            (None, None, None) => {}
+            _ => bail!("qualification purpose consumer definitions differ from signed policy"),
+        }
+        for (name, scenario) in &self.policy_source.policy.producer_scenarios {
+            let Some(recipe_ref) = &scenario.recipe_ref else {
+                if self.producer_recipe_sources.contains_key(name) {
+                    bail!("qualification purpose pins a producer for a probe scenario");
+                }
+                continue;
+            };
+            let source = self
+                .producer_recipe_sources
+                .get(name)
+                .context("qualification purpose has no producer source for signed scenario")?;
+            source.validate()?;
+            if &source.canonical_ref != recipe_ref {
+                bail!("qualification purpose producer source differs from signed scenario");
+            }
+            if let Some(definitions) = &self.consumer_definitions
+                && source.bundle_generation_identity != definitions.bundle_generation_identity
+            {
+                bail!("qualification producer and consumer use different Bundle generations");
+            }
+        }
+        let producer_scenarios = self
+            .policy_source
+            .policy
+            .producer_scenarios
+            .values()
+            .filter(|scenario| scenario.recipe_ref.is_some())
+            .count();
+        if self.producer_recipe_sources.len() != producer_scenarios {
+            bail!("qualification purpose does not pin every signed producer scenario");
+        }
+        let remote_scenarios = self
+            .policy_source
+            .policy
+            .producer_scenarios
+            .iter()
+            .filter(|(_, scenario)| scenario.remote_verifier.is_some())
+            .count();
+        if self.remote_verifier_sources.len() != remote_scenarios {
+            bail!("qualification purpose does not retain every signed remote verifier");
+        }
+        if remote_scenarios > 0 {
+            for (name, scenario) in &self.policy_source.policy.producer_scenarios {
+                if scenario.remote_verifier.is_none() {
+                    continue;
+                }
+                if let QualificationRemoteUse::Worker { qualified_use } = self.remote_use(name)? {
+                    qualified_use
+                        .require_qualified_use(&self.policy_source.policy.verifier_parameters)?;
+                }
+            }
+            let invocation = self
+                .consumer_invocation
+                .as_ref()
+                .context("remote consumer purpose has no sealed invocation")?;
+            invocation.validate()?;
+            if !matches!(self.subject, QualificationSubject::CapturedProduct { .. }) {
+                bail!("remote consumer invocation requires a captured product");
+            }
+            if !self
+                .remote_verifier_sources
+                .contains_key(&invocation.scenario_id)
+            {
+                bail!("consumer invocation has no retained signed remote scenario");
+            }
+        } else if self.consumer_invocation.is_some() {
+            bail!("nonremote qualification purpose cannot carry a consumer invocation");
+        }
+        for (name, verifier) in &self.remote_verifier_sources {
+            verifier.validate_for(&self.policy_source, name)?;
+            if self.producer_recipe_sources.get(name) != verifier.producer_source.as_ref() {
+                bail!("retained remote verifier differs from admitted producer source");
+            }
+        }
+        validate_name(&self.subject_declaration_id)?;
+        validate_hash(
+            "qualification subject manifest",
+            &self.subject_manifest_hash,
+        )?;
+        if let QualificationSubject::ActivatedContent { content } = &self.subject
+            && content.manifest_hash != self.subject_manifest_hash
+        {
+            bail!("activated qualification subject differs from verifier manifest");
+        }
+        validate_claims(&self.required_claims)?;
+        validate_hash(
+            "qualification admitted parameters",
+            &self.admitted_parameters_digest,
+        )?;
+        validate_canonical_unsuffixed_ref("qualification verifier", &self.verifier_ref)?;
+        validate_hash(
+            "qualification verifier definition",
+            &self.verifier_effective_definition_digest,
+        )?;
+        validate_hash(
+            "qualification realized verifier definition",
+            &self.verifier_realized_definition_digest,
+        )?;
+        let policy = &self.policy_source.policy;
+        if self.subject_declaration_id != policy.subject_declaration_id
+            || self.verifier_ref != policy.verifier_ref
+            || self.admitted_parameters_digest != policy.admitted_parameters_digest()?
+            || self
+                .required_claims
+                .iter()
+                .any(|claim| policy.allowed_claims.binary_search(claim).is_err())
+        {
+            bail!("qualification launch purpose contradicts its signed policy");
+        }
+        bounded(
+            self,
+            MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES,
+            "qualification launch purpose",
+        )
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::objects::{
+        EXTERNAL_LARGE_CONTENT_MANIFEST_KIND, ExternalContentKind, ExternalContentMode,
+        ExternalContentMountRoot, ExternalContentRealization,
+    };
+
+    pub(crate) fn content_subject(manifest_hash: &str) -> ContentQualificationSubject {
+        ContentQualificationSubject {
+            schema: super::super::qualification_subject::CONTENT_QUALIFICATION_SUBJECT_SCHEMA,
+            activation_receipt_hash: "a".repeat(64),
+            activation_program_digest: "b".repeat(64),
+            binding_hash: "c".repeat(64),
+            consumer_ref: "worker:fixture/runtime".into(),
+            declaration_id: "guest-runtime".into(),
+            manifest_hash: manifest_hash.into(),
+            manifest_kind: EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into(),
+            target_node_fingerprint: "d".repeat(64),
+            realization: ExternalContentRealization {
+                id: "guest-runtime".into(),
+                kind: ExternalContentKind::Tree,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: manifest_hash.into(),
+                entry_count: 2,
+                total_bytes: 4,
+                mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                mount: "guest-runtime".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn explicit_content_subject_cannot_borrow_product_provenance() {
+        let original = super::super::products::qualification::tests::launch_purpose();
+        let mut content = original.clone();
+        content.subject = QualificationSubject::ActivatedContent {
+            content: content_subject(&original.subject_manifest_hash),
+        };
+        content.validate().unwrap();
+        assert!(content.subject.captured_product().is_err());
+        assert!(
+            !original
+                .execution_view()
+                .unwrap()
+                .has_same_enclosing_purpose(&content.execution_view().unwrap())
+        );
+        content.subject_manifest_hash = "9".repeat(64);
+        assert!(content.validate().is_err());
+    }
+
+    #[test]
+    fn invocation_is_required_nullable_and_cannot_enable_a_nonremote_purpose() {
+        let purpose = super::super::products::qualification::tests::launch_purpose();
+        purpose.validate().unwrap();
+        let mut wire = serde_json::to_value(&purpose).unwrap();
+        assert!(wire["consumer_invocation"].is_null());
+        wire.as_object_mut().unwrap().remove("consumer_invocation");
+        assert!(serde_json::from_value::<QualificationLaunchPurpose>(wire).is_err());
+        let mut unexpected = purpose.clone();
+        unexpected.consumer_invocation = Some(ryeos_external_execution_contract::restored_runtime_measurement::ConsumerVerificationInputSelection {
+            scenario_id: "consumer".into(), qualification_operation_id: "a".repeat(64),
+            prerequisite_measurement_attempt_id: "b".repeat(64),
+        });
+        assert!(unexpected.validate().is_err());
+        let mut predecessor = purpose;
+        predecessor.schema = "ryeos.qualification_launch_purpose.v6".into();
+        assert!(predecessor.validate().is_err());
+    }
+
+    #[test]
+    fn purpose_requires_current_schema_and_explicit_source() {
+        let purpose = super::super::products::qualification::tests::launch_purpose();
+        let mut predecessor = purpose.clone();
+        predecessor.schema = "ryeos.product_qualification_launch_purpose.v3".into();
+        assert!(predecessor.validate().is_err());
+        let mut missing = serde_json::to_value(&purpose).unwrap();
+        missing.as_object_mut().unwrap().remove("subject");
+        assert!(serde_json::from_value::<QualificationLaunchPurpose>(missing).is_err());
+        let mut unknown = serde_json::to_value(&purpose).unwrap();
+        unknown["subject"]["kind"] = serde_json::json!("unknown_source");
+        assert!(serde_json::from_value::<QualificationLaunchPurpose>(unknown).is_err());
+        let mut forged = serde_json::to_value(&purpose).unwrap();
+        forged["subject"]["content"] =
+            serde_json::to_value(content_subject(&purpose.subject_manifest_hash)).unwrap();
+        assert!(serde_json::from_value::<QualificationLaunchPurpose>(forged).is_err());
+    }
+}

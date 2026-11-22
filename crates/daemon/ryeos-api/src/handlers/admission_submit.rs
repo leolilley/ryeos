@@ -50,10 +50,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
     let policy = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>(
     )?;
     let limits = policy.admit(
-        ryeos_app::node_policy::sections::object_closure::RequestedObjectTransferLimits {
+        ryeos_node_runtime::node_policy::sections::object_closure::RequestedObjectTransferLimits {
             max_objects: req.max_objects,
             max_blobs: req.max_blobs,
             max_object_bytes: req.max_object_bytes,
@@ -88,7 +88,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let _permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e:#}"))?;
     let result = state.state_store.with_state_db(|db| {
         ryeos_state::admit_root(
             db,
@@ -124,3 +124,26 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ryeos admission submit <subject>` defaults to exactly the policy and
+    /// claim this service admits, so the command cannot drift from it.
+    #[test]
+    fn the_admission_submit_command_defaults_to_the_local_policy() {
+        let command: serde_json::Value = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/commands/admission-submit.yaml"
+        )))
+        .unwrap();
+        assert_eq!(command["defaults"]["policy"], LOCAL_ADMISSION_POLICY);
+        assert_eq!(command["defaults"]["claim"], default_claim());
+        assert_eq!(command["dispatch"]["execute"], DESCRIPTOR.service_ref);
+        assert_eq!(
+            command["tokens"],
+            serde_json::json!(["admission", "submit"])
+        );
+    }
+}

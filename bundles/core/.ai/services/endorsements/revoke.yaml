@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-20T23:16:10Z:c120e46155ab5b789590da858fb726d13135d36e7f9ff36bfe5b144ae01a927f:5YDBQA8g8iJOVRLY96QPgVCC2NiFs8u5ag1QOMrEvMDUpSbDOiGgSMpxADfqjAk2WfxCBJ00cVEt4nPr2d3kDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: endorsements.revoke
+required_caps: ["ryeos.execute.service.endorsements/revoke"]
+schema:
+  endorsement: string
+  reason: string?
+description: "Withdraw one recorded endorsement by digest with a node-signed tombstone. The items it covered are untrusted again."

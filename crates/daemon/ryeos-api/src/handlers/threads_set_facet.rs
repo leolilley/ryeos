@@ -38,7 +38,7 @@ pub async fn handle(
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
     ctx.require_owner(thread.requested_by.as_deref())?;
 
@@ -48,23 +48,32 @@ pub async fn handle(
         ));
     }
 
-    // Enum is the producer-side source of truth for the wire type + storage
-    // class; the append path validates it against the closed vocabulary and the
+    // Enum is the producer-side source of truth for the wire type; the append
+    // path validates it against the closed vocabulary, stores it under the
+    // node's event_storage policy (a facet is always indexed), and the
     // projection derives the facet row (survives rebuild).
+    let storage = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy>()
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let attachments = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::thread_attachments::ThreadAttachmentsPolicy>()
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let record = state
         .events
-        .append(&EventAppendParams {
-            thread_id: req.thread_id.clone(),
-            event: EventAppendItem {
-                event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
-                storage_class: RuntimeEventType::ThreadFacetSet
-                    .storage_class()
-                    .as_str()
-                    .to_string(),
-                payload: json!({ "key": req.key, "value": req.value }),
+        .append(
+            &EventAppendParams {
+                thread_id: req.thread_id.clone(),
+                event: EventAppendItem {
+                    event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
+                    payload: json!({ "key": req.key, "value": req.value }),
+                },
             },
-        })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+            storage,
+            attachments,
+        )
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     serde_json::to_value(record).map_err(|e| HandlerError::Internal(e.to_string()))
 }
@@ -112,5 +121,18 @@ mod tests {
             DESCRIPTOR.required_caps,
             &["ryeos.execute.service.threads/set_facet"]
         );
+    }
+
+    #[test]
+    fn a_non_owner_cannot_set_the_title_facet() {
+        // The ownership guard `handle` applies before appending: a verified
+        // caller who does not own the thread gets NotFound, whatever the key.
+        let ctx = HandlerContext::new("fp:attacker".to_string(), Vec::new(), true);
+        let error = ctx
+            .require_owner(Some("fp:owner"))
+            .expect_err("non-owner must be refused");
+        assert!(matches!(error, HandlerError::NotFound), "got {error:?}");
+        let owner = HandlerContext::new("fp:owner".to_string(), Vec::new(), true);
+        assert!(owner.require_owner(Some("fp:owner")).is_ok());
     }
 }

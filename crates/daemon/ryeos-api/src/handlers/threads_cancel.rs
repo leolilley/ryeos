@@ -15,18 +15,61 @@ use serde_json::{Value, json};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::cascade::{CascadeMode, cancel_queued_descendants, cascade_descendants};
-use ryeos_app::process::{ShutdownAction, kill_by_action, resolve_shutdown_action};
+use ryeos_app::cascade::{
+    CascadeMode, cancel_queued_descendants, cascade_descendants, chain_segment_ids,
+    settle_stopped_descendants,
+};
+use ryeos_app::process::{
+    KillResult, SIGKILL_DELIVERED_UNSETTLED, ShutdownAction, kill_by_action,
+    resolve_shutdown_action,
+};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{StopIntent, is_terminal_status};
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_engine::contracts::ThreadTerminalStatus;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::objects::ThreadStatus;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
+}
+
+/// Map a failed stop kill to its API error. A delivered SIGKILL whose group
+/// is not yet observed empty is the typed, retryable `stop_pending_settlement`
+/// conflict: the stop intent is durable and recovery finalizes it once the
+/// group is gone. Every other failure means no kill was proved delivered and
+/// stays internal.
+fn kill_failure_error(
+    result: &KillResult,
+    thread_id: &str,
+    pgid: i64,
+    stop_intent: StopIntent,
+) -> HandlerError {
+    if result.method == SIGKILL_DELIVERED_UNSETTLED {
+        return HandlerError::Structured {
+            code: "stop_pending_settlement".to_string(),
+            status: 409,
+            body: json!({
+                "code": "stop_pending_settlement",
+                "message": format!(
+                    "SIGKILL reached process group {pgid} for thread {thread_id}, but the group \
+                     was still present at the settle bound; the {} request is durable and \
+                     recovery finalizes the thread once the group is gone",
+                    stop_intent.as_str()
+                ),
+                "thread_id": thread_id,
+                "stop_intent": stop_intent.as_str(),
+                "pgid": pgid,
+                "method": result.method,
+            }),
+        };
+    }
+    HandlerError::Internal(format!(
+        "failed to kill process group {pgid} for thread {thread_id}: {}",
+        result.method
+    ))
 }
 
 fn in_process_stop_refusal_error(
@@ -44,12 +87,85 @@ pub async fn handle(
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     // Ownership check: callers can only cancel their own threads.
     ctx.require_owner(thread.requested_by.as_deref())?;
+    cancel_loaded_thread(req, thread, state).await
+}
 
+/// Cancel a thread on the node's own authority, with no ownership check: the
+/// caller is an operator action (a grant revocation) that has already decided
+/// the thread must stop. Everything else is `threads.cancel` exactly.
+pub(crate) async fn cancel_as_node_action(
+    thread_id: &str,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    let thread = state
+        .state_store
+        .get_thread(thread_id)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
+        .ok_or(HandlerError::NotFound)?;
+    cancel_loaded_thread(
+        Request {
+            thread_id: thread_id.to_owned(),
+        },
+        thread,
+        state,
+    )
+    .await
+}
+
+/// Bound on waiting for a stopped descendant's launcher to settle its row
+/// before the cancel settles the row itself.
+const DESCENDANT_SETTLE_WAIT: Duration = Duration::from_secs(15);
+
+/// Follow `continued` rows to the run's live tip. A caller names a run by the
+/// id it was given, which stays the first segment after the run suspends on a
+/// follow or hands off to a successor; the row that can be stopped is the tip.
+/// A tip that is terminal (or a chain with no recorded successor) keeps the
+/// requested row, so the caller sees the ordinary refusal for it.
+fn resolve_live_tip(
+    state: &AppState,
+    thread: ryeos_app::state_store::ThreadDetail,
+) -> Result<ryeos_app::state_store::ThreadDetail, HandlerError> {
+    const MAX_SEGMENTS: usize = 1024;
+    let mut current = thread;
+    for _ in 0..MAX_SEGMENTS {
+        if current.status != ThreadStatus::Continued.as_str() {
+            return Ok(current);
+        }
+        let Some(next_id) = current.successor_thread_id.clone() else {
+            return Ok(current);
+        };
+        current = state
+            .state_store
+            .get_thread(&next_id)
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
+            .ok_or_else(|| {
+                HandlerError::Internal(format!(
+                    "continuation successor {next_id} of {} has no thread row",
+                    current.thread_id
+                ))
+            })?;
+    }
+    Err(HandlerError::Internal(format!(
+        "continuation chain of {} exceeds {MAX_SEGMENTS} segments",
+        current.thread_id
+    )))
+}
+
+async fn cancel_loaded_thread(
+    req: Request,
+    thread: ryeos_app::state_store::ThreadDetail,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    let requested_thread_id = req.thread_id;
+    let thread = resolve_live_tip(&state, thread)?;
+    let req = Request {
+        thread_id: thread.thread_id.clone(),
+    };
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
     if is_terminal_status(current_status) {
@@ -69,14 +185,14 @@ pub async fn handle(
     if let Some(refusal) = state
         .state_store
         .in_process_handler_stop_refusal(&req.thread_id)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
     {
         return Err(in_process_stop_refusal_error(refusal, &req.thread_id));
     }
     let mut hosted_root_terminalization = if state
         .state_store
         .dedicated_session(&req.thread_id)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
         .is_some()
     {
         Some(
@@ -85,7 +201,7 @@ pub async fn handle(
                 &req.thread_id,
             )
             .await
-            .map_err(|error| HandlerError::Conflict(error.to_string()))?,
+            .map_err(|error| HandlerError::Conflict(format!("{error:#}")))?,
         )
     } else {
         None
@@ -98,7 +214,7 @@ pub async fn handle(
     let runtime = state
         .state_store
         .request_thread_stop(&req.thread_id, ryeos_app::state_store::StopIntent::Cancel)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let effective_intent = runtime.stop_intent.ok_or_else(|| {
         HandlerError::Internal(format!(
             "durable stop request for {} returned no effective intent",
@@ -131,14 +247,20 @@ pub async fn handle(
                 ))
             })?;
 
-        // If the kill genuinely failed (not already_dead), don't
-        // finalize — the process is still alive and marking it
-        // cancelled would be a lie.
+        // If the kill was not proved (not already_dead), don't finalize —
+        // the process may still be alive and marking it cancelled would be a
+        // lie. A delivered-but-unsettled kill wakes recovery now rather than
+        // at its next scheduled pass.
         if !result.success {
-            return Err(HandlerError::Internal(format!(
-                "failed to kill process group {} for thread {}: {}",
-                pgid, req.thread_id, result.method
-            )));
+            if result.method == SIGKILL_DELIVERED_UNSETTLED {
+                ryeos_app::recovery_nudge::nudge();
+            }
+            return Err(kill_failure_error(
+                &result,
+                &req.thread_id,
+                pgid,
+                effective_intent,
+            ));
         }
 
         json!({
@@ -191,8 +313,23 @@ pub async fn handle(
     let cascade_state = Arc::clone(&state);
     let cascade_thread_id = req.thread_id.clone();
     let (queued_cancelled, cascade) = tokio::task::spawn_blocking(move || {
-        let queued_cancelled = cancel_queued_descendants(&cascade_state, &cascade_thread_id)?;
-        let cascade = cascade_descendants(&cascade_state, &cascade_thread_id, cascade_mode)?;
+        // A follow child hangs off whichever segment of the run suspended, so
+        // every segment's lineage is stopped, not just the target's.
+        let segments = chain_segment_ids(&cascade_state, &cascade_thread_id)?;
+        let mut queued_cancelled = Vec::new();
+        let mut cascade = Vec::new();
+        for segment in &segments {
+            queued_cancelled.extend(cancel_queued_descendants(&cascade_state, segment)?);
+            cascade.extend(cascade_descendants(&cascade_state, segment, cascade_mode)?);
+        }
+        for segment in &segments {
+            settle_stopped_descendants(
+                &cascade_state,
+                segment,
+                cascade_mode,
+                DESCENDANT_SETTLE_WAIT,
+            )?;
+        }
         Ok::<_, anyhow::Error>((queued_cancelled, cascade))
     })
     .await
@@ -259,7 +396,7 @@ pub async fn handle(
                         thread.status
                     )));
                 }
-                _ => return Err(HandlerError::Internal(e.to_string())),
+                _ => return Err(HandlerError::Internal(format!("{e:#}"))),
             }
         }
     };
@@ -285,6 +422,7 @@ pub async fn handle(
 
     Ok(json!({
         "thread_id": req.thread_id,
+        "requested_thread_id": requested_thread_id,
         "status": finalized.status,
         "kill": kill_info,
         "cascade": cascade,
@@ -334,6 +472,42 @@ mod tests {
                 "expected '{}' to NOT be terminal",
                 status
             );
+        }
+    }
+
+    #[test]
+    fn unsettled_sigkill_maps_to_stop_pending_conflict() {
+        let result = KillResult {
+            success: false,
+            method: SIGKILL_DELIVERED_UNSETTLED,
+        };
+        match kill_failure_error(&result, "T-1", 4242, StopIntent::Cancel) {
+            HandlerError::Structured { code, status, body } => {
+                assert_eq!(code, "stop_pending_settlement");
+                assert_eq!(status, 409);
+                assert_eq!(body["code"], "stop_pending_settlement");
+                assert_eq!(body["thread_id"], "T-1");
+                assert_eq!(body["stop_intent"], "cancel");
+            }
+            other => panic!("expected stop_pending_settlement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_sigkill_stays_internal() {
+        for method in [
+            "sigkill_failed",
+            "group_wait_failed",
+            "identity_unavailable",
+        ] {
+            let result = KillResult {
+                success: false,
+                method,
+            };
+            assert!(matches!(
+                kill_failure_error(&result, "T-1", 4242, StopIntent::Kill),
+                HandlerError::Internal(_)
+            ));
         }
     }
 

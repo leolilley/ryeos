@@ -1,28 +1,40 @@
 //! `web` — mints a RyeOS RyeOs launch token and opens the browser.
 //!
 //! This binary is the `cli_exec` target for `client:ryeos/web`. It:
-//! 1. Parses launch args (surface and project).
+//! 1. Parses an explicit Config or Surface selection and project.
 //! 2. Resolves the daemon URL from `daemon.json` or `RYEOSD_URL`.
 //! 3. Discovers the daemon's public key for request signing.
 //! 4. Calls `POST /ui/api/launch/mint` with the launch context.
 //! 5. Opens the browser at the daemon-returned `launch_url`.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use clap::Parser;
-use ryeos_cli::transport::discovery::discover_audience;
-use serde::{Deserialize, Serialize};
+use ryeos_client_transport::discovery::discover_audience;
+use ryeos_client_transport::signing::operator_signing_key_path;
+use serde::Deserialize;
 
 #[derive(Parser)]
 #[command(name = "web", about = "Launch RyeOS in the browser")]
 struct Cli {
-    /// Surface ref backing RyeOs. Command descriptors provide the default.
-    #[arg(long = "surface", required = true)]
-    surface: String,
+    /// Signed shared presentation Config. Command descriptors select it.
+    #[arg(
+        long = "presentation",
+        required_unless_present = "surface",
+        conflicts_with = "surface"
+    )]
+    presentation: Option<String>,
+
+    /// Signed Surface root to open directly, without a shared Config.
+    #[arg(
+        long = "surface",
+        required_unless_present = "presentation",
+        conflicts_with = "presentation"
+    )]
+    surface: Option<String>,
 
     /// Project path
     #[arg(long = "project")]
@@ -39,18 +51,22 @@ struct Cli {
     /// Bind RyeOs principal storage to this launcher's signing-key principal.
     #[arg(long = "hosted-principal")]
     hosted_principal: bool,
+
+    /// Capability pattern to narrow the session to (repeatable). The session
+    /// holds the intersection of your scopes, the node's browser-session
+    /// ceiling and these patterns; it can never hold more than the ceiling.
+    #[arg(long = "scope")]
+    scopes: Vec<String>,
 }
 
-/// Request body for `ui.launch.mint`.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct MintRequest {
-    ui_binding_contract_revision: &'static str,
-    surface_ref: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    project_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    user_principal_id: Option<String>,
+/// The one canonical root the launch selects: a shared presentation Config or a
+/// Surface. The daemon chooses the composition by the ref's kind.
+fn selected_root_ref(presentation: Option<String>, surface: Option<String>) -> Result<String> {
+    match (presentation, surface) {
+        (Some(config_ref), None) => Ok(config_ref),
+        (None, Some(surface_ref)) => Ok(surface_ref),
+        _ => bail!("select exactly one of --presentation or --surface"),
+    }
 }
 
 /// Response from `ui.launch.mint`.
@@ -59,16 +75,16 @@ struct MintRequest {
 struct MintResponse {
     ui_binding_contract_revision: String,
     launch_url: String,
-    #[allow(dead_code)]
     session_id: String,
-    #[allow(dead_code)]
     token: String,
+    /// The authority the session holds: the minter's scopes within the node's
+    /// browser-session ceiling and any requested narrowing.
+    granted_caps: Vec<String>,
     /// Exact public coordinate of the surface binding admitted for this
     /// launch. The browser obtains the same attachment through session open;
     /// retaining it in this strict response type keeps the launcher and daemon
     /// on one current mint contract without treating the coordinate as a
     /// client-side grant.
-    #[allow(dead_code)]
     attachment: ryeos_client_base::ui::UiBindingAttachment,
 }
 
@@ -115,16 +131,20 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("project path is not valid UTF-8"))
         })
         .transpose()?;
-    let mint_req = MintRequest {
-        ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-        surface_ref: cli.surface,
-        project_path,
-        user_principal_id: cli
-            .hosted_principal
-            .then(|| format!("fp:{}", signer.fingerprint)),
-    };
+    let root_ref = selected_root_ref(cli.presentation, cli.surface)?;
+    let user_principal_id = cli
+        .hosted_principal
+        .then(|| format!("fp:{}", signer.fingerprint));
+    let mut mint_body = ryeos_client_base::presentation::launch_mint_body(
+        &root_ref,
+        project_path.as_deref(),
+        user_principal_id.as_deref(),
+    );
+    if !cli.scopes.is_empty() {
+        mint_body["scopes"] = cli.scopes.clone().into();
+    }
 
-    let body = serde_json::to_vec(&mint_req).context("serialize mint request")?;
+    let body = serde_json::to_vec(&mint_body).context("serialize mint request")?;
 
     // Sign the request. `MINT_PATH` drives BOTH the signed canonical path and
     // the URL below, so the path the signature is bound to can never drift.
@@ -169,6 +189,14 @@ async fn main() -> Result<()> {
         .attachment
         .validate()
         .map_err(|error| anyhow::anyhow!("invalid mint binding attachment: {error}"))?;
+    if mint_resp.session_id.is_empty() || mint_resp.token.is_empty() {
+        anyhow::bail!("mint response carries no session credentials");
+    }
+
+    ryeos_client_base::diagnostic::info(&format!(
+        "session authority · {}",
+        mint_resp.granted_caps.join(", ")
+    ));
 
     if cli.print_url || cli.no_open {
         println!("{}", mint_resp.launch_url);
@@ -179,11 +207,7 @@ async fn main() -> Result<()> {
     }
 
     // Open the browser at the daemon-returned launch URL.
-    let console = ryeos_cli::tty::Console::detect(false);
-    console.info(&ryeos_cli::tty::Diagnostic::info(format!(
-        "opening browser · {}",
-        mint_resp.launch_url
-    )))?;
+    ryeos_client_base::diagnostic::info(&format!("opening browser · {}", mint_resp.launch_url));
     open_browser(&mint_resp.launch_url)?;
 
     Ok(())
@@ -237,21 +261,13 @@ struct SignedHeaders {
 
 impl WebSigner {
     fn resolve(app_root: &std::path::Path) -> Result<Self> {
-        let operator_key = app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem");
+        let operator_key = operator_signing_key_path(app_root);
 
         if operator_key.exists() {
             return Self::load_from(operator_key);
         }
 
-        bail!(
-            "no signing key found at <app_root>/{}/config/keys/signing/private_key.pem",
-            ryeos_engine::AI_DIR
-        )
+        bail!("no signing key found at {}", operator_key.display())
     }
 
     fn load_from(path: PathBuf) -> Result<Self> {
@@ -280,50 +296,38 @@ impl WebSigner {
         let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = hex::encode(nonce_bytes);
 
-        let body_hash = lillux::cas::sha256_hex(body);
-        let canon_path = canonicalize_path(path_and_query);
+        self.sign_with(method, path_and_query, body, audience, timestamp, &nonce)
+    }
 
-        let string_to_sign = format!(
-            "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-            method.to_uppercase(),
-            canon_path,
-            body_hash,
-            timestamp,
+    /// [`WebSigner::sign`] with the timestamp and nonce supplied, so the exact
+    /// bytes signed can be pinned by fixed vectors.
+    fn sign_with(
+        &self,
+        method: &str,
+        path_and_query: &str,
+        body: &[u8],
+        audience: &str,
+        timestamp: u64,
+        nonce: &str,
+    ) -> Result<SignedHeaders> {
+        use ryeos_request_signing as rs;
+        let content_hash = rs::content_hash(
+            method,
+            &rs::canonical_path_and_query(path_and_query),
+            &rs::body_digest(body),
+            &timestamp.to_string(),
             nonce,
             audience,
         );
-
-        let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
         let sig = lillux::crypto::Signer::sign(&self.signing_key, content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 
         Ok(SignedHeaders {
             key_id: format!("fp:{}", self.fingerprint),
             timestamp: timestamp.to_string(),
-            nonce,
+            nonce: nonce.to_string(),
             signature: sig_b64,
         })
-    }
-}
-
-/// Sort query parameters alphabetically and normalise the path.
-fn canonicalize_path(path_and_query: &str) -> String {
-    if let Some((path, query)) = path_and_query.split_once('?') {
-        let mut params: BTreeMap<String, String> = BTreeMap::new();
-        for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                params.insert(k.to_string(), v.to_string());
-            } else if !pair.is_empty() {
-                params.insert(pair.to_string(), String::new());
-            }
-        }
-        let sorted: Vec<String> = params
-            .into_iter()
-            .map(|(k, v)| if v.is_empty() { k } else { format!("{k}={v}") })
-            .collect();
-        format!("{}?{}", path, sorted.join("&"))
-    } else {
-        path_and_query.to_string()
     }
 }
 
@@ -356,72 +360,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonicalize_path_no_query() {
-        assert_eq!(canonicalize_path("/execute"), "/execute");
-    }
-
-    #[test]
-    fn canonicalize_path_sorted_query() {
-        assert_eq!(
-            canonicalize_path("/threads/abc/events/stream?after=42&limit=10"),
-            "/threads/abc/events/stream?after=42&limit=10"
-        );
-    }
-
-    #[test]
-    fn canonicalize_path_unsorted_query() {
-        assert_eq!(
-            canonicalize_path("/threads/abc?limit=10&after=42"),
-            "/threads/abc?after=42&limit=10"
-        );
-    }
-
-    #[test]
-    fn mint_request_serializes_surface() {
-        let req = MintRequest {
-            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
-            project_path: Some("/tmp/proj".to_string()),
-            user_principal_id: None,
+    fn signed_headers_match_shared_vectors() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../support/ryeos-request-signing/tests/vectors/request_signing.json"
+        ))
+        .unwrap();
+        let seed = vectors["signing_key_seed_byte"].as_u64().unwrap() as u8;
+        let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
+        let signer = WebSigner {
+            fingerprint: lillux::crypto::fingerprint(&key.verifying_key()),
+            signing_key: key,
         };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["surface_ref"], "surface:ryeos/ryeos/base");
-        assert_eq!(json["project_path"], "/tmp/proj");
-        assert!(json.get("mode").is_none());
-        assert!(json.get("read_only").is_none());
+        for v in vectors["vectors"].as_array().unwrap() {
+            let s = |k: &str| v[k].as_str().unwrap();
+            let headers = signer
+                .sign_with(
+                    s("method"),
+                    s("path_and_query"),
+                    s("body").as_bytes(),
+                    s("audience"),
+                    v["timestamp"].as_u64().unwrap(),
+                    s("nonce"),
+                )
+                .unwrap();
+            assert_eq!(headers.signature, s("signature"), "{}", s("name"));
+            assert_eq!(headers.nonce, s("nonce"));
+            assert_eq!(headers.timestamp, v["timestamp"].to_string());
+        }
+    }
+
+    #[test]
+    fn launcher_selects_surface_root_without_inventing_a_config() {
+        let cli = Cli::try_parse_from(["web", "--surface", "surface:ryeos/ui/assistant-observe"])
+            .unwrap();
+        assert!(cli.presentation.is_none());
         assert_eq!(
-            json["ui_binding_contract_revision"],
-            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+            selected_root_ref(cli.presentation, cli.surface).unwrap(),
+            "surface:ryeos/ui/assistant-observe"
         );
     }
 
     #[test]
-    fn mint_request_omits_none_project_path() {
-        let req = MintRequest {
-            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            surface_ref: "surface:x/y/z".to_string(),
-            project_path: None,
-            user_principal_id: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
+    fn launcher_requires_exactly_one_composition_root() {
+        assert!(Cli::try_parse_from(["web"]).is_err());
         assert!(
-            !json.contains("project_path"),
-            "should skip_serializing_if None"
+            Cli::try_parse_from([
+                "web",
+                "--presentation",
+                "config:ryeos/ui/presentation",
+                "--surface",
+                "surface:ryeos/ui/assistant-observe",
+            ])
+            .is_err()
         );
-        assert!(!json.contains("mode"));
-        assert!(!json.contains("read_only"));
-    }
-
-    #[test]
-    fn mint_request_includes_user_principal_when_bound() {
-        let req = MintRequest {
-            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            surface_ref: "surface:x/y/z".to_string(),
-            project_path: None,
-            user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["user_principal_id"], format!("fp:{}", "ab".repeat(32)));
+        assert!(
+            Cli::try_parse_from(["web", "--presentation", "config:ryeos/ui/presentation",]).is_ok()
+        );
     }
 
     #[test]
@@ -431,18 +425,21 @@ mod tests {
             "token": "abc-123",
             "launch_url": "http://localhost:8080/custom/launch/abc-123",
             "session_id": "sess-456",
+            "granted_caps": ["ryeos.execute.service.ui/*"],
             "attachment": {
                 "binding_attachment_id": "attachment-789",
                 "binding_generation": 1,
                 "binding_digest": "digest-789",
-                "surface_ref": "surface:ryeos/ui/assistant-observe",
-                "surface_generation": "surface-generation-789",
-                "effective_surface": {"name": "assistant-observe"},
+                "root_ref": "surface:ryeos/ui/assistant-observe",
+                "root_generation": "surface-generation-789",
+                "presentation": {"definition": {"kind": "surface", "surface": {"name": "assistant-observe"}}, "views": {}},
                 "project_path": null,
+                "subject": {"kind": "projectless"},
                 "posture": "observation_only",
                 "binding_request_bounds": {
                     "max_request_bytes": 4096,
-                    "max_input_bytes": 1024
+                    "max_input_bytes": 1024,
+                    "max_seat_append_bytes": 65536
                 }
             }
         });
@@ -452,6 +449,7 @@ mod tests {
             "http://localhost:8080/custom/launch/abc-123"
         );
         assert_eq!(resp.session_id, "sess-456");
+        assert_eq!(resp.granted_caps, ["ryeos.execute.service.ui/*"]);
         assert_eq!(resp.attachment.binding_attachment_id, "attachment-789");
         assert!(resp.attachment.validate().is_ok());
     }
@@ -459,7 +457,12 @@ mod tests {
     #[test]
     fn launcher_rejects_authority_posture_flags() {
         for posture_flag in ["--read-only", "--allow-intents", "--mode"] {
-            let mut args = vec!["web", "--surface", "surface:ryeos/ryeos/base", posture_flag];
+            let mut args = vec![
+                "web",
+                "--presentation",
+                "config:ryeos/ui/presentation",
+                posture_flag,
+            ];
             if posture_flag == "--mode" {
                 args.push("operate");
             }

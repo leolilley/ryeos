@@ -42,6 +42,26 @@ fn validate_component(label: &str, value: &str, maximum: usize) -> Result<()> {
     Ok(())
 }
 
+/// The directory every private artifact home lives under, credential
+/// profile homes included.
+pub fn root(runtime_state_dir: &Path) -> PathBuf {
+    runtime_state_dir.join(HOME_ROOT)
+}
+
+/// Establish the home root, private to the node's account (mode 0700),
+/// without creating any home in it. The node does this before its
+/// capability report grades the root, so a node that has not yet enrolled
+/// a credential profile reports the private credential home it will give
+/// its first one; a credential login workload requires that grade.
+pub fn ensure_root(runtime_state_dir: &Path) -> Result<PathBuf> {
+    let path = root(runtime_state_dir);
+    let directory = lillux::PinnedDirectory::open_or_create(&path)
+        .context("open node-private artifact-home root")?;
+    directory.set_mode(0o700)?;
+    directory.sync()?;
+    Ok(path)
+}
+
 pub fn home_path(runtime_state_dir: &Path, home_id: &str) -> Result<PathBuf> {
     validate_component("private artifact home id", home_id, MAX_HOME_ID_BYTES)?;
     Ok(runtime_state_dir.join(HOME_ROOT).join(home_id))
@@ -116,6 +136,7 @@ pub fn create(
             .remove_contents_recursive_bounded(HOME_TRAVERSAL_BUDGET)
             .and_then(|()| {
                 root.remove_empty_child_if_same(&home_name, &home)
+                    .map(|receipt| receipt.is_some())
                     .and_then(|removed| {
                         if removed {
                             Ok(())
@@ -144,7 +165,9 @@ pub fn remove(runtime_state_dir: &Path, home_id: &str) -> Result<bool> {
         return Ok(false);
     };
     home.remove_contents_recursive_bounded(HOME_TRAVERSAL_BUDGET)?;
-    let removed = root.remove_empty_child_if_same(&name, &home)?;
+    let removed = root
+        .remove_empty_child_if_same(&name, &home)
+        .map(|receipt| receipt.is_some())?;
     if !removed {
         bail!("private artifact home identity changed during removal");
     }
@@ -168,7 +191,9 @@ pub fn remove_empty_orphan(runtime_state_dir: &Path, home_id: &str) -> Result<bo
     if !home.entries_no_follow_bounded(1)?.is_empty() {
         bail!("private artifact orphan is non-empty and requires explicit recovery");
     }
-    let removed = root.remove_empty_child_if_same(&name, &home)?;
+    let removed = root
+        .remove_empty_child_if_same(&name, &home)
+        .map(|receipt| receipt.is_some())?;
     if !removed {
         bail!("private artifact home identity changed during orphan recovery");
     }
@@ -433,9 +458,9 @@ pub fn install_portable_state_conditionally(
                         if !current_observation.matches_quarantined_incumbent(&observation) {
                             bail!("portable predecessor identity changed before replacement");
                         }
-                        let mut current = current.try_clone()?;
+                        let current = current.try_clone()?;
                         let bytes = lillux::read_open_regular_file_stable_bounded(
-                            &mut current,
+                            &current,
                             &current_observation,
                             max_file_bytes,
                         )?;
@@ -527,7 +552,6 @@ fn open_existing_portable_parent(
     Ok(Some((parent, OsString::from(file_name))))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_portable_state_directory(
     directory: &lillux::PinnedDirectory,
     relative: &Path,
@@ -592,7 +616,7 @@ fn capture_portable_state_directory(
                     directory.ensure_entry_observation(&entry)?;
                     continue;
                 }
-                let mut file = directory
+                let file = directory
                     .open_regular(&entry.name, false)?
                     .ok_or_else(|| anyhow::anyhow!("portable-state file disappeared"))?;
                 let observation = lillux::observe_open_regular_file(&file)?;
@@ -600,7 +624,7 @@ fn capture_portable_state_directory(
                     bail!("portable-state file changed identity before capture");
                 }
                 let bytes = lillux::read_open_regular_file_stable_bounded(
-                    &mut file,
+                    &file,
                     &observation,
                     contract.max_file_bytes,
                 )?;

@@ -1,0 +1,12 @@
+# ryeos:signed:2026-10-15T01:16:46Z:e314d49382d6936ee96d86dd2b8eacbb13032ba22e89f6bb8f1898d28a368bd5:gfgOnGII2R2ZasDVGot0waEwqBb/+gkw504taN3AE6be+4aoeTNio6fxcau+UH0joellF7YT6QheTz62vSZUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: external-execution/channel-stream
+path: /external-execution/channel/{placement_thread_id}/{occurrence_id}/stream
+methods:
+  - GET
+auth: none
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: channel_stream

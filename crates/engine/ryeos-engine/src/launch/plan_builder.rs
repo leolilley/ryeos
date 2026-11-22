@@ -34,14 +34,14 @@ const MAX_CHAIN_DEPTH: usize = 16;
 /// publisher's v1 document instead of accepting a lenient `name` projection:
 /// generation identity must not be supplied by a replayed or structurally
 /// obsolete trusted document.
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceBundleManifest {
     name: String,
-    version: String,
-    #[serde(default)]
-    description: String,
+    #[serde(rename = "version")]
+    _version: String,
+    #[serde(default, rename = "description")]
+    _description: String,
     provides_kinds: Vec<String>,
     #[serde(default)]
     requires_kinds: Vec<String>,
@@ -49,10 +49,14 @@ struct RuntimeSourceBundleManifest {
     uses_kinds: Vec<String>,
     #[serde(default)]
     runtime_authority: RuntimeSourceAuthorityDecls,
+    #[serde(default, rename = "smoke")]
+    _smoke: Vec<RuntimeSourceSmokeDecl>,
+    #[serde(default, rename = "shadows")]
+    _shadows: Vec<String>,
     #[serde(default)]
-    smoke: Vec<RuntimeSourceSmokeDecl>,
-    #[serde(default)]
-    shadows: Vec<String>,
+    owns_namespaces: Vec<String>,
+    #[serde(default, rename = "sync_include")]
+    _sync_include: Vec<ryeos_state::project_sync::SyncIncludeDecl>,
     #[serde(default)]
     isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
     #[serde(default)]
@@ -62,7 +66,6 @@ struct RuntimeSourceBundleManifest {
         Vec<ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration>,
 }
 
-#[allow(dead_code)]
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceAuthorityDecls {
@@ -72,11 +75,36 @@ struct RuntimeSourceAuthorityDecls {
     runtime_vault: Vec<RuntimeSourceVaultDecl>,
     #[serde(default)]
     item_authoring: Vec<RuntimeSourceItemAuthorDecl>,
-    #[serde(default)]
-    project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
+    #[serde(default, rename = "project_snapshots")]
+    _project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
+    /// Node-owned bundle state home; judged by the launch that opens it.
+    #[serde(default, rename = "state_home")]
+    _state_home: Option<RuntimeSourceStateHomeDecl>,
+    /// Handler-route operator-vault bound; judged by route dispatch, not here.
+    #[serde(default, rename = "operator_vault")]
+    _operator_vault: bool,
+    /// Route-principal authority bound; judged by route dispatch, not here.
+    #[serde(default, rename = "route_capabilities")]
+    _route_capabilities: Vec<String>,
 }
 
-#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceStateHomeDecl {
+    #[serde(rename = "namespaces")]
+    _namespaces: RuntimeSourceStateHomeNamespaces,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeSourceStateHomeNamespaces {
+    Fixed {
+        #[serde(rename = "names")]
+        _names: Vec<String>,
+    },
+    LaunchParam,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceBundleEventDecl {
@@ -84,7 +112,6 @@ struct RuntimeSourceBundleEventDecl {
     operations: Vec<RuntimeSourceBundleEventOperation>,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum RuntimeSourceBundleEventOperation {
@@ -92,7 +119,6 @@ enum RuntimeSourceBundleEventOperation {
     Scan,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceVaultDecl {
@@ -100,7 +126,6 @@ struct RuntimeSourceVaultDecl {
     operations: Vec<RuntimeSourceVaultOperation>,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum RuntimeSourceVaultOperation {
@@ -110,7 +135,6 @@ enum RuntimeSourceVaultOperation {
     List,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum RuntimeSourceProjectSnapshotOperation {
@@ -120,7 +144,6 @@ enum RuntimeSourceProjectSnapshotOperation {
     Create,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceItemAuthorDecl {
@@ -128,19 +151,19 @@ struct RuntimeSourceItemAuthorDecl {
     namespace: String,
 }
 
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeSourceSmokeDecl {
     #[serde(rename = "ref")]
-    item_ref: String,
-    ref_bindings: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    inputs: serde_json::Value,
-    #[serde(default)]
-    timeout_secs: Option<u64>,
+    _item_ref: String,
+    #[serde(rename = "ref_bindings")]
+    _ref_bindings: std::collections::BTreeMap<String, String>,
+    #[serde(default, rename = "name")]
+    _name: Option<String>,
+    #[serde(default, rename = "inputs")]
+    _inputs: serde_json::Value,
+    #[serde(default, rename = "timeout_secs")]
+    _timeout_secs: Option<u64>,
 }
 
 impl RuntimeSourceAuthorityDecls {
@@ -230,6 +253,17 @@ pub struct SignedBundleManifestIdentity {
     pub provides_kinds: Vec<String>,
     pub requires_kinds: Vec<String>,
     pub uses_kinds: Vec<String>,
+    /// Namespaces the signed manifest declares the bundle owns.
+    pub owns_namespaces: Vec<String>,
+}
+
+/// Exact signed installed Bundle manifest captured for historical source
+/// testimony. The identity alone cannot preserve its signature envelope after
+/// the installed generation is replaced.
+#[derive(Debug, Clone)]
+pub struct CapturedSignedBundleManifest {
+    pub identity: SignedBundleManifestIdentity,
+    pub signed_bytes: Vec<u8>,
 }
 
 pub fn verify_bundle_source_manifest_identity(
@@ -237,22 +271,33 @@ pub fn verify_bundle_source_manifest_identity(
     expected_name: &str,
     node_trust_store: &TrustStore,
 ) -> Result<SignedBundleManifestIdentity, EngineError> {
+    Ok(
+        capture_signed_bundle_source_manifest(bundle_root, expected_name, node_trust_store)?
+            .identity,
+    )
+}
+
+/// Capture the same verified source-manifest authority used by normal Bundle
+/// admission, without resolving a diagnostic path after the check.
+pub fn capture_signed_bundle_source_manifest(
+    bundle_root: &Path,
+    expected_name: &str,
+    node_trust_store: &TrustStore,
+) -> Result<CapturedSignedBundleManifest, EngineError> {
     let manifest_path = bundle_root.join(crate::AI_DIR).join("manifest.yaml");
-    let metadata = std::fs::symlink_metadata(&manifest_path).map_err(|error| {
+    let signed_bytes = lillux::read_regular_file_bounded_no_follow(
+        &manifest_path,
+        crate::config_loading::MAX_BUNDLE_MANIFEST_BYTES,
+    )
+    .map_err(|error| {
         EngineError::Internal(format!(
-            "stat runtime source-bundle manifest {}: {error}",
+            "read runtime source-bundle manifest {}: {error}",
             manifest_path.display()
         ))
     })?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(EngineError::Internal(format!(
-            "runtime source-bundle manifest is not a regular file: {}",
-            manifest_path.display()
-        )));
-    }
-    let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+    let raw = std::str::from_utf8(&signed_bytes).map_err(|error| {
         EngineError::Internal(format!(
-            "read runtime source-bundle manifest {}: {error}",
+            "runtime source-bundle manifest is not UTF-8 at {}: {error}",
             manifest_path.display()
         ))
     })?;
@@ -262,44 +307,131 @@ pub fn verify_bundle_source_manifest_identity(
         after_shebang: false,
     };
     let signature =
-        crate::item_resolution::parse_signature_header(&raw, &envelope).ok_or_else(|| {
+        crate::item_resolution::parse_signature_header(raw, &envelope).ok_or_else(|| {
             EngineError::Internal(format!(
                 "runtime source-bundle manifest is unsigned: {}",
                 manifest_path.display()
             ))
         })?;
-    let (trust_class, _) =
-        crate::trust::verify_item_signature(&raw, &signature, &envelope, node_trust_store)
-            .map_err(|error| {
-                EngineError::Internal(format!(
-                    "verify runtime source-bundle manifest {}: {error}",
-                    manifest_path.display()
-                ))
-            })?;
+    let (trust_class, _) = crate::trust::verify_item_signature(
+        raw,
+        &signature,
+        &envelope,
+        node_trust_store,
+        &crate::trust::SignerContext::bundle("runtime_source_bundle_manifest"),
+    )
+    .map_err(|error| {
+        EngineError::Internal(format!(
+            "verify runtime source-bundle manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
     if trust_class != ContractTrustClass::Trusted {
         return Err(EngineError::Internal(format!(
             "runtime source-bundle manifest signer {} is not node-trusted",
             signature.signer_fingerprint
         )));
     }
-    let body = lillux::signature::strip_signature_lines(&raw);
-    let manifest_value: serde_yaml::Value = serde_yaml::from_str(&body).map_err(|error| {
+    let (body, canonical_header) = lillux::signature::strip_canonical_signature_with_envelope(
+        raw, "#", None, false,
+    )
+    .map_err(|error| {
+        EngineError::Internal(format!(
+            "runtime source-bundle manifest has a noncanonical signature envelope: {error}"
+        ))
+    })?;
+    if canonical_header
+        .as_ref()
+        .map(|header| header.signer_fingerprint.as_str())
+        != Some(signature.signer_fingerprint.as_str())
+    {
+        return Err(EngineError::Internal(
+            "runtime source-bundle manifest signature changed during canonical recheck".into(),
+        ));
+    }
+    let identity = validate_runtime_source_bundle_manifest_body(
+        &body,
+        expected_name,
+        &signature.signer_fingerprint,
+        &manifest_path.display().to_string(),
+    )?;
+    Ok(CapturedSignedBundleManifest {
+        identity,
+        signed_bytes,
+    })
+}
+
+/// Recheck historical signed Bundle bytes without consulting the current
+/// installed Bundle or treating the supplied key as fresh publisher authority.
+/// The caller must authenticate node testimony that this exact key was
+/// admitted under the checked generation named by that testimony.
+pub fn verify_retained_signed_bundle_manifest_bytes(
+    signed_bytes: &[u8],
+    expected_name: &str,
+    expected_signer: &str,
+    verifier: &lillux::crypto::VerifyingKey,
+) -> Result<SignedBundleManifestIdentity, EngineError> {
+    if signed_bytes.len() as u64 > crate::config_loading::MAX_BUNDLE_MANIFEST_BYTES {
+        return Err(EngineError::Internal(
+            "retained signed Bundle manifest exceeds its byte limit".into(),
+        ));
+    }
+    let signed = std::str::from_utf8(signed_bytes).map_err(|error| {
+        EngineError::Internal(format!("retained Bundle manifest is not UTF-8: {error}"))
+    })?;
+    let (body, header) =
+        lillux::signature::strip_canonical_signature_with_envelope(signed, "#", None, false)
+            .map_err(|error| {
+                EngineError::Internal(format!("retained Bundle signature envelope: {error}"))
+            })?;
+    let header = header.ok_or_else(|| {
+        EngineError::Internal("retained Bundle manifest has no canonical signature".into())
+    })?;
+    if lillux::crypto::fingerprint(verifier) != expected_signer
+        || !lillux::signature::is_valid_signature_for(
+            &header.content_hash,
+            &header.signature_b64,
+            &header.signer_fingerprint,
+            &body,
+            verifier,
+            expected_signer,
+        )
+    {
+        return Err(EngineError::Internal(
+            "retained Bundle manifest signature differs from historical verifier".into(),
+        ));
+    }
+    validate_runtime_source_bundle_manifest_body(
+        &body,
+        expected_name,
+        expected_signer,
+        "retained CAS",
+    )
+}
+
+fn validate_runtime_source_bundle_manifest_body(
+    body: &str,
+    expected_name: &str,
+    signer_fingerprint: &str,
+    source_description: &str,
+) -> Result<SignedBundleManifestIdentity, EngineError> {
+    let manifest_value: serde_yaml::Value = serde_yaml::from_str(body).map_err(|error| {
         EngineError::Internal(format!(
             "parse runtime source-bundle manifest {}: {error}",
-            manifest_path.display()
+            source_description
         ))
     })?;
     let manifest_mapping = manifest_value.as_mapping().ok_or_else(|| {
         EngineError::Internal(format!(
             "runtime source-bundle manifest must contain a YAML mapping: {}",
-            manifest_path.display()
+            source_description
         ))
     })?;
     for required in ["name", "version", "provides_kinds", "requires_kinds"] {
         if !manifest_mapping.contains_key(serde_yaml::Value::String(required.to_string())) {
             return Err(EngineError::Internal(format!(
                 "runtime source-bundle manifest is not ryeos.bundle-manifest/v1: missing required field {required:?} at {}",
-                manifest_path.display()
+                source_description
             )));
         }
     }
@@ -307,7 +439,7 @@ pub fn verify_bundle_source_manifest_identity(
         serde_yaml::from_value(manifest_value).map_err(|error| {
             EngineError::Internal(format!(
                 "runtime source-bundle manifest is not the current closed schema at {}: {error}",
-                manifest_path.display()
+                source_description
             ))
         })?;
     if manifest.name != expected_name {
@@ -319,9 +451,17 @@ pub fn verify_bundle_source_manifest_identity(
     manifest.runtime_authority.validate().map_err(|error| {
         EngineError::Internal(format!(
             "runtime source-bundle manifest has invalid runtime_authority at {}: {error}",
-            manifest_path.display()
+            source_description
         ))
     })?;
+    crate::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces).map_err(
+        |error| {
+            EngineError::Internal(format!(
+                "runtime source-bundle manifest has invalid owns_namespaces at {}: {error}",
+                source_description
+            ))
+        },
+    )?;
     let mut backend_ids = std::collections::BTreeSet::new();
     for backend in &manifest.isolation_backends {
         backend.validate().map_err(|error| {
@@ -370,10 +510,11 @@ pub fn verify_bundle_source_manifest_identity(
     Ok(SignedBundleManifestIdentity {
         name: manifest.name,
         body_digest: lillux::sha256_hex(body.as_bytes()),
-        signer_fingerprint: signature.signer_fingerprint,
+        signer_fingerprint: signer_fingerprint.to_owned(),
         provides_kinds: manifest.provides_kinds,
         requires_kinds: manifest.requires_kinds,
         uses_kinds: manifest.uses_kinds,
+        owns_namespaces: manifest.owns_namespaces,
     })
 }
 
@@ -567,6 +708,15 @@ fn resolve_executor_chain(
                     header,
                     &source_format.signature,
                     trust_store,
+                    &crate::trust::SignerContext::new(
+                        source_space,
+                        &ref_.kind,
+                        roots
+                            .logical_project_root
+                            .as_deref()
+                            .or_else(|| project_authority.map(|(root, _)| root))
+                            .or_else(|| roots.project_root()),
+                    ),
                 )
                 .map_err(|error| crate::trust::patch_canonical_ref(error, &resolved_id))?;
                 (trust_class, signer.map(|signer| signer.0))
@@ -686,7 +836,6 @@ fn resolve_executor_chain(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_executor_source_policy(
     starting_executor_id: &str,
     root_source_path: &Path,
@@ -800,6 +949,10 @@ pub struct TerminalExecutorDecl {
 pub struct ResolvedTerminalExecutor {
     pub terminal_ref: String,
     pub kind: TerminalExecutorKind,
+    /// The signed source authority of every executor-chain hop walked to
+    /// the terminal, in order, so a launch can judge each hop's space and
+    /// trust class before anything runs.
+    pub chain_authorities: Vec<crate::contracts::PlanTrustAuthority>,
 }
 
 /// Walk the executor chain from `starting_executor_id` to its terminal and
@@ -814,7 +967,6 @@ pub struct ResolvedTerminalExecutor {
 /// Every resolved terminal MUST declare a `terminal_executor:` block — a
 /// missing or invalid descriptor is a hard error (no silent fallback), so a
 /// mistyped or absent descriptor can never be silently treated as a subprocess.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_terminal_executor(
     starting_executor_id: &str,
     root_source_path: &Path,
@@ -838,7 +990,6 @@ pub fn resolve_terminal_executor(
 
 /// Resolve an executor terminal with every project hop and precedence probe
 /// sourced from admitted project content.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_terminal_executor_under_project_authority(
     starting_executor_id: &str,
     root_source_path: &Path,
@@ -862,7 +1013,6 @@ pub fn resolve_terminal_executor_under_project_authority(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_terminal_executor_with_project_authority(
     starting_executor_id: &str,
     root_source_path: &Path,
@@ -915,6 +1065,7 @@ fn resolve_terminal_executor_with_project_authority(
     Ok(ResolvedTerminalExecutor {
         terminal_ref: last.resolved_ref.clone(),
         kind: decl.kind,
+        chain_authorities: terminal.verified_chain.clone(),
     })
 }
 
@@ -947,6 +1098,11 @@ pub struct BuildPlanInput<'a> {
     /// Already admitted composed/parent filesystem ceiling. It is consumed
     /// before runtime templates can read host bindings, not just at spawn.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// The protocol this node selected for the root's subprocess terminator,
+    /// a node-local launch fact. It supplies the filesystem ceiling of an item
+    /// that lists several admissible protocols and keys the plan cache; it is
+    /// never part of the item's resolution or definition digest.
+    pub selected_protocol: Option<crate::protocols::SelectedProtocol<'a>>,
     pub project_authority: Option<(
         &'a Path,
         &'a dyn crate::project_content::AuthoritativeProjectContent,
@@ -1029,6 +1185,7 @@ fn build_plan_with_execution_root(
         node_trust_store,
         host_env,
         filesystem_authority_ceiling: admitted_filesystem_ceiling,
+        selected_protocol,
         project_authority,
         sealed_content,
     } = input;
@@ -1198,15 +1355,14 @@ fn build_plan_with_execution_root(
     );
     plan_env.insert("RYEOS_ITEM_KIND".to_owned(), resolved.kind.clone());
     plan_env.insert("RYEOS_ITEM_REF".to_owned(), canonical_ref.clone());
-    let execution_project_root =
-        logical_project_root.unwrap_or_else(|| match &ctx.project_context {
-            crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
-            crate::contracts::ProjectContext::None
-            | crate::contracts::ProjectContext::SnapshotHash { .. }
-            | crate::contracts::ProjectContext::ProjectRef { .. } => {
-                resolved.materialized_project_root.as_deref()
-            }
-        });
+    let execution_project_root = logical_project_root.unwrap_or(match &ctx.project_context {
+        crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
+        crate::contracts::ProjectContext::None
+        | crate::contracts::ProjectContext::SnapshotHash { .. }
+        | crate::contracts::ProjectContext::ProjectRef { .. } => {
+            resolved.materialized_project_root.as_deref()
+        }
+    });
     if let Some(root) = execution_project_root {
         plan_env.insert(
             "RYEOS_PROJECT_ROOT".to_owned(),
@@ -1251,12 +1407,17 @@ fn build_plan_with_execution_root(
             })?;
     let root_value = &terminal.intermediates[0].parsed;
     let filesystem_authority_ceiling = execution
-        .project_filesystem_authority_ceiling(root_value)?
+        .project_filesystem_authority_ceiling_selected(
+            root_value,
+            selected_protocol.and_then(|selected| selected.holding),
+        )?
         .intersect(admitted_filesystem_ceiling);
     let network_authority_ceiling = execution.project_network_authority_ceiling(root_value)?;
-    let target_requirement = execution.project_target_requirement(root_value)?;
+    let execution_posture = execution.project_execution_posture(root_value)?;
+    let (target_requirement, current_target_request) = execution.project_target_data(root_value)?;
     let endpoint_requirement = execution.project_endpoint_requirement(root_value)?;
     let resource_authority_ceiling = execution.project_resource_authority_ceiling(root_value)?;
+    let subprocess_limits = execution.project_subprocess_limits(root_value)?;
     resource_authority_ceiling
         .admits(target_requirement.as_ref())
         .map_err(|error| EngineError::SchemaLoaderError {
@@ -1264,7 +1425,8 @@ fn build_plan_with_execution_root(
         })?;
     let no_host_environment = HostEnvBindings::default();
     let host_env = match filesystem_authority_ceiling {
-        crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution => {
+        crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+        | crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedInputs => {
             &no_host_environment
         }
         crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy => host_env,
@@ -1284,6 +1446,22 @@ fn build_plan_with_execution_root(
     // the complete meaning-blind implementation set those policies may name.
     let registry = RuntimeHandlerRegistry::with_builtins();
     let root_trust_class = widen_root_trust_class(item.trust_class, item.resolved.source_space);
+    let mut authenticated_chain_authorities = vec![root_plan_trust_authority(item, &canonical_ref)];
+    authenticated_chain_authorities.extend(terminal.verified_chain.iter().cloned());
+    // A pinned snapshot has a materialized execution root even though source
+    // lookup remains under its separate admitted project authority. Give the
+    // runtime compiler the same root already exposed in RYEOS_PROJECT_ROOT so
+    // cwd and typed project-path inputs can be relocated with the direct plan.
+    let runtime_execution_root = logical_project_root.unwrap_or({
+        if matches!(
+            &ctx.project_context,
+            crate::contracts::ProjectContext::SnapshotHash { .. }
+        ) {
+            execution_project_root
+        } else {
+            project_root.as_deref()
+        }
+    });
     let spec = crate::runtime::compile_with_handlers_and_execution_root(
         &terminal.intermediates,
         &terminal.root_source_path,
@@ -1302,7 +1480,8 @@ fn build_plan_with_execution_root(
         root_trust_class,
         project_authority,
         sealed_content,
-        logical_project_root.unwrap_or(project_root.as_deref()),
+        runtime_execution_root,
+        Some(&authenticated_chain_authorities),
     )?;
 
     // Step 5: Build plan node
@@ -1332,6 +1511,7 @@ fn build_plan_with_execution_root(
         registry_fingerprint,
         parameters,
         hints,
+        selected_protocol.map(|selected| selected.protocol.canonical_ref.as_str()),
     );
 
     // Step 7: Build plan ID
@@ -1348,10 +1528,13 @@ fn build_plan_with_execution_root(
         materialization_requirements: Vec::new(),
         network_authority_ceiling,
         filesystem_authority_ceiling,
+        execution_posture,
         target_requirement,
+        current_target_request,
         endpoint_requirement,
         external_endpoint_binding: None,
         resource_authority_ceiling,
+        subprocess_limits,
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
         executor_chain: terminal.chain,
@@ -1374,6 +1557,7 @@ fn compute_cache_key(
     registry_fingerprint: &str,
     parameters: &serde_json::Value,
     hints: &ExecutionHints,
+    selected_protocol_ref: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"ryeos:plan:v1:");
@@ -1386,6 +1570,10 @@ fn compute_cache_key(
     hasher.update(parameters.to_string().as_bytes());
     hasher.update(b":");
     hasher.update(serde_json::to_string(&hints).unwrap_or_default().as_bytes());
+    // The protocol this node selected changes the plan's filesystem ceiling, so
+    // plans built under different selections must never share an identity.
+    hasher.update(b":protocol=");
+    hasher.update(selected_protocol_ref.unwrap_or("").as_bytes());
     for h in chain_content_hashes {
         hasher.update(b":");
         hasher.update(h.as_bytes());
@@ -1423,6 +1611,38 @@ fn widen_root_trust_class(
     }
 }
 
+fn root_plan_trust_authority(
+    item: &VerifiedItem,
+    canonical_ref: &str,
+) -> crate::contracts::PlanTrustAuthority {
+    let resolved = &item.resolved;
+    let trust_class = match (item.trust_class, resolved.source_space) {
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Bundle) => {
+            crate::resolution::TrustClass::TrustedBundle
+        }
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Project) => {
+            crate::resolution::TrustClass::TrustedProject
+        }
+        (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Node) => {
+            crate::resolution::TrustClass::TrustedNode
+        }
+        (ContractTrustClass::Untrusted, _) => crate::resolution::TrustClass::UntrustedProject,
+        (ContractTrustClass::Unsigned, _) => crate::resolution::TrustClass::Unsigned,
+    };
+    crate::contracts::PlanTrustAuthority {
+        requested_id: canonical_ref.to_owned(),
+        canonical_ref: canonical_ref.to_owned(),
+        source_space: resolved.source_space,
+        trust_class,
+        signer_fingerprint: resolved
+            .signature_header
+            .as_ref()
+            .map(|header| header.signer_fingerprint.clone()),
+        content_hash: resolved.content_hash.clone(),
+        raw_content_digest: resolved.raw_content_digest.clone(),
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1436,6 +1656,44 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn retained_bundle_bytes_receive_full_current_manifest_validation() {
+        let key = test_signing_key();
+        let fingerprint = lillux::crypto::fingerprint(&key.verifying_key());
+        let valid = lillux::signature::sign_content_at(
+            "name: codex\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n",
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        let identity = verify_retained_signed_bundle_manifest_bytes(
+            valid.as_bytes(),
+            "codex",
+            &fingerprint,
+            &key.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(identity.name, "codex");
+
+        let incomplete = lillux::signature::sign_content_at(
+            "name: codex\nversion: 1.0.0\n",
+            &key,
+            "#",
+            None,
+            "2026-09-29T00:00:00Z",
+        );
+        assert!(
+            verify_retained_signed_bundle_manifest_bytes(
+                incomplete.as_bytes(),
+                "codex",
+                &fingerprint,
+                &key.verifying_key(),
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn widen_trusted_bundle_stays_trusted_bundle() {
@@ -1522,11 +1780,46 @@ mod tests {
         let signed = lillux::signature::sign_content(body, &test_signing_key(), "#", None);
         fs::write(
             bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
-            signed,
+            &signed,
         )
         .unwrap();
 
         verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts()).unwrap();
+        let captured =
+            capture_signed_bundle_source_manifest(&bundle_root, "runtime-bundle", &test_ts())
+                .unwrap();
+        assert_eq!(captured.identity.name, "runtime-bundle");
+        assert_eq!(
+            captured.identity.body_digest,
+            lillux::sha256_hex(body.as_bytes())
+        );
+        assert_eq!(captured.signed_bytes, signed.as_bytes());
+    }
+
+    #[test]
+    fn runtime_bundle_manifest_capture_refuses_oversize_signed_source() {
+        let parent = tempdir();
+        let bundle_root = parent.join("runtime-bundle");
+        fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
+        let body = format!(
+            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\ndescription: {}\n",
+            "x".repeat(crate::config_loading::MAX_BUNDLE_MANIFEST_BYTES as usize)
+        );
+        let signed = lillux::signature::sign_content(&body, &test_signing_key(), "#", None);
+        fs::write(
+            bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
+            signed,
+        )
+        .unwrap();
+        let error =
+            capture_signed_bundle_source_manifest(&bundle_root, "runtime-bundle", &test_ts())
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("read runtime source-bundle manifest"),
+            "unexpected oversized-manifest error: {error}"
+        );
     }
 
     #[test]
@@ -1561,7 +1854,7 @@ mod tests {
         fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
         let target = lillux::platform::current_binary_target().unwrap();
         let body = format!(
-            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nexternal_lifecycle_adapters:\n  - id: synthetic-local\n    protocol: ryeos.external-execution.lifecycle-adapter.v2\n    targets: [{target}]\n    adapter: adapter\n    supervisor: supervisor\n    launcher: launcher\n    provider_spec:\n      path: lifecycle/provider.json\n      sha256: '{}'\n    settings_schema_digest: '{}'\n    capabilities: [exact_allocation_reconciliation, authoritative_no_occurrence, exact_activation_reconciliation, idempotent_termination, exact_terminal_observation]\nexternal_providers:\n  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-configuration.v1\n    targets: [{target}]\n    connector: connector\n    connector_process_group: new\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n",
+            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nexternal_lifecycle_adapters:\n  - id: synthetic-local\n    protocol: ryeos.external-execution.lifecycle-adapter.v3\n    targets: [{target}]\n    adapter: adapter\n    supervisor: supervisor\n    launcher: launcher\n    provider_spec:\n      path: lifecycle/provider.json\n      sha256: '{}'\n    settings_schema_digest: '{}'\n    capabilities: [exact_allocation_reconciliation, authoritative_no_occurrence, exact_activation_reconciliation, idempotent_termination, exact_terminal_observation]\nexternal_providers:\n  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-declaration.v2\n    qualification_request_binding_protocol: null\n    targets: [{target}]\n    connector: connector\n    connector_descendants: contained\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n",
             "f".repeat(64),
             "9".repeat(64)
         );
@@ -1582,7 +1875,7 @@ mod tests {
         fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
         let target = lillux::platform::current_binary_target().unwrap();
         let provider = format!(
-            "  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-configuration.v1\n    targets: [{target}]\n    connector: connector\n    connector_process_group: new\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n"
+            "  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-declaration.v2\n    qualification_request_binding_protocol: null\n    targets: [{target}]\n    connector: connector\n    connector_descendants: contained\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n"
         );
         let body = format!(
             "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nexternal_providers:\n{provider}{provider}"
@@ -1720,6 +2013,7 @@ metadata:
         let content_hash = crate::item_resolution::content_hash(&content);
 
         let resolved = ResolvedItem {
+            logical_project_root: None,
             canonical_ref: CanonicalRef::parse(canonical_ref).unwrap(),
             kind: kind.to_string(),
             source_path,
@@ -1760,6 +2054,7 @@ metadata:
             crate::contracts::SubjectResolutionAuthority::Projectless
         };
         PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -1914,6 +2209,7 @@ config:
         let roots = ResolutionRoots::from_registered(
             Some(project.path().to_path_buf()),
             &[crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "bundle-release".into(),
                 canonical_root: installed.path().to_path_buf(),
             }],
@@ -1939,6 +2235,7 @@ config:
                 host_env: &HostEnvBindings::default(),
                 filesystem_authority_ceiling:
                     crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                selected_protocol: None,
                 project_authority: authority,
                 sealed_content: None,
             })
@@ -2051,6 +2348,7 @@ config:
                 host_env: &HostEnvBindings::default(),
                 filesystem_authority_ceiling:
                     crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                selected_protocol: None,
                 project_authority: None,
                 sealed_content: None,
             })
@@ -2163,6 +2461,7 @@ config:
                 // runtime_workspace's protocol ceiling must not widen a
                 // narrower ceiling authored by the worker itself.
                 filesystem_authority_ceiling: NodePolicy,
+                selected_protocol: None,
                 project_authority: None,
                 sealed_content: None,
             })
@@ -2229,6 +2528,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -2258,6 +2558,92 @@ config:
             spec.env_sources.get("RYEOS_EXECUTION_CONTEXT"),
             Some(&crate::contracts::RuntimeEnvSource::EnginePlan)
         );
+    }
+
+    // ── Test: a project-scoped signer owns a source scope only on the logical project ──
+
+    #[test]
+    fn source_scope_owner_scope_matches_the_logical_project_not_the_checkout() {
+        use crate::trust::{SignerRecord, SignerRole, SignerScope, SignerSpace, SignerStatus};
+
+        let checkout = tempdir();
+        let kinds_dir = tempdir();
+        let kinds = {
+            write_tool_schema(&kinds_dir);
+            KindRegistry::load_base(&[kinds_dir], &test_ts()).unwrap()
+        };
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+
+        // A chain terminal that declares a source scope, signed by a key that
+        // is scoped to one registered project that is not the checkout path.
+        let logical = PathBuf::from("/work/registered-project");
+        let author = SigningKey::from_bytes(&[43u8; 32]);
+        let node_key = SigningKey::from_bytes(&[44u8; 32]).verifying_key();
+        let mut record = SignerRecord::new(
+            &author.verifying_key(),
+            "project-author",
+            SignerRole::ProjectAuthor,
+            SignerScope {
+                spaces: vec![SignerSpace::Project],
+                kinds: vec!["*".to_string()],
+                projects: vec![logical.to_string_lossy().into_owned()],
+            },
+            SignerStatus::Active,
+        );
+        record.event = "e".repeat(64);
+        let store = TrustStore::from_registry(node_key, vec![record]).unwrap();
+
+        let tool_dir = checkout.join(AI_DIR).join("tools/ryeos/test");
+        fs::create_dir_all(&tool_dir).unwrap();
+        let terminal = tool_dir.join("scoped.yaml");
+        fs::write(
+            &terminal,
+            lillux::signature::sign_content(
+                "executor_id: null\nsource_scope:\n  location: item_directory\n  load_roots: [item_directory]\n  materialization: read_only\n",
+                &author,
+                "#",
+                None,
+            ),
+        )
+        .unwrap();
+
+        let resolve = |roots: &ResolutionRoots| {
+            resolve_executor_source_policy(
+                "tool:ryeos/test/scoped",
+                &terminal,
+                "tool",
+                &kinds,
+                &parsers,
+                roots,
+                &store,
+                &store,
+                None,
+            )
+        };
+
+        // The materialized checkout is judged when no logical project is
+        // stated: the signer is out of scope and owns nothing.
+        let by_checkout = ResolutionRoots::from_flat(Some(checkout.join(AI_DIR)), vec![]);
+        let refusal = resolve(&by_checkout).unwrap_err().to_string();
+        assert!(
+            refusal.contains("source_scope owner is not signed by an admitted trusted principal"),
+            "{refusal}"
+        );
+
+        // A logical project the signer's scope does not list admits nothing:
+        // stating some other project is not a way in.
+        let by_other = by_checkout
+            .clone()
+            .with_logical_project_root(Some(PathBuf::from("/work/other-project")));
+        let refusal = resolve(&by_other).unwrap_err().to_string();
+        assert!(
+            refusal.contains("source_scope owner is not signed by an admitted trusted principal"),
+            "{refusal}"
+        );
+
+        // Stating the logical project the scope lists admits the signer.
+        let by_logical = by_checkout.with_logical_project_root(Some(logical));
+        assert!(resolve(&by_logical).unwrap().is_some());
     }
 
     // ── Test: chain cycle detected ─────────────────────────────────────
@@ -2301,6 +2687,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -2374,6 +2761,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -2423,6 +2811,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -2491,6 +2880,7 @@ config:
                     host_env: &host_env,
                     filesystem_authority_ceiling:
                         crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    selected_protocol: None,
                     project_authority: None,
                     sealed_content: None,
                 },
@@ -2528,14 +2918,10 @@ config:
 
     fn live_kind_registry() -> KindRegistry {
         let trust = crate::test_support::live_trust_store();
-        let roots = [
-            crate::test_support::core_bundle_root()
-                .join(crate::AI_DIR)
-                .join("node/engine/kinds"),
-            crate::test_support::standard_bundle_root()
-                .join(crate::AI_DIR)
-                .join("node/engine/kinds"),
-        ];
+        let roots: Vec<_> = std::iter::once(crate::test_support::core_bundle_root())
+            .chain(crate::test_support::workflow_bundle_roots())
+            .map(|root| root.join(crate::AI_DIR).join("node/engine/kinds"))
+            .collect();
         KindRegistry::load_base(&roots, &trust).unwrap()
     }
 
@@ -3028,6 +3414,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -3050,6 +3437,7 @@ config:
             "fp1",
             &json!(1),
             &ExecutionHints::default(),
+            None,
         );
         let k2 = compute_cache_key(
             "tool:a",
@@ -3058,6 +3446,7 @@ config:
             "fp1",
             &json!(1),
             &ExecutionHints::default(),
+            None,
         );
         assert_eq!(k1, k2);
 
@@ -3068,8 +3457,33 @@ config:
             "fp1",
             &json!(1),
             &ExecutionHints::default(),
+            None,
         );
         assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn cache_key_follows_the_selected_protocol() {
+        let key = |selected: Option<&str>| {
+            compute_cache_key(
+                "worker:a",
+                "hash1",
+                &[],
+                "fp1",
+                &json!(1),
+                &ExecutionHints::default(),
+                selected,
+            )
+        };
+        assert_eq!(
+            key(Some("protocol:x/contained")),
+            key(Some("protocol:x/contained"))
+        );
+        assert_ne!(
+            key(Some("protocol:x/contained")),
+            key(Some("protocol:x/trusted"))
+        );
+        assert_ne!(key(Some("protocol:x/contained")), key(None));
     }
 
     #[test]
@@ -3111,6 +3525,7 @@ config:
             "fp",
             &from_string,
             &ExecutionHints::default(),
+            None,
         );
         let key_typed = compute_cache_key(
             "tool:x",
@@ -3119,6 +3534,7 @@ config:
             "fp",
             &from_typed,
             &ExecutionHints::default(),
+            None,
         );
         assert_eq!(key_string, key_typed);
     }
@@ -3238,6 +3654,7 @@ category: ryeos/core/subprocess\n";
             host_env: &host_env,
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -3262,6 +3679,7 @@ category: ryeos/core/subprocess\n";
             host_env: &host_env,
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })

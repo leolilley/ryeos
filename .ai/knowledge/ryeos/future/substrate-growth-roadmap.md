@@ -4,13 +4,19 @@ name: substrate-growth-roadmap
 title: RyeOS Substrate Growth Roadmap
 description: Boundary map from landed exact execution and portable hosted-worker placement through local inference, self-hosted implementation, broader federation, and deployment
 entry_type: reference
-version: "0.3.0"
+version: "0.3.1"
 ```
 
 # RyeOS substrate growth roadmap
 
+The [platform direction](platform-direction-and-delivery.md) owns the overall
+author-to-operated-application destination and project-wide milestone framework.
+This note owns execution branch dependencies beneath it. Its historical branch
+selections do not require ordinary interpreted authoring or client work to wait
+for serious inference, self-hosting or federation.
+
 This note connects the current execution substrate to the next RyeOS
-directions. It is a sequencing and ownership map, not an implementation plan.
+directions. It is an execution-branch sequencing and ownership map, not an implementation plan.
 The linked owner documents remain authoritative for each boundary.
 
 ## Landed horizon
@@ -38,7 +44,7 @@ multi-tenant cloud. It is the narrower portable hosted-execution path required
 to place one admitted worker on an explicitly selected site and retain one
 authoritative chain.
 
-## Growth map
+## Execution growth map
 
 ```text
 exact single-node execution + recorded evidence
@@ -65,11 +71,11 @@ The branches compose through the same identity, content, consequence, and
 lineage contracts. They do not justify parallel model, worker, checkpoint, or
 federation substrates.
 
-## Active local-inference branch
+## Selected local-inference branch
 
-The offline-model requirement and a capable remote site now satisfy the pull-
-forward gate. The next path is not “seal the CPU fixture” and not “build a
-general scheduler.” It is:
+The offline-model requirement and selected capable remote site motivated this
+branch's pull-forward gate. Reconfirm site availability and campaign acceptance
+in current implementation records. Within that branch, the path is:
 
 1. prove ordinary disabled-isolation local inference through the existing
    daemon-owned private workspace;
@@ -162,7 +168,12 @@ adaptive update worth testing. Begin with existing knowledge, attestation,
 candidate and training owners; do not add a memory service, identity hierarchy
 or universal learning-update kind by inference from the research vision.
 
-## Pull-forward order
+## Execution-branch dependency order
+
+The sequence below records the selected inference/self-hosting programme. The
+first usable application platform path can use already supported local tools,
+clients and environments independently. Do not promote these branch-specific
+steps to prerequisites for all application authors.
 
 1. Qualify the landed hosted-worker and explicit cross-site placement path.
 2. Activate one serious recorded tinygrad model on the selected remote site.

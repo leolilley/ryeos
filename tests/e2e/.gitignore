@@ -43,8 +43,8 @@ __pycache__/
 !environment-products/project/.ai/graphs/test/recorded-producer.yaml
 !environment-products/project/.ai/graphs/test/two-products.yaml
 !environment-products/project/.ai/tools/test/produce.yaml
-!environment-products/qualification-bundle-overlay/standard/.ai/config/test/runtime-qualification.yaml
-!environment-products/qualification-bundle-overlay/standard/.ai/tools/test/verify-runtime.yaml
+!environment-products/qualification-bundle-overlay/environment-qualification/.ai/config/test/runtime-qualification.yaml
+!environment-products/qualification-bundle-overlay/environment-qualification/.ai/tools/test/verify-runtime.yaml
 !environment-products/qualification-bundle-overlay/codex/.ai/worker-executions/fixture/login.yaml
 !environment-products/qualification-bundle-overlay/codex/.ai/worker-executions/fixture/session.yaml
 !environment-products/qualification-bundle-overlay/codex/.ai/workers/fixture/enrollment.yaml
@@ -89,6 +89,8 @@ __pycache__/
 !environment-products/native-authoring/check-fixture.py
 !authoring-environment/test_production.py
 !authoring-environment/test_development_contract.py
+!authoring-environment/test_cargo_vendor_finalizer.py
+!authoring-environment/test_static_link_producer_intent.py
 !authoring-environment/test_candidate_evaluator.py
 !authoring-environment/test_preparation.py
 !authoring-environment/test_utilities.py
@@ -134,6 +136,9 @@ __pycache__/
 !configured-remote/test_qualification.sh
 !execute-stream/smoke.sh
 !installed-resume/smoke.sh
+!init-profiles/check.sh
+!browser-smoke/smoke.sh
+!browser-smoke/smoke.mjs
 !development-toolchain-stage0/Cargo.toml
 !development-toolchain-stage0/README.md
 !development-toolchain-stage0/probe.sh
@@ -147,3 +152,10 @@ __pycache__/
 !development-toolchain-stage0/test-artifact.sh
 !development-toolchain-stage0/test-runtime.sh
 !development-toolchain-stage0/test-ownership.sh
+
+# Source fixtures included by verifier and daemon regression tests.
+!external-execution/fixtures/
+!external-execution/fixtures/independent-scripted-config.toml.template
+!external-execution/fixtures/independent-environments.toml.template
+!external-execution/fixtures/synthetic-provider-spec.json
+!external-execution/fixtures/lease-controller-*

@@ -7,16 +7,20 @@
 
 #![cfg(all(unix, feature = "crash-qualification-test-support"))]
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use anyhow::Context as _;
+use common::fast_fixture::{
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
+};
 use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use common::runtime_phase_cut::RuntimePhaseCutGate;
 use common::{DaemonHarness, build_signed_headers_for_bytes};
 use lillux::crypto::SigningKey;
+use rusqlite::OptionalExtension as _;
 use serde_json::{Value, json};
 
 const DIRECTIVE_REF: &str = "directive:test/recovery";
@@ -134,8 +138,6 @@ accounting:
   failure_policy: auto
   budget_mode: settled
 tool_preload: false
-retry_on_timeout: false
-retry_mid_stream: false
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
@@ -168,6 +170,11 @@ inputs:
     required: true
 model:
   tier: general
+context:
+  before:
+    - "knowledge:recovery/before"
+  after:
+    - "knowledge:recovery/after"
 requires:
   capabilities:
     declared:
@@ -181,6 +188,33 @@ Call the marker tool exactly once, then report completion.
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
+    std::fs::write(path, signed)?;
+    plant_knowledge_item(root, "recovery/before", RECOVERY_BEFORE_TEXT, signer)?;
+    plant_knowledge_item(root, "recovery/after", RECOVERY_AFTER_TEXT, signer)
+}
+
+const RECOVERY_BEFORE_TEXT: &str = "RECOVERY-BEFORE: keep the marker tool to one call.";
+const RECOVERY_AFTER_TEXT: &str = "RECOVERY-AFTER: report completion plainly.";
+
+/// Plant a knowledge item at `<root>/.ai/knowledge/<rel>.md`.
+fn plant_knowledge_item(
+    root: &Path,
+    rel: &str,
+    body: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let path = root.join(format!(".ai/knowledge/{rel}.md"));
+    std::fs::create_dir_all(path.parent().expect("knowledge parent"))?;
+    let stem = Path::new(rel)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(rel);
+    let category = Path::new(rel)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+    let content = format!("```yaml\nname: {stem}\ncategory: \"{category}\"\n```\n\n{body}\n");
+    let signed = lillux::signature::sign_content(&content, signer, "<!--", Some("-->"));
     std::fs::write(path, signed)?;
     Ok(())
 }
@@ -204,6 +238,7 @@ fn plant_marker_tool(
 #   category: "marker"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "Crash-recovery execution marker"
 
 import json
@@ -225,152 +260,134 @@ print(json.dumps({{"executed": True}}))
     Ok(())
 }
 
-fn projection_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = match common::selected_projection_path(state_path) {
-        Ok(path) => path,
-        Err(_) => return Vec::new(),
-    };
-    let conn = match rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
-    };
-    let mut statement = match conn
-        .prepare("SELECT event_type, payload FROM events WHERE thread_id=?1 ORDER BY chain_seq ASC")
-    {
-        Ok(statement) => statement,
-        Err(_) => return Vec::new(),
-    };
-    statement
-        .query_map(rusqlite::params![thread_id], |row| {
-            let event_type: String = row.get(0)?;
-            let payload: Vec<u8> = row.get(1)?;
-            Ok((
-                event_type,
-                serde_json::from_slice(&payload).unwrap_or(Value::Null),
-            ))
-        })
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default()
+/// Persisted events of `thread_id` through the daemon's replay service. The
+/// daemon must be answering; a refusal or an unknown thread is an error.
+async fn projection_events(
+    harness: &DaemonHarness,
+    thread_id: &str,
+) -> anyhow::Result<Vec<(String, Value)>> {
+    harness.existing_thread_events(thread_id).await
 }
 
-fn projection_thread_status(state_path: &Path, thread_id: &str) -> Option<String> {
-    let db_path = common::selected_projection_path(state_path).ok()?;
-    let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    conn.query_row(
-        "SELECT status FROM threads WHERE thread_id=?1",
-        rusqlite::params![thread_id],
-        |row| row.get(0),
-    )
-    .ok()
+/// The directive root thread, by item ref, through `service:threads/list`.
+async fn root_thread_id(harness: &DaemonHarness) -> anyhow::Result<Option<String>> {
+    Ok(harness
+        .list_threads(500)
+        .await?
+        .into_iter()
+        .find(|thread| thread.item_ref == DIRECTIVE_REF)
+        .map(|thread| thread.thread_id))
 }
 
-fn root_thread_id(state_path: &Path) -> Option<String> {
-    let db_path = common::selected_projection_path(state_path).ok()?;
-    let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    conn.query_row(
-        "SELECT thread_id FROM threads WHERE item_ref=?1 ORDER BY created_at ASC LIMIT 1",
-        rusqlite::params![DIRECTIVE_REF],
-        |row| row.get(0),
-    )
-    .ok()
+/// Status of `thread_id` through `service:threads/get`; `None` while the
+/// daemon does not know the thread.
+async fn thread_status(harness: &DaemonHarness, thread_id: &str) -> anyhow::Result<Option<String>> {
+    let Some(detail) = harness.get_thread(thread_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        detail
+            .pointer("/thread/status")
+            .and_then(Value::as_str)
+            .with_context(|| format!("threads/get returned no status: {detail}"))?
+            .to_owned(),
+    ))
 }
 
+/// Everything a reader can see when the root row never appears: every thread
+/// the daemon lists.
+async fn describe_listed_threads(harness: &DaemonHarness) -> String {
+    match harness.list_threads(500).await {
+        Ok(threads) => threads
+            .iter()
+            .map(|thread| format!("{} {} {}", thread.thread_id, thread.item_ref, thread.status))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(error) => format!("threads/list failed: {error:#}"),
+    }
+}
+
+/// Runtime-action intents of one chain from the stopped node's Runtime store
+/// through the native test gate. The daemon must already have exited.
 fn runtime_action_intents(state_path: &Path, chain_root_id: &str) -> Vec<(String, String)> {
     let db_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
-    let conn = match rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
-    };
-    let mut statement = match conn.prepare(
-        "SELECT chain_root_id, operation_id, child_thread_id FROM runtime_action_intent \
-         ORDER BY created_at_ms ASC",
-    ) {
-        Ok(statement) => statement,
-        Err(_) => return Vec::new(),
-    };
-    statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default()
-        .into_iter()
+    let rows = ryeos_app::test_support::read_existing_runtime(&db_path, |connection| {
+        let mut statement = connection.prepare(
+            "SELECT chain_root_id, operation_id, child_thread_id FROM runtime_action_intent \
+             ORDER BY created_at_ms ASC",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    });
+    rows.into_iter()
         .filter_map(|(retained_chain, operation_id, child_thread_id)| {
             (retained_chain == chain_root_id).then_some((operation_id, child_thread_id))
         })
         .collect()
 }
 
+fn accounting_db_path(state_path: &Path) -> std::path::PathBuf {
+    state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME)
+}
+
+/// The first retry advancement recorded for `thread_id`, from the stopped
+/// node's accounting ledger through the native test gate.
 fn provider_retry_advance(
     state_path: &Path,
     thread_id: &str,
 ) -> Option<ryeos_accounting::ProviderRetryAdvance> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME);
-    let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let raw: String = conn
-        .query_row(
-            "SELECT operation.response_json
-               FROM accounting_operation AS operation
-               JOIN provider_attempt_reservation AS attempt
-                 ON attempt.attempt_id=operation.attempt_id
-              WHERE attempt.thread_id=?1 AND operation.operation_kind='retry_advance'
-              ORDER BY attempt.turn, attempt.attempt_number
-              LIMIT 1",
-            rusqlite::params![thread_id],
-            |row| row.get(0),
-        )
-        .ok()?;
-    serde_json::from_str(&raw).ok()
+    let raw: Option<String> = ryeos_app::test_support::read_existing_accounting(
+        &accounting_db_path(state_path),
+        |connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT operation.response_json
+                       FROM accounting_operation AS operation
+                       JOIN provider_attempt_reservation AS attempt
+                         ON attempt.attempt_id=operation.attempt_id
+                      WHERE attempt.thread_id=?1 AND operation.operation_kind='retry_advance'
+                      ORDER BY attempt.turn, attempt.attempt_number
+                      LIMIT 1",
+                    rusqlite::params![thread_id],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        },
+    );
+    raw.map(|raw| serde_json::from_str(&raw).expect("decode the recorded retry advancement"))
 }
 
+/// Provider attempts of `thread_id` from the stopped node's accounting
+/// ledger through the native test gate.
 fn provider_attempts(state_path: &Path, thread_id: &str) -> Vec<(u32, u32, String)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME);
-    let conn = match rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(conn) => conn,
-        Err(_) => return Vec::new(),
-    };
-    let mut statement = match conn.prepare(
-        "SELECT turn, attempt_number, state
-           FROM provider_attempt_reservation
-          WHERE thread_id=?1
-          ORDER BY turn, attempt_number",
-    ) {
-        Ok(statement) => statement,
-        Err(_) => return Vec::new(),
-    };
-    statement
-        .query_map(rusqlite::params![thread_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default()
+    ryeos_app::test_support::read_existing_accounting(
+        &accounting_db_path(state_path),
+        |connection| {
+            let mut statement = connection.prepare(
+                "SELECT turn, attempt_number, state
+               FROM provider_attempt_reservation
+              WHERE thread_id=?1
+              ORDER BY turn, attempt_number",
+            )?;
+            Ok(statement
+                .query_map(rusqlite::params![thread_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?)
+        },
+    )
 }
 
 fn event_count(events: &[(String, Value)], event_type: &str) -> usize {
@@ -382,7 +399,10 @@ fn transcript_cognition_out_count(events: &[(String, Value)]) -> usize {
         .iter()
         .filter(|(kind, payload)| {
             kind == "cognition_out"
-                && (payload.get("content").is_some() || payload.get("tool_calls").is_some())
+                && payload
+                    .get("parts")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| !parts.is_empty())
         })
         .count()
 }
@@ -449,15 +469,25 @@ async fn await_root_thread(
     harness: &mut DaemonHarness,
     request: &mut tokio::task::JoinHandle<Result<(u16, String), String>>,
 ) -> String {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // The first execute on a cold node builds the request engine, verifies
+    // the bundle set and runs the directive's augmentation subprocess, which
+    // a slow debug host can stretch well past half a minute.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut last_read_error = None;
     loop {
-        if let Some(thread_id) = root_thread_id(&harness.state_path) {
-            return thread_id;
+        match root_thread_id(harness).await {
+            Ok(Some(thread_id)) => return thread_id,
+            Ok(None) => {}
+            Err(error) => last_read_error = Some(format!("{error:#}")),
         }
-        assert!(
-            Instant::now() < deadline,
-            "directive root thread did not appear"
-        );
+        if Instant::now() >= deadline {
+            let stderr = harness.drain_stderr_nonblocking().await;
+            let pending = !request.is_finished();
+            let rows = describe_listed_threads(harness).await;
+            panic!(
+                "directive root thread did not appear within 120 s (execute request still pending: {pending}; last read error: {last_read_error:?})\n{rows}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
         tokio::select! {
             result = &mut *request => {
                 let stderr = harness.drain_stderr_nonblocking().await;
@@ -500,24 +530,31 @@ async fn await_child_born_marker(
 
 async fn await_completed(harness: &mut DaemonHarness, thread_id: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last_read_error = None;
     loop {
-        match projection_thread_status(&harness.state_path, thread_id).as_deref() {
-            Some("completed") => return,
-            Some("failed" | "cancelled" | "killed" | "timed_out" | "continued") => {
-                let events = projection_events(&harness.state_path, thread_id);
+        match thread_status(harness, thread_id).await {
+            Ok(Some(status)) if status == "completed" => return,
+            Ok(Some(status))
+                if matches!(
+                    status.as_str(),
+                    "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+                ) =>
+            {
+                let events = projection_events(harness, thread_id).await;
                 let stderr = harness.drain_stderr_nonblocking().await;
                 panic!(
-                    "resumed directive reached a non-completed terminal; events={events:#?}\n\
+                    "resumed directive reached a non-completed terminal ({status}); events={events:#?}\n\
                      --- daemon stderr ---\n{stderr}"
                 );
             }
-            _ => {}
+            Ok(_) => {}
+            Err(error) => last_read_error = Some(format!("{error:#}")),
         }
         if Instant::now() >= deadline {
-            let events = projection_events(&harness.state_path, thread_id);
+            let events = projection_events(harness, thread_id).await;
             let stderr = harness.drain_stderr_nonblocking().await;
             panic!(
-                "resumed directive did not complete; events={events:#?}\n\
+                "resumed directive did not complete (last read error: {last_read_error:?}); events={events:#?}\n\
                  --- daemon stderr ---\n{stderr}"
             );
         }
@@ -586,7 +623,7 @@ async fn run_crash_cut(cut: CrashCut) {
     let mock_url = mock.base_url.clone();
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)
         };
     let (mut phase_gate, mut phase_child) = match cut.runtime_block_stage() {
@@ -690,12 +727,20 @@ async fn run_crash_cut(cut: CrashCut) {
         .await
         .expect("respawn daemon without cut hook");
     await_completed(&mut harness, &root_thread_id).await;
+    let events = match projection_events(&harness, &root_thread_id).await {
+        Ok(events) => events,
+        Err(error) => {
+            let stderr = harness.drain_stderr_nonblocking().await;
+            panic!(
+                "read the recovered directive's events: {error:#}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+    };
     harness
         .kill_daemon()
         .await
         .expect("stop recovered directive daemon before evidence inspection");
 
-    let events = projection_events(&harness.state_path, &root_thread_id);
     assert_eq!(
         event_count(&events, "thread_started"),
         1,
@@ -763,7 +808,7 @@ async fn run_crash_cut(cut: CrashCut) {
         assert!(events.iter().any(|(kind, payload)| {
             kind == "tool_call_result"
                 && payload.get("call_id").and_then(Value::as_str) == Some("refused-marker-call")
-                && payload.get("truncated_reason").and_then(Value::as_str) == Some("error_envelope")
+                && payload.get("status").and_then(Value::as_str) == Some("error")
         }));
     }
 
@@ -793,6 +838,42 @@ async fn run_crash_cut(cut: CrashCut) {
             })),
         "the final request must consume the one retained tool observation; body={:#?}",
         bodies[final_body_index]
+    );
+    // The context positions are in the record and the resumed run rebuilds
+    // them: the first request carries them in order (before, its
+    // acknowledgement, the task, after, its acknowledgement), and the request
+    // after recovery starts with exactly the first request's whole message
+    // list, system text included.
+    let first_messages = bodies[0]
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("first request messages");
+    let final_messages = bodies[final_body_index]
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("final request messages");
+    let texts = first_messages
+        .iter()
+        .map(|message| {
+            message
+                .get("content")
+                .map(Value::to_string)
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    let before_at = texts
+        .iter()
+        .position(|text| text.contains(RECOVERY_BEFORE_TEXT))
+        .expect("the first request carries the before context");
+    let after_at = texts
+        .iter()
+        .position(|text| text.contains(RECOVERY_AFTER_TEXT))
+        .expect("the first request carries the after context");
+    assert!(before_at < after_at, "texts={texts:?}");
+    assert!(
+        final_messages.len() > first_messages.len()
+            && final_messages[..first_messages.len()] == first_messages[..],
+        "the request after recovery must start with the first request's messages; first={first_messages:#?} final={final_messages:#?}"
     );
     let provider_observations = events
         .iter()
@@ -875,4 +956,654 @@ async fn resumes_once_across_every_durable_directive_cut() {
         eprintln!("[directive-recovery] exercising {cut:?}");
         run_crash_cut(cut).await;
     }
+}
+
+/// The text of a recorded tool result's first part, as the model reads it.
+fn tool_result_text(payload: &Value) -> String {
+    payload
+        .get("parts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// A batch of `[directive_return (fails output validation), marker tool]`,
+/// then a valid return. The call after the failed return must never run, but
+/// must be answered in the record, in the next provider request, and across a
+/// crash cut between the return's result and the call's result.
+async fn run_failed_return(crash_between_results: bool) {
+    const REFUSED_CALL: &str = "refused-marker-call";
+    const REFUSED_RETURN_CALL: &str = "refused-return-call";
+    let mock = MockProvider::start(vec![
+        MockResponse::ToolCall {
+            id: "marker-call".to_string(),
+            name: TOOL_NAME.to_string(),
+            arguments: "{}".to_string(),
+        },
+        MockResponse::ToolCalls(vec![
+            MockToolCallSpec {
+                id: "failing-return-call".to_string(),
+                name: DIRECTIVE_RETURN_NAME.to_string(),
+                arguments: "{}".to_string(),
+            },
+            MockToolCallSpec {
+                id: REFUSED_CALL.to_string(),
+                name: TOOL_NAME.to_string(),
+                arguments: "{}".to_string(),
+            },
+            // A second return in the batch is refused like any other call
+            // after the failed one, not settled as a lifecycle return.
+            MockToolCallSpec {
+                id: REFUSED_RETURN_CALL.to_string(),
+                name: DIRECTIVE_RETURN_NAME.to_string(),
+                arguments: r#"{"answer":"too early"}"#.to_string(),
+            },
+        ]),
+        MockResponse::ToolCall {
+            id: "valid-return-call".to_string(),
+            name: DIRECTIVE_RETURN_NAME.to_string(),
+            arguments: r#"{"answer":"recovery complete"}"#.to_string(),
+        },
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)
+        };
+    let stage = "failed_directive_return_recorded";
+    let (mut phase_gate, mut phase_child) = if crash_between_results {
+        let (gate, child) =
+            RuntimePhaseCutGate::pair(stage).expect("create exact directive phase-cut gate");
+        (Some(gate), Some(child))
+    } else {
+        (None, None)
+    };
+    let (mut harness, fixture) = DaemonHarness::start_fast_with(plant, |command| {
+        if let Some(child) = phase_child.as_mut() {
+            child
+                .configure_command(command, stage)
+                .expect("configure exact directive phase-cut channel");
+            command.env("RYEOS_DIRECTIVE_TEST_BLOCK_AT", stage);
+        }
+        command.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start directive recovery daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker_path = marker_dir.path().join("executions.log");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_recovery_directive(project.path(), &fixture.publisher, 2, true).expect("plant directive");
+    plant_marker_tool(
+        project.path(),
+        &marker_path,
+        Duration::ZERO,
+        &fixture.publisher,
+    )
+    .expect("plant marker tool");
+
+    let mut execute_request = start_execute_request(&harness, project.path()).await;
+    let root_thread_id = await_root_thread(&mut harness, &mut execute_request).await;
+    if let Some(gate) = phase_gate.as_mut() {
+        tokio::select! {
+            result = gate.wait_reached() => {
+                if let Err(error) = result {
+                    let stderr = harness.drain_stderr_nonblocking().await;
+                    panic!("directive did not report the failed-return boundary: {error:#}\n--- daemon stderr ---\n{stderr}");
+                }
+            }
+            result = &mut execute_request => {
+                let stderr = harness.drain_stderr_nonblocking().await;
+                panic!("execute request settled before the failed-return boundary: {result:?}\n--- daemon stderr ---\n{stderr}");
+            }
+        }
+        harness.kill_daemon().await.expect("kill daemon at cut");
+        execute_request.abort();
+        harness
+            .respawn_with(|command| {
+                command.env(
+                    "RUST_LOG",
+                    std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                        "info,ryeos_directive_runtime=debug,ryeosd=debug".into()
+                    }),
+                );
+            })
+            .await
+            .expect("respawn daemon without cut hook");
+    }
+    await_completed(&mut harness, &root_thread_id).await;
+    let events = match projection_events(&harness, &root_thread_id).await {
+        Ok(events) => events,
+        Err(error) => {
+            let stderr = harness.drain_stderr_nonblocking().await;
+            panic!("read the directive's events: {error:#}\n--- daemon stderr ---\n{stderr}");
+        }
+    };
+    harness
+        .kill_daemon()
+        .await
+        .expect("stop daemon before evidence inspection");
+
+    // Starts and results: the marker, the failing return, the two refused
+    // calls, and the valid return, each exactly once.
+    assert_eq!(
+        event_count(&events, "tool_call_start"),
+        5,
+        "events={events:#?}"
+    );
+    assert_eq!(
+        event_count(&events, "tool_call_result"),
+        5,
+        "events={events:#?}"
+    );
+    let for_call = |kind: &str, call_id: &str| {
+        events
+            .iter()
+            .filter(|(event_kind, payload)| {
+                event_kind == kind
+                    && payload.get("call_id").and_then(Value::as_str) == Some(call_id)
+            })
+            .map(|(_, payload)| payload)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(for_call("tool_call_start", REFUSED_CALL).len(), 1);
+    let refused_return = for_call("tool_call_result", REFUSED_RETURN_CALL);
+    assert_eq!(refused_return.len(), 1, "events={events:#?}");
+    assert_eq!(
+        refused_return[0].get("status").and_then(Value::as_str),
+        Some("error")
+    );
+    let refusal = for_call("tool_call_result", REFUSED_CALL);
+    assert_eq!(refusal.len(), 1, "events={events:#?}");
+    assert_eq!(
+        refusal[0].get("status").and_then(Value::as_str),
+        Some("error")
+    );
+    assert!(
+        tool_result_text(refusal[0]).contains("tool_not_run_after_failed_return"),
+        "refusal={:#?}",
+        refusal[0]
+    );
+    // The refused call never ran: one child, one marker execution.
+    assert_eq!(
+        marker_execution_count(&marker_path),
+        1,
+        "the call after the failed return must not run"
+    );
+    assert_eq!(
+        runtime_action_intents(&harness.state_path, &root_thread_id).len(),
+        1,
+        "only the first marker call owns a child"
+    );
+
+    // The request after the failed return carries a result for every call the
+    // assistant message named, in proposal order, and the recovered run issued
+    // no provider request the uninterrupted run would not have.
+    let bodies = mock.captured_bodies().await;
+    assert_eq!(bodies.len(), 3, "bodies={bodies:#?}");
+    let second = bodies[1]["messages"].as_array().expect("second messages");
+    let third = bodies[2]["messages"].as_array().expect("third messages");
+    assert!(
+        third.len() > second.len() && third[..second.len()] == second[..],
+        "the request after the failed return must extend the previous request"
+    );
+    let appended = &third[second.len()..];
+    let tool_ids = appended
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+        .map(|message| message.get("tool_call_id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_ids,
+        vec![
+            Some("failing-return-call"),
+            Some(REFUSED_CALL),
+            Some(REFUSED_RETURN_CALL)
+        ],
+        "appended={appended:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_return_answers_the_calls_after_it_without_running_them() {
+    run_failed_return(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_between_a_failed_return_and_its_siblings_still_refuses_them_unrun() {
+    run_failed_return(true).await;
+}
+
+/// How the first daemon incarnation ends while a tool child is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MidflightStop {
+    /// The signed service window reaches its drain margin: planned rollover.
+    PlannedRollover,
+    /// An operator-requested orderly stop (the same path a service stop takes).
+    OrderlyStop,
+}
+
+/// Rewrite the fixture's signed native-capacity policy to a 300 s window with
+/// the minimum 60 s cleanup occupancy and drain margin, so the planned
+/// rollover begins 180 s after the daemon starts. The window must exceed the
+/// margin plus the cleanup occupancy the reservation requires.
+fn lengthen_short_service_window(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/native_capacity.yaml");
+    let raw = std::fs::read_to_string(&path)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    let incarnation = policy["incarnation"]
+        .as_mapping_mut()
+        .context("incarnation envelope")?;
+    incarnation.insert("maximum_occupancy_ms".into(), 300_000u64.into());
+    incarnation.insert("cleanup_occupancy_ms".into(), 60_000u64.into());
+    incarnation.insert("rollover_drain_margin_ms".into(), 60_000u64.into());
+    let body = serde_yaml::to_string(&policy)?;
+    let signed = lillux::signature::sign_content_at(
+        &body,
+        node,
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// A daemon that ends in an orderly way while a directive's tool child is in
+/// flight must end cleanly (75 on a planned rollover, 0 on an orderly stop),
+/// leave restart uninhibited, and let the next start resume the same thread
+/// to completion without running the tool again.
+async fn run_midflight_stop(stop: MidflightStop) {
+    let mock = MockProvider::start(vec![
+        MockResponse::ToolCall {
+            id: "marker-call".to_string(),
+            name: TOOL_NAME.to_string(),
+            arguments: "{}".to_string(),
+        },
+        MockResponse::Text("recovery complete".to_string()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let rollover = stop == MidflightStop::PlannedRollover;
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)?;
+            if rollover {
+                lengthen_short_service_window(state_path, &fixture.node)?;
+            }
+            Ok(())
+        };
+    let log_env = |command: &mut tokio::process::Command| {
+        command.env(
+            "RUST_LOG",
+            "info,ryeos_directive_runtime=debug,ryeosd=debug",
+        );
+    };
+    let (mut harness, fixture) = DaemonHarness::start_fast_with(plant, log_env)
+        .await
+        .expect("start directive daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker_path = marker_dir.path().join("executions.log");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_recovery_directive(project.path(), &fixture.publisher, 2, false)
+        .expect("plant directive");
+    // The tool outlives the stop in both variants: it sleeps well past the
+    // planned rollover point (180 s) so it is in flight when the stop begins.
+    plant_marker_tool(
+        project.path(),
+        &marker_path,
+        Duration::from_secs(400),
+        &fixture.publisher,
+    )
+    .expect("plant marker tool");
+
+    let mut execute_request = start_execute_request(&harness, project.path()).await;
+    let root_thread_id = await_root_thread(&mut harness, &mut execute_request).await;
+    await_child_born_marker(&mut harness, &marker_path, &mut execute_request).await;
+
+    match stop {
+        MidflightStop::PlannedRollover => {
+            let status = tokio::time::timeout(Duration::from_secs(300), harness.child.wait())
+                .await
+                .expect("the service window ends within its bound")
+                .expect("wait for daemon exit");
+            assert_eq!(
+                status.code(),
+                Some(75),
+                "a planned rollover with a tool in flight exits 75: {status:?}\n--- daemon stderr ---\n{}",
+                harness.stderr_so_far()
+            );
+        }
+        MidflightStop::OrderlyStop => {
+            harness
+                .stop_gracefully()
+                .await
+                .expect("orderly stop with a tool in flight exits 0");
+        }
+    }
+    execute_request.abort();
+    let stderr = harness.stderr_so_far();
+    assert!(
+        !stderr.contains("runtime requested exact same-thread recovery"),
+        "shutdown must not launch a same-thread recovery successor\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("native custody remains held"),
+        "an orderly stop must not end in held custody\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        ryeos_node::lifecycle_marker::read_restart_inhibition(&harness.state_path)
+            .expect("read restart inhibition")
+            .is_none(),
+        "an orderly end must not inhibit restart"
+    );
+    if rollover {
+        let summary = ryeos_node::native_capacity::inspect_capacity_account(&harness.state_path)
+            .expect("inspect capacity account")
+            .expect("issued account");
+        assert!(
+            !summary.outstanding_incarnation,
+            "the rolled-over incarnation settled"
+        );
+        assert_eq!(summary.last_operation, "rollover_renewal");
+        assert_eq!(summary.recovery_attempts_used, 0);
+    }
+    assert_eq!(
+        marker_execution_count(&marker_path),
+        1,
+        "the tool ran before the stop"
+    );
+
+    harness
+        .respawn_with(|command| {
+            command.env(
+                "RUST_LOG",
+                "info,ryeos_directive_runtime=debug,ryeosd=debug",
+            );
+        })
+        .await
+        .expect("restart after the orderly end");
+    await_completed(&mut harness, &root_thread_id).await;
+    let events = projection_events(&harness, &root_thread_id)
+        .await
+        .expect("read the resumed directive's events");
+    harness
+        .kill_daemon()
+        .await
+        .expect("stop resumed daemon before evidence inspection");
+
+    assert_eq!(
+        event_count(&events, "thread_started"),
+        1,
+        "resume must not duplicate thread_started; events={events:#?}"
+    );
+    assert_eq!(
+        event_count(&events, "tool_call_start"),
+        1,
+        "one proposal has one start; events={events:#?}"
+    );
+    assert_eq!(
+        event_count(&events, "tool_call_result"),
+        1,
+        "one proposal has one result; events={events:#?}"
+    );
+    assert_eq!(
+        marker_execution_count(&marker_path),
+        1,
+        "the resumed thread must not run the tool again"
+    );
+    assert_eq!(
+        runtime_action_intents(&harness.state_path, &root_thread_id).len(),
+        1,
+        "one logical tool occurrence owns one child"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn planned_rollover_midflight_exits_75_and_the_thread_resumes() {
+    run_midflight_stop(MidflightStop::PlannedRollover).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn orderly_stop_midflight_exits_0_and_the_thread_resumes() {
+    run_midflight_stop(MidflightStop::OrderlyStop).await;
+}
+
+fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    let pub_path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("vault")
+        .join("public_key.pem");
+    let pub_key = lillux::vault::read_public_key(&pub_path)?;
+    let store_path = ryeos_app::vault::default_sealed_store_path(state_path);
+    let secrets = HashMap::from([(
+        "ZEN_API_KEY".to_string(),
+        "test-zen-api-key-value".to_string(),
+    )]);
+    ryeos_app::vault::write_sealed_secrets(&store_path, &pub_key, &secrets)?;
+    Ok(())
+}
+
+/// A graph that follows the recovery directive: the directive runs as its own
+/// managed thread, detached from the parent, with the marker tool in flight.
+fn plant_follow_parent_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.test/recovery
+      - ryeos.execute.tool.*
+config:
+  start: fetch
+  nodes:
+    fetch:
+      node_type: action
+      follow: true
+      action:
+        item_id: "directive:test/recovery"
+        ref_bindings:
+          model: "directive:test/recovery"
+        params:
+          name: recovery
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("follow_parent.yaml"), signed)?;
+    Ok(())
+}
+
+/// A planned rollover that begins while a graph's followed directive child is
+/// running. The child's runtime exits during the stop and its launch owner
+/// settles it between the drain's attached-thread list and its row read; the
+/// qualification delay holds the snapshot there so the interleaving always
+/// happens. The daemon must still drain, exit 75 without holding custody, and
+/// the next start must resume the child and the graph run.
+#[tokio::test(flavor = "multi_thread")]
+async fn planned_rollover_with_a_settling_follow_child_exits_75_and_the_run_resumes() {
+    let mock = MockProvider::start(vec![
+        MockResponse::ToolCall {
+            id: "marker-call".to_string(),
+            name: TOOL_NAME.to_string(),
+            arguments: "{}".to_string(),
+        },
+        MockResponse::Text("recovery complete".to_string()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_recorded_mock_provider_bundle(state_path, &mock_url, fixture)?;
+            plant_vault_with_zen_key(state_path)?;
+            lengthen_short_service_window(state_path, &fixture.node)
+        };
+    let log_env = |command: &mut tokio::process::Command| {
+        command
+            .env(
+                "RUST_LOG",
+                "info,ryeos_directive_runtime=debug,ryeosd=debug",
+            )
+            // After listing, the drain's snapshot waits (up to 30 s) until
+            // one listed thread, the follow child, has been settled by its
+            // launch owner, so the child always settles between the list and
+            // the row read. The running tool thread stays attached.
+            .env("RYEOSD_TEST_ATTACHED_SNAPSHOT_HOLD_MS", "30000");
+    };
+    let (mut harness, fixture) = DaemonHarness::start_fast_with(plant, log_env)
+        .await
+        .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let marker_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker_path = marker_dir.path().join("executions.log");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_recovery_directive(project.path(), &fixture.publisher, 2, false)
+        .expect("plant directive");
+    plant_marker_tool(
+        project.path(),
+        &marker_path,
+        Duration::from_secs(400),
+        &fixture.publisher,
+    )
+    .expect("plant marker tool");
+    plant_follow_parent_graph(project.path(), &fixture.publisher).expect("plant parent graph");
+
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(120),
+        harness.post_execute(
+            "graph:follow_parent",
+            project.path().to_str().expect("UTF-8 project path"),
+            json!({}),
+        ),
+    )
+    .await
+    .expect("the parent graph suspends at its follow node")
+    .expect("post the parent graph");
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body["result"]["status"], "continued",
+        "the parent suspends at the follow node; body={body:#}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while marker_execution_count(&marker_path) != 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the followed directive's tool never started\n{}",
+            harness.drain_stderr_nonblocking().await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let waited = tokio::time::timeout(Duration::from_secs(300), harness.child.wait()).await;
+    let Ok(waited) = waited else {
+        panic!(
+            "the service window did not end within its bound\n--- daemon stderr tail ---\n{}",
+            harness.stderr_tail(80)
+        );
+    };
+    let status = waited.expect("wait for daemon exit");
+    let stderr = harness.stderr_so_far();
+    assert_eq!(
+        status.code(),
+        Some(75),
+        "a planned rollover with a settling follow child exits 75: {status:?}\n--- daemon stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains("attached process was settled by its launch owner during the snapshot"),
+        "the child must settle between the snapshot's list and read\n--- daemon stderr ---\n{stderr}"
+    );
+    for refused in [
+        "unresolved process custody",
+        "daemon remains alive holding",
+        "lost its durable process identity",
+    ] {
+        assert!(
+            !stderr.contains(refused),
+            "the stop must not hold custody ({refused})\n--- daemon stderr ---\n{stderr}"
+        );
+    }
+    assert!(
+        ryeos_node::lifecycle_marker::read_restart_inhibition(&harness.state_path)
+            .expect("read restart inhibition")
+            .is_none(),
+        "an orderly end must not inhibit restart"
+    );
+
+    harness
+        .respawn_with(|command| {
+            command.env(
+                "RUST_LOG",
+                "info,ryeos_directive_runtime=debug,ryeosd=debug",
+            );
+        })
+        .await
+        .expect("restart after the rollover");
+    let child_thread_id = {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let events = harness.principal_events().await;
+            let found = events.iter().find_map(|(thread_id, event_type, payload)| {
+                (event_type == "thread_created"
+                    && payload.get("item_ref").and_then(Value::as_str) == Some(DIRECTIVE_REF))
+                .then(|| thread_id.clone())
+            });
+            if let Some(thread_id) = found {
+                break thread_id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the followed child thread is gone"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    await_completed(&mut harness, &child_thread_id).await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let events = harness.principal_events().await;
+        if events
+            .iter()
+            .any(|(_, event_type, _)| event_type == "graph_completed")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the graph run did not resume to completion; events={events:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        marker_execution_count(&marker_path),
+        1,
+        "the resumed child must not run the tool again"
+    );
+    harness
+        .kill_daemon()
+        .await
+        .expect("stop resumed daemon before the test ends");
 }

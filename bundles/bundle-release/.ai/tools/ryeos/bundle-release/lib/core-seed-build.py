@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-24T01:03:11Z:1bf338ae808a2b552e7a1077eaedcc79ae3e6e12cb2ce7c87b0e358f947b3a0f:xcGYJa6wTkLkyfQz7Lr3QCc9QoPsuTMyOOm9JAaz8Pes2b1zx2Iim0DLXF6XeNKbAZeL4z7n4vG9vjd1Dsb8Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:177424f8b1bfed4edb1c012dd2316c66452e87507a5a0d14f2e214f82492de4c:NimVuqWCVkwiysLMdCawLhXh+SZH201GeoQWWc/na7dtHwFruZtu9qOfG1blUFdreYA8tTd64cXoueI1WAssAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build the exact initial Core bundle from an admitted pinned source generation."""
 import hashlib
 import importlib.util
@@ -21,6 +21,19 @@ def fail(message):
     raise SystemExit(message)
 
 
+def feature_selections(records, implications):
+    selected = {}
+    for record in records:
+        selected.setdefault(record["cargo_package"], set()).update(record["required_features"])
+    result = []
+    for package, features in sorted(selected.items()):
+        implied = set()
+        for feature in features:
+            implied.update(implications.get(package, {}).get(feature, []))
+        result.append({"cargo_package": package, "features": sorted(features - implied)})
+    return result
+
+
 def unsigned_source_manifest(signed):
     if not isinstance(signed, bytes) or len(signed) > 1024 * 1024:
         fail("Core source manifest is unsafe or oversized")
@@ -34,7 +47,8 @@ def unsigned_source_manifest(signed):
 
 def verified_ownership_projection(resolved):
     # The signed Tool declaration makes RyeOS resolve this Config under its
-    # pinned source and publisher authority, including for direct Tool calls.
+    # pinned source and publisher authority. This value is injected at launch,
+    # replacing any caller-supplied resolved_config, even for a direct Tool call.
     if not isinstance(resolved, dict) or set(resolved) != {"value", "source"}:
         fail("verified ownership resolution is required")
     source = resolved["source"]
@@ -49,14 +63,15 @@ def verified_ownership_projection(resolved):
     if (not isinstance(document, dict)
             or set(document) != {"category", "version", "description", "payload_ownership"}
             or document["category"] != "bundle-release"
-            or document["version"] != "1.0.0"
+            or document["version"] != "2.0.0"
             or not isinstance(document["description"], str)
             or not document["description"]):
         fail("verified ownership Config has an invalid shape")
     ownership = document["payload_ownership"]
     if (not isinstance(ownership, dict)
-            or set(ownership) != {"schema", "kind", "bundles"}
-            or ownership["schema"] != "ryeos.bundle_payload_ownership.v1"
+            or set(ownership) != {"schema", "kind", "host_packages", "no_default_features_packages", "feature_implications",
+                                  "data_only_bundles", "host_only_bundles", "bundles"}
+            or ownership["schema"] != "ryeos.bundle_payload_ownership.v2"
             or ownership["kind"] != "bundle_payload_ownership"):
         fail("verified ownership contract has an invalid shape")
     bundles = ownership["bundles"]
@@ -66,24 +81,62 @@ def verified_ownership_projection(resolved):
     if len(canonical.encode("utf-8")) > 64 * 1024:
         fail("verified ownership contract exceeds its wire bound")
     name = re.compile(r"[a-z0-9_-]{1,64}\Z")
+    def sorted_names(items, allow_empty):
+        return (isinstance(items, list) and (allow_empty or bool(items))
+                and all(isinstance(item, str) and name.fullmatch(item) for item in items)
+                and items == sorted(set(items)))
+    if not sorted_names(ownership["host_packages"], True):
+        fail("verified ownership host packages are not unique and sorted")
+    if not sorted_names(ownership["no_default_features_packages"], True):
+        fail("verified ownership no-default-features packages are not unique and sorted")
+    implications = ownership["feature_implications"]
+    if not isinstance(implications, dict):
+        fail("verified ownership feature implications have an invalid shape")
+    for package, table in implications.items():
+        if not isinstance(package, str) or not name.fullmatch(package) or not isinstance(table, dict):
+            fail("verified ownership feature implications have an invalid shape")
+        for feature, implied in table.items():
+            if (not isinstance(feature, str) or not name.fullmatch(feature)
+                    or not sorted_names(implied, False) or feature in implied):
+                fail("verified ownership feature implications are not unique and sorted")
+    if not sorted_names(ownership["data_only_bundles"], True):
+        fail("verified ownership data-only bundles are not unique and sorted")
+    host_only = ownership["host_only_bundles"]
+    if not isinstance(host_only, list):
+        fail("verified ownership host-only bundles have an invalid shape")
+    previous_host_only = None
+    for entry in host_only:
+        if not isinstance(entry, dict) or set(entry) != {"bundle_name", "bundle_sets", "host_features"}:
+            fail("verified ownership host-only bundle has an invalid shape")
+        if (not isinstance(entry["bundle_name"], str) or not name.fullmatch(entry["bundle_name"])
+                or previous_host_only is not None and entry["bundle_name"] <= previous_host_only):
+            fail("verified ownership host-only bundle names are not unique and sorted")
+        previous_host_only = entry["bundle_name"]
+        if not sorted_names(entry["bundle_sets"], False):
+            fail("verified ownership host-only bundle sets are not unique and sorted")
+        if not sorted_names(entry["host_features"], False):
+            fail("verified ownership host-only features are not unique and sorted")
     records, seen_binaries, previous_bundle = [], set(), None
+    owner_names = set()
     for bundle in bundles:
-        if not isinstance(bundle, dict) or set(bundle) != {"bundle_name", "bundle_sets", "payloads"}:
+        if not isinstance(bundle, dict) or set(bundle) != {"bundle_name", "bundle_sets", "host_features", "payloads"}:
             fail("verified ownership bundle has an invalid shape")
         bundle_name, sets, payloads = bundle["bundle_name"], bundle["bundle_sets"], bundle["payloads"]
         if (not isinstance(bundle_name, str) or not name.fullmatch(bundle_name)
                 or previous_bundle is not None and bundle_name <= previous_bundle):
             fail("verified ownership bundle names are not unique and sorted")
         previous_bundle = bundle_name
-        if (not isinstance(sets, list) or not sets
-                or any(not isinstance(item, str) or not name.fullmatch(item) for item in sets)
-                or sets != sorted(set(sets))):
+        owner_names.add(bundle_name)
+        if not sorted_names(sets, False):
             fail("verified ownership bundle sets are not unique and sorted")
+        if not sorted_names(bundle["host_features"], True):
+            fail("verified ownership bundle host features are not unique and sorted")
         if not isinstance(payloads, list) or not payloads:
             fail("data-only bundles must be absent from ownership")
         previous_binary = None
         for payload in payloads:
-            if not isinstance(payload, dict) or set(payload) != {"binary", "cargo_package", "build_class"}:
+            if (not isinstance(payload, dict)
+                    or set(payload) != {"binary", "cargo_package", "build_class", "cargo_features"}):
                 fail("verified owned payload has an invalid shape")
             binary, package, build_class = payload["binary"], payload["cargo_package"], payload["build_class"]
             if (not isinstance(binary, str) or not name.fullmatch(binary)
@@ -93,13 +146,24 @@ def verified_ownership_projection(resolved):
             if (not isinstance(package, str) or not name.fullmatch(package)
                     or build_class not in {"release", "static"}):
                 fail("verified owned payload has invalid package or class")
+            if package in ownership["host_packages"]:
+                fail("verified owned payload belongs to a host package")
+            if package in ownership["no_default_features_packages"] and not payload["cargo_features"]:
+                fail("verified owned payload of a no-default-features package lacks an explicit feature composition")
+            if not sorted_names(payload["cargo_features"], True):
+                fail("verified owned payload features are not unique and sorted")
             previous_binary = binary
             seen_binaries.add(binary)
             records.append({"bundle":bundle_name,"binary":binary,"cargo_package":package,
-                            "build_class":build_class,"bundle_sets":sets})
+                            "build_class":build_class,"bundle_sets":sets,
+                            "required_features":payload["cargo_features"]})
             if len(records) > 256:
                 fail("verified owned payloads exceed their bound")
-    return records, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    lists = [set(ownership["data_only_bundles"]), {entry["bundle_name"] for entry in host_only}, owner_names]
+    if (len(lists[0]) + len(lists[1]) + len(lists[2])
+            != len(lists[0] | lists[1] | lists[2])):
+        fail("verified ownership bundle lists are not disjoint")
+    return records, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), implications, ownership["no_default_features_packages"]
 
 
 # This helper is part of the authenticated Tool source closure, not project code.
@@ -118,13 +182,14 @@ required = {
     "source_snapshot_hash", "predecessor_generation_hash", "target",
     "build_profile", "payload_ownership_item_ref",
     "payload_ownership_content_hash", "payloads", "cargo_packages",
+    "cargo_feature_selections",
     "build_classes", "requires_binary_build", "clean_output_required",
     "ambient_target_reuse_allowed",
 }
 if not isinstance(value, dict) or set(value) != required:
     fail("Core seed release input shape changed")
-if value["schema"] != "ryeos.bundle_release_input_plan.v1":
-    fail("Core seed release input schema changed")
+if value["schema"] != "ryeos.bundle_release_input_plan.v2":
+    fail("unsupported Core seed release input schema")
 if value["bundle_name"] != "core" or value["predecessor_generation_hash"] is not None:
     fail("Core seed must be the initial Core generation")
 manifest_value = value["authored_manifest"]
@@ -145,7 +210,7 @@ if value["payload_ownership_item_ref"] != "config:bundle-release/payload-ownersh
 # Execution is rooted in the admitted source generation. project_path is
 # provenance only and is never used as ambient filesystem authority.
 root = pathlib.Path.cwd().resolve(strict=True)
-ownership_records, ownership_identity = verified_ownership_projection(request["resolved_config"])
+ownership_records, ownership_identity, ownership_implications, no_default_features_packages = verified_ownership_projection(request["resolved_config"])
 if ownership_identity != value["payload_ownership_content_hash"]:
     fail("Core seed ownership contract changed")
 expected = sorted(
@@ -155,9 +220,12 @@ expected = sorted(
 if value["payloads"] != expected or not expected:
     fail("Core seed is not the exact nonempty Core ownership selection")
 packages = sorted({payload["cargo_package"] for payload in expected})
+selected_features = feature_selections(expected, ownership_implications)
 classes = sorted({payload["build_class"] for payload in expected})
-if value["cargo_packages"] != packages or value["build_classes"] != classes:
-    fail("Core seed package or build-class projection changed")
+if (value["cargo_packages"] != packages
+        or value["cargo_feature_selections"] != selected_features
+        or value["build_classes"] != classes):
+    fail("Core seed package, feature, or build-class projection changed")
 if value["requires_binary_build"] is not True:
     fail("Core seed must build its owned native payloads")
 for payload in expected:
@@ -232,6 +300,13 @@ for build_class in ("release", "static"):
                    "--config", 'source.ryeos-vendored.directory="/ryeos/realizations/cargo-vendor"',
                    "build", "--release", "--locked", "--frozen", "--offline",
                    "--jobs", "2", "--target", triple, "-p", package]
+        package_features = next(
+            (selection["features"] for selection in selected_features
+             if selection["cargo_package"] == package),
+            [],
+        )
+        if package in no_default_features_packages: command.append("--no-default-features")
+        if package_features: command.extend(["--features", ",".join(package_features)])
         for binary in sorted(payload["binary"] for payload in expected
                              if payload["cargo_package"] == package
                              and payload["build_class"] == build_class):

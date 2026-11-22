@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt as _;
@@ -80,6 +82,7 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
     };
     let runtime_recipe_digest = recipe.digest().unwrap();
     let guest_inputs = ryeos_external_execution_contract::ExternalGuestInputProjection {
+        workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
         schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
         base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
             descriptor: 55,
@@ -113,7 +116,7 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
     };
     let guest_input_identity = guest_inputs.identity_digest().unwrap();
     let requirement = ExternalCandidateRequirement {
-        schema: 6,
+        schema: 7,
         required_lifecycle_capabilities: Default::default(),
         protocol: PROTOCOL.into(),
         connector_protocol:
@@ -122,6 +125,7 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         provider_declaration_id: "codex-hosted".into(),
         provider_configuration_destination: "environments.toml".into(),
         runtime_product_declaration_id: "runtime".into(),
+        runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
         runtime_recipe: recipe,
     };
     let qualification_use =
@@ -130,20 +134,22 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         )
         .unwrap();
     ExternalSupervisorBootstrap {
-        schema: 7,
+        schema: ryeos_state::external_execution::transport::EXTERNAL_SUPERVISOR_HTTP_BOOTSTRAP_SCHEMA,
         controller: ExternalControllerTransportContract {
-            schema: 2,
+            schema: 3,
             network_inputs:
                 ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
                     resolver:
                         ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                             source: "/etc/resolv.conf".into(),
                             max_bytes: 64 * 1024,
+                            required: true,
                         },
                     hosts:
                         ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
                             source: "/etc/hosts".into(),
                             max_bytes: 64 * 1024,
+                            required: true,
                         },
                 },
             https_origin: "https://controller.invalid".into(),
@@ -152,7 +158,8 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
             connect_timeout_ms: 1_000,
             request_timeout_ms: 2_000,
             maximum_response_bytes: 64 * 1024,
-        },
+            max_clock_skew_ms: None,
+        }.into(),
         tls_root_certificates_der_base64: roots,
         placement_thread_id: "T-executable-boundary".into(),
         occurrence_id: "occurrence-executable-boundary".into(),
@@ -167,10 +174,16 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
             qualification_use,
             runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
             runtime_manifest_hash: "e".repeat(64),
-            runtime_witness_hash: "1".repeat(64),
+            runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "3".repeat(64),
             runtime_recipe_digest,
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
         }
         .into(),
         guest_input_identity,
@@ -185,6 +198,15 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         post_execution_timeout_seconds: 30,
         candidate_export_max_bytes: 1024 * 1024,
         channel_max_bytes: 2 * 1024 * 1024,
+        native_journal: ryeos_state::external_execution::transport::ExternalSupervisorNativeEnvelope {
+            storage_bytes: 67_108_864,
+            allocator_steps: 2_000_000_000,
+            connections: 16,
+            operation_millis: 4_860_000,
+            cleanup_millis: 120_000,
+            cleanup_steps: 3_000_000,
+        },
+        report_capabilities: false,
     }
 }
 
@@ -342,16 +364,22 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
     let outer = state.create_child(OsStr::new("outer"), 0o700).unwrap();
     let guest = state.create_child(OsStr::new("guest"), 0o700).unwrap();
     let retained_bootstrap = serde_json::from_slice(&admitted.canonical_bytes().unwrap()).unwrap();
+    // The journals live on this thread's shared native test host, which is
+    // released before the supervisor executable is spawned.
+    let host = ryeos_state::test_support::shared_test_host();
     let prepared = PreparedExternalSupervisorJournal::create(
         outer,
         retained_bootstrap,
         ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs::from_bytes(
-            &admitted.controller.network_inputs,
+            &admitted.controller.http().unwrap().network_inputs,
             b"nameserver 127.0.0.1\n",
             b"127.0.0.1 localhost\n",
         )
         .unwrap(),
         lillux::crypto::generate_signing_key(),
+        host.factory(),
+        host.destination(),
+        &ryeos_state::external_execution::native_journal::testing::census(&host),
     )
     .unwrap();
     let store_identity = prepared.store_identity().clone();
@@ -383,7 +411,7 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
     };
     let attached = prepared.record_binding(binding.clone()).unwrap();
     let authority_root = tempfile::tempdir().unwrap();
-    let authority_db = ryeos_state::StateDb::open(
+    let authority_db = ryeos_state::test_support::TestState::open(
         authority_root.path(),
         std::sync::Arc::new(ryeos_state::TrustStore::new()),
     )
@@ -391,8 +419,15 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
     let authority = authority_db.pinned_authority().unwrap();
     drop(authority_db);
     let launch_digest = "7".repeat(64);
-    let reservation =
-        PreparedGuestJournal::reserve(guest, &authority, &launch_digest, binding).unwrap();
+    let reservation = PreparedGuestJournal::reserve(
+        guest,
+        &authority,
+        &launch_digest,
+        binding.clone(),
+        ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
+        host.factory(),
+        host.destination())
+    .unwrap();
     let launch = attached
         .begin_launch(
             reservation.store_identity().clone(),
@@ -402,17 +437,25 @@ fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
         )
         .unwrap();
     let _expected_binding_digest = launch.binding().digest().unwrap();
-    drop(launch);
+    ryeos_state::external_execution::native_journal::testing::retire(&host, launch.close());
     drop(reservation);
+    ryeos_state::test_support::release_shared_test_host(host);
 
     let anchor = serde_json::json!({
         "schema": 1,
         "state_root_identity": state.identity().unwrap(),
         "outer_store_identity": store_identity,
+        "native_journal": admitted.native_journal,
     });
     let anchor = lillux::canonical_json(&anchor).unwrap().into_bytes();
     state
-        .atomic_write_if_same(OsStr::new("supervisor-state.json"), None, &anchor, 0o600)
+        .atomic_write_if_same(
+            OsStr::new("supervisor-state.json"),
+            None,
+            &anchor,
+            0o600,
+            TEST_PURPOSE,
+        )
         .unwrap();
 
     let bootstrap_document = lillux::sealed_memfd(

@@ -31,38 +31,43 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let _mutation_guard = state.scheduler_runtime_gate.clone().write_owned().await;
-    ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let _mutation_guard = scheduler
+        .acquire_mutation()
+        .await
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let db = scheduler.scheduler_db();
+    ryeos_scheduler_contract::validate_schedule_id(&req.schedule_id)
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
-    let spec = state
-        .scheduler_db
+    let spec = db
         .get_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     ctx.require_owner(Some(spec.execution.principal_id()))?;
 
     let yaml_path = super::scheduler_register::canonical_schedule_source_path(
-        &state.config.app_root,
+        scheduler.app_root(),
         &req.schedule_id,
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let schedules_path = yaml_path
         .parent()
         .ok_or_else(|| HandlerError::Internal("schedule source has no parent".to_string()))?;
     let schedules_directory = lillux::PinnedDirectory::open(schedules_path)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or_else(|| HandlerError::Internal("schedule source directory is absent".to_string()))?;
     let _source_lock = schedules_directory
         .lock_exclusive()
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let source_name = yaml_path
         .file_name()
         .ok_or_else(|| HandlerError::Internal("schedule source has no filename".to_string()))?;
     let source_file = schedules_directory
         .open_regular(source_name, false)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     // When present, the exact source currently represented by SQLite must be
     // trusted before an authenticated mutation is allowed to remove it. A
     // missing source is accepted as recovery of a prior crash after the
@@ -75,9 +80,10 @@ pub async fn handle(
         let verified = ryeos_scheduler::projection::verify_schedule_source_content(
             &yaml_path,
             &content,
-            &state.engine.trust_store,
+            scheduler.trust_store(),
+            scheduler.identity().fingerprint(),
         )
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         if verified.spec_hash != spec.spec_hash {
             return Err(HandlerError::Internal(
                 "schedule source changed since it was projected".to_string(),
@@ -89,41 +95,28 @@ pub async fn handle(
     // removed but before the final DB delete, this stale row cannot dispatch.
     let mut disabled_spec = spec.clone();
     disabled_spec.enabled = false;
-    state
-        .scheduler_db
-        .upsert_spec(&disabled_spec)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    db.upsert_spec(&disabled_spec)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     // Publish the fail-closed state before any fallible history work. The
     // timer may have cached the old enabled row, and must not dispatch it if a
     // purge fails after this point.
-    if let Some(ref tx) = state.scheduler_reload_tx
-        && let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
-            schedule_id: Some(req.schedule_id.clone()),
-        })
-    {
-        tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed after disable — timer will pick up changes on next tick");
-    }
+    scheduler.notify_reload(Some(req.schedule_id.clone()));
 
     // The on-disk JSONL history dir is preserved by default (audit trail), but
     // it blocks re-registering the same id. `purge_history` removes it so the id
     // can be recreated cleanly without hand-deleting files.
     let mut history_purged = false;
     if req.purge_history {
-        let runtime_state_dir = state
-            .config
-            .app_root
+        let runtime_state_dir = scheduler
+            .app_root()
             .join(ryeos_engine::AI_DIR)
             .join("state");
         let fires_root = runtime_state_dir.join("schedules");
         let fires_dir = fires_root.join(&req.schedule_id);
-        state
-            .scheduler_db
-            .drain_fire_outbox(&runtime_state_dir)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
-        state
-            .scheduler_db
-            .begin_fire_retention()
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        db.drain_fire_outbox(&runtime_state_dir)
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+        db.begin_fire_retention()
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         let purge_result = (|| -> anyhow::Result<()> {
             match std::fs::symlink_metadata(&fires_root) {
                 Ok(metadata)
@@ -149,25 +142,18 @@ pub async fn handle(
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            state
-                .scheduler_db
-                .finish_schedule_fire_purge(&req.schedule_id)?;
+            db.finish_schedule_fire_purge(&req.schedule_id)?;
             Ok(())
         })();
         if let Err(error) = purge_result {
             let repair = (|| -> anyhow::Result<()> {
-                ryeos_scheduler::projection::rebuild_fires_from_dir(
-                    &fires_root,
-                    &state.scheduler_db,
-                )?;
-                let specs = state.scheduler_db.list_specs(false, None)?;
-                state
-                    .scheduler_db
-                    .rebuild_cursors_for_specs(&specs, lillux::time::timestamp_millis())?;
+                ryeos_scheduler::projection::rebuild_fires_from_dir(&fires_root, &db)?;
+                let specs = db.list_specs(false, None)?;
+                db.rebuild_cursors_for_specs(&specs, lillux::time::timestamp_millis())?;
                 Ok(())
             })();
             return Err(HandlerError::Internal(match repair {
-                Ok(()) => error.to_string(),
+                Ok(()) => format!("{error:#}"),
                 Err(repair_error) => {
                     format!("{error:#}; scheduler fire projection repair failed: {repair_error:#}")
                 }
@@ -178,21 +164,13 @@ pub async fn handle(
     if let Some(file) = source_file.as_ref() {
         schedules_directory
             .remove_if_same(source_name, file)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     }
-    state
-        .scheduler_db
-        .delete_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    db.delete_spec(&req.schedule_id)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     // Ping timer loop
-    if let Some(ref tx) = state.scheduler_reload_tx
-        && let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
-            schedule_id: Some(req.schedule_id.clone()),
-        })
-    {
-        tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
-    }
+    scheduler.notify_reload(Some(req.schedule_id.clone()));
 
     Ok(serde_json::json!({
         "schedule_id": req.schedule_id,

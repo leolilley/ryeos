@@ -1,3 +1,4 @@
+use ryeos_runtime::graph_result::{ErrorRecord, GraphRunStatus};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -18,7 +19,9 @@ use super::outcome::{
     IntegrityFailedOutcome, LeafSoftErrorOutcome, RetryScheduledOutcome, RunNodeBodyContext,
     StepOutcome, TerminalOrigin, TerminalOutcome, add_runtime_cost,
 };
-use super::transitions::{resolve_next_on_error, retry_attempts_remaining};
+use super::transitions::{
+    resolve_next_on_error, retries_tool_failure, retry_attempts_remaining, retry_refused_note,
+};
 use super::{Walker, compute_cache_key, merge_into};
 
 impl Walker {
@@ -272,7 +275,9 @@ impl Walker {
                     Err(error) => {
                         return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                             item_id: Some(dispatched_item_id),
-                            error: format!("follow action has invalid product selections: {error}"),
+                            error: format!(
+                                "follow action has invalid product selections: {error:#}"
+                            ),
                             next_on_error: resolve_next_on_error(node, cfg),
                             elapsed_ms: elapsed,
                             cost: None,
@@ -333,7 +338,7 @@ impl Walker {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
                         item_id: Some(dispatched_item_id),
                         error: format!(
-                            "failed to canonicalize cache identity for node `{current}`: {error}"
+                            "failed to canonicalize cache identity for node `{current}`: {error:#}"
                         ),
                         elapsed_ms: elapsed,
                         cost: None,
@@ -363,6 +368,7 @@ impl Walker {
                         child_thread_id: None,
                         integrity: true,
                         dispatch: None,
+                        outcome: None,
                     }))
                 } else {
                     let action_digest = match dispatch::rendered_action_digest(&rendered_action) {
@@ -456,9 +462,16 @@ impl Walker {
                         dispatch: None,
                     });
                 }
+                let mut diagnostic = dispatch_error.diagnostic;
+                if !dispatch_error.retryable
+                    && retry_attempts_remaining(node, retry_attempt).is_some()
+                {
+                    let rc = node.retry.as_ref().expect("retry present");
+                    diagnostic.push_str(&retry_refused_note(rc.attempts));
+                }
                 StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                     item_id: Some(dispatched_item_id),
-                    error: dispatch_error.diagnostic,
+                    error: diagnostic,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     // Transport/dispatch failed before the child returned — no cost.
@@ -483,7 +496,8 @@ impl Walker {
                 }
                 // Authored retry is an attempt budget, not blanket permission.
                 // Only a failure explicitly classified retryable may consume it.
-                if failure.retryable
+                let retryable = failure.retryable || retries_tool_failure(node);
+                if retryable
                     && let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt)
                 {
                     let rc = node.retry.as_ref().expect("retry present when scheduling");
@@ -498,6 +512,11 @@ impl Walker {
                         dispatch: failure.dispatch,
                     });
                 }
+                let mut diagnostic = failure.diagnostic;
+                if !retryable && retry_attempts_remaining(node, retry_attempt).is_some() {
+                    let rc = node.retry.as_ref().expect("retry present");
+                    diagnostic.push_str(&retry_refused_note(rc.attempts));
+                }
                 let observation = DispatchObservation::from_failure(
                     dispatched_item_id.clone(),
                     failure.child_thread_id,
@@ -505,12 +524,13 @@ impl Walker {
                 );
                 StepOutcome::LeafSoftError(LeafSoftErrorOutcome {
                     item_id: dispatched_item_id,
-                    error: failure.diagnostic,
+                    error: diagnostic,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     // A failed native child may have spent tokens — preserve it.
                     cost: failure.cost,
                     observation,
+                    outcome: failure.outcome,
                 })
             }
             Ok(dispatch::ActionOutcome::Success(success)) => {
@@ -694,7 +714,6 @@ impl Walker {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn run_follow_fanout(
         &self,
         node: &GraphNode,
@@ -840,6 +859,10 @@ impl Walker {
                         }
                     }
                     dispatch::ActionOutcome::Failure(failure) => {
+                        // A worker child's slot keeps its structured outcome
+                        // (kind and partial result); any other failed slot
+                        // stays null.
+                        results[index] = failure.outcome.clone().unwrap_or(Value::Null);
                         errors.push(ErrorRecord {
                             step,
                             node: current.to_string(),
@@ -1104,7 +1127,7 @@ impl Walker {
                     return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                         item_id: Some(item_ref),
                         error: format!(
-                            "follow fanout item {index} has invalid product selections: {error}"
+                            "follow fanout item {index} has invalid product selections: {error:#}"
                         ),
                         next_on_error: resolve_next_on_error(node, cfg),
                         elapsed_ms: start.elapsed().as_millis() as u64,
@@ -1246,7 +1269,6 @@ impl Walker {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn evaluate_fanout_next(
     compiled: &ryeos_graph_definition::CompiledNode,
     node: &GraphNode,

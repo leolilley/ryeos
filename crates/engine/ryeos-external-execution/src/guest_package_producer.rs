@@ -19,7 +19,8 @@ use ryeos_external_execution_contract::{GuestMountContentAuthority, GuestMountKi
 
 use crate::guest_inputs::ExternalGuestInputAuthority;
 use crate::{
-    guest_content::recheck_staged_guest_content, guest_staging::stage_uploaded_guest_package,
+    guest_content::recheck_staged_guest_content,
+    guest_staging::{GUEST_PACKAGE_PREFIX, stage_uploaded_guest_package},
 };
 
 /// Private, locally preflighted package. Delivery must still stream the exact
@@ -108,27 +109,38 @@ pub fn prepare_private_guest_package(
     expected: &GuestStagingExpected<'_>,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<PreparedGuestPackage> {
-    parent.require_owner_private_directory()?;
-    let owner = parent.try_clone()?;
-    let (name, root) = parent.create_unique_child("guest-package", 0o700)?;
+    parent
+        .require_owner_private_directory()
+        .context("guest package parent")?;
+    let owner = parent
+        .try_clone()
+        .context("retain the guest package parent")?;
+    let (name, root) = parent
+        .create_unique_child(GUEST_PACKAGE_PREFIX, 0o700)
+        .context("create the private guest package directory")?;
     let result = (|| {
         root.require_owner_private_directory()?;
-        let output = root.open_regular_create(OsStr::new("payload"), true, true, 0o600)?;
+        let output = root
+            .open_regular_create(OsStr::new("payload"), true, true, 0o600)
+            .context("create the guest package payload")?;
         let (output, manifest) = write_guest_package(
             output, inputs, bootstrap, supervisor, launcher, expected, deadline,
         )?;
         lillux::set_open_regular_file_mode(&output, 0o400)?;
-        output.sync_all()?;
+        output
+            .sync_all()
+            .context("sync the guest package payload")?;
         drop(output);
-        root.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
+        root.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(1, 1))
+            .context("sync the guest package directory")?;
         let payload = root
             .open_pinned_regular(OsStr::new("payload"), false)?
             .context("private guest package disappeared")?;
         let observation = payload.observation()?;
         let bytes = observation.size();
         ensure!(
-            bytes == manifest.framed_bytes()? && bytes <= expected.maximum_framed_bytes,
-            "private guest package length changed"
+            bytes <= manifest.framed_bytes_bound()? && bytes <= expected.maximum_framed_bytes,
+            "private guest package length exceeds its bound"
         );
         let sha256 = payload.digest_stable_exact(&observation)?;
         require_time(deadline)?;
@@ -180,7 +192,9 @@ fn remove_private_package(
 ) -> Result<()> {
     root.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
     ensure!(
-        parent.remove_empty_child_if_same(name, root)?,
+        parent
+            .remove_empty_child_if_same(name, root)
+            .map(|receipt| receipt.is_some())?,
         "private guest package generation changed before cleanup"
     );
     Ok(())
@@ -232,21 +246,26 @@ pub(crate) fn write_guest_package<W: Write>(
 
     let base = inputs
         .base_snapshot()
-        .try_clone_pinned_directory(PathBuf::from("<guest-package-base>"))?;
+        .try_clone_pinned_directory(PathBuf::from("<guest-package-base>"))
+        .context("retain the guest base snapshot descriptor")?;
     inventory_tree(
         &base,
         "base",
+        0o700,
         false,
+        InventoryMode::Exact,
         &mut entries,
         &mut total_regular_bytes,
         expected.maximum_regular_bytes,
         deadline,
-    )?;
+    )
+    .context("inventory the guest base snapshot")?;
     require_time(deadline)?;
     let measurement = ryeos_project_capture::inspect_project_snapshot_transfer(
         &base,
         &expected.inputs.base_snapshot.snapshot_hash,
-    )?;
+    )
+    .context("measure the guest base snapshot")?;
     require_time(deadline)?;
     let retained_base = &expected.inputs.base_snapshot;
     ensure!(
@@ -266,11 +285,13 @@ pub(crate) fn write_guest_package<W: Write>(
         inventory_root_file(
             authority,
             name,
+            InventoryMode::Exact,
             &mut entries,
             &mut total_regular_bytes,
             expected.maximum_regular_bytes,
             deadline,
-        )?;
+        )
+        .with_context(|| format!("inventory the guest {name}"))?;
         roots.insert(name.into(), RootSource::File(authority));
     }
 
@@ -278,6 +299,7 @@ pub(crate) fn write_guest_package<W: Write>(
         inventory_root_file(
             output_authority,
             "workspace_outputs",
+            InventoryMode::Exact,
             &mut entries,
             &mut total_regular_bytes,
             expected.maximum_regular_bytes,
@@ -300,34 +322,49 @@ pub(crate) fn write_guest_package<W: Write>(
         let authority = inputs
             .input(index)
             .context("retained guest input descriptor disappeared")?;
+        let slot = || format!("guest {name} ({}, {:?})", input.authority_id, input.kind);
         match input.kind {
             GuestMountKind::RegularFile => {
+                // The expectation is the input's normalized mode, so a file
+                // root always enters as portable content.
                 inventory_root_file(
                     authority,
                     &name,
+                    InventoryMode::Portable,
                     &mut entries,
                     &mut total_regular_bytes,
                     expected.maximum_regular_bytes,
                     deadline,
-                )?;
+                )
+                .with_context(|| format!("inventory {}", slot()))?;
                 roots.insert(name, RootSource::File(authority));
             }
             GuestMountKind::Directory => {
-                let root = authority.try_clone_pinned_directory(PathBuf::from(format!(
-                    "<guest-package-input-{index}>"
-                )))?;
+                let root = authority
+                    .try_clone_pinned_directory(PathBuf::from(format!(
+                        "<guest-package-input-{index}>"
+                    )))
+                    .with_context(|| format!("retain {} descriptor", slot()))?;
+                let product = matches!(
+                    input.content_authority,
+                    GuestMountContentAuthority::ProductManifest { .. }
+                );
                 inventory_tree(
                     &root,
                     &name,
-                    matches!(
-                        input.content_authority,
-                        GuestMountContentAuthority::ProductManifest { .. }
-                    ),
+                    0o700,
+                    product,
+                    if product {
+                        InventoryMode::Portable
+                    } else {
+                        InventoryMode::Exact
+                    },
                     &mut entries,
                     &mut total_regular_bytes,
                     expected.maximum_regular_bytes,
                     deadline,
-                )?;
+                )
+                .with_context(|| format!("inventory {}", slot()))?;
                 roots.insert(name, RootSource::Directory(root));
             }
         }
@@ -341,11 +378,13 @@ pub(crate) fn write_guest_package<W: Write>(
         inventory_root_file(
             authority,
             &name,
+            InventoryMode::Exact,
             &mut entries,
             &mut total_regular_bytes,
             expected.maximum_regular_bytes,
             deadline,
-        )?;
+        )
+        .with_context(|| format!("inventory the guest {name}"))?;
         roots.insert(name, RootSource::File(authority));
     }
 
@@ -361,7 +400,7 @@ pub(crate) fn write_guest_package<W: Write>(
         entries,
     };
     ensure!(
-        manifest.framed_bytes()? <= expected.maximum_framed_bytes,
+        manifest.framed_bytes_bound()? <= expected.maximum_framed_bytes,
         "guest package exceeds admitted framed byte bound"
     );
     let mut stream = GuestStagingStreamWriter::new(output, manifest.clone(), expected)?;
@@ -390,28 +429,34 @@ pub(crate) fn write_guest_package<W: Write>(
                     relative.is_none(),
                     "guest package descends through a file root"
                 );
-                let mut reader = authority.stable_regular_reader_exact(
-                    *bytes,
-                    sha256,
-                    expected.maximum_regular_bytes,
-                )?;
-                stream.copy_next_file(&mut DeadlineReader {
-                    inner: &mut reader,
-                    deadline,
-                })?;
+                let label = path.clone();
+                let mut reader = authority
+                    .stable_regular_reader_exact(*bytes, sha256, expected.maximum_regular_bytes)
+                    .with_context(|| format!("read guest package file {label}"))?;
+                stream
+                    .copy_next_file(&mut DeadlineReader {
+                        inner: &mut reader,
+                        deadline,
+                    })
+                    .with_context(|| format!("copy guest package file {label}"))?;
                 reader.finish()?;
             }
             RootSource::Directory(root) => {
+                let label = path.clone();
                 let relative = relative.context("guest package directory has no file path")?;
                 let source = root
-                    .open_pinned_regular_descendant(Path::new(relative), false)?
+                    .open_pinned_regular_descendant(Path::new(relative), false)
+                    .with_context(|| format!("open guest package file {label}"))?
                     .context("guest package source file disappeared")?;
-                let mut reader =
-                    source.stable_reader_exact(*bytes, sha256, expected.maximum_regular_bytes)?;
-                stream.copy_next_file(&mut DeadlineReader {
-                    inner: &mut reader,
-                    deadline,
-                })?;
+                let mut reader = source
+                    .stable_reader_exact(*bytes, sha256, expected.maximum_regular_bytes)
+                    .with_context(|| format!("read guest package file {label}"))?;
+                stream
+                    .copy_next_file(&mut DeadlineReader {
+                        inner: &mut reader,
+                        deadline,
+                    })
+                    .with_context(|| format!("copy guest package file {label}"))?;
                 reader.finish()?;
             }
         }
@@ -420,9 +465,32 @@ pub(crate) fn write_guest_package<W: Write>(
     Ok((stream.finish()?, manifest))
 }
 
-fn inventory_root_file(
+/// How an inventoried regular file's mode enters the package.
+///
+/// Product content carries the portable mode its manifest declares (0644 or
+/// 0755). The node's read-only store inodes (0444, or 0555 for the shared
+/// executable inode) are a host storage fact, not the content's mode, so they
+/// never reach the wire. Private package roots (bootstrap, supervisor,
+/// launcher, records, the base transfer) keep their exact local mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InventoryMode {
+    Exact,
+    Portable,
+}
+
+impl InventoryMode {
+    fn of(self, observation: &lillux::secure_fs::OpenRegularFileObservation) -> Result<u32> {
+        match self {
+            Self::Exact => observation.permission_mode(),
+            Self::Portable => observation.portable_mode(),
+        }
+    }
+}
+
+pub(crate) fn inventory_root_file(
     authority: &lillux::InheritedDescriptorAuthority,
     path: &str,
+    file_mode: InventoryMode,
     entries: &mut Vec<GuestStagingEntry>,
     total: &mut u64,
     maximum_regular_bytes: u64,
@@ -431,7 +499,7 @@ fn inventory_root_file(
     require_time(deadline)?;
     let observation = authority.regular_file_observation()?;
     require_size_budget(*total, observation.size(), maximum_regular_bytes)?;
-    let mode = observation.permission_mode()?;
+    let mode = file_mode.of(&observation)?;
     match path {
         "bootstrap" => ensure!(mode == 0o600, "guest bootstrap must remain owner-private"),
         "supervisor" | "launcher" => ensure!(
@@ -452,26 +520,33 @@ fn inventory_root_file(
     )
 }
 
-fn inventory_tree(
+pub(crate) fn inventory_tree(
     root: &lillux::PinnedDirectory,
     name: &str,
+    root_mode: u32,
     allows_symlinks: bool,
+    file_mode: InventoryMode,
     entries: &mut Vec<GuestStagingEntry>,
     total: &mut u64,
     maximum_regular_bytes: u64,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<()> {
+    ensure!(
+        matches!(root_mode, 0o700 | 0o755),
+        "invalid guest inventory root mode"
+    );
     push_entry(
         entries,
         GuestStagingEntry::Directory {
             path: name.into(),
-            mode: 0o700,
+            mode: root_mode,
         },
     )?;
     inventory_children(
         root,
         name,
         allows_symlinks,
+        file_mode,
         0,
         entries,
         total,
@@ -484,6 +559,7 @@ fn inventory_children(
     directory: &lillux::PinnedDirectory,
     parent: &str,
     allows_symlinks: bool,
+    file_mode: InventoryMode,
     depth: usize,
     entries: &mut Vec<GuestStagingEntry>,
     total: &mut u64,
@@ -520,6 +596,7 @@ fn inventory_children(
                     &next,
                     &path,
                     allows_symlinks,
+                    file_mode,
                     depth + 1,
                     entries,
                     total,
@@ -539,7 +616,7 @@ fn inventory_children(
                     entries,
                     total,
                     path,
-                    observation.permission_mode()?,
+                    file_mode.of(&observation)?,
                     observation.size(),
                     sha256,
                 )?;
@@ -609,4 +686,115 @@ fn require_time(deadline: lillux::time::MonotonicDeadline) -> Result<()> {
         "guest package production deadline expired"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    fn deadline() -> lillux::time::MonotonicDeadline {
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30))
+    }
+
+    fn entry_mode(entries: &[GuestStagingEntry], wanted: &str) -> u32 {
+        entries
+            .iter()
+            .find_map(|entry| match entry {
+                GuestStagingEntry::RegularFile { path, mode, .. } if path == wanted => Some(*mode),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// Realizations bind the node store's own read-only inodes: the shared
+    /// executable inode (0555, one inode for every generation) and the plain
+    /// object (0444). As a file root and inside a product tree, the package
+    /// carries the portable 0755/0644 the staging contract expects; only a
+    /// private root keeps its exact mode.
+    #[test]
+    fn store_linked_product_content_enters_the_package_with_its_portable_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = lillux::PinnedDirectory::open_or_create(&dir.path().join("runtime")).unwrap();
+        let store = ryeos_state::LargeObjectStore::open_with_chunk_bytes(&runtime, 8).unwrap();
+        let ingest = |name: &str, bytes: &[u8]| {
+            let source = dir.path().join(name);
+            std::fs::write(&source, bytes).unwrap();
+            let file = std::fs::File::open(&source).unwrap();
+            let identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+                file: lillux::pinned_regular_file_identity(&file).unwrap(),
+                size: bytes.len() as u64,
+            };
+            store
+                .ingest_open_regular(file, identity, name, None)
+                .unwrap()
+                .file_sha256
+        };
+        let tool = ingest("tool-source", &[7u8; 24]);
+        let data = ingest("data-source", &[3u8; 24]);
+        let executable = store.lease_executable_object(&tool, 24).unwrap();
+        let plain = store.lease_object(&data, 24).unwrap();
+
+        let roots = lillux::PinnedDirectory::open_or_create(&dir.path().join("roots")).unwrap();
+        store
+            .link_executable_object_into(&tool, &roots, OsStr::new("runtime"), executable.file())
+            .unwrap();
+        let product = lillux::PinnedDirectory::open_or_create(&dir.path().join("product")).unwrap();
+        let bin = product
+            .open_or_create_child(OsStr::new("bin"), 0o755)
+            .unwrap();
+        store
+            .link_executable_object_into(&tool, &bin, OsStr::new("tool"), executable.file())
+            .unwrap();
+        store
+            .link_object_into(&data, &product, OsStr::new("data"), plain.file())
+            .unwrap();
+        let root_meta = std::fs::metadata(dir.path().join("roots/runtime")).unwrap();
+        assert_eq!(root_meta.permissions().mode() & 0o777, 0o555);
+        assert!(root_meta.nlink() >= 3);
+        let data_meta = std::fs::metadata(dir.path().join("product/data")).unwrap();
+        assert_eq!(data_meta.permissions().mode() & 0o777, 0o444);
+
+        let root = roots
+            .open_inherited_regular(OsStr::new("runtime"), false)
+            .unwrap()
+            .unwrap();
+        for (file_mode, expected) in [
+            (InventoryMode::Portable, 0o755),
+            (InventoryMode::Exact, 0o555),
+        ] {
+            let mut entries = Vec::new();
+            let mut total = 0;
+            inventory_root_file(
+                &root,
+                "input-00",
+                file_mode,
+                &mut entries,
+                &mut total,
+                1024,
+                deadline(),
+            )
+            .unwrap();
+            assert_eq!(entry_mode(&entries, "input-00"), expected);
+            assert_eq!(total, 24);
+        }
+
+        let mut entries = Vec::new();
+        let mut total = 0;
+        inventory_tree(
+            &product,
+            "input-01",
+            0o700,
+            true,
+            InventoryMode::Portable,
+            &mut entries,
+            &mut total,
+            1024,
+            deadline(),
+        )
+        .unwrap();
+        assert_eq!(entry_mode(&entries, "input-01/bin/tool"), 0o755);
+        assert_eq!(entry_mode(&entries, "input-01/data"), 0o644);
+        assert_eq!(total, 48);
+    }
 }

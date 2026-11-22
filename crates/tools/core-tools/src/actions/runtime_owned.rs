@@ -12,14 +12,18 @@
 use std::path::Path;
 
 use ryeos_engine::AI_DIR;
-use ryeos_state::project_sync::{ProjectAiPathClass, classify_project_ai_path};
+use ryeos_state::project_sync::{
+    ProjectAiPathClass, classify_floor_path, is_live_execution_denied_only_path,
+};
 
 /// True when a `.ai/`-relative path is node runtime state or a signing secret,
 /// and therefore never a signable authoring source.
 ///
-/// Reuses `classify_project_ai_path`'s code-enforced floor:
+/// Reuses `classify_floor_path`'s code-enforced floor:
 /// - `NodeOwned` — `.ai/state`, `.ai/node/{schedules,routes,bundles}`;
-/// - `NeverDeploySecret` — `.ai/config/keys/signing`, node identity/auth/vault.
+/// - `NeverDeploySecret` — node identity/auth/vault;
+/// - the live-execution-only roots: the node trust registry, operator key
+///   material and remote pins.
 ///
 /// The floor is exhaustive: runtime state and retired runtime-output locations
 /// are reserved under `.ai/state/`, so nothing writes under `.ai/knowledge/`
@@ -28,10 +32,7 @@ use ryeos_state::project_sync::{ProjectAiPathClass, classify_project_ai_path};
 /// The `ignore` matcher is deliberately unused: runtime ownership is a floor,
 /// independent of any project ignore file.
 pub fn is_runtime_owned_ai_path(ai_rel_path: &str) -> bool {
-    matches!(
-        classify_project_ai_path(ai_rel_path, None),
-        ProjectAiPathClass::NodeOwned { .. } | ProjectAiPathClass::NeverDeploySecret { .. }
-    )
+    classify_floor_path(ai_rel_path).is_some() || is_live_execution_denied_only_path(ai_rel_path)
 }
 
 /// True when a `.ai/`-relative path is secret key material that must never be
@@ -43,8 +44,8 @@ pub fn is_runtime_owned_ai_path(ai_rel_path: &str) -> bool {
 /// continues to use [`is_runtime_owned_ai_path`] to exclude node-owned state.
 pub fn is_never_signable_secret_ai_path(ai_rel_path: &str) -> bool {
     matches!(
-        classify_project_ai_path(ai_rel_path, None),
-        ProjectAiPathClass::NeverDeploySecret { .. }
+        classify_floor_path(ai_rel_path),
+        Some(ProjectAiPathClass::NeverDeploySecret { .. })
     )
 }
 
@@ -80,7 +81,9 @@ mod tests {
             ".ai/node/schedules/nightly.yaml",
             ".ai/node/routes/inbound.yaml",
             ".ai/node/bundles/core/manifest.yaml",
-            ".ai/config/keys/signing/private_key.pem",
+            ".ai/node/operator/signing/private_key.pem",
+            ".ai/node/remotes/origin.yaml",
+            ".ai/node/trust/signers/abc.yaml",
         ] {
             assert!(is_runtime_owned_ai_path(p), "expected runtime-owned: {p}");
         }
@@ -93,7 +96,6 @@ mod tests {
             ".ai/tools/ryeos/core/sign.yaml",
             ".ai/graphs/app/flow.yaml",
             ".ai/knowledge/app/notes.md",
-            ".ai/config/keys/trusted/publisher.pem",
         ] {
             assert!(!is_runtime_owned_ai_path(p), "expected signable: {p}");
         }
@@ -113,7 +115,6 @@ mod tests {
         ));
 
         for path in [
-            ".ai/config/keys/signing/private_key.pem",
             ".ai/node/identity/private_key.pem",
             ".ai/node/auth/private_key.pem",
             ".ai/node/vault/private_key.pem",

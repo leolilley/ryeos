@@ -1,5 +1,5 @@
 {
-  "schema_version": 10,
+  "schema_version": 13,
   "external_candidate": null,
   "transport": "http_sse",
   "http_sse": {
@@ -34,6 +34,11 @@
   "baseline_destination": "opencode.json",
   "auxiliary_configs": [],
   "runtime_configs": [],
+  "configuration_absence": {
+    "absolute_paths": [],
+    "startup_ancestor_paths": [],
+    "route_ancestor_paths": []
+  },
   "portable_state": null,
   "credential_subject": null,
   "initialization": [],
@@ -351,7 +356,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.idle",
@@ -364,7 +372,8 @@
         "fields": {
           "session_id": {
             "op": "pointer",
-            "pointer": "/message/params/sessionID"
+            "pointer": "/message/params/sessionID",
+            "max_string_bytes": 256
           }
         }
       },
@@ -390,7 +399,10 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": true,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.next.prompted",
@@ -433,7 +445,10 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.next.text.delta",
@@ -455,7 +470,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.next.tool.called",
@@ -479,7 +497,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.error",
@@ -496,7 +517,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "installation.update-available",
@@ -513,7 +537,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     }
   ],
   "ignored_notifications": {
@@ -613,12 +640,6 @@
           "op": "literal",
           "value": {
             "response": "once"
-          }
-        },
-        "cancel": {
-          "op": "literal",
-          "value": {
-            "response": "reject"
           }
         },
         "decline": {

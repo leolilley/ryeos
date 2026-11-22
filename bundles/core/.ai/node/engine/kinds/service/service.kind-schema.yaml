@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T08:51:39Z:6a7b7fec63aab04dbb255622caa4d60304717fbe7a73f7874f36cf4e817b3f02:cZIkhSqP/8waep/HVLqbbS32ATRJy/ng/arJ0yDzOE5RQ7IsalKoWdx3AbhSsADODljSIfCNUxuk9OZmFEouAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:40Z:61451f9e5772bb8c5907dd5ec2b375d1f103216fa1d93ac71cc1d5e1a499e0f8:tfbiCKGLOZdaKpIzgLcL2T9103/Esy1DwSxdBeQ6BByvKyYhk4qCNiH5IjsE97X92fJ036ykpffr6nlzrOFxCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 inventory_policy:
   admission:
@@ -9,6 +9,12 @@ location:
 effective_trust:
   include_references: false
 resolution: []
+# Which spaces and trust classes may supply a launch root of this kind.
+# Only signed bundles supply this kind; a project or node file is ignored.
+launch_trust:
+  allowed_spaces: [bundle]
+  allowed_trust: [trusted_bundle]
+  operator_may_admit: []
 execution:
   terminator:
     kind: in_process
@@ -86,7 +92,7 @@ composed_value_contract:
     ui_result_effect:
       type: single
       prim: string
-      enum: [admit_binding_attachment, resume_particular_view_set]
+      enum: [surface_opening, resume_particular_view_set, resume_particular_surface]
     schema: { type: single, prim: mapping }
 metadata:
   rules:

@@ -5,6 +5,9 @@
 //! checks the admitted mechanical identity, executes the already-admitted
 //! subject, and stores a normalized answer. No kind vocabulary belongs here.
 
+pub mod locality;
+pub mod rfc3339;
+
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,6 +41,11 @@ pub struct AdmittedExternalEffectAuthority {
     /// `None` is live execution. Durable classes are explicit and never
     /// inferred from a route name, endpoint, or accounting configuration.
     pub admitted_effect_class: Option<EffectClass>,
+    /// Number of leading retries of one operation the performing runtime may
+    /// issue after an outcome that leaves it unknown whether the external
+    /// system acted. Zero refuses every such retry. The value is mechanical;
+    /// the kind that sealed it owns its meaning.
+    pub unknown_outcome_retry_ceiling: u32,
 }
 
 impl AdmittedExternalEffectAuthority {
@@ -505,7 +513,7 @@ pub fn canonical_value_digest(value: &Value) -> anyhow::Result<String> {
 /// instead of the general state clock so they cannot emit a value their own
 /// durable contract refuses.
 pub fn canonical_observation_timestamp_now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    rfc3339::now_millis()
 }
 
 pub fn require_hex64(field: &str, value: &str) -> anyhow::Result<()> {
@@ -531,11 +539,7 @@ fn canonical_digest(value: &impl Serialize) -> anyhow::Result<String> {
 }
 
 fn parse_canonical_timestamp(value: &str) -> anyhow::Result<()> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(value)
-        .map_err(|error| anyhow::anyhow!("invalid RFC3339 timestamp: {error}"))?;
-    let canonical = parsed
-        .with_timezone(&chrono::Utc)
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let canonical = rfc3339::normalize_millis(value)?;
     if canonical != value {
         bail!("timestamp is not canonical UTC millisecond RFC3339");
     }

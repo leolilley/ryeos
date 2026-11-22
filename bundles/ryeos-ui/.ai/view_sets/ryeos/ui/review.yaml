@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-20T23:17:59Z:8a82ec9c4011a6dcfcb5ef48ab0d510eff227fd6212fc9faadbfeef541e7f1c6:1brXHKc8VcXKH1/ennqS0w33eD2R8NPUk3SZO80OskLu77tMoKjVLIukEQhSgxdgGuxuaptkA+vnvW5zhMXlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+schema: 2
+id: review
+title: Review
+root:
+  type: group
+  views: ["view:ryeos/review/pending", "view:ryeos/review/history"]
+  active: 0

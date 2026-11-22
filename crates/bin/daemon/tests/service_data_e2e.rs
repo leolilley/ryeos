@@ -6,7 +6,7 @@
 //! Companion file: `service_data_standalone_e2e.rs` covers stopped-node
 //! services that require `run-service` mode.
 
-mod common;
+use ryeosd::test_support as common;
 
 use common::DaemonHarness;
 use serde_json::{Value, json};
@@ -30,7 +30,7 @@ async fn start_with_isolated_bundle(
         "service_data_e2e/{test_name}"
     ));
     DaemonHarness::start_fast_with(
-        |state, _, fixture| common::fast_fixture::register_standard_bundle(state, fixture),
+        |state, _, fixture| common::fast_fixture::register_workflow_bundles(state, fixture),
         move |cmd| {
             cmd.env("RYEOS_APP_ROOT", &bundle);
         },
@@ -68,13 +68,14 @@ fn unwrap_tool_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> V
     })
 }
 
-/// Execute a service that deliberately retains the default recorded-thread
-/// behavior and return its durable service thread id.
+/// Execute a service that retains the default recorded-thread behavior
+/// (`system/routes` declares no `record_thread` override) and return its
+/// durable service thread id.
 async fn recorded_service_thread_id(h: &DaemonHarness) -> String {
-    let (status, body) = exec(h, "service:identity/public_key", json!({})).await;
+    let (status, body) = exec(h, "service:system/routes", json!({})).await;
     assert!(
         status.is_success(),
-        "recorded identity.public_key service failed: {body}"
+        "recorded system.routes service failed: {body}"
     );
     let tid = body
         .get("thread")
@@ -142,8 +143,8 @@ async fn service_bundle_list_returns_at_least_core() {
         .get("bundles")
         .and_then(|v| v.as_array())
         .expect("bundles array");
-    // start_fast() registers core + standard bundles, so the list should
-    // contain at least those two. The install→list round-trip is proven
+    // start_fast() selects the authored Standard composition. The
+    // install→list round-trip is proven
     // in service_data_standalone_e2e.rs.
     for entry in bundles {
         assert!(
@@ -344,6 +345,70 @@ async fn service_events_chain_replay_returns_events_for_recorded_service_chain()
     assert!(
         result.get("next_cursor").is_some(),
         "events.chain_replay missing next_cursor: {result}"
+    );
+}
+
+// ── threads/timeline — the chain folded by the installed definition ─────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_threads_timeline_folds_an_owned_chain_with_the_installed_definition() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    // Recorded service threads are their own chain roots, owned by the caller.
+    let tid = recorded_service_thread_id(&h).await;
+
+    let (status, body) = exec(
+        &h,
+        "service:threads/timeline",
+        json!({"chain_root_id": tid, "limit": 50}),
+    )
+    .await;
+    let result = unwrap_result(status, &body, "threads.timeline");
+    assert!(
+        result.get("items").and_then(|v| v.as_array()).is_some(),
+        "threads.timeline missing items array: {result}"
+    );
+    assert_eq!(result["chain_root_id"], tid);
+    assert_eq!(
+        result["timeline_contract"],
+        ryeos_client_base::ui::timeline::TIMELINE_CONTRACT_VERSION
+    );
+    assert!(result["highest_chain_seq"].as_i64().is_some());
+    assert!(result.get("summary").is_some(), "missing summary: {result}");
+
+    // An upsert since the head carries the window order and no items.
+    let head = result["highest_chain_seq"].as_i64().unwrap();
+    let (status, body) = exec(
+        &h,
+        "service:threads/timeline",
+        json!({"chain_root_id": tid, "since_chain_seq": head}),
+    )
+    .await;
+    let upsert = unwrap_result(status, &body, "threads.timeline since");
+    assert!(upsert.get("order").and_then(|v| v.as_array()).is_some());
+    assert_eq!(upsert["items"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn service_threads_timeline_refuses_clearly_without_the_ryeos_ui_bundle() {
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start daemon");
+    let tid = recorded_service_thread_id(&h).await;
+
+    let (status, body) = exec(
+        &h,
+        "service:threads/timeline",
+        json!({"chain_root_id": tid}),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "a missing definition must be refused: {body}"
+    );
+    assert!(
+        body.to_string()
+            .contains("timeline definition is not installed"),
+        "unclear refusal: {body}"
     );
 }
 
@@ -597,4 +662,84 @@ async fn stopped_node_services_reject_in_live_mode() {
             "{svc}: error must mention stopped-node/standalone, got: {body}"
         );
     }
+}
+
+// ── items/effective — authorship of runtime-authored items ──────────────
+
+/// Plant a project knowledge item whose body ends with the provenance line
+/// `runtime.author_item` appends, signed by `signer`.
+fn plant_knowledge_with_provenance(
+    project: &std::path::Path,
+    stem: &str,
+    signer: &lillux::crypto::SigningKey,
+) {
+    let path = project.join(format!(".ai/knowledge/notes/{stem}.md"));
+    std::fs::create_dir_all(path.parent().expect("knowledge parent dir"))
+        .expect("create knowledge dir");
+    let content = format!(
+        "```yaml\nname: {stem}\ncategory: \"notes\"\n```\n\nA note.\n\n\
+         <!-- ryeos:authored: {{\"authored_by\":\"runtime\",\"content_digest\":\"ab\"}} -->\n"
+    );
+    std::fs::write(
+        &path,
+        lillux::signature::sign_content(&content, signer, "<!--", Some("-->")),
+    )
+    .expect("write knowledge item");
+}
+
+async fn root_authorship(h: &DaemonHarness, project: &std::path::Path, item_ref: &str) -> Value {
+    let (status, body) = exec(
+        h,
+        "service:items/effective",
+        json!({
+            "canonical_ref": item_ref,
+            "project_path": project.to_str().unwrap(),
+        }),
+    )
+    .await;
+    let result = unwrap_result(status, &body, "items.effective");
+    let rows = result
+        .get("authorship")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("items.effective must report authorship: {result}"));
+    let mut root = rows
+        .iter()
+        .find(|row| row["position"] == "root")
+        .cloned()
+        .unwrap_or_else(|| panic!("authorship must include the root: {result}"));
+    // The launch trust class the signer's registry scope gives the root.
+    root["trust_class"] = result["trust_class"].clone();
+    root
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn items_effective_reports_an_authoring_signed_item_as_runtime_authored() {
+    let (h, fixture) = DaemonHarness::start_fast_with(
+        |state, _, fixture| common::fast_fixture::register_workflow_bundles(state, fixture),
+        |_| {},
+    )
+    .await
+    .expect("start daemon with the workflow bundles");
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_knowledge_with_provenance(project.path(), "authored", &fixture.authoring);
+    plant_knowledge_with_provenance(project.path(), "operator", &fixture.user);
+    plant_knowledge_with_provenance(project.path(), "node", &fixture.node);
+
+    let authored = root_authorship(&h, project.path(), "knowledge:notes/authored").await;
+    assert_eq!(authored["signer_role"], "authoring", "{authored}");
+    assert_eq!(authored["runtime_authored"], true, "{authored}");
+    // The authoring key is pinned with no kind: its items are machine drafts.
+    assert_eq!(authored["trust_class"], "untrusted_project", "{authored}");
+
+    // The same line under the operator's key is not runtime authorship.
+    let operator = root_authorship(&h, project.path(), "knowledge:notes/operator").await;
+    assert_eq!(operator["signer_role"], "other", "{operator}");
+    assert_eq!(operator["runtime_authored"], false, "{operator}");
+    assert_eq!(operator["trust_class"], "trusted_project", "{operator}");
+
+    // Nor is it under the node key, which no longer authors project items.
+    let node = root_authorship(&h, project.path(), "knowledge:notes/node").await;
+    assert_eq!(node["signer_role"], "node", "{node}");
+    assert_eq!(node["runtime_authored"], false, "{node}");
+    assert_eq!(node["trust_class"], "untrusted_project", "{node}");
 }

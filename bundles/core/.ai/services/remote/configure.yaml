@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:17Z:635bacb01ba881cbe6e5340a202f3181ec9bceaa3c6b3fbf2ef0d822f4b9db39:jeagM6PVd0c7atSh5DWFKCzpQbmP4BujwX4qCQndImLZbmmVAnA83pUE61R0M+mooGS04UB1FcMKT2lBg87jBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:41:47Z:be74287ff16215f617b38f34605c7d7137c265d40655d53f1efb97b07c11fd52:Cutzd+UmOAaHmew7hX/UbaG6tB9U+bw4mfeOPt3EisRRsphlrgfTQmyqtUhxxFvr6WY0pD4OCS14O/UyTRhdAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.configure
 required_caps: ["ryeos.execute.service.remote/configure"]
@@ -6,4 +6,5 @@ schema:
   remote: string?
   url: string?
   descriptor: string?
-description: "Add or update a remote node configuration, optionally from a descriptor trust pin"
+  expect_fingerprint: string?
+description: "Add or update a remote node configuration; the remote key must be pinned by a descriptor or an expected fingerprint"

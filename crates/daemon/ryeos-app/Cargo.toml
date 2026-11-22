@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-test-support = ["ryeos-engine/test-support", "ryeos-state/test-support"]
+test-support = ["ryeos-engine/test-support", "ryeos-state/test-support", "ryeos-node-runtime/test-support", "lillux-sqlite/test-support"]
 latency-profiling = []
 # Allows an exact runtime-owned phase to be selected by the daemon's
 # process-kill qualification harness. Production daemon builds never enable
@@ -14,17 +14,18 @@ latency-profiling = []
 crash-qualification-test-support = []
 
 [dependencies]
+ryeos-node-runtime = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
-chrono = { workspace = true }
 directories = { workspace = true }
 lillux = { workspace = true }
+lillux-sqlite = { workspace = true }
 once_cell = { workspace = true }
 rand = { workspace = true }
-regex = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rusqlite = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-bundle = { workspace = true }
@@ -33,14 +34,15 @@ ryeos-engine = { workspace = true }
 ryeos-external-execution = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
-ryeos-graph-definition = { workspace = true }
 ryeos-effect-contract = { workspace = true }
+ryeos-gpu-loader-owner-contract = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
-ryeos-scheduler = { workspace = true }
+ryeos-scheduler-contract = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-tracing = { workspace = true }
 ryeos-provider-contract = { workspace = true }
+ryeos-project-capture = { workspace = true }
 ryeos-vault = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
@@ -49,6 +51,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
@@ -60,6 +63,12 @@ zeroize = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
+ryeos-tracing = { workspace = true, features = ["test-harness"] }
+ryeos-remote-lease-core = { workspace = true }
+
+[lints]
+workspace = true

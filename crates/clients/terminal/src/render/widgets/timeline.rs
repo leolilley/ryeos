@@ -5,8 +5,11 @@
 //! into history when the point walks back off the tail.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::{Style, TextSurface};
-use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTimelineEntryVm, RyeOsTone};
+use ryeos_client_base::ui::view_model::{
+    RyeOsRowDetailVm, RyeOsTimelineDockVm, RyeOsTimelineEntryVm, RyeOsTimelineLaneVm, RyeOsTone,
+};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
@@ -61,6 +64,69 @@ pub struct TimelineEntryMeta<'a> {
     pub details: &'a [Vec<RyeOsRowDetailVm>],
 }
 
+/// Docked asks drawn at most; the rest stay in the flow.
+const MAX_DOCKED: usize = LAYOUT.cells.max_docked;
+
+/// Rows the foot under the feed takes: one for the status lane, reserved
+/// whether or not it has text, then one per docked ask. At least one row stays
+/// for the feed.
+pub fn foot_rows(height: u16, docked: usize) -> u16 {
+    let wanted = 1 + docked.min(MAX_DOCKED) as u16;
+    wanted.min(height.saturating_sub(1))
+}
+
+/// Draws the status lane, then the docked asks, one row each, in `rect`.
+pub fn draw_foot(
+    surface: &mut TextSurface,
+    rect: Rect,
+    lane: Option<&RyeOsTimelineLaneVm>,
+    dock: &[RyeOsTimelineDockVm],
+) {
+    let width = rect.w as usize;
+    if width == 0 || rect.h == 0 {
+        return;
+    }
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    if let Some(lane) = lane {
+        // The lane: a dot in its tone, then the label at the body ink.
+        surface.draw_text(x, y, "●", tone_style(lane.tone));
+        surface.draw_text(
+            x + 2,
+            y,
+            &truncate(&lane.label, width.saturating_sub(2)),
+            style_fg(),
+        );
+    }
+    for (index, ask) in dock.iter().take(usize::from(rect.h) - 1).enumerate() {
+        // A docked ask needs the operator: its title is yellow.
+        let (primary, meta) = match &ask.entry {
+            RyeOsTimelineEntryVm::Line { primary, meta, .. } => (primary.clone(), meta.clone()),
+            other => (other.label(), None),
+        };
+        let tone = RyeOsTone::Warn;
+        // The answering actions are listed beside the ask; the command
+        // overlay runs them.
+        let labels: Vec<&str> = ask
+            .actions
+            .iter()
+            .filter(|action| action.intent.is_some())
+            .map(|action| action.label.as_str())
+            .collect();
+        let meta = if labels.is_empty() {
+            meta
+        } else {
+            Some(labels.join("  "))
+        };
+        surface.draw_text(
+            x,
+            y + 1 + index,
+            &join_with_right_meta(tone_glyph(tone), &primary, meta.as_deref(), width),
+            tone_style(tone),
+        );
+    }
+}
+
 pub fn draw_timeline(
     surface: &mut TextSurface,
     rect: Rect,
@@ -74,7 +140,9 @@ pub fn draw_timeline(
     if width == 0 || height == 0 {
         return;
     }
-    let entry_window = height.saturating_mul(4).max(64);
+    let entry_window = height
+        .saturating_mul(LAYOUT.cells.timeline_window_per_row)
+        .max(LAYOUT.cells.timeline_window_least);
     let selected_entry = selected.and_then(|sel| (sel < entries.len()).then_some(sel));
     let entry_start = match selected_entry {
         Some(sel) => sel.saturating_sub(entry_window / 2),
@@ -174,7 +242,7 @@ fn push_timeline_lines(
         // two spaces per level, so the braid reads as a call tree. Panic-safe: a
         // missing/short indent vector degrades to depth 0 (flat).
         let depth = entry_indents.get(entry_index).copied().unwrap_or(0) as usize;
-        let indent_cols = (depth * 2).min(width.saturating_sub(1));
+        let indent_cols = (depth * LAYOUT.cells.timeline_indent).min(width.saturating_sub(1));
         let entry_width = width.saturating_sub(indent_cols).max(1);
         let first_line = lines.len();
         match entry {
@@ -202,6 +270,7 @@ fn push_timeline_lines(
                 meta,
                 tone,
                 pending,
+                ..
             } => {
                 let glyph = if *pending {
                     "▸"
@@ -222,7 +291,9 @@ fn push_timeline_lines(
                 ));
             }
             RyeOsTimelineEntryVm::Separator { label } => {
-                let label = format!(" {label} ");
+                // The label carries the whole message; a rule holds one line.
+                let flat = label.split_whitespace().collect::<Vec<_>>().join(" ");
+                let label = format!(" {} ", truncate(&flat, entry_width.saturating_sub(4)));
                 let rule_len = entry_width.saturating_sub(display_width(&label));
                 let left = rule_len / 2;
                 let right = rule_len.saturating_sub(left);
@@ -500,6 +571,7 @@ mod tests {
             tone: RyeOsTone::Neutral,
             intent: None,
             secondary_intent: None,
+            state: None,
         }
     }
 
@@ -634,5 +706,41 @@ mod tests {
             "selected midpoint row: {:?}",
             row_text(&surface, 20, 2)
         );
+    }
+
+    #[test]
+    fn the_foot_reserves_the_lane_row_and_leaves_the_feed_a_row() {
+        assert_eq!(foot_rows(10, 0), 1);
+        assert_eq!(foot_rows(10, 2), 3);
+        assert_eq!(foot_rows(10, 9), 4);
+        assert_eq!(foot_rows(2, 5), 1);
+        assert_eq!(foot_rows(1, 0), 0);
+    }
+
+    #[test]
+    fn the_foot_draws_the_lane_above_the_docked_asks() {
+        let lane = RyeOsTimelineLaneVm {
+            label: "Waiting for approval".to_string(),
+            tone: RyeOsTone::Warn,
+        };
+        let dock = [RyeOsTimelineDockVm {
+            id: "ask:1".to_string(),
+            entry: line("approval requested: write"),
+            actions: Vec::new(),
+        }];
+        let mut surface = TextSurface::new(40, 2);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 2,
+        };
+        draw_foot(&mut surface, rect, Some(&lane), &dock);
+        assert!(row_text(&surface, 40, 0).contains("Waiting for approval"));
+        assert!(row_text(&surface, 40, 1).contains("approval requested: write"));
+        // An idle lane draws nothing but keeps its row.
+        let mut idle = TextSurface::new(40, 2);
+        draw_foot(&mut idle, rect, None, &[]);
+        assert!(row_text(&idle, 40, 0).trim().is_empty());
     }
 }

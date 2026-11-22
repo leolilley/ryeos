@@ -1,0 +1,399 @@
+//! Composition of one node-signed runtime snapshot qualification binding.
+//!
+//! The binding is anchored to an installed production binding: its id and
+//! digest are read back from the verified document, and the qualification
+//! settings are the producer's own settings, so the restored Sandbox is
+//! created in the exact provider scope the snapshot was produced in. The
+//! operator adds the provider spec, the restored verifier artifact and the
+//! optional consumer verifier inventory.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, ensure};
+use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection;
+use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
+use serde::{Deserialize, Serialize};
+
+use super::{QualificationDocument, RuntimeSnapshotQualificationSection, SECTION_NAME};
+use crate::node_config::NodeConfigSection as _;
+use crate::node_config::sections::external_execution::compose::{
+    item_context, load_node_identity, publish_signed_document, sign_node_document,
+    validate_document_id, verify_node_signed,
+};
+use crate::node_config::sections::runtime_snapshot_production::compose::installed_production_binding;
+
+/// Largest provider spec the lifecycle adapter accepts.
+pub const MAX_PROVIDER_SPEC_BYTES: usize = 64 * 1024;
+
+/// Protocol of the qualification document this composer emits.
+const QUALIFICATION_PROTOCOL: &str = "ryeos.runtime-snapshot-qualification.v5";
+
+/// Budgets of one qualification attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualificationLimits {
+    pub contact_timeout_seconds: u32,
+    pub delivery_timeout_seconds: u32,
+    pub maximum_lifetime_seconds: u32,
+}
+
+impl Default for QualificationLimits {
+    fn default() -> Self {
+        Self {
+            contact_timeout_seconds: 60,
+            delivery_timeout_seconds: 600,
+            maximum_lifetime_seconds: 900,
+        }
+    }
+}
+
+/// One operator request to compose and install a qualification binding.
+pub struct QualificationComposeRequest<'a> {
+    pub app_root: &'a Path,
+    /// Proof that the node is stopped; no daemon may read the section while
+    /// it is rewritten.
+    pub state_lock: &'a ryeos_node_runtime::state_lock::StateLock,
+    pub id: String,
+    /// Installed production binding this qualification attempt restores.
+    pub snapshot_binding_id: String,
+    /// Bytes of the lifecycle provider spec the installed adapter carries.
+    pub provider_spec: Vec<u8>,
+    /// Content hash of the restored-runtime verifier executable.
+    pub verifier_artifact_hash: String,
+    /// Consumer verifier selections keyed by scenario id, as a JSON object;
+    /// absent means none.
+    pub consumer_verifiers: Option<serde_json::Value>,
+    /// The launch shape every occurrence under this binding is created with,
+    /// as a JSON object. Every binding states its shape; there is no default.
+    pub launch_shape: serde_json::Value,
+    pub limits: QualificationLimits,
+}
+
+/// What was installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QualificationComposeReport {
+    pub id: String,
+    pub path: PathBuf,
+    pub production_binding_id: String,
+    pub production_binding_digest: String,
+    pub provider_spec_digest: String,
+    pub verifier_artifact_hash: String,
+    pub settings_digest: String,
+    pub binding_digest: String,
+}
+
+/// Compose, sign with the node identity, verify the exact bytes the loader
+/// will read, and publish atomically.
+pub fn compose_runtime_snapshot_qualification_binding(
+    request: QualificationComposeRequest<'_>,
+) -> Result<QualificationComposeReport> {
+    request
+        .state_lock
+        .ensure_protects_app_root(request.app_root)?;
+    validate_document_id(&request.id, "runtime snapshot qualification binding")?;
+    ensure!(
+        !request.provider_spec.is_empty() && request.provider_spec.len() <= MAX_PROVIDER_SPEC_BYTES,
+        "provider spec must be 1..={MAX_PROVIDER_SPEC_BYTES} bytes"
+    );
+    ensure!(
+        serde_json::from_slice::<serde_json::Value>(&request.provider_spec)
+            .context("provider spec is not JSON")?
+            .is_object(),
+        "provider spec must be a JSON object"
+    );
+    let consumer_verifiers: BTreeMap<String, ConsumerRuntimeVerifierSelection> =
+        match request.consumer_verifiers {
+            Some(value) => serde_json::from_value(value).context("invalid consumer verifiers")?,
+            None => BTreeMap::new(),
+        };
+    let launch_shape: LaunchShape =
+        serde_json::from_value(request.launch_shape).context("invalid launch shape")?;
+    let identity = load_node_identity(request.app_root)?;
+    let producer =
+        installed_production_binding(request.app_root, &request.snapshot_binding_id, &identity)?;
+    let settings = producer.settings().clone();
+    let document = QualificationDocument {
+        kind: "node".into(),
+        schema: 6,
+        protocol: QUALIFICATION_PROTOCOL.into(),
+        production_binding_id: producer.id().to_owned(),
+        production_binding_digest: producer.digest().to_owned(),
+        provider_spec_digest: lillux::sha256_hex(&request.provider_spec),
+        settings_digest: producer.settings_digest().to_owned(),
+        settings,
+        verifier_artifact_hash: request.verifier_artifact_hash,
+        consumer_verifiers,
+        launch_shape,
+        contact_timeout_seconds: request.limits.contact_timeout_seconds,
+        delivery_timeout_seconds: request.limits.delivery_timeout_seconds,
+        maximum_lifetime_seconds: request.limits.maximum_lifetime_seconds,
+    };
+    document.validate()?;
+    let signed = sign_node_document(&serde_yaml::to_string(&document)?, &identity)?;
+    let body = verify_node_signed(&signed, &identity, "runtime snapshot qualification binding")?;
+    // The section parse is the loader's own gate for this document.
+    RuntimeSnapshotQualificationSection.parse(
+        &item_context(
+            request.app_root,
+            SECTION_NAME,
+            &request.id,
+            identity.fingerprint(),
+        ),
+        &body,
+    )?;
+    let digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "domain": "ryeos.runtime-snapshot-qualification-binding.v1",
+        "id": request.id,
+        "signer": identity.fingerprint(),
+        "signed_source": lillux::sha256_hex(signed.as_bytes()),
+    }))?;
+    let path = publish_signed_document(
+        request.app_root,
+        SECTION_NAME,
+        &request.id,
+        signed.as_bytes(),
+    )?;
+    Ok(QualificationComposeReport {
+        id: request.id,
+        path,
+        production_binding_id: document.production_binding_id,
+        production_binding_digest: document.production_binding_digest,
+        provider_spec_digest: document.provider_spec_digest,
+        verifier_artifact_hash: document.verifier_artifact_hash,
+        settings_digest: document.settings_digest,
+        binding_digest: digest,
+    })
+}
+
+/// Verify signed qualification bytes exactly as the loader would and build
+/// the installed authority from them.
+pub(crate) fn admit_signed_qualification(
+    app_root: &Path,
+    id: &str,
+    signed: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<super::InstalledRuntimeSnapshotQualificationBinding> {
+    let body = verify_node_signed(signed, identity, "runtime snapshot qualification binding")?;
+    // The section parse is the loader's own gate for this document.
+    RuntimeSnapshotQualificationSection.parse(
+        &item_context(app_root, SECTION_NAME, id, identity.fingerprint()),
+        &body,
+    )?;
+    let document: QualificationDocument =
+        serde_json::from_value(body).context("invalid runtime snapshot qualification binding")?;
+    document.validate()?;
+    let digest = super::binding_digest(id, identity.fingerprint(), signed)?;
+    Ok(super::InstalledRuntimeSnapshotQualificationBinding {
+        id: id.to_owned(),
+        document,
+        signer: identity.fingerprint().to_owned(),
+        signer_verifying_key: identity.verifying_key().to_bytes(),
+        signed_source: signed.into(),
+        digest,
+    })
+}
+
+/// Read an installed qualification binding back the way the loader admits it.
+pub(crate) fn installed_qualification_binding(
+    app_root: &Path,
+    id: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<super::InstalledRuntimeSnapshotQualificationBinding> {
+    validate_document_id(id, "runtime snapshot qualification binding")?;
+    let signed =
+        crate::node_config::sections::external_execution::compose::read_installed_document(
+            app_root,
+            SECTION_NAME,
+            id,
+        )?;
+    admit_signed_qualification(app_root, id, &signed, identity)
+}
+
+/// Re-pin the installed qualification binding to its producer's current
+/// digest, the producer adapter's installed provider spec and restoration
+/// verifier, and the given consumer selections (`None` carries the installed
+/// ones). Every other field is carried. Signs and verifies, publishes nothing.
+pub(crate) fn repin_qualification(
+    app_root: &Path,
+    installed: &super::InstalledRuntimeSnapshotQualificationBinding,
+    production_binding_digest: &str,
+    provider_spec_digest: &str,
+    verifier_artifact_hash: &str,
+    consumer_verifiers: Option<BTreeMap<String, ConsumerRuntimeVerifierSelection>>,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<
+    crate::node_config::recompose::RepinOutcome<
+        super::InstalledRuntimeSnapshotQualificationBinding,
+    >,
+> {
+    let mut document = installed.document.clone();
+    document.production_binding_digest = production_binding_digest.to_owned();
+    document.provider_spec_digest = provider_spec_digest.to_owned();
+    document.verifier_artifact_hash = verifier_artifact_hash.to_owned();
+    if let Some(selections) = consumer_verifiers {
+        document.consumer_verifiers = selections;
+    }
+    let fields_changed = crate::node_config::recompose::changed_fields(
+        &serde_json::to_value(&installed.document)?,
+        &serde_json::to_value(&document)?,
+    );
+    if fields_changed.is_empty() {
+        return Ok(crate::node_config::recompose::RepinOutcome::unchanged(
+            installed.clone(),
+        ));
+    }
+    document.validate()?;
+    let signed = sign_node_document(&serde_yaml::to_string(&document)?, identity)?;
+    let new = admit_signed_qualification(app_root, &installed.id, &signed, identity)?;
+    Ok(crate::node_config::recompose::RepinOutcome {
+        old: installed.clone(),
+        new,
+        signed: Some(signed),
+        fields_changed,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_launch_shape;
+    use super::*;
+    use crate::node_config::sections::runtime_snapshot_production::compose::tests::{
+        StoppedNode, install_production, stopped_node,
+    };
+
+    const PROVIDER_SPEC: &[u8] = br#"{"schema":1}"#;
+
+    fn request<'a>(node: &'a StoppedNode, id: &str) -> QualificationComposeRequest<'a> {
+        QualificationComposeRequest {
+            app_root: node.root.path(),
+            state_lock: &node.lock,
+            id: id.into(),
+            snapshot_binding_id: "snapshot-producer".into(),
+            provider_spec: PROVIDER_SPEC.to_vec(),
+            verifier_artifact_hash: "3".repeat(64),
+            consumer_verifiers: None,
+            launch_shape: serde_json::to_value(test_launch_shape()).unwrap(),
+            limits: QualificationLimits::default(),
+        }
+    }
+
+    #[test]
+    fn installs_a_document_bound_to_the_installed_producer() {
+        let node = stopped_node();
+        let producer = install_production(&node, "snapshot-producer");
+        let report =
+            compose_runtime_snapshot_qualification_binding(request(&node, "qualifier")).unwrap();
+        assert_eq!(report.production_binding_id, "snapshot-producer");
+        assert_eq!(report.production_binding_digest, producer.binding_digest);
+        assert_eq!(report.settings_digest, producer.settings_digest);
+        assert_eq!(
+            report.provider_spec_digest,
+            lillux::sha256_hex(PROVIDER_SPEC)
+        );
+        assert!(
+            report
+                .path
+                .ends_with(".ai/node/runtime_snapshot_qualification/qualifier.yaml")
+        );
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let identity = load_node_identity(node.root.path()).unwrap();
+        let body = verify_node_signed(&signed, &identity, "binding").unwrap();
+        let document: QualificationDocument = serde_json::from_value(body).unwrap();
+        document.validate().unwrap();
+        assert_eq!(document.settings["sandbox_group_id"], "sbg-exact");
+    }
+
+    #[test]
+    fn the_binding_carries_the_launch_shape_it_was_composed_with() {
+        let node = stopped_node();
+        install_production(&node, "snapshot-producer");
+        let report =
+            compose_runtime_snapshot_qualification_binding(request(&node, "qualifier")).unwrap();
+        let signed = std::fs::read_to_string(&report.path).unwrap();
+        let identity = load_node_identity(node.root.path()).unwrap();
+        let body = verify_node_signed(&signed, &identity, "binding").unwrap();
+        let document: QualificationDocument = serde_json::from_value(body).unwrap();
+        assert_eq!(document.launch_shape, test_launch_shape());
+    }
+
+    #[test]
+    fn an_absent_producer_is_refused_and_publishes_nothing() {
+        let node = stopped_node();
+        let error = compose_runtime_snapshot_qualification_binding(request(&node, "qualifier"))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is not installed"),
+            "{error:#}"
+        );
+        assert!(
+            !node
+                .root
+                .path()
+                .join(".ai/node/runtime_snapshot_qualification")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_lock_that_does_not_protect_the_app_root_is_refused() {
+        let node = stopped_node();
+        install_production(&node, "snapshot-producer");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let other = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(elsewhere.path()),
+        )
+        .unwrap();
+        let mut req = request(&node, "qualifier");
+        req.state_lock = &other;
+        assert!(compose_runtime_snapshot_qualification_binding(req).is_err());
+        assert!(
+            !node
+                .root
+                .path()
+                .join(".ai/node/runtime_snapshot_qualification")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn invalid_fields_are_refused_and_publish_nothing() {
+        let node = stopped_node();
+        install_production(&node, "snapshot-producer");
+        let refused = |mutate: &dyn Fn(&mut QualificationComposeRequest<'_>)| {
+            let mut req = request(&node, "qualifier");
+            mutate(&mut req);
+            format!(
+                "{:#}",
+                compose_runtime_snapshot_qualification_binding(req).unwrap_err()
+            )
+        };
+        assert!(
+            refused(&|r| r.verifier_artifact_hash = "nope".into()).contains("verifier artifact")
+        );
+        assert!(refused(&|r| r.provider_spec = Vec::new()).contains("1..="));
+        assert!(refused(&|r| r.provider_spec = b"[]".to_vec()).contains("JSON object"));
+        assert!(
+            refused(&|r| r.consumer_verifiers = Some(serde_json::json!([1])))
+                .contains("consumer verifiers")
+        );
+        assert!(
+            refused(&|r| r.consumer_verifiers = Some(serde_json::json!({"s": {"bogus": 1}})))
+                .contains("consumer verifiers")
+        );
+        assert!(
+            refused(&|r| r.launch_shape = serde_json::json!({"bogus": 1})).contains("launch shape")
+        );
+        assert!(refused(&|r| r.launch_shape = serde_json::Value::Null).contains("launch shape"));
+        assert!(refused(&|r| r.limits.maximum_lifetime_seconds = 3601).contains("budget"));
+        assert!(refused(&|r| r.limits.delivery_timeout_seconds = 59).contains("budget"));
+        assert!(refused(&|r| r.snapshot_binding_id = "../x".into()).contains("id is invalid"));
+        assert!(refused(&|r| r.id = ".hidden".into()).contains("id is invalid"));
+        assert!(
+            !node
+                .root
+                .path()
+                .join(".ai/node/runtime_snapshot_qualification")
+                .exists()
+        );
+    }
+}

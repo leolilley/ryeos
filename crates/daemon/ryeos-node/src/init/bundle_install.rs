@@ -76,7 +76,7 @@ pub(super) fn replace_bundle(
         if let Err(error) = lillux::remove_dir_all_durable(&staging) {
             tracing::warn!(
                 path = %staging.display(),
-                error = %error,
+                error = %format!("{error:#}"),
                 "bundle replacement committed but previous generation cleanup failed"
             );
         }
@@ -185,12 +185,8 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         } else {
             fs::copy(&from, &to)
                 .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
-            // Preserve the source mtime (best-effort): bundle verification
-            // includes an mtime-based manifest-freshness check
-            // (manifest.yaml must not be older than manifest.source.yaml),
-            // and a copy stamping fresh mtimes in directory-iteration order
-            // can invert that relationship on the installed tree — a
-            // millisecond of copy-order skew then reads as a stale manifest.
+            // Preserve the source mtime (best-effort) for fidelity; no
+            // verification depends on it.
             if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
                 let destination = fs::File::options().write(true).open(&to);
                 if let Ok(file) = destination {

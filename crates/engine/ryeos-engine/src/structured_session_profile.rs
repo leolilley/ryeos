@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 use ryeos_state::objects::{
-    AdmittedStructuredSessionProfile, MAX_SESSION_CONFIGURATION_FILE_BYTES,
+    AdmittedStructuredSessionProfile, ConfigurationAbsence, MAX_SESSION_CONFIGURATION_FILE_BYTES,
     MAX_STRUCTURED_SESSION_PROFILE_BYTES, SessionConfigurationFile,
     SessionRuntimeConfigurationFile, validate_session_auxiliary_configs,
     validate_session_runtime_configs,
@@ -20,9 +20,11 @@ use ryeos_state::objects::{
 
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-/// v10 commits an external provider's generated private configuration
-/// destination so capture/restore exclusions are sealed before node contact.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 10;
+/// v11 seals the finite absence inventory checked before workload bootstrap.
+/// v12 removes the approval `cancel` response template.
+pub use ryeos_state::objects::{
+    STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, StructuredSessionProfileSchemaRefusal,
+};
 
 /// The closed workload transport vocabulary. The admission compiler and the
 /// bridge must accept exactly this set; adding a transport is a schema
@@ -75,6 +77,7 @@ pub fn compile(
         "baseline_destination",
         "auxiliary_configs",
         "runtime_configs",
+        "configuration_absence",
         "external_candidate",
         "portable_state",
         "credential_subject",
@@ -87,10 +90,11 @@ pub fn compile(
         "server_requests",
     ]
     .to_vec();
-    if object.get("schema_version").and_then(Value::as_u64)
-        != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION))
-    {
-        bail!("structured-session profile schema is not admitted");
+    let schema_version = object.get("schema_version").and_then(Value::as_u64);
+    if schema_version != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION)) {
+        return Err(anyhow::Error::new(StructuredSessionProfileSchemaRefusal {
+            found: schema_version,
+        }));
     }
     required.push("transport");
     let http_transport = match object.get("transport").and_then(Value::as_str) {
@@ -180,6 +184,13 @@ pub fn compile(
         (false, None) => {
             bail!("structured-session HTTP credential block must be present and nullable");
         }
+    }
+    if let Some(requires) = object.get("requires") {
+        required.push("requires");
+        let remote = object
+            .get("external_candidate")
+            .is_some_and(|candidate| !candidate.is_null());
+        validate_placement_requirements(requires, remote)?;
     }
     if object.len() != required.len() || required.iter().any(|key| !object.contains_key(*key)) {
         bail!("structured-session profile has an unknown or missing top-level field");
@@ -701,6 +712,7 @@ pub fn compile(
         }
     }
     let mut notification_methods = BTreeSet::new();
+    let mut result_notifications = 0usize;
     for item in bounded_array(object, "notifications", 0, 256)? {
         let item = item
             .as_object()
@@ -715,6 +727,9 @@ pub fn compile(
                 "payload",
                 "observations",
                 "ceremony_clear",
+                "result",
+                "result_cost",
+                "result_status",
             ],
             &["upstream_session_pointer"],
         )?;
@@ -729,9 +744,19 @@ pub fn compile(
                 .get("ceremony_clear")
                 .and_then(Value::as_bool)
                 .is_none()
+            || item.get("result").and_then(Value::as_bool).is_none()
         {
             bail!("structured-session notification flags are invalid");
         }
+        if item["result"] == true {
+            result_notifications += 1;
+            if result_notifications > 1 {
+                bail!("structured-session profile marks more than one result notification");
+            }
+            validate_result_notification(item)?;
+        }
+        validate_result_cost(item)?;
+        validate_result_status(item)?;
         validate_template(item.get("payload"), 0, &mut 0)?;
         if let Some(pointer) = item.get("upstream_session_pointer") {
             validate_pointer(
@@ -894,7 +919,7 @@ pub fn compile(
             .get("responses")
             .and_then(Value::as_object)
             .ok_or_else(|| anyhow!("structured-session server-request responses are invalid"))?;
-        const RESPONSE_KEYS: [&str; 4] = ["accept", "cancel", "decline", "expire"];
+        const RESPONSE_KEYS: [&str; 3] = ["accept", "decline", "expire"];
         if responses.len() != RESPONSE_KEYS.len()
             || RESPONSE_KEYS
                 .iter()
@@ -1006,6 +1031,10 @@ pub fn compile(
         serde_json::from_value(object["runtime_configs"].clone())
             .context("decode signed runtime configuration inventory")?;
     validate_session_runtime_configs(&runtime_configs)?;
+    let configuration_absence: ConfigurationAbsence =
+        serde_json::from_value(object["configuration_absence"].clone())
+            .context("decode signed configuration absence inventory")?;
+    configuration_absence.validate_runtime_configs(&runtime_configs)?;
     for config in &runtime_configs {
         let bytes = source_files
             .get(&config.source)
@@ -1036,6 +1065,7 @@ pub fn compile(
         baseline_destination,
         auxiliary_configs,
         runtime_configs,
+        configuration_absence,
     };
     admitted.validate()?;
     Ok(admitted)
@@ -1476,6 +1506,147 @@ fn value_string<'a>(object: &'a serde_json::Map<String, Value>, key: &str) -> Re
         .ok_or_else(|| anyhow!("structured-session `{key}` must be a string"))
 }
 
+/// The most entries one placement requirement list may hold.
+pub const MAX_PLACEMENT_REQUIREMENT_ENTRIES: usize = 64;
+/// The most credential kinds one profile may declare.
+pub const MAX_CREDENTIAL_KINDS: usize = 16;
+
+type Requirement = lillux::process_control::CapabilityRequirement;
+
+/// The placement requirements a structured-session profile declares as data.
+///
+/// `workload_class` is the id a refusal names. `controller` lists the
+/// guarantees the node running the workload's app server must prove in its
+/// capability report. `credential_kinds` names every credential kind the
+/// workload supports, each with the guarantees the node must prove for that
+/// kind: admission evaluates only the list of the kind the launch's
+/// credential binding names, and refuses a binding that names no kind or an
+/// undeclared one, so one kind never stands in for another. `lease` and
+/// `guest` list what a remote lease provider and its activated guest must
+/// attest, so only a profile with an external candidate may name them.
+/// They are parsed and validated here and judged at placement, not at
+/// session admission: the lease list goes to the lease adapter's admission
+/// before any provider contact, which refuses when the provider cannot
+/// attest it; the guest list is carried in the admitted lease request and is
+/// judged against the guest's own report once the guest channel delivers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementRequirements {
+    pub workload_class: String,
+    pub controller: Vec<Requirement>,
+    pub credential_kinds: BTreeMap<String, Vec<Requirement>>,
+    pub lease: Vec<Requirement>,
+    pub guest: Vec<Requirement>,
+}
+
+/// The placement requirements of an admission-compiled profile contract,
+/// or `None` when the profile declares none.
+pub fn placement_requirements(contract: &Value) -> Result<Option<PlacementRequirements>> {
+    let Some(requires) = contract.get("requires") else {
+        return Ok(None);
+    };
+    let remote = contract
+        .get("external_candidate")
+        .is_some_and(|candidate| !candidate.is_null());
+    parse_placement_requirements(requires, remote).map(Some)
+}
+
+/// The placement of the program an external-candidate profile admits: the
+/// profile's workload class and lease and guest requirement floors, with the
+/// readiness budget its Worker declares. A profile with an external candidate
+/// must declare `requires`; there is no default.
+pub fn external_program_placement(
+    contract: &Value,
+    ready_timeout_ms: u64,
+) -> Result<ryeos_state::external_execution::admission::ExternalProgramPlacement> {
+    let requirements = placement_requirements(contract)?
+        .ok_or_else(|| anyhow!("external candidate profile declares no `requires`"))?;
+    let placement = ryeos_state::external_execution::admission::ExternalProgramPlacement {
+        workload_class: requirements.workload_class,
+        lease: requirements.lease,
+        guest: requirements.guest,
+        ready_timeout_ms,
+    };
+    placement.validate()?;
+    Ok(placement)
+}
+
+fn validate_placement_requirements(requires: &Value, remote: bool) -> Result<()> {
+    parse_placement_requirements(requires, remote).map(|_| ())
+}
+
+fn parse_placement_requirements(requires: &Value, remote: bool) -> Result<PlacementRequirements> {
+    let object = requires
+        .as_object()
+        .ok_or_else(|| anyhow!("structured-session `requires` must be a mapping"))?;
+    require_keys(
+        object,
+        &["workload_class", "controller", "credential_kinds"],
+        &["lease", "guest"],
+    )?;
+    let workload_class = value_string(object, "workload_class")?;
+    validate_identifier(workload_class)?;
+    if !remote && (object.contains_key("lease") || object.contains_key("guest")) {
+        bail!(
+            "structured-session `requires.lease` and `requires.guest` need an external candidate"
+        );
+    }
+    let list = |key: &str| -> Result<Vec<Requirement>> {
+        match object.get(key) {
+            Some(value) => requirement_list(&format!("requires.{key}"), value),
+            None => Ok(Vec::new()),
+        }
+    };
+    let kinds = object
+        .get("credential_kinds")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            anyhow!("structured-session `requires.credential_kinds` must be a mapping")
+        })?;
+    if kinds.is_empty() || kinds.len() > MAX_CREDENTIAL_KINDS {
+        bail!(
+            "structured-session `requires.credential_kinds` must declare between 1 and \
+             {MAX_CREDENTIAL_KINDS} credential kinds"
+        );
+    }
+    let mut credential_kinds = BTreeMap::new();
+    for (kind, value) in kinds {
+        validate_identifier(kind)?;
+        let entries = requirement_list(&format!("requires.credential_kinds.{kind}"), value)?;
+        if entries.is_empty() {
+            bail!(
+                "structured-session `requires.credential_kinds.{kind}` must name what the node \
+                 proves for that kind"
+            );
+        }
+        credential_kinds.insert(kind.clone(), entries);
+    }
+    Ok(PlacementRequirements {
+        workload_class: workload_class.to_owned(),
+        controller: list("controller")?,
+        credential_kinds,
+        lease: list("lease")?,
+        guest: list("guest")?,
+    })
+}
+
+/// One bounded list of capability floor entries, each well formed and the
+/// list sorted and unique by label.
+fn requirement_list(path: &str, value: &Value) -> Result<Vec<Requirement>> {
+    let entries: Vec<Requirement> = serde_json::from_value(value.clone())
+        .with_context(|| format!("structured-session `{path}` is not a list of entries"))?;
+    if entries.len() > MAX_PLACEMENT_REQUIREMENT_ENTRIES {
+        bail!("structured-session `{path}` count is outside its bound");
+    }
+    if let Some(reason) = entries.iter().find_map(|entry| entry.spec_refusal()) {
+        bail!("structured-session `{path}`: {reason}");
+    }
+    let labels: Vec<String> = entries.iter().map(|entry| entry.label()).collect();
+    if labels.windows(2).any(|pair| pair[0] >= pair[1]) {
+        bail!("structured-session `{path}` entries must be sorted and unique");
+    }
+    Ok(entries)
+}
+
 fn require_keys(
     object: &serde_json::Map<String, Value>,
     required: &[&str],
@@ -1770,6 +1941,134 @@ fn validate_predicates(value: Option<&Value>, maximum: usize) -> Result<()> {
     Ok(())
 }
 
+/// A result notification is the execution's result: it must be retained
+/// (durable), its evaluated payload is the result so every pointer in it must
+/// be byte-bounded, and it must carry the `turn_running -> idle` observation
+/// so the result is bound to the turn it completes.
+fn validate_result_notification(item: &serde_json::Map<String, Value>) -> Result<()> {
+    if item["durable"] != true {
+        bail!("structured-session result notification must be durable");
+    }
+    if !template_pointers_are_bounded(&item["payload"]) {
+        bail!("structured-session result notification payload has an unbounded pointer");
+    }
+    let carries_completion =
+        item["observations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|observation| {
+                let literal = |field: &str, expected: &str| {
+                    observation
+                        .pointer(&format!("/value/fields/{field}"))
+                        .is_some_and(|value| {
+                            *value == serde_json::json!({"op":"literal","value":expected})
+                        })
+                };
+                literal("kind", "state")
+                    && literal("expected", "turn_running")
+                    && literal("next", "idle")
+            });
+    if !carries_completion {
+        bail!(
+            "structured-session result notification must carry the turn_running to idle observation"
+        );
+    }
+    Ok(())
+}
+
+/// `result_cost` is required on every notification and nullable. It declares
+/// where the result payload reports its usage: three JSON pointers (each
+/// nullable) applied to the notification's evaluated durable payload. Only the
+/// result-marked notification may declare it.
+fn validate_result_cost(item: &serde_json::Map<String, Value>) -> Result<()> {
+    let declared = &item["result_cost"];
+    if declared.is_null() {
+        return Ok(());
+    }
+    if item["result"] != true {
+        bail!("structured-session result_cost is only valid on the result notification");
+    }
+    let declared = declared
+        .as_object()
+        .ok_or_else(|| anyhow!("structured-session result_cost must be an object or null"))?;
+    require_keys(
+        declared,
+        &["input_tokens", "output_tokens", "cost_micro_usd"],
+        &[],
+    )?;
+    for pointer in declared.values() {
+        if pointer.is_null() {
+            continue;
+        }
+        validate_pointer(
+            pointer
+                .as_str()
+                .ok_or_else(|| anyhow!("structured-session result_cost pointer is invalid"))?,
+        )?;
+    }
+    Ok(())
+}
+
+/// `result_status` is required on every notification and nullable. It declares
+/// which value of the result payload reports the turn's outcome: a JSON
+/// pointer into the evaluated durable payload and the values that mean the
+/// workload failed (non-empty strings, sorted, distinct, at most 16). Only the
+/// result-marked notification may declare it.
+fn validate_result_status(item: &serde_json::Map<String, Value>) -> Result<()> {
+    let declared = &item["result_status"];
+    if declared.is_null() {
+        return Ok(());
+    }
+    if item["result"] != true {
+        bail!("structured-session result_status is only valid on the result notification");
+    }
+    let declared = declared
+        .as_object()
+        .ok_or_else(|| anyhow!("structured-session result_status must be an object or null"))?;
+    require_keys(declared, &["pointer", "failure_values"], &[])?;
+    validate_pointer(
+        declared["pointer"]
+            .as_str()
+            .ok_or_else(|| anyhow!("structured-session result_status pointer is invalid"))?,
+    )?;
+    let values = declared["failure_values"]
+        .as_array()
+        .filter(|values| !values.is_empty() && values.len() <= 16)
+        .ok_or_else(|| {
+            anyhow!("structured-session result_status failure_values must hold 1 to 16 entries")
+        })?;
+    let mut previous: Option<&str> = None;
+    for value in values {
+        let value = value
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow!("structured-session result_status failure value must be a non-empty string")
+            })?;
+        if previous.is_some_and(|previous| previous >= value) {
+            bail!("structured-session result_status failure_values must be sorted and distinct");
+        }
+        previous = Some(value);
+    }
+    Ok(())
+}
+
+fn template_pointers_are_bounded(template: &Value) -> bool {
+    match template.get("op").and_then(Value::as_str) {
+        Some("pointer") => template.get("max_string_bytes").is_some(),
+        Some("object") => template
+            .get("fields")
+            .and_then(Value::as_object)
+            .is_some_and(|fields| fields.values().all(template_pointers_are_bounded)),
+        Some("array") => template
+            .get("values")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().all(template_pointers_are_bounded)),
+        _ => true,
+    }
+}
+
 fn validate_observations(value: Option<&Value>, maximum: usize) -> Result<()> {
     let observations = value
         .and_then(Value::as_array)
@@ -1782,6 +2081,38 @@ fn validate_observations(value: Option<&Value>, maximum: usize) -> Result<()> {
         require_keys(observation, &["when", "value"], &[])?;
         validate_predicates(observation.get("when"), 16)?;
         validate_template(observation.get("value"), 0, &mut 0)?;
+        validate_observation_kind(observation.get("value"))?;
+    }
+    Ok(())
+}
+
+/// The observation kinds the dedicated-session runtime records. An
+/// observation is an object template whose `kind` is one of these literals,
+/// so a misnamed kind is refused when the profile is validated rather than
+/// when a session first reports it.
+const WORKER_OBSERVATION_KINDS: &[&str] = &[
+    "approval_expired",
+    "credential_enrollment_cancelled",
+    "credential_enrollment_observed",
+    "credential_enrollment_started",
+    "remote_thread",
+    "remote_thread_recovered",
+    "remote_thread_recovery_status",
+    "state",
+];
+
+fn validate_observation_kind(template: Option<&Value>) -> Result<()> {
+    let kind = template
+        .filter(|template| template.get("op").and_then(Value::as_str) == Some("object"))
+        .and_then(|template| template.pointer("/fields/kind"))
+        .filter(|kind| kind.get("op").and_then(Value::as_str) == Some("literal"))
+        .and_then(|kind| kind.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            anyhow!("structured-session observation must be an object with a literal kind")
+        })?;
+    if !WORKER_OBSERVATION_KINDS.contains(&kind) {
+        bail!("structured-session observation kind `{kind}` is not a worker observation kind");
     }
     Ok(())
 }
@@ -1962,6 +2293,7 @@ mod tests {
             "baseline_destination":"runtime.conf",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "configuration_absence":{"absolute_paths":[],"startup_ancestor_paths":[],"route_ancestor_paths":[]},
             "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
@@ -2028,6 +2360,64 @@ mod tests {
         profile["routes"][0]["http_path"] = json!("/session");
         profile["routes"][0]["http_body_schema"] = json!("schema/request.json");
         profile["routes"][0]["http_path_parameters"] = json!({});
+    }
+
+    #[test]
+    fn configuration_absence_is_required_and_retained_without_reinterpretation() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        profile["configuration_absence"] = json!({"absolute_paths":["/etc/fixture/policy"],"startup_ancestor_paths":["runtime.conf"],"route_ancestor_paths":["runtime.conf"]});
+        let admitted = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
+        // The same leaf as the HOME baseline is legal: cwd and HOME differ.
+        admitted.validate().unwrap();
+        let mut changed = admitted.clone();
+        changed.configuration_absence.absolute_paths[0] = "/etc/fixture/other".into();
+        assert!(changed.validate().is_err());
+        let mut missing = serde_json::to_value(&admitted).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration_absence");
+        assert!(serde_json::from_value::<AdmittedStructuredSessionProfile>(missing).is_err());
+        let mut predecessor = admitted.clone();
+        predecessor.contract["schema_version"] = json!(10);
+        predecessor.profile_hash =
+            ryeos_state::objects::canonical_value_digest(&predecessor.contract).unwrap();
+        assert!(predecessor.validate().is_err());
+        let mut old_contract = admitted.clone();
+        old_contract
+            .contract
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration_absence");
+        old_contract.profile_hash =
+            ryeos_state::objects::canonical_value_digest(&old_contract.contract).unwrap();
+        assert!(old_contract.validate().is_err());
+        profile
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration_absence");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+        profile["schema_version"] = json!(10);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+    }
+
+    #[test]
+    fn configuration_absence_refuses_positive_runtime_file_overlap() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        profile["runtime_configs"] =
+            json!([{"source":"policy", "destination":"/etc/fixture/policy"}]);
+        let mut files = schemas();
+        files.insert("policy".into(), b"enabled=false".to_vec());
+        for absent in [
+            "/etc/fixture",
+            "/etc/fixture/policy",
+            "/etc/fixture/policy/child",
+        ] {
+            profile["configuration_absence"] = json!({"absolute_paths":[absent],"startup_ancestor_paths":[],"route_ancestor_paths":[]});
+            assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        }
     }
 
     #[test]
@@ -2144,9 +2534,91 @@ mod tests {
         }
         let mut files = BTreeMap::new();
         collect(&root, &root, &mut files);
-        for name in ["authoring.profile.json", "structured-session.profile.json"] {
+        for name in [
+            "authoring.profile.json",
+            "structured-session.profile.json",
+            "external-authoring.profile.json",
+        ] {
             compile(&files[name], &files).unwrap();
         }
+        // The remote authoring profile declares its placement requirements
+        // as data, with one requirement list per credential kind it supports.
+        let remote: Value =
+            serde_json::from_slice(&files["external-authoring.profile.json"]).unwrap();
+        assert_eq!(
+            remote["requires"]["workload_class"],
+            "codex.authoring.remote"
+        );
+        let admitted = compile(&files["external-authoring.profile.json"], &files).unwrap();
+        let requirements = placement_requirements(&admitted.contract).unwrap().unwrap();
+        assert_eq!(
+            requirements.credential_kinds.keys().collect::<Vec<_>>(),
+            ["credential_profile"]
+        );
+        assert_eq!(
+            requirements.credential_kinds["credential_profile"][0].label(),
+            "credential:private_home"
+        );
+        let too_many: Vec<String> = (0..=MAX_PLACEMENT_REQUIREMENT_ENTRIES)
+            .map(|index| format!("n{index:03}"))
+            .collect();
+        for (pointer, value, refusal) in [
+            (
+                "/requires/controller",
+                json!(["time", "accounting"]),
+                "sorted and unique",
+            ),
+            ("/requires/controller", json!(too_many), "outside its bound"),
+            ("/requires/credential_kinds", json!({}), "between 1 and"),
+            (
+                "/requires/credential_kinds",
+                json!({"credential_profile": []}),
+                "must name what",
+            ),
+            (
+                "/requires/credential_kinds",
+                json!({"credential profile": ["time"]}),
+                "identifier",
+            ),
+            (
+                "/requires/credential_kinds",
+                json!({"credential_profile": [{"any_of": []}]}),
+                "neither name nor any_of",
+            ),
+            (
+                "/requires/guest",
+                json!([{"name": "guest.exec_route_closed", "accept": ["peer_attested"]}]),
+                "peer_attested",
+            ),
+            (
+                "/requires/workload_class",
+                json!("codex authoring"),
+                "identifier",
+            ),
+        ] {
+            let mut invalid = remote.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            let error = compile(&serde_json::to_vec(&invalid).unwrap(), &files).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(refusal),
+                "{pointer}: {error:#}"
+            );
+        }
+        for extra in ["extra", "credential"] {
+            let mut unknown = remote.clone();
+            unknown["requires"][extra] = json!([]);
+            assert!(
+                compile(&serde_json::to_vec(&unknown).unwrap(), &files).is_err(),
+                "{extra}"
+            );
+        }
+        let mut local: Value = serde_json::from_slice(&files["authoring.profile.json"]).unwrap();
+        local["requires"] = remote["requires"].clone();
+        let error = compile(&serde_json::to_vec(&local).unwrap(), &files).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("need an external candidate"),
+            "{error:#}"
+        );
         // Early lifecycle authority must be correlated before the daemon ACK
         // can permit a child; final-response corroboration is too late.
         let profile: Value = serde_json::from_slice(&files["authoring.profile.json"]).unwrap();
@@ -2198,6 +2670,293 @@ mod tests {
             profile.contract.get("transport").and_then(Value::as_str),
             Some("http_sse")
         );
+    }
+
+    /// Every file under one bundle's `lib/hosted` source directory, keyed by
+    /// its path relative to that directory, exactly as admission captures it.
+    fn bundle_source_set(relative: &str) -> BTreeMap<String, Vec<u8>> {
+        fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    assert!(entry.file_type().unwrap().is_file());
+                    files.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let root = crate::test_support::workspace_root().join(relative);
+        let mut files = BTreeMap::new();
+        collect(&root, &root, &mut files);
+        files
+    }
+
+    #[test]
+    fn claude_code_stdio_profile_compiles_from_the_exact_local_source_set() {
+        let files = bundle_source_set("bundles/claude-code/.ai/workers/claude-code/lib/hosted");
+        let admitted = compile(&files["structured-session.profile.json"], &files)
+            .expect("the authored claude-code profile must compile from its local source set");
+        let contract = &admitted.contract;
+        assert_eq!(
+            contract.get("transport").and_then(Value::as_str),
+            Some("stdio_jsonrpc")
+        );
+        assert_eq!(admitted.baseline_destination, "settings.json");
+        assert!(contract["credential_subject"].is_null());
+        assert!(contract["portable_state"].is_null());
+        // Every route set carries the recovery pair (the continuation set
+        // carries nothing else that starts a session), and the bounded turn's
+        // lifecycle is observed from the route and from its notifications.
+        assert_eq!(
+            contract["recovery"]["route_sets"],
+            json!(["continue", "read_only", "session"])
+        );
+        assert!(
+            !contract["route_sets"]["continue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|route| route.as_str().unwrap().starts_with("session.start"))
+        );
+        let completed = contract["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["method"] == "turn/completed")
+            .unwrap();
+        assert_eq!(completed["durable"], true);
+        assert_eq!(completed["result"], true);
+        assert_eq!(
+            completed["observations"][0]["value"]["fields"]["completed_turn_id"]["pointer"],
+            "/message/params/completed_turn_id"
+        );
+    }
+
+    fn claude_code_profile_with(mutate: impl FnOnce(&mut Value)) -> Result<()> {
+        let mut files = bundle_source_set("bundles/claude-code/.ai/workers/claude-code/lib/hosted");
+        let mut profile: Value =
+            serde_json::from_slice(&files["structured-session.profile.json"]).unwrap();
+        mutate(&mut profile);
+        let bytes = serde_json::to_vec(&profile).unwrap();
+        files.insert("structured-session.profile.json".to_owned(), bytes.clone());
+        compile(&bytes, &files).map(drop)
+    }
+
+    #[test]
+    fn result_marker_is_a_required_boolean_on_every_notification() {
+        claude_code_profile_with(|_| {}).unwrap();
+        for bad in [json!(null), json!("true"), json!(1)] {
+            let error = claude_code_profile_with(|profile| {
+                profile["notifications"][1]["result"] = bad.clone();
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("notification flags are invalid"));
+        }
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("result");
+        })
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn result_cost_is_required_nullable_and_only_on_the_result_notification() {
+        claude_code_profile_with(|_| {}).unwrap();
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("result_cost");
+        })
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]["result_cost"] = json!({
+                "input_tokens": "/a", "output_tokens": null, "cost_micro_usd": null
+            });
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("only valid on the result"));
+        for bad in [
+            json!("/a"),
+            json!({"input_tokens": "/a"}),
+            json!({"input_tokens": "a", "output_tokens": null, "cost_micro_usd": null}),
+            json!({"input_tokens": 1, "output_tokens": null, "cost_micro_usd": null}),
+            json!({"input_tokens": null, "output_tokens": null, "cost_micro_usd": null,
+                   "extra": null}),
+        ] {
+            claude_code_profile_with(|profile| {
+                let index = profile["notifications"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .position(|n| n["result"] == true)
+                    .unwrap();
+                profile["notifications"][index]["result_cost"] = bad.clone();
+            })
+            .unwrap_err();
+        }
+        claude_code_profile_with(|profile| {
+            let index = profile["notifications"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|n| n["result"] == true)
+                .unwrap();
+            profile["notifications"][index]["result_cost"] = json!(null);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn result_status_is_required_nullable_and_validated() {
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("result_status");
+        })
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]["result_status"] =
+                json!({"pointer": "/status", "failure_values": ["failed"]});
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("only valid on the result"));
+        let seventeen: Vec<Value> = (0..17).map(|i| json!(format!("v{i:02}"))).collect();
+        for bad in [
+            json!("/status"),
+            json!({"pointer": "/status"}),
+            json!({"pointer": "status", "failure_values": ["failed"]}),
+            json!({"pointer": "/status", "failure_values": []}),
+            json!({"pointer": "/status", "failure_values": [""]}),
+            json!({"pointer": "/status", "failure_values": [1]}),
+            json!({"pointer": "/status", "failure_values": ["b", "a"]}),
+            json!({"pointer": "/status", "failure_values": ["a", "a"]}),
+            json!({"pointer": "/status", "failure_values": seventeen}),
+            json!({"pointer": "/status", "failure_values": ["a"], "extra": 1}),
+        ] {
+            claude_code_profile_with(|profile| {
+                let index = profile["notifications"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .position(|n| n["result"] == true)
+                    .unwrap();
+                profile["notifications"][index]["result_status"] = bad.clone();
+            })
+            .unwrap_err();
+        }
+        claude_code_profile_with(|profile| {
+            let index = profile["notifications"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|n| n["result"] == true)
+                .unwrap();
+            profile["notifications"][index]["result_status"] =
+                json!({"pointer": "/status", "failure_values": ["crashed", "failed"]});
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn at_most_one_notification_carries_the_result_marker() {
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]["result"] = json!(true);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("more than one result notification")
+        );
+        // No result notification at all is a valid profile.
+        claude_code_profile_with(|profile| {
+            profile["notifications"][0]["result"] = json!(false);
+            profile["notifications"][0]["result_cost"] = json!(null);
+            profile["notifications"][0]["result_status"] = json!(null);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn the_result_notification_carries_the_turn_completion_observation() {
+        // The turn-start notification carries the idle to turn_running edge,
+        // not the completion edge.
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["result"] = json!(false);
+            profile["notifications"][0]["result_cost"] = json!(null);
+            profile["notifications"][0]["result_status"] = json!(null);
+            profile["notifications"][1]["result"] = json!(true);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("turn_running to idle observation")
+        );
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["observations"] = json!([]);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("turn_running to idle observation")
+        );
+    }
+
+    #[test]
+    fn an_observation_kind_outside_the_worker_set_is_refused() {
+        let error = claude_code_profile_with(|profile| {
+            profile["routes"][0]["observations"][0]["value"]["fields"]["kind"]["value"] =
+                json!("remote_session");
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("`remote_session` is not a worker observation kind"),
+            "{error:#}"
+        );
+        let error = claude_code_profile_with(|profile| {
+            profile["routes"][0]["observations"][0]["value"]["fields"]["kind"] =
+                json!({"op": "pointer", "pointer": "/response/result/kind", "max_string_bytes": 64});
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("an object with a literal kind"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_result_notification_is_durable_and_its_pointers_are_bounded() {
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["durable"] = json!(false);
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("must be durable"));
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["payload"]["fields"]["result"]
+                .as_object_mut()
+                .unwrap()
+                .remove("max_string_bytes");
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("unbounded pointer"));
     }
 
     #[test]
@@ -2412,7 +3171,10 @@ mod tests {
                         "durable":false,
                         "payload":{"op":"literal","value":null},
                         "observations":[],
-                        "ceremony_clear":false
+                        "ceremony_clear":false,
+                        "result":false,
+                        "result_cost":null,
+                        "result_status":null
                     })
                 })
                 .collect(),
@@ -2447,7 +3209,8 @@ mod tests {
             .unwrap()
             .remove("external_candidate");
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
-        profile["external_candidate"] = json!({"schema":6,
+        profile["external_candidate"] = json!({"schema":7,
+        "runtime_authority":"captured_product",
         "protocol":ryeos_state::external_execution::admission::PROTOCOL,
         "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
         "execution_route":"connector_only",
@@ -2570,7 +3333,25 @@ mod tests {
 
         let mut retired = profile.clone();
         retired["schema_version"] = json!(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION - 1);
-        assert!(compile(&serde_json::to_vec(&retired).unwrap(), &schemas()).is_err());
+        let refusal = compile(&serde_json::to_vec(&retired).unwrap(), &schemas()).unwrap_err();
+        assert_eq!(
+            refusal.downcast_ref::<StructuredSessionProfileSchemaRefusal>(),
+            Some(&StructuredSessionProfileSchemaRefusal {
+                found: Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION - 1)),
+            })
+        );
+        assert!(refusal.to_string().contains("Cure: migrate the profile"));
+        let mut unversioned = profile.clone();
+        unversioned
+            .as_object_mut()
+            .unwrap()
+            .remove("schema_version");
+        assert_eq!(
+            compile(&serde_json::to_vec(&unversioned).unwrap(), &schemas())
+                .unwrap_err()
+                .downcast_ref::<StructuredSessionProfileSchemaRefusal>(),
+            Some(&StructuredSessionProfileSchemaRefusal { found: None })
+        );
 
         for invalid in ["", "stdio", "auto", "HTTP_SSE", "unix_socket"] {
             let mut closed = profile.clone();
@@ -2686,7 +3467,6 @@ mod tests {
             },
             "responses":{
                 "accept":{"op":"literal","value":{"response":"once"}},
-                "cancel":{"op":"literal","value":{"response":"deny"}},
                 "decline":{"op":"literal","value":{"response":"deny"}},
                 "expire":{"op":"literal","value":{"response":"deny"}}
             },

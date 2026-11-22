@@ -7,13 +7,19 @@
 //!    via the verified-loader (signature + trust-class checked at boot).
 //! 2. Directive declares `model.tier: general`; `model_routing.yaml`
 //!    maps that tier to provider `mock`.
-//! 3. `crates/runtimes/directive/src/bootstrap.rs::resolve_provider`
-//!    picks the YAML up at spawn time and serialises it into the
-//!    runtime's `BootstrapConfig`.
-//! 4. `provider_adapter/http.rs::call_provider` reads
-//!    `auth.env_var`, calls `std::env::var(...)`, and adds
-//!    `<header_name>: <prefix><secret>` to the outbound request.
-//! 5. The daemon's runtime spawn (`execution/launch.rs::spawn_runtime`)
+//! 3. At launch preparation the directive launch handler
+//!    (`crates/tools/handler-bins/src/directive_launch.rs`) calls
+//!    `ryeos_directive_definition::prepare_directive_launch`, which
+//!    resolves the provider YAML into a `ResolvedProviderSnapshot`
+//!    shipped in the launch `runtime_data`. The runtime's
+//!    `crates/runtimes/directive/src/bootstrap.rs::bootstrap` consumes
+//!    that snapshot and never re-reads provider YAML from disk.
+//! 4. `crates/runtimes/directive/src/provider_adapter/prepared.rs::prepare_provider_request`
+//!    reads `auth.env_var`, calls `std::env::var(...)`, and freezes
+//!    `<header_name>: <prefix><secret>` into the prepared request
+//!    (the credential is fixed at prepare time).
+//! 5. The daemon's runtime spawn
+//!    (`ryeos-executor/src/execution/launch/runtime_request.rs::spawn_runtime`)
 //!    builds a closed env: an allowlisted parent snapshot + declared
 //!    secrets pulled from the sealed vault. After lillux's
 //!    `env_clear()` contract change the subprocess sees ONLY this
@@ -22,7 +28,7 @@
 //!
 //! These tests prove that chain end-to-end by capturing the headers
 //! the mock provider receives and asserting the value flows from
-//! vault → vault_bindings → spec.env → directive-runtime subprocess.
+//! vault → admitted secret delivery → spec.env → directive-runtime subprocess.
 //!
 //! Two scenarios:
 //! - `secret_injection_with_custom_header_and_prefix` —
@@ -33,13 +39,15 @@
 //!   `auth: { env_var: ... }` only; defaults take effect →
 //!   `Authorization: Bearer <secret>`.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::Duration;
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::fast_fixture::{
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
+};
 use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
@@ -191,9 +199,9 @@ model:
 /// Secrets MUST be declared in the directive's `required_secrets`
 /// AND present in the operator's sealed vault store at
 /// `<state>/.ai/state/secrets/store.enc`. The dispatcher reads the
-/// declared secrets out of the vault, threads them through
-/// `vault_bindings`, and the directive-runtime subprocess sees them
-/// as `std::env::var(env_var)`.
+/// declared secrets out of the vault after the launch's admission is
+/// verified, delivers them as named environment entries, and the
+/// directive-runtime subprocess sees them as `std::env::var(env_var)`.
 async fn run_directive_and_capture_first_request_headers(
     env_var: &str,
     secret_value: &str,
@@ -208,7 +216,7 @@ async fn run_directive_and_capture_first_request_headers(
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(
                 state_path,
                 &mock_url,
@@ -245,7 +253,7 @@ async fn run_directive_and_capture_first_request_headers(
     plant_directive_with_secrets(
         project.path(),
         "test/secret_injection",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
@@ -353,10 +361,9 @@ async fn secret_injection_with_default_authorization_bearer() {
 // All secret-injection tests in this file go through the sealed
 // vault. Operators put their API keys in the sealed-envelope store
 // at `<state>/.ai/state/secrets/store.enc`, the daemon's
-// `SealedEnvelopeVault` decrypts them at request-build time, and the
-// vault populates `vault_bindings`, which
-// `services::thread_lifecycle::spawn_item` merges into the spawned
-// subprocess's `spec.env`. After lillux's `env_clear()` contract
+// `SealedEnvelopeVault` decrypts them after the launch's admission is
+// verified, and the authorized declared secrets are delivered as named
+// entries of the spawned subprocess's `spec.env`. After lillux's `env_clear()` contract
 // change this is the only path that delivers a secret into the
 // directive runtime — the parent process's env is no longer
 // inherited.
@@ -413,7 +420,7 @@ async fn run_directive_with_vault_secret(
 
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(
                 state_path,
                 &mock_url,
@@ -451,7 +458,7 @@ async fn run_directive_with_vault_secret(
     plant_directive_with_secrets(
         project.path(),
         "test/vault_secret",
-        "Hello {{ name }}.",
+        "Hello ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
@@ -474,7 +481,7 @@ async fn run_directive_with_vault_secret(
     let captured = mock.captured_headers().await;
     assert!(
         !captured.is_empty(),
-        "mock provider received zero requests; vault → vault_bindings → spec.env path \
+        "mock provider received zero requests; vault → secret delivery → spec.env path \
          is broken"
     );
 
@@ -492,8 +499,8 @@ async fn vault_secret_reaches_provider_with_default_bearer() {
     // `<state>/.ai/state/secrets/store.enc`. Nothing on the daemon's
     // command line, nothing in `cmd.env()`. If the header arrives at
     // the mock provider with the expected value, the full pipe works:
-    //   store.enc → SealedEnvelopeVault::read_all → dispatch.rs →
-    //   ExecutionParams.vault_bindings → spawn_item spec.env →
+    //   store.enc → SealedEnvelopeVault → admitted secret delivery →
+    //   spawn_item spec.env →
     //   Command::env() → directive-runtime subprocess →
     //   std::env::var(provider.auth.env_var) → outbound auth header.
     // `RYEOS_`-prefixed keys are vault-blocked; use a neutral name.
@@ -513,7 +520,7 @@ async fn vault_secret_reaches_provider_with_default_bearer() {
         actual, &expected,
         "vault → subprocess env → auth header mismatch — sealed vault store at \
          `<state>/.ai/state/secrets/store.enc` must reach the provider HTTP \
-         request via the existing vault_bindings plumbing",
+         request via admitted secret delivery",
     );
 }
 
@@ -524,8 +531,8 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     // step 7c overlay: dispatcher walks `[user_home, project_root]`
     // for `.env`, parses KEY=VALUE, layers it under the (empty)
     // vault, then projects to the directive's declared
-    // `required_secrets` and threads the result through
-    // `vault_bindings` → spec.env → directive-runtime subprocess →
+    // `required_secrets` and delivers the result through
+    // admitted secret delivery → spec.env → directive-runtime subprocess →
     // outbound auth header.
     // `RYEOS_`-prefixed keys are vault-blocked; use a neutral name.
     let env_var = "OPENROUTER_API_KEY";
@@ -535,7 +542,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, env_var, None, None, fixture)?;
         // Pre-generate vault keypair so the daemon boots cleanly,
         // but DO NOT seal any secret — the .env overlay must be the
@@ -565,7 +572,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     plant_directive_with_secrets(
         project.path(),
         "test/dotenv_secret",
-        "Hello {{ name }}.",
+        "Hello ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
@@ -591,7 +598,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     let captured = mock.captured_headers().await;
     assert!(
         !captured.is_empty(),
-        ".env → vault_bindings → spec.env path is broken; mock got 0 requests"
+        ".env → secret delivery → spec.env path is broken; mock got 0 requests"
     );
     let headers = captured.into_iter().next().unwrap();
     let actual = headers.get("authorization").unwrap_or_else(|| {
@@ -650,7 +657,7 @@ async fn vault_blocked_name_fails_request_loud() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
+        register_workflow_bundles(state_path, fixture)?;
         register_mock_provider_bundle(state_path, &mock_url, "ZEN_API_KEY", None, None, fixture)?;
         // Poisoned sealed store: PATH is on the blocked list, but we
         // bypass write-time validation by sealing the plaintext
@@ -706,6 +713,331 @@ async fn vault_blocked_name_fails_request_loud() {
         body_str.contains("vault") && body_str.contains("PATH") && body_str.contains("blocked"),
         "5xx response should name the vault, the offending key, and the blocked-list \
          policy; got: {body_str}"
+    );
+
+    drop(project);
+    drop(mock);
+}
+
+/// POST a validate-only `/execute` for a project directive.
+async fn validate_only_directive(
+    h: &DaemonHarness,
+    item_ref: &str,
+    project: &Path,
+) -> serde_json::Value {
+    let post_fut = h.post_json(
+        "/execute",
+        serde_json::json!({
+            "item_ref": item_ref,
+            "ref_bindings": { "model": item_ref },
+            "project_path": project,
+            "parameters": { "name": "World" },
+            "validate_only": true,
+            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+        }),
+    );
+    let (status, body) = tokio::time::timeout(Duration::from_secs(30), post_fut)
+        .await
+        .expect("validate-only /execute timed out")
+        .expect("validate-only /execute send failed");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "validate-only preview should answer; body={body:#}"
+    );
+    assert_eq!(body.get("validated"), Some(&serde_json::json!(true)));
+    body
+}
+
+/// A node-space provider file layered over the bundle entry replaces the
+/// endpoint, and the validate preview reports the resulting request URL (and
+/// both contributing spaces) without calling the provider.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_only_preview_reports_node_overridden_endpoint() {
+    let env_var = "OPENROUTER_API_KEY";
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, env_var, None, None, fixture)?;
+        // Operator-signed node-space override carrying only the changed keys.
+        let dir = state_path.join(".ai/config/ryeos-runtime/model-providers");
+        std::fs::create_dir_all(&dir)?;
+        let body = "category: \"ryeos-runtime/model-providers\"\n\
+                    transport:\n  kind: remote_http\n  base_url: \"https://override.example.test/v9/\"\n";
+        let signed = lillux::signature::sign_content(body, &fixture.user, "#", None);
+        std::fs::write(dir.join("mock.yaml"), signed)?;
+        Ok(())
+    };
+
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env_remove(env_var);
+    })
+    .await
+    .expect("start daemon with a node-space provider override");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive_with_secrets(
+        project.path(),
+        "test/preview_endpoint",
+        "Hello {{ name }}.",
+        &[],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
+
+    let body = validate_only_directive(&h, "directive:test/preview_endpoint", project.path()).await;
+    assert_eq!(
+        body.pointer("/runtime_preparation/runtime_facts/request_url"),
+        Some(&serde_json::json!(
+            "https://override.example.test/v9/chat/completions"
+        )),
+        "body={body:#}"
+    );
+    assert_eq!(
+        body.pointer("/runtime_preparation/runtime_facts/provider_id"),
+        Some(&serde_json::json!("mock")),
+        "body={body:#}"
+    );
+    let sources = body
+        .pointer("/runtime_preparation/runtime_facts/config_sources")
+        .and_then(|v| v.as_array())
+        .expect("config_sources fact");
+    assert!(
+        sources
+            .iter()
+            .any(|s| s.as_str().is_some_and(|s| s.starts_with("node"))),
+        "node-space contributor must be reported; body={body:#}"
+    );
+    assert!(
+        !body.to_string().contains(&mock_url),
+        "the overridden bundle URL must not be reported; body={body:#}"
+    );
+    assert_eq!(
+        mock.captured_headers().await.len(),
+        0,
+        "validation must not call the provider"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_only_preview_sees_vault_secret() {
+    // The preview asks the vault for the declared names only. A secret sealed
+    // in the vault reads as present and leaves admission ready; a declared name
+    // the vault lacks is reported by name and holds admission back. The mock
+    // provider is never called: validation launches nothing.
+    let present = "OPENROUTER_API_KEY";
+    let absent = "DEEPSEEK_API_KEY";
+    let secret = "sk-preview-present-0badc0de0badc0de";
+
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, present, None, None, fixture)?;
+        let mut secrets = std::collections::HashMap::new();
+        secrets.insert(present.to_string(), secret.to_string());
+        plant_sealed_vault_secrets(state_path, &secrets)?;
+        Ok(())
+    };
+
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env_remove(present);
+        cmd.env_remove(absent);
+    })
+    .await
+    .expect("start daemon with one vault-backed secret");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive_with_secrets(
+        project.path(),
+        "test/preview_present",
+        "Hello {{ name }}.",
+        &[present],
+        &fixture.publisher,
+    )
+    .expect("plant present directive");
+    plant_directive_with_secrets(
+        project.path(),
+        "test/preview_missing",
+        "Hello {{ name }}.",
+        &[present, absent],
+        &fixture.publisher,
+    )
+    .expect("plant missing directive");
+
+    let ready = validate_only_directive(&h, "directive:test/preview_present", project.path()).await;
+    assert_eq!(
+        ready.pointer("/runtime_preparation/credential_readiness"),
+        Some(&serde_json::json!({ "status": "present", "required_count": 1 })),
+        "body={ready:#}"
+    );
+    assert_eq!(
+        ready.get("admission_ready"),
+        Some(&serde_json::json!(true)),
+        "a vault-present secret must not hold admission back; body={ready:#}"
+    );
+    assert!(
+        !ready.to_string().contains(secret),
+        "the preview must never carry a secret value; body={ready:#}"
+    );
+
+    let missing =
+        validate_only_directive(&h, "directive:test/preview_missing", project.path()).await;
+    assert_eq!(
+        missing.pointer("/runtime_preparation/credential_readiness"),
+        Some(&serde_json::json!({
+            "status": "missing",
+            "required_count": 2,
+            "missing": [absent],
+        })),
+        "body={missing:#}"
+    );
+    assert_eq!(
+        missing.get("admission_ready"),
+        Some(&serde_json::json!(false)),
+        "body={missing:#}"
+    );
+    assert!(
+        !missing.to_string().contains(secret),
+        "the preview must never carry a secret value; body={missing:#}"
+    );
+
+    assert!(
+        mock.captured_headers().await.is_empty(),
+        "validate-only must not reach the provider"
+    );
+    drop(project);
+    drop(mock);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_vault_is_refused_without_capability_and_still_reaches_the_operator() {
+    // A caller holding execute rights on every item and live project write,
+    // but not the operator-vault capability, asks for the standard local-live
+    // policy, whose project overlay includes the operator vault. The daemon
+    // refuses it with the typed error before any launch, so no thread exists
+    // and the provider is never contacted with the vault secret. The
+    // configured operator (bootstrap `*`) then runs the same directive and the
+    // secret reaches the provider.
+    use ryeos_app::execution_policy::{
+        ExecutionPolicy, ExecutionResponse, LIVE_PROJECT_WRITE_CAPABILITY,
+        OPERATOR_VAULT_CAPABILITY,
+    };
+
+    let env_var = "ZEN_API_KEY";
+    let secret = "sk-operator-vault-gate-0ddba11c0ffee";
+    let item_ref = "directive:test/operator_vault_gate";
+    let caller = SigningKey::from_bytes(&[0x5a_u8; 32]);
+    let caller_for_plant = caller.clone();
+
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_mock_provider_bundle(state_path, &mock_url, env_var, None, None, fixture)?;
+            let mut secrets = std::collections::HashMap::new();
+            secrets.insert(env_var.to_owned(), secret.to_owned());
+            plant_sealed_vault_secrets(state_path, &secrets)?;
+            common::fast_fixture::write_authorized_key_with_scopes(
+                state_path,
+                &caller_for_plant,
+                &fixture.node,
+                &["ryeos.execute.*", LIVE_PROJECT_WRITE_CAPABILITY],
+            )
+        };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with a vault secret and a caller without operator-vault authority");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive_with_secrets(
+        project.path(),
+        "test/operator_vault_gate",
+        "Hello {{ name }}.",
+        &[env_var],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
+
+    let body = serde_json::json!({
+        "item_ref": item_ref,
+        "ref_bindings": {"model": item_ref},
+        "project_path": project.path().to_str().unwrap(),
+        "parameters": {"name": "World"},
+        "execution_policy": ExecutionPolicy::local_live(ExecutionResponse::Wait),
+    });
+    let body_bytes = serde_json::to_vec(&body).unwrap();
+    let node_key = h.node_key.as_ref().expect("fast fixture node key");
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{}/execute", h.bind))
+        .header("content-type", "application/json")
+        .body(body_bytes.clone());
+    for (name, value) in
+        common::build_signed_headers_for_bytes(&caller, node_key, "POST", "/execute", &body_bytes)
+    {
+        request = request.header(name, value);
+    }
+    let response = tokio::time::timeout(Duration::from_secs(30), request.send())
+        .await
+        .expect("refused /execute timed out")
+        .expect("refused /execute send failed");
+    let status = response.status();
+    let recorded_thread = response.headers().get("x-ryeos-thread-id").cloned();
+    let refused: serde_json::Value = response.json().await.unwrap_or_default();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "a caller without the operator-vault capability must be refused: {refused:#}"
+    );
+    assert_eq!(
+        refused["error_code"], "operator_vault_capability_required",
+        "the refusal must be the typed operator-vault error: {refused:#}"
+    );
+    assert_eq!(refused["required_capability"], OPERATOR_VAULT_CAPABILITY);
+    assert!(
+        refused.get("thread_id").is_none() && recorded_thread.is_none(),
+        "the refusal precedes any launch: {refused:#}"
+    );
+    assert!(
+        mock.captured_headers().await.is_empty(),
+        "a refused caller must never reach the provider with the operator's secret"
+    );
+
+    // The configured operator still receives its own vault secret.
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(30),
+        h.post_execute(
+            item_ref,
+            project.path().to_str().unwrap(),
+            serde_json::json!({"name": "World"}),
+        ),
+    )
+    .await
+    .expect("operator /execute timed out")
+    .expect("operator /execute send failed");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the configured operator's run must be unaffected: {body:#}"
+    );
+    let captured = mock.captured_headers().await;
+    let headers = captured
+        .first()
+        .expect("the operator's run must reach the provider");
+    assert_eq!(
+        headers.get("authorization"),
+        Some(&format!("Bearer {secret}")),
+        "the operator vault secret must reach the provider for the operator: {headers:#?}"
     );
 
     drop(project);

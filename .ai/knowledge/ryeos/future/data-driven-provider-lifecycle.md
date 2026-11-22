@@ -1,31 +1,30 @@
-<!-- ryeos:signed:2026-09-29T00:19:36Z:99afe406240f9eb1711ebce3dd314f2c555a484a3c606ac896dddd420f21f954:bbS2YFXUzBxF3M4jcjSBIBnrj1Kp4CZfAjHKLm3ylGY3MGfuONbx1Q+QKkDTxxf74n9zoqxuc0U/igr7HUnGAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:bafa51a0feaba6e8a173a74d462ae8ea4cb3608438b90b4867b251bde43dd12f:JuHCLALid90X9vr5hu0wRKMGXU8UbvsvBU29XeScjY8tQZ8Ly1aPEsHjI7LPaLA6dlcjSCcdGDbXKKiLpjIcDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: data-driven-provider-lifecycle
 title: Data-Driven Provider Lifecycle Operations
 description: Future separation of provider lifecycle profiles, shared bounded interpretation, and native host mechanisms
 entry_type: design
-version: "0.1.0"
+version: "0.1.1"
 ```
 
 # Data-Driven Provider Lifecycle Operations
 
 ## Status and ordering
 
-Deferred design, recorded on 2026-09-28. This note describes a later
-generalization of the Render lifecycle adapter. It does not change the active
-Render Codex worker implementation, authorize provider contact, or claim that
-Render activation or snapshot qualification has passed.
+Deferred shared-profile design, recorded on 2026-09-28 and reconciled with the
+[platform direction](platform-direction-and-delivery.md) on 2026-10-06.
+This note owns finite declarative lifecycle profiles. The [integration-adapter
+owner](language-neutral-integration-adapters.md) owns admitted procedural product
+implementations when profiles cannot express their behavior.
 
-The order matters:
-
-1. Finish and qualify the current Render Codex worker path, including launch,
-   authenticated readiness, settlement, recovery, and frozen result return.
-2. Generalize runtime verification from its current concrete Codex verifier
-   only after that path works and a second real scenario establishes what is
-   shared. Follow [Data-Driven Runtime Verification](data-driven-runtime-verification.md).
-3. Generalize provider lifecycle operations, including snapshot production,
-   from repeated provider profiles and operation evidence.
+Keep current launch, authenticated readiness, settlement, recovery and frozen
+result qualification requirements intact. A second real provider/profile and
+operation evidence gate extraction of a shared lifecycle interpreter. A second
+verification scenario separately gates shared verification abstractions. Neither
+gate requires ordinary client/authoring work to wait for both generalizations,
+nor makes an already-supported interpreted implementation depend on them.
+This design does not authorize provider contact or claim operational acceptance.
 
 Do not combine the verifier and lifecycle adapter into one universal plugin
 system. They interpret different protocols and produce different evidence.
@@ -56,8 +55,10 @@ signed provider profile + admitted operation intent
 Adding or changing a provider's supported route, response-field mapping, or
 status mapping should not ordinarily require a new provider-specific Rust
 implementation. RyeOS should use the same pattern it uses for LLM providers:
-provider configuration selects a supported profile; compiled code supplies the
-shared request, validation, security, and evidence semantics.
+provider configuration selects a supported profile; an admitted interpreter
+supplies its semantics through the shared host and evidence contracts. Procedural
+behavior outside the finite profile vocabulary belongs in separately admitted
+implementation code, which may use Python or another supported runtime.
 
 ## The present hard-coded example
 
@@ -173,9 +174,11 @@ trust and recovery semantics.
 Once the generic interpreter supports an operation, profile-only changes can be
 reviewed and tested as signed data without editing or recompiling the adapter's
 provider logic. They still require the normal bundle-generation, signature,
-admission, and qualification steps. Adding an interpreter operation or changing
-its safety semantics remains a Rust change and requires the relevant builds and
-tests.
+admission, and qualification steps. Changing interpreter behavior requires
+the checks appropriate to its admitted implementation. A missing shared host
+mechanism or changed native guarantee requires a Rust release; procedural
+provider semantics do not inherently require Rust. Never embed arbitrary scripts
+inside the restricted profile language to avoid that distinction.
 
 To keep development feedback fast:
 
@@ -192,8 +195,10 @@ To keep development feedback fast:
 
 ## Adoption sequence
 
-After the Render Codex worker is operational and the generic verifier direction
-has been implemented against concrete scenarios:
+For shared profile-interpreter extraction, first select working concrete
+operation contracts and a repeated provider requirement. Coordinate changes
+with the current integration owners and preserve their acceptance. A generic
+verifier framework is not a prerequisite for this separate lifecycle contract:
 
 1. Inventory lifecycle operations used by the current Render route and one
    concrete second provider or materially different profile. Separate provider
@@ -208,7 +213,7 @@ has been implemented against concrete scenarios:
    specified.
 4. Convert the Render-specific response structs and status mappings into the
    signed profile. Keep response parsing strict and compare mapped values
-   against the admitted operation intent in common Rust code.
+   against the admitted operation intent through its shared authoritative owner.
 5. Run the same interpreter tests against Render and the second profile. Prove
    profile substitution, response tampering, wrong source occurrence, missing
    metadata, duplicate keys, oversized bodies, cancellation, timeout, and lost

@@ -25,6 +25,11 @@ pub const MAX_STRUCTURED_OBSERVATION_BATCH_BYTES: usize = 384 * 1024;
 /// growth independently of the seven-day lifetime ceiling.
 pub const MAX_HOSTED_SESSION_OBSERVATION_EVENTS: u64 = 1_048_576;
 pub const REMOTE_CONTINUATION_AUTHORITY_SCHEMA: u32 = 4;
+/// Reserved payload field naming the attachment objects an event refers to,
+/// whatever its event type. The closure walker follows exactly this list.
+pub const ATTACHMENT_REFS_FIELD: &str = "attachment_refs";
+/// Most attachment objects one event may name.
+pub const MAX_THREAD_EVENT_ATTACHMENT_REFS: usize = 64;
 pub const ACCOUNTING_ALLOWANCE_TRANSFER_KIND: &str = "accounting_allowance_transfer";
 pub const ACCOUNTING_ALLOWANCE_TRANSFER_SCHEMA: u32 = 2;
 
@@ -410,6 +415,36 @@ pub struct ThreadEvent {
     pub payload: serde_json::Value,
 }
 
+/// The attachment object hashes a payload names through its reserved
+/// `attachment_refs` field: absent means none; present it must be an array of
+/// at most [`MAX_THREAD_EVENT_ATTACHMENT_REFS`] distinct canonical hashes.
+pub fn payload_attachment_refs(payload: &serde_json::Value) -> anyhow::Result<Vec<&str>> {
+    let Some(field) = payload.get(ATTACHMENT_REFS_FIELD) else {
+        return Ok(Vec::new());
+    };
+    let list = field
+        .as_array()
+        .with_context(|| format!("payload {ATTACHMENT_REFS_FIELD} must be an array"))?;
+    if list.len() > MAX_THREAD_EVENT_ATTACHMENT_REFS {
+        anyhow::bail!(
+            "payload {ATTACHMENT_REFS_FIELD} names {} attachments (max {MAX_THREAD_EVENT_ATTACHMENT_REFS})",
+            list.len()
+        );
+    }
+    let mut hashes = Vec::with_capacity(list.len());
+    for entry in list {
+        let hash = entry
+            .as_str()
+            .with_context(|| format!("payload {ATTACHMENT_REFS_FIELD} entries must be strings"))?;
+        validate_canonical_hash("payload attachment_refs entry", hash)?;
+        if hashes.contains(&hash) {
+            anyhow::bail!("payload {ATTACHMENT_REFS_FIELD} names {hash} twice");
+        }
+        hashes.push(hash);
+    }
+    Ok(hashes)
+}
+
 impl ThreadEvent {
     /// Validate this event's invariants.
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -427,7 +462,7 @@ impl ThreadEvent {
             anyhow::bail!("event_type must not be empty");
         }
         parse_canonical_timestamp(&self.ts)
-            .map_err(|error| anyhow::anyhow!("invalid thread event ts: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("invalid thread event ts: {error:#}"))?;
         if let Some(hash) = &self.prev_chain_event_hash {
             validate_canonical_hash("prev_chain_event_hash", hash)?;
         }
@@ -454,6 +489,7 @@ impl ThreadEvent {
                 anyhow::bail!("remote continuation source event is not its thread predecessor");
             }
         }
+        payload_attachment_refs(&self.payload)?;
         let serialized_bytes = lillux::canonical_json(&self.to_value())
             .context("failed to canonicalize thread event")?
             .len();

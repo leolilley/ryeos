@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-19T01:31:04Z:ba1d2160a7ed75b7ffd95c326bef24f497ed825cd594a695f76f6d4e0b843296:sRVHWotKEkua3XfU65zykqC8HSO0RUYaZ7xBRMJbIR7yxhNISwZ+Fc9Nhm04Q52u/HMj1AovgWZPbmQq1MqFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-18T04:15:43Z:a65ff5359646e8b653a097ca3aa938bcf25963138c58a81e32625e7524f5d9d9:INXBgV120DT9tiT4xvKkGrx71FR9Ie9k28wfLVg8F/i3zAPD396bjwMFEk86jMKvdYRloWbmeOk7QwmG3Mp4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -9,48 +9,19 @@ if [[ "$mode" != "--check" && "$mode" != "--publish" ]]; then
 fi
 
 root="$(git rev-parse --show-toplevel)"
-web="$root/crates/clients/web"
-package="$web/pkg"
+renderer="$root/crates/clients/rune"
+package="$renderer/pkg"
 registry="$root/crates/daemon/ryeos-ui/generate_asset_registry.py"
-stage="$(mktemp -d "$web/.asset-stage.XXXXXX")"
+stage="$(mktemp -d "$renderer/.asset-stage.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
 
-if [[ "$mode" == "--check" ]]; then
-  cargo run -q -p ryeos-ui-contract-exporter -- --check
-else
-  cargo run -q -p ryeos-ui-contract-exporter
-fi
+# The Rune renderer's closed set: built with remapped paths and the exact
+# wasm-bindgen CLI the lock names (the build refuses any other version).
+"$root/.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh" --out "$stage/final"
 
-cargo build -q -p ryeos-client-web --target wasm32-unknown-unknown --release --lib
-mkdir -p "$stage/wasm" "$stage/renderer" "$stage/final"
-wasm-bindgen \
-  "$root/target/wasm32-unknown-unknown/release/ryeos_client_web.wasm" \
-  --target web \
-  --out-dir "$stage/wasm" \
-  --out-name ryeos_web
-
-(cd "$web" && RYEOS_UI_ASSET_STAGE="$stage/renderer" npm run check:renderer)
-(cd "$web" && RYEOS_UI_ASSET_STAGE="$stage/renderer" npm run build:renderer)
-# Vite preserves a small amount of dependency-authored line-end whitespace.
-# Normalize generated text before hashing so repository checks and builds from
-# different checkout paths compare the same canonical bytes.
-sed -i 's/[[:space:]]\+$//' "$stage/renderer"/*.js "$stage/renderer"/*.css
-
-cp "$web/browser/index.html" "$stage/final/index.html"
-cp "$stage/renderer/ryeos_ui.js" "$stage/final/ryeos_ui.js"
-cp "$stage/renderer/ryeos_ui.css" "$stage/final/ryeos_ui.css"
-cp "$stage/renderer/ryeos_three.js" "$stage/final/ryeos_three.js"
-cp "$stage/wasm/ryeos_web.js" "$stage/final/ryeos_web.js"
-cp "$stage/wasm/ryeos_web_bg.wasm" "$stage/final/ryeos_web_bg.wasm"
-
-expected=(
-  index.html
-  ryeos_three.js
-  ryeos_ui.css
-  ryeos_ui.js
-  ryeos_web.js
-  ryeos_web_bg.wasm
-)
+# The closed generation is whatever the registry lists; the registry check below
+# holds it to rune-snippets.toml and to the package.
+mapfile -t expected < <(python3 -I -c 'import json, sys; print("\n".join(sorted(a["filename"] for a in json.load(open(sys.argv[1]))["assets"])))' "$root/crates/daemon/ryeos-ui/web-assets.json" | LC_ALL=C sort)
 mapfile -t actual < <(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
 if [[ "${actual[*]}" != "${expected[*]}" ]]; then
   echo "assembled browser asset inventory is not the closed generation" >&2
@@ -65,7 +36,7 @@ if [[ "$mode" == "--check" ]]; then
   exit 0
 fi
 
-backup="$web/.pkg.backup.$$"
+backup="$renderer/.pkg.backup.$$"
 manifest="$root/crates/daemon/ryeos-ui/web-assets.json"
 generated="$root/crates/daemon/ryeos-ui/src/generated_web_assets.rs"
 cp "$manifest" "$stage/web-assets.json"

@@ -168,7 +168,7 @@ mod tests {
         ] {
             assert!(validate_request("runtime", &hash, request).is_err());
         }
-        assert!(validate_request("runtime", &hash, &vec![b' '; 65]).is_err());
+        assert!(validate_request("runtime", &hash, &[b' '; 65]).is_err());
     }
 
     #[test]

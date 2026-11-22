@@ -1,4 +1,4 @@
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ use ryeos_api::routes::compile::{CompiledLimits, CompiledRoute, RouteDispatchCon
 use ryeos_api::routes::invocation::RoutePrincipal;
 use ryeos_api::routes::response_modes::execute_mode::CompiledExecuteMode;
 use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectTree};
 use ryeos_state::project_sync::{PROJECT_SNAPSHOT_CONFIG_RELATIVE, ProjectSyncScope};
 use serde_json::{Value, json};
@@ -17,9 +17,11 @@ use serde_json::{Value, json};
 // Command coercion must use HEAD, without invoking or publishing anything.
 #[tokio::test]
 async fn current_head_validation_uses_pinned_authority_without_invoking_or_publishing() {
-    let (_node, state) = test_state::build_test_state_with_bundles();
+    let (_node, _state_owner, state) = test_state::build_test_state_with_bundles();
     let project = tempfile::tempdir().unwrap();
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let mut principal = RoutePrincipal::anonymous(operator.principal_id(), "ryeos_signed");
     principal.verified = true;
     principal.authorized_key_class = Some(AuthorizedKeyPrincipalClass::LocalClient);
@@ -48,8 +50,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
     };
     let service_path = ".ai/services/threads/list.yaml";
     let service_bytes =
-        std::fs::read(ryeos_engine::test_support::standard_bundle_root().join(service_path))
-            .unwrap();
+        std::fs::read(ryeos_engine::test_support::core_bundle_root().join(service_path)).unwrap();
     let service_file = ProjectFile {
         blob_hash: cas.store_blob(&service_bytes).unwrap(),
         size: service_bytes.len() as u64,
@@ -141,6 +142,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
         principal,
         state: state.clone(),
         launch_timings: None,
+        publication: None,
         webhook_dedupe: Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new()),
     }).await.unwrap();
     let status = response.status();

@@ -19,12 +19,25 @@ use ryeos_accounting::{
     SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument, UsdNanos,
 };
 
+mod cache_marks;
 mod effective;
+mod image_input;
+mod request_rejections;
 
+pub use cache_marks::{CACHE_MARKS_MAX, CacheMarkPosition, CacheMarksConfig};
 pub use effective::{
-    ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DirectiveEffectClass,
-    DirectiveHeader, LimitsSpec, OutputSpec, ReturnNudge, parse_effective_header,
-    resolve_external_effect_authority,
+    ContinuationConfig, ContinuationEnabled, DIRECTIVE_EFFECTIVE_HEADER_KEYS, DeadlineSpec,
+    DirectiveEffectClass, DirectiveHeader, LimitsSpec, OutputSpec, ProviderContact, ReturnNudge,
+    UnknownOutcomeClass, UnknownOutcomeRetryPolicy, parse_effective_header,
+    resolve_external_effect_authority, unknown_outcome_retry_ceiling,
+};
+pub use image_input::{
+    ImageAcceptConfig, ImageCostConfig, ImageInputConfig, ToolResultImagePlacement,
+    UnsupportedImagePolicy, render_note,
+};
+pub use request_rejections::{
+    REQUEST_REJECTION_CODE_PREFIX, RequestRejectionRow, classify_request_rejection,
+    validate_request_rejections,
 };
 
 pub const MODEL_BINDING: &str = "model";
@@ -127,6 +140,21 @@ pub struct ProviderConfig {
     pub body_template: Option<Value>,
     #[serde(default)]
     pub body_extra: Option<Value>,
+    /// Which models take images and in what form. A top-level field, not part
+    /// of `schemas`, because a profile's `schemas` replaces the whole block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<ImageInputConfig>,
+    /// Where the request marks its cacheable prefix. A top-level field, not
+    /// part of `schemas`, for the same reason as `image_input`. Absent: the
+    /// request carries no mark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_marks: Option<CacheMarksConfig>,
+    /// Which refused requests get a named failure code, by status and response
+    /// body phrase. A top-level field, not part of `schemas`, for the same
+    /// reason as `image_input`. Absent: every refusal is the generic provider
+    /// failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_rejections: Option<Vec<RequestRejectionRow>>,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
 }
@@ -154,6 +182,15 @@ pub struct ProviderProfile {
     pub body_template: Option<Value>,
     #[serde(default)]
     pub body_extra: Option<Value>,
+    /// Replaces the config's `image_input` whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<ImageInputConfig>,
+    /// Replaces the config's `cache_marks` whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_marks: Option<CacheMarksConfig>,
+    /// Replaces the config's `request_rejections` whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_rejections: Option<Vec<RequestRejectionRow>>,
 }
 
 /// Provider-domain transport selection. The remote and admitted-worker paths
@@ -310,11 +347,28 @@ pub struct SchemasConfig {
     pub output_limit: Option<OutputLimitConfig>,
     #[serde(default)]
     pub reasoning: Option<ReasoningSchemaConfig>,
+    /// Which parts of the request frame a provider refuses to see change
+    /// mid-conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_stability: Option<FrameStabilityConfig>,
+}
+
+/// Frame components a provider refuses to see change within one
+/// conversation. A resume or continuation whose launch frame differs in a
+/// listed component fails with `frame_change_refused` instead of recording a
+/// new frame.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameStabilityConfig {
+    #[serde(default)]
+    pub refuse_change_of: Vec<ryeos_runtime::cognition::FrameComponent>,
 }
 
 /// Signed mapping from provider-neutral reasoning policy to provider-native
-/// request fields. The runtime follows only these declared paths and values;
-/// provider and model identities never influence request mutation.
+/// request fields, and the signed rules for capturing and replaying what a
+/// provider returns as reasoning. The runtime follows only these declared
+/// paths, values and rules; provider and model identities never influence
+/// request mutation, capture or replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningSchemaConfig {
@@ -322,6 +376,227 @@ pub struct ReasoningSchemaConfig {
     pub mode: Option<ReasoningModeSchemaConfig>,
     #[serde(default)]
     pub effort: Option<ReasoningEffortSchemaConfig>,
+    /// What to read out of a streamed response. Empty reads nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture: Vec<ReasoningCaptureRule>,
+    /// What to send back on later requests. Absent sends nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReasoningReplayConfig>,
+}
+
+/// One capture rule, applied to every chunk of a `delta_merge` stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReasoningCaptureRule {
+    /// String delta fields that carry the visible reasoning text. The first
+    /// listed field present in a chunk is taken.
+    TextDelta { id: String, fields: Vec<String> },
+    /// An array field in the delta whose items assemble into one opaque
+    /// artefact per block.
+    Blocks {
+        id: String,
+        field: String,
+        /// Key holding an item's block type. Defaults to `type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        type_key: Option<String>,
+        /// String keys concatenated across the items of one block.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        merge_keys: Vec<String>,
+        /// A key whose presence completes the block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        close_key: Option<String>,
+        /// Item types that are complete on arrival.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        whole_types: Vec<String>,
+        /// A key whose value separates interleaved blocks, such as `index`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_key: Option<String>,
+        /// A key whose string value is also emitted as reasoning text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_key: Option<String>,
+    },
+    /// A field riding on each streamed tool-call entry.
+    ToolCallField {
+        id: String,
+        field: String,
+        merge: ToolCallFieldMerge,
+    },
+}
+
+impl ReasoningCaptureRule {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::TextDelta { id, .. }
+            | Self::Blocks { id, .. }
+            | Self::ToolCallField { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolCallFieldMerge {
+    /// The latest value replaces earlier ones.
+    Last,
+    /// Object values merge key by key, later keys winning.
+    ObjectMerge,
+}
+
+/// How captured reasoning goes back on later requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningReplayConfig {
+    /// Names the set of entries whose artefacts are interchangeable. An
+    /// artefact replays only when the active entry declares the group it was
+    /// captured under. Required once any rule captures an artefact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_group: Option<String>,
+    pub placements: Vec<ReplayPlacement>,
+}
+
+/// One placement. Authored as `from`, `into: {message_field: key}` or
+/// `into: {tool_call_field: key}`, `scope`, and `on_missing` (`omit`,
+/// `refuse` or `fill` with a sibling `fill` literal).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(try_from = "RawReplayPlacement", into = "RawReplayPlacement")]
+pub struct ReplayPlacement {
+    /// The capture rule id whose output is replayed.
+    pub from: String,
+    pub into: ReplayTarget,
+    pub scope: ReplayScope,
+    pub on_missing: OnMissing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplayPlacement {
+    from: String,
+    into: RawReplayTarget,
+    scope: ReplayScope,
+    #[serde(default)]
+    on_missing: RawOnMissing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fill: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplayTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawOnMissing {
+    #[default]
+    Omit,
+    Refuse,
+    Fill,
+}
+
+impl TryFrom<RawReplayPlacement> for ReplayPlacement {
+    type Error = String;
+
+    fn try_from(raw: RawReplayPlacement) -> Result<Self, String> {
+        let into = match (raw.into.message_field, raw.into.tool_call_field) {
+            (Some(key), None) => ReplayTarget::MessageField(key),
+            (None, Some(key)) => ReplayTarget::ToolCallField(key),
+            _ => {
+                return Err(
+                    "replay placement `into` must name exactly one of message_field or tool_call_field"
+                        .to_string(),
+                );
+            }
+        };
+        let on_missing = match (raw.on_missing, raw.fill) {
+            (RawOnMissing::Omit, None) => OnMissing::Omit,
+            (RawOnMissing::Refuse, None) => OnMissing::Refuse,
+            (RawOnMissing::Fill, Some(value)) => OnMissing::Fill(value),
+            (RawOnMissing::Fill, None) => {
+                return Err("replay placement on_missing fill needs a `fill` value".to_string());
+            }
+            (_, Some(_)) => {
+                return Err(
+                    "replay placement `fill` is only valid with on_missing fill".to_string()
+                );
+            }
+        };
+        Ok(Self {
+            from: raw.from,
+            into,
+            scope: raw.scope,
+            on_missing,
+        })
+    }
+}
+
+impl From<ReplayPlacement> for RawReplayPlacement {
+    fn from(placement: ReplayPlacement) -> Self {
+        let (message_field, tool_call_field) = match placement.into {
+            ReplayTarget::MessageField(key) => (Some(key), None),
+            ReplayTarget::ToolCallField(key) => (None, Some(key)),
+        };
+        let (on_missing, fill) = match placement.on_missing {
+            OnMissing::Omit => (RawOnMissing::Omit, None),
+            OnMissing::Refuse => (RawOnMissing::Refuse, None),
+            OnMissing::Fill(value) => (RawOnMissing::Fill, Some(value)),
+        };
+        Self {
+            from: placement.from,
+            into: RawReplayTarget {
+                message_field,
+                tool_call_field,
+            },
+            scope: placement.scope,
+            on_missing,
+            fill,
+        }
+    }
+}
+
+/// Where a replayed value is written.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReplayTarget {
+    /// A top-level key of the rendered assistant message.
+    MessageField(String),
+    /// A top-level key of each rendered tool call that carries a value.
+    ToolCallField(String),
+}
+
+impl ReplayTarget {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::MessageField(key) | Self::ToolCallField(key) => key,
+        }
+    }
+}
+
+/// Which assistant messages a placement applies to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReplayScope {
+    /// Every assistant message.
+    All,
+    /// Assistant messages that carry a tool call.
+    ToolCallTurns,
+    /// Assistant messages after the last user message.
+    OpenLoop,
+}
+
+/// What a message in scope that proposes a tool call but holds no matching
+/// artefact does.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum OnMissing {
+    /// Send nothing.
+    #[default]
+    Omit,
+    /// Fail the turn with `reasoning_artefact_missing`.
+    Refuse,
+    /// Send this literal.
+    Fill(Value),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +764,13 @@ pub struct StreamUsageConfig {
     pub is_byok_path: Option<String>,
     #[serde(default)]
     pub reasoning_included_in_output: bool,
+    /// When true, the signed protocol declares that `input_tokens` already
+    /// contains the cache-read and cache-write counts. A report where those
+    /// counts exceed the input is then an anomaly, and a tariff may not bill
+    /// the input together with a cache dimension (the cached part would be
+    /// billed twice).
+    #[serde(default)]
+    pub cache_included_in_input: bool,
     #[serde(default)]
     pub aggregation: UsageAggregation,
     /// The signed protocol contract permits exactly one matching usage
@@ -960,6 +1242,30 @@ pub fn resolve_accounting_authority(
 }
 
 impl ProviderConfig {
+    /// The exact URL a provider request is sent to for `model`, or `None` for
+    /// a transport that makes no HTTP request. `{model}` in `base_url` is
+    /// substituted first. `extra.stream_url` then selects the join: absent
+    /// appends `/chat/completions`, empty uses the base unchanged, otherwise
+    /// it is appended behind exactly one separating `/`.
+    pub fn effective_request_url(&self, model: &str) -> Option<String> {
+        let base_url = self.transport.remote_base_url()?;
+        let base = base_url.replace("{model}", model);
+        let stream_url = self.extra.get("stream_url").and_then(|v| v.as_str());
+        Some(match stream_url {
+            Some("") => base,
+            Some(suffix) => format!(
+                "{}{}",
+                base.trim_end_matches('/'),
+                if suffix.starts_with('/') {
+                    suffix.to_string()
+                } else {
+                    format!("/{suffix}")
+                }
+            ),
+            None => format!("{}/chat/completions", base.trim_end_matches('/')),
+        })
+    }
+
     pub fn setup_projection(&self, provider_id: &str) -> Result<ProviderSetupProjection> {
         let setup = match self.extra.get("setup") {
             Some(value) => {
@@ -1155,6 +1461,34 @@ impl ProviderConfig {
 
     pub fn validate(&self, context: &str) -> Result<()> {
         self.transport.validate(context)?;
+        if let Some(image_input) = &self.image_input {
+            image_input.validate(context)?;
+        }
+        if let Some(cache_marks) = &self.cache_marks {
+            cache_marks.validate(context)?;
+        }
+        if let Some(rows) = &self.request_rejections {
+            validate_request_rejections(rows, context)?;
+        }
+        for profile in &self.profiles {
+            // A profile can change the route (schemas, spend authority) under
+            // an entry-level declaration, or add its own; the cross-field
+            // rules hold for every resolved profile, not only the one a launch
+            // happens to pick.
+            let resolved = self.merge_profile(profile);
+            let profile_context = format!("{context} profile {}", profile.name);
+            resolved.validate_cache_marks_route(&profile_context)?;
+            resolved.validate_cache_included_in_input_tariff(&profile_context)?;
+            if let Some(image_input) = &profile.image_input {
+                image_input.validate(&format!("{context} profile {}", profile.name))?;
+            }
+            if let Some(cache_marks) = &profile.cache_marks {
+                cache_marks.validate(&format!("{context} profile {}", profile.name))?;
+            }
+            if let Some(rows) = &profile.request_rejections {
+                validate_request_rejections(rows, &format!("{context} profile {}", profile.name))?;
+            }
+        }
         if self.body_template.is_none() {
             bail!("provider config{context} has no body_template");
         }
@@ -1250,6 +1584,11 @@ impl ProviderConfig {
                 {
                     bail!(
                         "provider config{context}: streaming metadata usage.single_snapshot requires latest_snapshot aggregation"
+                    );
+                }
+                if usage.cache_partition_of_input && usage.cache_included_in_input {
+                    bail!(
+                        "provider config{context}: streaming metadata usage.cache_partition_of_input and usage.cache_included_in_input cannot both be set: one says input is read plus miss, the other that read plus write sit inside input"
                     );
                 }
                 if usage.cache_partition_of_input
@@ -1442,6 +1781,37 @@ impl ProviderConfig {
             .and_then(|schemas| schemas.reasoning.as_ref())
         {
             validate_reasoning_schema(reasoning, context)?;
+            let delta_merge = self
+                .schemas
+                .as_ref()
+                .and_then(|schemas| schemas.streaming.as_ref())
+                .and_then(|streaming| streaming.mode)
+                == Some(StreamingMode::DeltaMerge);
+            if (!reasoning.capture.is_empty() || reasoning.replay.is_some()) && !delta_merge {
+                bail!(
+                    "provider config{context}: reasoning capture and replay require streaming mode delta_merge"
+                );
+            }
+        }
+
+        if let Some(stability) = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.frame_stability.as_ref())
+        {
+            let listed = &stability.refuse_change_of;
+            if listed.is_empty() {
+                bail!(
+                    "provider config{context}: schemas.frame_stability must list at least one component in refuse_change_of"
+                );
+            }
+            let distinct: std::collections::BTreeSet<&str> =
+                listed.iter().map(|component| component.as_str()).collect();
+            if distinct.len() != listed.len() {
+                bail!(
+                    "provider config{context}: schemas.frame_stability.refuse_change_of lists a component twice"
+                );
+            }
         }
 
         if let Some(pricing) = self.pricing.as_ref()
@@ -1487,6 +1857,9 @@ impl ProviderConfig {
                 .map_err(|error| anyhow::anyhow!("provider config{context}: {error}"))?;
         }
 
+        self.validate_cache_marks_route(context)?;
+        self.validate_cache_included_in_input_tariff(context)?;
+
         match self.family {
             ProtocolFamily::AnthropicMessages => {
                 if let Some(messages) = self.schemas.as_ref().and_then(|s| s.messages.as_ref())
@@ -1510,6 +1883,111 @@ impl ProviderConfig {
             ProtocolFamily::ChatCompletions => {}
         }
 
+        Ok(())
+    }
+
+    /// Marks are written into the Chat Completions message list, so the route
+    /// must send that list unrenamed and unextracted, and a tariff on it must
+    /// bill the cache dimensions a marked request produces.
+    fn validate_cache_marks_route(&self, context: &str) -> Result<()> {
+        if self.cache_marks.is_none() {
+            return Ok(());
+        }
+        if self.family != ProtocolFamily::ChatCompletions {
+            bail!("provider config{context}: cache_marks requires family chat_completions");
+        }
+        if let Some(messages) = self.schemas.as_ref().and_then(|s| s.messages.as_ref()) {
+            if let Some(role_map) = &messages.role_map {
+                for role in ["system", "assistant"] {
+                    if role_map.get(role).is_some_and(|mapped| mapped != role) {
+                        bail!(
+                            "provider config{context}: cache_marks requires messages.role_map to leave the {role} role unrenamed"
+                        );
+                    }
+                }
+            }
+            if messages
+                .system_message
+                .as_ref()
+                .is_some_and(|system| system.mode != SystemMessageMode::MessageRole)
+            {
+                bail!(
+                    "provider config{context}: cache_marks requires system messages to stay inline (system_message.mode message_role)"
+                );
+            }
+            if messages
+                .content_key
+                .as_deref()
+                .is_some_and(|key| key != "content")
+            {
+                bail!(
+                    "provider config{context}: cache_marks requires messages.content_key content"
+                );
+            }
+            if messages
+                .tool_result
+                .as_ref()
+                .is_some_and(|tool| tool.role != "tool")
+            {
+                bail!(
+                    "provider config{context}: cache_marks requires messages.tool_result.role tool"
+                );
+            }
+            if messages
+                .tool_result
+                .as_ref()
+                .is_some_and(|tool| tool.wrap_mode != ToolResultWrapMode::Direct)
+            {
+                bail!(
+                    "provider config{context}: cache_marks requires messages.tool_result.wrap_mode direct"
+                );
+            }
+        }
+        if let Some(tariff) = self
+            .spend_authority
+            .as_ref()
+            .and_then(|authority| authority.tariff.as_ref())
+            && !tariff.covered_dimensions.covers(&[
+                BillableDimension::CacheReadTokens,
+                BillableDimension::CacheWriteTokens,
+            ])
+        {
+            bail!(
+                "provider config{context}: a marked request is not billed by input and output alone; the tariff must cover cache_read_tokens and cache_write_tokens"
+            );
+        }
+        Ok(())
+    }
+
+    /// When the signed usage schema says `input_tokens` already contains the
+    /// cache counts, a tariff that bills the input together with a cache
+    /// dimension would bill the cached part twice.
+    fn validate_cache_included_in_input_tariff(&self, context: &str) -> Result<()> {
+        let included = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.streaming.as_ref())
+            .and_then(|streaming| streaming.metadata.as_ref())
+            .and_then(|metadata| metadata.usage.as_ref())
+            .is_some_and(|usage| usage.cache_included_in_input);
+        if !included {
+            return Ok(());
+        }
+        if let Some(tariff) = self
+            .spend_authority
+            .as_ref()
+            .and_then(|authority| authority.tariff.as_ref())
+        {
+            let covered = &tariff.covered_dimensions;
+            if covered.contains(BillableDimension::InputTokens)
+                && (covered.contains(BillableDimension::CacheReadTokens)
+                    || covered.contains(BillableDimension::CacheWriteTokens))
+            {
+                bail!(
+                    "provider config{context}: usage.cache_included_in_input is set, so a tariff covering input_tokens together with cache_read_tokens or cache_write_tokens would bill the cached tokens twice"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1544,6 +2022,15 @@ impl ProviderConfig {
                 Some(existing) => deep_merge(existing, body_extra),
                 None => resolved.body_extra = Some(body_extra.clone()),
             }
+        }
+        if let Some(image_input) = &profile.image_input {
+            resolved.image_input = Some(image_input.clone());
+        }
+        if let Some(cache_marks) = &profile.cache_marks {
+            resolved.cache_marks = Some(cache_marks.clone());
+        }
+        if let Some(rows) = &profile.request_rejections {
+            resolved.request_rejections = Some(rows.clone());
         }
         resolved.profiles.clear();
         resolved
@@ -1898,7 +2385,10 @@ pub fn prepare_directive_launch(
             target.model_name, target.provider_id
         ))
         .map_err(|error| {
-            DirectivePreparationError::configuration("provider_config_invalid", error.to_string())
+            DirectivePreparationError::configuration(
+                "provider_config_invalid",
+                format!("{error:#}"),
+            )
         })?;
     validate_reasoning_selection(
         target.reasoning.as_ref(),
@@ -1911,7 +2401,7 @@ pub fn prepare_directive_launch(
         ResolvedProviderSnapshot::compute_hash(&resolved_provider).map_err(|error| {
             DirectivePreparationError::internal(
                 "provider_config_hash_failed",
-                format!("could not hash resolved provider config: {error}"),
+                format!("could not hash resolved provider config: {error:#}"),
             )
         })?;
 
@@ -1979,6 +2469,38 @@ fn resolve_output_ceiling(
             )
         }),
     }
+}
+
+/// Extract the unknown-outcome retry policy from the verified execution
+/// config item. An absent item or block means such outcomes are never retried;
+/// a present block that does not decode strictly or validate is a
+/// configuration error.
+pub fn resolve_unknown_outcome_policy(
+    execution: Option<&VerifiedConfigItem>,
+) -> std::result::Result<Option<UnknownOutcomeRetryPolicy>, DirectivePreparationError> {
+    let Some(item) = execution else {
+        return Ok(None);
+    };
+    let Some(object) = item.value.as_object() else {
+        return Err(DirectivePreparationError::configuration(
+            "execution_config_invalid",
+            "the execution config input must be a mapping",
+        ));
+    };
+    let Some(value) = object.get("unknown_outcome_retry") else {
+        return Ok(None);
+    };
+    let policy: UnknownOutcomeRetryPolicy =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            DirectivePreparationError::configuration(
+                "execution_config_invalid",
+                format!("execution.unknown_outcome_retry is invalid: {error}"),
+            )
+        })?;
+    policy.validate().map_err(|error| {
+        DirectivePreparationError::configuration("execution_config_invalid", format!("{error:#}"))
+    })?;
+    Ok(Some(policy))
 }
 
 fn resolve_target(
@@ -2149,9 +2671,16 @@ fn validate_reasoning_selection(
 }
 
 fn validate_reasoning_schema(config: &ReasoningSchemaConfig, context: &str) -> Result<()> {
-    if config.mode.is_none() && config.effort.is_none() {
-        bail!("provider config{context}: schemas.reasoning must declare mode or effort mapping");
+    if config.mode.is_none()
+        && config.effort.is_none()
+        && config.capture.is_empty()
+        && config.replay.is_none()
+    {
+        bail!(
+            "provider config{context}: schemas.reasoning must declare a mode or effort mapping, capture rules or replay"
+        );
     }
+    validate_reasoning_capture_and_replay(config, context)?;
     if let Some(mode) = config.mode.as_ref() {
         validate_reasoning_path("reasoning.mode.path", &mode.path, context)?;
         validate_reasoning_wire_value(
@@ -2190,6 +2719,207 @@ fn validate_reasoning_schema(config: &ReasoningSchemaConfig, context: &str) -> R
         );
     }
     Ok(())
+}
+
+fn validate_reasoning_identifier(label: &str, value: &str, context: &str) -> Result<()> {
+    let mut bytes = value.bytes();
+    let valid = value.len() <= 64
+        && bytes
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if !valid {
+        bail!("provider config{context}: {label} must be a 1-64 byte identifier");
+    }
+    Ok(())
+}
+
+fn validate_reasoning_capture_and_replay(
+    config: &ReasoningSchemaConfig,
+    context: &str,
+) -> Result<()> {
+    if config.capture.len() > 16 {
+        bail!("provider config{context}: reasoning.capture may declare at most 16 rules");
+    }
+    if config
+        .capture
+        .iter()
+        .filter(|rule| matches!(rule, ReasoningCaptureRule::ToolCallField { .. }))
+        .count()
+        > 1
+    {
+        bail!(
+            "provider config{context}: reasoning.capture may declare at most one tool_call_field rule, since a call holds one artefact"
+        );
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut captures_artefact = false;
+    for rule in &config.capture {
+        let id = rule.id();
+        if id.is_empty()
+            || id.len() > 32
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            bail!(
+                "provider config{context}: reasoning capture id {id:?} must be 1-32 lowercase ASCII letters, digits or '_'"
+            );
+        }
+        if !ids.insert(id.to_string()) {
+            bail!("provider config{context}: reasoning capture id {id:?} is declared twice");
+        }
+        match rule {
+            ReasoningCaptureRule::TextDelta { fields, .. } => {
+                if fields.is_empty() || fields.len() > 8 {
+                    bail!(
+                        "provider config{context}: reasoning capture {id:?} must name 1-8 text fields"
+                    );
+                }
+                for field in fields {
+                    validate_reasoning_identifier("reasoning capture field", field, context)?;
+                }
+            }
+            ReasoningCaptureRule::Blocks {
+                field,
+                type_key,
+                merge_keys,
+                close_key,
+                whole_types,
+                group_key,
+                text_key,
+                ..
+            } => {
+                captures_artefact = true;
+                validate_reasoning_identifier("reasoning capture field", field, context)?;
+                for key in type_key
+                    .iter()
+                    .chain(merge_keys)
+                    .chain(close_key)
+                    .chain(group_key)
+                    .chain(text_key)
+                {
+                    validate_reasoning_identifier("reasoning capture key", key, context)?;
+                }
+                if close_key.is_none() && whole_types.is_empty() {
+                    bail!(
+                        "provider config{context}: reasoning capture {id:?} needs a close_key or whole_types, or no block could ever complete"
+                    );
+                }
+                if whole_types.len() > 8
+                    || whole_types
+                        .iter()
+                        .any(|kind| kind.is_empty() || kind.len() > 64)
+                {
+                    bail!(
+                        "provider config{context}: reasoning capture {id:?} whole_types must hold at most 8 non-empty names"
+                    );
+                }
+            }
+            ReasoningCaptureRule::ToolCallField { field, .. } => {
+                captures_artefact = true;
+                validate_reasoning_identifier("reasoning capture field", field, context)?;
+            }
+        }
+    }
+    let Some(replay) = config.replay.as_ref() else {
+        if captures_artefact {
+            bail!(
+                "provider config{context}: reasoning capture that stores an artefact needs a replay block naming a compat_group"
+            );
+        }
+        return Ok(());
+    };
+    if let Some(group) = replay.compat_group.as_deref()
+        && (group.is_empty()
+            || group.len() > 64
+            || !group.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'_' | b'-' | b'.')
+            }))
+    {
+        bail!(
+            "provider config{context}: reasoning replay compat_group must be 1-64 lowercase ASCII letters, digits, '_', '-' or '.'"
+        );
+    }
+    if (captures_artefact || replay_places_artefact(config)) && replay.compat_group.is_none() {
+        bail!(
+            "provider config{context}: reasoning replay needs a compat_group once any capture rule stores an artefact"
+        );
+    }
+    if replay.placements.is_empty() || replay.placements.len() > 16 {
+        bail!("provider config{context}: reasoning replay must declare 1-16 placements");
+    }
+    let mut targets = std::collections::BTreeSet::new();
+    for placement in &replay.placements {
+        let Some(rule) = config
+            .capture
+            .iter()
+            .find(|rule| rule.id() == placement.from)
+        else {
+            bail!(
+                "provider config{context}: reasoning replay placement names unknown capture {:?}",
+                placement.from
+            );
+        };
+        validate_reasoning_identifier(
+            "reasoning replay target key",
+            placement.into.key(),
+            context,
+        )?;
+        let kind_matches = matches!(
+            (rule, &placement.into),
+            (
+                ReasoningCaptureRule::TextDelta { .. } | ReasoningCaptureRule::Blocks { .. },
+                ReplayTarget::MessageField(_)
+            ) | (
+                ReasoningCaptureRule::ToolCallField { .. },
+                ReplayTarget::ToolCallField(_)
+            )
+        );
+        if !kind_matches {
+            bail!(
+                "provider config{context}: reasoning replay of capture {:?} cannot go into that kind of target",
+                placement.from
+            );
+        }
+        if matches!(rule, ReasoningCaptureRule::TextDelta { .. })
+            && !matches!(placement.on_missing, OnMissing::Omit)
+        {
+            bail!(
+                "provider config{context}: reasoning text replay is never missing, so on_missing must stay omit"
+            );
+        }
+        if !targets.insert(placement.into.clone()) {
+            bail!("provider config{context}: two reasoning replay placements write the same key");
+        }
+    }
+    for rule in &config.capture {
+        if !matches!(rule, ReasoningCaptureRule::TextDelta { .. })
+            && !replay
+                .placements
+                .iter()
+                .any(|placement| placement.from == rule.id())
+        {
+            bail!(
+                "provider config{context}: reasoning capture {:?} stores an artefact that no replay placement names",
+                rule.id()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn replay_places_artefact(config: &ReasoningSchemaConfig) -> bool {
+    config.replay.as_ref().is_some_and(|replay| {
+        replay.placements.iter().any(|placement| {
+            config.capture.iter().any(|rule| {
+                rule.id() == placement.from
+                    && !matches!(rule, ReasoningCaptureRule::TextDelta { .. })
+            })
+        })
+    })
 }
 
 fn validate_reasoning_path(label: &str, path: &str, context: &str) -> Result<()> {
@@ -2323,6 +3053,12 @@ fn runtime_facts(
             )
         })?,
     );
+    if let Some(url) = snapshot
+        .provider
+        .effective_request_url(&snapshot.model_name)
+    {
+        facts.insert("request_url".to_string(), Value::String(url));
+    }
     if let Some(profile) = &snapshot.matched_profile {
         facts.insert(
             "matched_profile".to_string(),
@@ -2376,6 +3112,9 @@ mod reasoning_tests {
             extra: HashMap::new(),
             body_template: None,
             body_extra: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: Vec::new(),
         };
         ResolvedProviderSnapshot {
@@ -2445,6 +3184,8 @@ mod reasoning_tests {
                     ("max".to_string(), Value::String("max".to_string())),
                 ]),
             }),
+            capture: Vec::new(),
+            replay: None,
         }
     }
 
@@ -2604,7 +3345,7 @@ mod shipped_provider_config_tests {
     #[test]
     fn deepseek_config_deserializes_and_validates_for_every_shipped_model() {
         let value: serde_json::Value = serde_yaml::from_str(include_str!(
-            "../../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/deepseek.yaml"
+            "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/deepseek.yaml"
         ))
         .expect("shipped DeepSeek provider YAML");
         let provider: ProviderConfig =
@@ -2616,6 +3357,37 @@ mod shipped_provider_config_tests {
                 .validate(&format!(" for shipped model {model}"))
                 .unwrap_or_else(|error| panic!("invalid shipped DeepSeek config: {error:#}"));
         }
+    }
+
+    #[test]
+    fn effective_request_url_follows_the_family_join_rules() {
+        let load = |yaml: &str| -> ProviderConfig {
+            serde_json::from_value(serde_yaml::from_str::<serde_json::Value>(yaml).unwrap())
+                .expect("shipped provider config")
+        };
+        let deepseek = load(include_str!(
+            "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/deepseek.yaml"
+        ));
+        assert_eq!(
+            deepseek.effective_request_url("deepseek-v4-pro").as_deref(),
+            Some("https://api.deepseek.com/chat/completions")
+        );
+        let anthropic = load(include_str!(
+            "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/anthropic.yaml"
+        ));
+        assert_eq!(
+            anthropic.effective_request_url("claude-x").as_deref(),
+            Some("https://api.anthropic.com/v1/messages")
+        );
+        let google = load(include_str!(
+            "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/google.yaml"
+        ));
+        assert_eq!(
+            google.effective_request_url("gemini-x").as_deref(),
+            Some(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:streamGenerateContent?alt=sse"
+            )
+        );
     }
 
     #[test]
@@ -2638,5 +3410,824 @@ mod shipped_provider_config_tests {
             .validate(" for unqualified local worker")
             .expect_err("authored local worker config cannot mint sealed evidence");
         assert!(error.to_string().contains("qualification evidence"));
+    }
+}
+
+#[cfg(test)]
+mod shipped_model_binding_tests {
+    use super::*;
+
+    /// Every shipped model binding, by the routing tier its file is named for.
+    const BINDINGS: &[(&str, &str)] = &[
+        (
+            "general",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/general.md"),
+        ),
+        (
+            "fast",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/fast.md"),
+        ),
+        (
+            "high",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/high.md"),
+        ),
+        (
+            "orchestrator",
+            include_str!(
+                "../../../../bundles/directive/.ai/directives/ryeos/models/orchestrator.md"
+            ),
+        ),
+        (
+            "max",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/max.md"),
+        ),
+        (
+            "code",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/code.md"),
+        ),
+        (
+            "code_max",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/code_max.md"),
+        ),
+        (
+            "cheap",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/cheap.md"),
+        ),
+        (
+            "free",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/free.md"),
+        ),
+        (
+            "vision",
+            include_str!("../../../../bundles/directive/.ai/directives/ryeos/models/vision.md"),
+        ),
+        (
+            "vision_fast",
+            include_str!(
+                "../../../../bundles/directive/.ai/directives/ryeos/models/vision_fast.md"
+            ),
+        ),
+    ];
+    const OPS_BASE: &str =
+        include_str!("../../../../bundles/directive/.ai/directives/ryeos/ops/base.md");
+    const ROUTING: &str =
+        include_str!("../../../../bundles/directive/.ai/config/ryeos-runtime/model_routing.yaml");
+    const DEFAULT_TIER: &str = "general";
+
+    /// The frontmatter mapping of a signed directive document.
+    fn frontmatter(document: &str) -> Value {
+        let mut parts = document.splitn(3, "\n---\n");
+        let signature = parts.next().expect("signature envelope");
+        assert!(signature.starts_with("<!-- ryeos:signed:"), "{signature}");
+        assert!(!signature.contains('\n'), "{signature}");
+        let yaml = parts.next().expect("directive frontmatter");
+        assert!(parts.next().is_some(), "directive body");
+        serde_yaml::from_str(yaml).expect("directive frontmatter YAML")
+    }
+
+    fn config_item(canonical_id: &str, yaml: &str) -> VerifiedConfigItem {
+        VerifiedConfigItem {
+            value: serde_yaml::from_str(yaml).expect("shipped config YAML"),
+            value_digest: "0".repeat(64),
+            contributors: vec![ProviderConfigSource {
+                space: SnapshotItemSpace::Bundle,
+                root_label: "bundle:directive".to_string(),
+                canonical_id: canonical_id.to_string(),
+                content_digest: "1".repeat(64),
+                trust_class: SnapshotTrustClass::TrustedBundle,
+            }],
+        }
+    }
+
+    fn routing() -> VerifiedConfigItem {
+        config_item("ryeos-runtime/model_routing", ROUTING)
+    }
+
+    #[test]
+    fn every_shipped_binding_holds_only_a_model_block_that_resolves_its_tier() {
+        let routing = routing();
+        let tiers: ModelRoutingConfig =
+            serde_json::from_value(routing.value.clone()).expect("shipped routing");
+        for (tier, document) in BINDINGS {
+            let composed = frontmatter(document);
+            let keys: std::collections::BTreeSet<&str> = composed
+                .as_object()
+                .expect("binding frontmatter mapping")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                std::collections::BTreeSet::from(["description", "model", "version"]),
+                "binding {tier}"
+            );
+            assert_eq!(
+                composed[MODEL_BINDING],
+                serde_json::json!({ "tier": tier }),
+                "binding {tier}"
+            );
+            let model: ModelSpec = serde_json::from_value(composed[MODEL_BINDING].clone())
+                .unwrap_or_else(|error| panic!("binding {tier}: {error}"));
+            let target = resolve_target(&model, Some(&routing))
+                .unwrap_or_else(|error| panic!("binding {tier}: {error}"));
+            let routed = &tiers.tiers[*tier];
+            assert_eq!(target.provider_id, routed.provider, "binding {tier}");
+            assert_eq!(target.model_name, routed.model, "binding {tier}");
+            assert_eq!(
+                target.context_window, routed.context_window,
+                "binding {tier}"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_base_directive_takes_its_model_from_the_default_binding() {
+        let routing = routing();
+        let tiers: ModelRoutingConfig =
+            serde_json::from_value(routing.value.clone()).expect("shipped routing");
+        let provider_id = tiers.tiers[DEFAULT_TIER].provider.clone();
+        // The one provider the shipped routing names for every tier.
+        assert_eq!(provider_id, "zen");
+        let config_id = format!("{PROVIDER_CONFIG_PREFIX}/{provider_id}");
+        let provider_catalog = BTreeMap::from([(
+            config_id.clone(),
+            config_item(
+                &config_id,
+                include_str!(
+                    "../../../../bundles/directive/.ai/config/ryeos-runtime/model-providers/zen.yaml"
+                ),
+            ),
+        )]);
+
+        let primary = frontmatter(OPS_BASE);
+        assert!(primary.get(MODEL_BINDING).is_none());
+        let (_, default_binding) = BINDINGS
+            .iter()
+            .find(|(tier, _)| *tier == DEFAULT_TIER)
+            .expect("default binding");
+        let binding = frontmatter(default_binding);
+
+        let prepare = |primary: &Value, model_ref: &str, model: &Value| {
+            prepare_directive_launch(DirectiveLaunchPreparationInput {
+                primary_ref: "directive:ryeos/ops/base",
+                primary_composed: primary,
+                model_ref,
+                model_composed: model,
+                model_routing: Some(&routing),
+                provider_catalog: &provider_catalog,
+                execution: None,
+            })
+        };
+
+        let bound = prepare(&primary, "directive:ryeos/models/general", &binding)
+            .expect("operator base launch under the default binding");
+        assert_eq!(bound.snapshot.provider_id, provider_id);
+        assert_eq!(bound.snapshot.model_name, tiers.tiers[DEFAULT_TIER].model);
+        assert_eq!(
+            bound.snapshot.context_window,
+            tiers.tiers[DEFAULT_TIER].context_window
+        );
+
+        // The same directive carrying the default tier as its own model block,
+        // bound to itself, seals the identical provider snapshot and facts.
+        let mut self_modeled = primary.clone();
+        self_modeled[MODEL_BINDING] = serde_json::json!({ "tier": DEFAULT_TIER });
+        let own = prepare(&self_modeled, "directive:ryeos/ops/base", &self_modeled)
+            .expect("self-modeled launch");
+        assert_eq!(
+            serde_json::to_value(&bound.snapshot).expect("snapshot"),
+            serde_json::to_value(&own.snapshot).expect("snapshot")
+        );
+        assert_eq!(bound.runtime_facts, own.runtime_facts);
+        assert_eq!(bound.accounting_authority, own.accounting_authority);
+
+        // Without a binding the directive would model itself, and it no
+        // longer carries a model block to do so.
+        let unbound = prepare(&primary, "directive:ryeos/ops/base", &primary)
+            .expect_err("operator base has no model of its own");
+        assert_eq!(unbound.code, "model_target_missing");
+
+        // A behavior directive that keeps its own model block refuses a
+        // distinct binding.
+        let conflict = prepare(&self_modeled, "directive:ryeos/models/general", &binding)
+            .expect_err("a distinct binding over a self-modeled primary");
+        assert_eq!(conflict.code, "primary_model_conflict");
+    }
+}
+
+#[cfg(test)]
+mod reasoning_capture_config_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn provider_with(streaming_mode: &str, reasoning: Value) -> ProviderConfig {
+        serde_json::from_value(json!({
+            "family": "chat_completions",
+            "transport": {"kind": "remote_http", "base_url": "https://example.invalid"},
+            "schemas": {
+                "streaming": {"mode": streaming_mode},
+                "output_limit": {
+                    "path": "max_tokens",
+                    "semantics": "provider_native_output_tokens"
+                },
+                "reasoning": reasoning
+            },
+            "pricing": {"explicitly_free": true},
+            "body_template": {"model": "{model}", "messages": "{messages}", "stream": "{stream}"}
+        }))
+        .expect("provider fixture parses")
+    }
+
+    fn validate(reasoning: Value) -> Result<()> {
+        provider_with("delta_merge", reasoning).validate("")
+    }
+
+    fn claude_shape() -> Value {
+        json!({
+            "capture": [
+                {"id": "text", "kind": "text_delta", "fields": ["reasoning_content"]},
+                {"id": "blocks", "kind": "blocks", "field": "thinking_blocks",
+                 "merge_keys": ["thinking"], "close_key": "signature",
+                 "whole_types": ["redacted_thinking"]}
+            ],
+            "replay": {
+                "compat_group": "claude-thinking-1",
+                "placements": [{
+                    "from": "blocks",
+                    "into": {"message_field": "thinking_blocks"},
+                    "scope": "open_loop",
+                    "on_missing": "refuse"
+                }]
+            }
+        })
+    }
+
+    fn gemini_shape() -> Value {
+        json!({
+            "capture": [
+                {"id": "text", "kind": "text_delta", "fields": ["reasoning_content"]},
+                {"id": "sig", "kind": "tool_call_field", "field": "extra_content",
+                 "merge": "object_merge"}
+            ],
+            "replay": {
+                "compat_group": "gemini-sig-1",
+                "placements": [{
+                    "from": "sig",
+                    "into": {"tool_call_field": "extra_content"},
+                    "scope": "open_loop",
+                    "on_missing": "fill", "fill": {"signature": "placeholder"}
+                }]
+            }
+        })
+    }
+
+    fn text_shape() -> Value {
+        json!({
+            "capture": [{"id": "text", "kind": "text_delta", "fields": ["reasoning"]}],
+            "replay": {"placements": [{
+                "from": "text",
+                "into": {"message_field": "reasoning_content"},
+                "scope": "all"
+            }]}
+        })
+    }
+
+    #[test]
+    fn the_documented_shapes_are_accepted() {
+        validate(claude_shape()).expect("claude-shaped entry");
+        validate(gemini_shape()).expect("gemini-shaped entry");
+        validate(text_shape()).expect("text-only entry");
+        validate(json!({"capture": [
+            {"id": "text", "kind": "text_delta", "fields": ["reasoning_content"]}
+        ]}))
+        .expect("capture without replay");
+    }
+
+    #[test]
+    fn an_entry_without_the_new_fields_serialises_without_them() {
+        let provider = provider_with(
+            "delta_merge",
+            json!({"effort": {"path": "reasoning_effort", "values": {"high": "high"}}}),
+        );
+        let value = serde_json::to_value(&provider).unwrap();
+        let reasoning = &value["schemas"]["reasoning"];
+        assert!(reasoning.get("capture").is_none());
+        assert!(reasoning.get("replay").is_none());
+        assert!(value["schemas"].get("frame_stability").is_none());
+    }
+
+    #[test]
+    fn duplicate_capture_ids_are_refused() {
+        let mut shape = claude_shape();
+        shape["capture"][1]["id"] = json!("text");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn a_placement_must_name_a_declared_capture() {
+        let mut shape = claude_shape();
+        shape["replay"]["placements"][0]["from"] = json!("nope");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn an_artefact_placement_needs_a_compat_group() {
+        let mut shape = claude_shape();
+        shape["replay"]
+            .as_object_mut()
+            .unwrap()
+            .remove("compat_group");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn an_artefact_capture_needs_a_replay_block() {
+        let mut shape = claude_shape();
+        shape.as_object_mut().unwrap().remove("replay");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn capture_is_refused_outside_delta_merge() {
+        let effort = json!({"effort": {"path": "reasoning_effort", "values": {"high": "high"}}});
+        let mut control = provider_with("event_typed", effort);
+        control.family = ProtocolFamily::AnthropicMessages;
+        control.validate("").expect("control validates");
+        let mut anthropic = provider_with("event_typed", claude_shape());
+        anthropic.family = ProtocolFamily::AnthropicMessages;
+        let error = anthropic
+            .validate("")
+            .expect_err("capture needs delta_merge");
+        assert!(error.to_string().contains("delta_merge"), "{error}");
+    }
+
+    #[test]
+    fn target_keys_must_be_identifiers() {
+        let mut shape = claude_shape();
+        shape["replay"]["placements"][0]["into"] = json!({"message_field": "a.b"});
+        assert!(validate(shape).is_err());
+        let mut shape = claude_shape();
+        shape["capture"][1]["field"] = json!("");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn a_capture_kind_and_a_target_kind_must_agree() {
+        let mut shape = gemini_shape();
+        shape["replay"]["placements"][0]["into"] = json!({"message_field": "extra_content"});
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn blocks_need_a_way_to_complete() {
+        let mut shape = claude_shape();
+        let block = shape["capture"][1].as_object_mut().unwrap();
+        block.remove("close_key");
+        block.remove("whole_types");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn text_replay_is_never_missing() {
+        let mut shape = text_shape();
+        shape["replay"]["placements"][0]["on_missing"] = json!("refuse");
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn two_placements_may_not_write_the_same_key() {
+        let mut shape = text_shape();
+        let placement = shape["replay"]["placements"][0].clone();
+        shape["replay"]["placements"]
+            .as_array_mut()
+            .unwrap()
+            .push(placement);
+        assert!(validate(shape).is_err());
+    }
+
+    #[test]
+    fn fill_goes_with_on_missing_fill_and_nothing_else() {
+        let mut shape = claude_shape();
+        shape["replay"]["placements"][0]["fill"] = json!({"x": 1});
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+        let mut shape = gemini_shape();
+        shape["replay"]["placements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("fill");
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+        let mut shape = text_shape();
+        shape["replay"]["placements"][0]["into"] =
+            json!({"message_field": "a", "tool_call_field": "b"});
+        assert!(serde_json::from_value::<ReasoningSchemaConfig>(shape).is_err());
+    }
+
+    #[test]
+    fn an_artefact_capture_no_placement_names_is_refused() {
+        let mut shape = claude_shape();
+        shape["capture"].as_array_mut().unwrap().push(json!(
+            {"id": "extra", "kind": "tool_call_field", "field": "x", "merge": "last"}
+        ));
+        let error = validate(shape).expect_err("unused artefact capture");
+        assert!(error.to_string().contains("no replay placement"), "{error}");
+    }
+
+    #[test]
+    fn frame_stability_refuses_empty_and_duplicate_lists() {
+        let with = |list: Value| {
+            let mut provider = provider_with("delta_merge", text_shape());
+            provider.schemas.as_mut().unwrap().frame_stability =
+                Some(serde_json::from_value(json!({"refuse_change_of": list})).unwrap());
+            provider.validate("")
+        };
+        with(json!(["system", "reasoning"])).expect("distinct components");
+        assert!(with(json!([])).is_err());
+        assert!(with(json!(["tools", "tools"])).is_err());
+    }
+
+    #[test]
+    fn unknown_capture_fields_are_refused_at_parse() {
+        let parsed = serde_json::from_value::<ReasoningSchemaConfig>(json!({
+            "capture": [{"id": "t", "kind": "text_delta", "fields": ["a"], "vendor": "x"}]
+        }));
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn frame_stability_parses_closed_components() {
+        let parsed: FrameStabilityConfig =
+            serde_json::from_value(json!({"refuse_change_of": ["system", "tools", "reasoning"]}))
+                .unwrap();
+        assert_eq!(parsed.refuse_change_of.len(), 3);
+        assert!(
+            serde_json::from_value::<FrameStabilityConfig>(
+                json!({"refuse_change_of": ["sampling"]})
+            )
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod image_input_profile_tests {
+    use super::*;
+
+    fn load(yaml: &str) -> ProviderConfig {
+        serde_json::from_value(serde_yaml::from_str::<Value>(yaml).expect("yaml"))
+            .expect("provider config")
+    }
+
+    const BASE: &str = r#"
+family: chat_completions
+transport: {kind: remote_http, base_url: "https://example.invalid"}
+body_template: {model: "{model}"}
+image_input:
+  unsupported: text_note
+profiles:
+  - name: sees
+    match: ["seeing-*"]
+    image_input:
+      accepts:
+        media_types: [image/png]
+        max_bytes_per_image: 100
+        max_images_per_request: 3
+        text_part_template: {type: text, text: "{text}"}
+        image_part_template: {type: image_url, image_url: {url: "{data_url}"}}
+        tool_result_note: "[{count} image(s) follow]"
+        deferred_label: "Image {index} from {call_id}:"
+        omitted_note: "[omitted {media_type}]"
+        cost: {pixels_per_token: 750, max_tokens: 1600, unknown_dimensions_tokens: 1600}
+"#;
+
+    #[test]
+    fn a_profile_image_input_replaces_the_config_value_whole() {
+        let provider = load(BASE);
+        let blind = provider.resolve_for_model("other-model");
+        let image_input = blind.image_input.expect("config value kept");
+        assert_eq!(image_input.unsupported, UnsupportedImagePolicy::TextNote);
+        assert!(image_input.accepts.is_none());
+        let seeing = provider.resolve_for_model("seeing-1");
+        let image_input = seeing.image_input.expect("profile value");
+        // Replaced whole: the profile did not restate `unsupported`.
+        assert_eq!(image_input.unsupported, UnsupportedImagePolicy::Refuse);
+        assert_eq!(
+            image_input.accepts.expect("accepts").max_images_per_request,
+            3
+        );
+    }
+
+    #[test]
+    fn an_invalid_profile_image_input_fails_config_validation() {
+        let provider =
+            load(&BASE.replace("max_images_per_request: 3", "max_images_per_request: 0"));
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("max_images_per_request"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod cache_marks_config_tests {
+    use super::*;
+
+    const MARKS: &str = r#"
+cache_marks:
+  mark: {cache_control: {type: ephemeral}}
+  text_part_template: {type: text, text: "{text}"}
+  max_marks: 4
+  positions: [system, newest, previous_tail]
+"#;
+
+    const PROFILE_MARKS: &str = r#"
+    cache_marks:
+      mark: {tag: profile}
+      text_part_template: {type: text, text: "{text}"}
+      max_marks: 2
+      positions: [newest]
+"#;
+
+    fn load(top: &str, profile: &str, extra: &str) -> ProviderConfig {
+        let yaml = format!(
+            r#"
+family: chat_completions
+transport: {{kind: remote_http, base_url: "https://example.invalid"}}
+schemas:
+  streaming:
+    mode: delta_merge
+    metadata:
+      usage:
+        path: usage
+        input_tokens_path: prompt_tokens
+        output_tokens_path: completion_tokens
+        {extra}
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+body_template: {{model: "{{model}}", messages: "{{messages}}", stream: "{{stream}}"}}
+{top}
+profiles:
+  - name: marked
+    match: ["marked-*"]
+{profile}
+"#
+        );
+        serde_json::from_value(serde_yaml::from_str::<Value>(&yaml).expect("yaml"))
+            .expect("provider config")
+    }
+
+    fn with_tariff(covered: &str, extra_usage: &str) -> ProviderConfig {
+        let mut provider = load(MARKS, "    extra: {}", extra_usage);
+        provider.spend_authority = Some(
+            serde_json::from_value(serde_json::json!({
+                "billing_principal": "p",
+                "credential_authority_generation": "g",
+                "pricing_contract_subject": "s",
+                "tariff": {
+                    "schema_version": 1,
+                    "currency": "usd",
+                    "pricing_generation": "t",
+                    "input_per_million": "1",
+                    "output_per_million": "2",
+                    "cache_read_per_million": "0.1",
+                    "cache_write_per_million": "1.25",
+                    "covered_dimensions": serde_yaml::from_str::<Value>(covered).unwrap()
+                }
+            }))
+            .expect("spend authority"),
+        );
+        provider
+    }
+
+    #[test]
+    fn a_profile_cache_marks_replaces_the_config_value_whole() {
+        let provider = load(MARKS, PROFILE_MARKS, "");
+        let plain = provider.resolve_for_model("other");
+        assert_eq!(plain.cache_marks.expect("config value").max_marks, 4);
+        let marked = provider.resolve_for_model("marked-1").cache_marks.unwrap();
+        assert_eq!(marked.max_marks, 2);
+        assert_eq!(marked.positions, vec![CacheMarkPosition::Newest]);
+        provider.validate("").unwrap();
+    }
+
+    #[test]
+    fn no_cache_marks_is_the_default_and_serialises_nothing() {
+        let provider = load("", "    extra: {}", "");
+        assert!(provider.cache_marks.is_none());
+        provider.validate("").unwrap();
+        let value = serde_json::to_value(&provider).unwrap();
+        assert!(value.get("cache_marks").is_none());
+    }
+
+    #[test]
+    fn an_invalid_profile_cache_marks_fails_config_validation() {
+        let provider = load(
+            "",
+            &PROFILE_MARKS.replace("max_marks: 2", "max_marks: 9"),
+            "",
+        );
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("max_marks"), "{error}");
+    }
+
+    #[test]
+    fn a_marked_route_must_be_chat_completions_unrenamed_and_inline() {
+        let mut provider = load(MARKS, "    extra: {}", "");
+        provider.family = ProtocolFamily::AnthropicMessages;
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("chat_completions"), "{error}");
+
+        let mut provider = load(MARKS, "    extra: {}", "");
+        provider.schemas.as_mut().unwrap().messages = Some(MessageSchemas {
+            role_map: Some(HashMap::from([(
+                "assistant".to_string(),
+                "model".to_string(),
+            )])),
+            ..Default::default()
+        });
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("role_map"), "{error}");
+
+        let mut provider = load(MARKS, "    extra: {}", "");
+        provider.schemas.as_mut().unwrap().messages = Some(MessageSchemas {
+            system_message: Some(SystemMessageConfig {
+                mode: SystemMessageMode::BodyField,
+                field: Some("system".to_string()),
+                template: None,
+            }),
+            ..Default::default()
+        });
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("system_message"), "{error}");
+    }
+
+    #[test]
+    fn a_profile_that_breaks_the_marked_route_fails_at_validate_time() {
+        let provider = load(
+            MARKS,
+            r#"    schemas:
+      streaming: {mode: delta_merge}
+      output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
+      messages:
+        role_map: {assistant: model}"#,
+            "",
+        );
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("role_map"), "{error}");
+        assert!(error.contains("profile marked"), "{error}");
+
+        // A profile's own marks over a profile route that renames the role.
+        let provider = load(
+            "",
+            &format!(
+                "{PROFILE_MARKS}    schemas:\n      streaming: {{mode: delta_merge}}\n      output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}\n      messages:\n        role_map: {{system: instructions}}\n"
+            ),
+            "",
+        );
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("role_map"), "{error}");
+    }
+
+    #[test]
+    fn a_marked_route_must_name_its_tool_role_tool() {
+        let mut provider = load(MARKS, "    extra: {}", "");
+        provider.schemas.as_mut().unwrap().messages = Some(MessageSchemas {
+            tool_result: Some(ToolResultConfig {
+                role: "function".to_string(),
+                wrap_mode: ToolResultWrapMode::Direct,
+                block_template: serde_json::json!({"content": "{content}"}),
+            }),
+            ..Default::default()
+        });
+        let error = provider.validate("").unwrap_err().to_string();
+        assert!(error.contains("tool_result.role"), "{error}");
+    }
+
+    #[test]
+    fn partition_and_included_in_input_cannot_both_be_declared() {
+        let error = load(
+            "",
+            "    extra: {}",
+            "cache_partition_of_input: true\n        cache_read_tokens_path: hit\n        cache_miss_tokens_path: miss\n        cache_included_in_input: true",
+        )
+        .validate("")
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot both be set"), "{error}");
+    }
+
+    #[test]
+    fn a_tariff_on_a_marked_route_must_cover_the_cache_dimensions() {
+        let covered = "[input_tokens, output_tokens, cache_read_tokens, cache_write_tokens]";
+        with_tariff(covered, "").validate("").unwrap();
+        let error = with_tariff("[input_tokens, output_tokens]", "")
+            .validate("")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cache_write_tokens"), "{error}");
+        let error = with_tariff("[input_tokens, output_tokens, cache_write_tokens]", "")
+            .validate("")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cache_read_tokens"), "{error}");
+    }
+
+    #[test]
+    fn included_in_input_refuses_a_tariff_that_bills_input_and_cache() {
+        let included = "cache_included_in_input: true";
+        let both = "[input_tokens, output_tokens, cache_read_tokens, cache_write_tokens]";
+        let error = with_tariff(both, included)
+            .validate("")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("twice"), "{error}");
+        // Without the flag the same tariff is a valid declaration.
+        with_tariff(both, "").validate("").unwrap();
+        // Output plus the cache dimensions, with no input dimension, is fine.
+        with_tariff(
+            "[output_tokens, cache_read_tokens, cache_write_tokens]",
+            included,
+        )
+        .validate("")
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod request_rejections_config_tests {
+    use super::*;
+
+    const ROWS: &str = r#"
+request_rejections:
+  - code: provider_context_length_exceeded
+    statuses: [400, 413]
+    body_contains_any: ["context length"]
+"#;
+
+    const PROFILE_ROWS: &str = r#"
+    request_rejections:
+      - code: provider_profile_rejection
+        statuses: [400]
+        body_contains_any: ["profile phrase"]
+"#;
+
+    fn load(top: &str, profile: &str) -> ProviderConfig {
+        let yaml = format!(
+            r#"
+family: chat_completions
+transport: {{kind: remote_http, base_url: "https://example.invalid"}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+body_template: {{model: "{{model}}", messages: "{{messages}}", stream: "{{stream}}"}}
+{top}
+profiles:
+  - name: special
+    match: ["special-*"]
+{profile}
+"#
+        );
+        serde_json::from_value(serde_yaml::from_str::<Value>(&yaml).expect("yaml"))
+            .expect("provider config")
+    }
+
+    #[test]
+    fn a_profile_replaces_the_rows_whole() {
+        let provider = load(ROWS, PROFILE_ROWS);
+        provider.validate("").unwrap();
+        let plain = provider.resolve_for_model("other").request_rejections;
+        assert_eq!(plain.expect("config rows")[0].statuses, vec![400, 413]);
+        let special = provider
+            .resolve_for_model("special-1")
+            .request_rejections
+            .expect("profile rows");
+        assert_eq!(special.len(), 1);
+        assert_eq!(special[0].code, "provider_profile_rejection");
+    }
+
+    #[test]
+    fn no_rows_is_the_default_and_serialises_nothing() {
+        let provider = load("", "    extra: {}");
+        assert!(provider.request_rejections.is_none());
+        provider.validate("").unwrap();
+        let value = serde_json::to_value(&provider).unwrap();
+        assert!(value.get("request_rejections").is_none());
+    }
+
+    #[test]
+    fn invalid_rows_fail_config_validation_in_the_entry_and_in_a_profile() {
+        let bad_top = ROWS.replace("provider_context_length_exceeded", "context_length");
+        assert!(load(&bad_top, "    extra: {}").validate("").is_err());
+        let bad_profile = PROFILE_ROWS.replace("provider_profile_rejection", "nope");
+        assert!(load(ROWS, &bad_profile).validate("").is_err());
+    }
+
+    #[test]
+    fn an_unknown_row_field_is_refused() {
+        let yaml = ROWS.replace("statuses:", "status:");
+        let parsed: Result<ProviderConfig, _> = serde_json::from_value(
+            serde_yaml::from_str::<Value>(&format!(
+                "family: chat_completions\ntransport: {{kind: remote_http, base_url: \"https://example.invalid\"}}\n{yaml}"
+            ))
+            .unwrap(),
+        );
+        assert!(parsed.is_err());
     }
 }

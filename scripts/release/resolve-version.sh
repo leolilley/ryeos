@@ -9,6 +9,7 @@ set -euo pipefail
 event_name="${1:-}"
 ref_name="${2:-}"
 requested_version="${3:-}"
+query="${4:-}"
 
 case "$event_name" in
     push)
@@ -45,4 +46,20 @@ if [[ "$prerelease" != "$version" ]]; then
     done
 fi
 
-printf '%s\n' "$version"
+case "$query" in
+    "")
+        printf '%s\n' "$version"
+        ;;
+    --prerelease)
+        # A version with a prerelease suffix is a prerelease.
+        if [[ "$version" == *-* ]]; then
+            echo true
+        else
+            echo false
+        fi
+        ;;
+    *)
+        echo "release version: unsupported query '$query'" >&2
+        exit 2
+        ;;
+esac

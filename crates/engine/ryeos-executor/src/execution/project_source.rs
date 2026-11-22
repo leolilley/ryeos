@@ -29,6 +29,26 @@ pub enum ProjectSourceError {
     /// went wrong (snapshot not in CAS, materialization race, etc.).
     #[error("project source checkout failed: {0}")]
     CheckoutFailed(String),
+    /// A mutable (writable-workspace) run was asked of an `ai_only` snapshot.
+    /// An AI-only head carries only the node's `sync_include` roots, so a run
+    /// that folds its workspace back cannot be captured against it. Read-only
+    /// pinned runs on such a head are unaffected. Mapped to 409.
+    #[error(
+        "snapshot {snapshot_hash} is an ai_only project head and cannot back a mutable run; execute it read-only or push a full_project snapshot"
+    )]
+    AiOnlyBaseNotMutable { snapshot_hash: String },
+    /// A pinned-project consumer named a snapshot that is not the principal's
+    /// current head for the project path it states. The path is the logical
+    /// project signer scopes are matched on, so it is only stated when the
+    /// head ref for that path is the exact snapshot whose bytes are resolved.
+    #[error(
+        "snapshot {snapshot_hash} is not the current head of project '{project_path}' (current head: {head}); the project scope of a signer is matched on the project path only for that head"
+    )]
+    SnapshotNotCurrentHead {
+        project_path: String,
+        snapshot_hash: String,
+        head: String,
+    },
     /// Anything else that goes wrong while resolving the project
     /// source — internal state-store errors, manifest parsing failures,
     /// etc. Mapped to HTTP 500 by the API layer.
@@ -38,13 +58,13 @@ pub enum ProjectSourceError {
 
 impl From<anyhow::Error> for ProjectSourceError {
     fn from(err: anyhow::Error) -> Self {
-        Self::Other(err.to_string())
+        Self::Other(format!("{err:#}"))
     }
 }
 
 impl From<ryeos_app::engine_cache::BuildWaitError> for ProjectSourceError {
     fn from(err: ryeos_app::engine_cache::BuildWaitError) -> Self {
-        Self::Other(err.to_string())
+        Self::Other(format!("{err:#}"))
     }
 }
 
@@ -386,6 +406,7 @@ pub struct PreparedExternalProductConsumer {
     _semantic_config: Option<ryeos_engine::launch_config::LaunchConfigSnapshotSet>,
     _source_closure: Option<ryeos_app::source_closure_admission::AdmittedSourceClosure>,
     _project_context: Option<ResolvedProjectContext>,
+    logical_project_root: Option<PathBuf>,
 }
 
 impl PreparedExternalProductConsumer {
@@ -409,11 +430,13 @@ impl PreparedExternalProductConsumer {
             .as_ref()
             .map(|context| &context.request_engine)
             .unwrap_or(&state.engine);
-        let roots = engine.resolution_roots(
-            self._project_context
-                .as_ref()
-                .map(|context| context.effective_path.clone()),
-        );
+        let roots = engine
+            .resolution_roots(
+                self._project_context
+                    .as_ref()
+                    .map(|context| context.effective_path.clone()),
+            )
+            .with_logical_project_root(self.logical_project_root.clone());
         ryeos_app::operator_external_content::product_composition::select_products_with_project_context_resolver(
             state,
             context,
@@ -455,11 +478,13 @@ impl PreparedExternalProductConsumer {
             .as_ref()
             .map(|context| &context.request_engine)
             .unwrap_or(&state.engine);
-        let roots = engine.resolution_roots(
-            self._project_context
-                .as_ref()
-                .map(|context| context.effective_path.clone()),
-        );
+        let roots = engine
+            .resolution_roots(
+                self._project_context
+                    .as_ref()
+                    .map(|context| context.effective_path.clone()),
+            )
+            .with_logical_project_root(self.logical_project_root.clone());
         ryeos_app::operator_external_content::product_composition::select_and_import_products(
             Arc::clone(&state),
             context,
@@ -495,6 +520,16 @@ pub fn prepare_pinned_project_external_consumer(
     principal_scopes: Vec<String>,
     checkout_id: &str,
 ) -> anyhow::Result<PreparedExternalProductConsumer> {
+    // The materialized checkout is a per-generation path; the project the
+    // operator named is the logical project signer scopes are matched on, but
+    // only for the snapshot that is that project's current head for this
+    // principal, as for launches. Any other pairing is refused.
+    let logical_project_root = current_head_logical_project(
+        state,
+        &principal_fingerprint,
+        &project_path,
+        project_snapshot_hash,
+    )?;
     let project_context = resolve_pinned_snapshot_context(
         state,
         project_snapshot_hash,
@@ -506,6 +541,7 @@ pub fn prepare_pinned_project_external_consumer(
         state,
         consumer_ref,
         Some(project_context),
+        Some(logical_project_root),
         principal_fingerprint,
         principal_scopes,
         state.threads.site_id().to_owned(),
@@ -524,6 +560,7 @@ pub fn prepare_installed_bundle_external_consumer(
     prepare_external_consumer_context(
         state,
         consumer_ref,
+        None,
         None,
         principal_fingerprint,
         principal_scopes,
@@ -563,20 +600,64 @@ pub fn prepare_external_product_consumer(
     } else {
         None
     };
+    // A composition names a snapshot, not a project path, so there is no
+    // logical project to state here.
     prepare_external_consumer_context(
         state,
         &request.consumer_ref,
         project,
+        None,
         context.fingerprint.clone(),
         context.scopes.clone(),
         context.execution_origin(state.threads.site_id()),
     )
 }
 
+/// The logical project a pinned-project consumer may state: the canonical
+/// project path, only when `head` (the principal's head ref for it) is exactly
+/// `snapshot_hash`. A missing or different head refuses; there is no fallback
+/// to a projectless or checkout-judged resolution.
+fn bind_logical_project_root(
+    project_ref: &str,
+    snapshot_hash: &str,
+    head: Option<&str>,
+) -> Result<PathBuf, ProjectSourceError> {
+    match head {
+        Some(head) if head == snapshot_hash => Ok(PathBuf::from(project_ref)),
+        other => Err(ProjectSourceError::SnapshotNotCurrentHead {
+            project_path: project_ref.to_owned(),
+            snapshot_hash: snapshot_hash.to_owned(),
+            head: other.unwrap_or("none").to_owned(),
+        }),
+    }
+}
+
+fn current_head_logical_project(
+    state: &AppState,
+    principal_id: &str,
+    project_path: &Path,
+    snapshot_hash: &str,
+) -> Result<PathBuf, ProjectSourceError> {
+    let raw = project_path.to_str().ok_or_else(|| {
+        ProjectSourceError::Other(
+            "project_path is not valid UTF-8 and cannot be used as a project identity".into(),
+        )
+    })?;
+    // The same canonical ref and storage key the head was written under.
+    let project_ref = canonical_project_ref(raw)?;
+    let project_hash = lillux::cas::sha256_hex(project_ref.as_bytes());
+    let principal_key = ryeos_state::refs::principal_storage_key(principal_id)?;
+    let head = state
+        .state_store
+        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+    bind_logical_project_root(&project_ref, snapshot_hash, head.as_deref())
+}
+
 fn prepare_external_consumer_context(
     state: &AppState,
     consumer_ref: &str,
     project_context: Option<ResolvedProjectContext>,
+    logical_project_root: Option<PathBuf>,
     principal_fingerprint: String,
     principal_scopes: Vec<String>,
     origin_site_id: String,
@@ -605,6 +686,7 @@ fn prepare_external_consumer_context(
         .map(|context| context.effective_path.clone());
     let site_id = state.threads.site_id().to_owned();
     let plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: principal_fingerprint,
@@ -637,6 +719,7 @@ fn prepare_external_consumer_context(
     }
     let mut resolution =
         engine.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: verified.resolved.logical_project_root.clone(),
             item_ref: canonical,
             expected_kind: None,
             project_root: project_root.clone(),
@@ -654,7 +737,11 @@ fn prepare_external_consumer_context(
         .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
-    let roots = engine.resolution_roots(project_root);
+    let effective_logical_root =
+        plan_context.effective_logical_project_root(project_root.as_deref());
+    let roots = engine
+        .resolution_roots(project_root.clone())
+        .with_logical_project_root(effective_logical_root.clone());
     let project_authority = project_context
         .as_ref()
         .map(|context| {
@@ -722,6 +809,7 @@ fn prepare_external_consumer_context(
         _semantic_config: semantic_config,
         _source_closure: source_closure,
         _project_context: project_context,
+        logical_project_root: effective_logical_root,
     })
 }
 
@@ -735,6 +823,22 @@ struct PinnedSnapshotContextParams<'a> {
     source: ProjectSource,
     captured_generation: Option<super::CapturedProjectGeneration>,
     realization: PinnedContextRealization,
+}
+
+/// Refuse an `ai_only` base for a mutable (copy-on-write) realization.
+fn refuse_ai_only_mutable_base(
+    scope: ryeos_state::project_sync::ProjectSyncScope,
+    realization: PinnedContextRealization,
+    snapshot_hash: &str,
+) -> Result<(), ProjectSourceError> {
+    if scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly
+        && matches!(realization, PinnedContextRealization::Cow)
+    {
+        return Err(ProjectSourceError::AiOnlyBaseNotMutable {
+            snapshot_hash: snapshot_hash.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn resolve_pinned_snapshot_context_admitted(
@@ -759,14 +863,32 @@ fn resolve_pinned_snapshot_context_admitted(
         recovery_stage = "snapshot-validation",
         "pinned project resolution stage"
     );
-    ryeos_state::project_materialization::load_project_snapshot_bounded(&cas, snapshot_hash)
-        .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?
+    let snapshot =
+        ryeos_state::project_materialization::load_project_snapshot_bounded(&cas, snapshot_hash)
+            .map_err(|e| ProjectSourceError::CheckoutFailed(format!("{e:#}")))?
+            .ok_or_else(|| {
+                ProjectSourceError::CheckoutFailed(format!(
+                    "snapshot {} not found in CAS",
+                    snapshot_hash
+                ))
+            })?;
+    // A mutable run folds its workspace back against the base policy, and an
+    // ai_only policy's capture filter is the node's sync_include table, which
+    // fold-back does not hold. Refuse before anything is realized or run.
+    if matches!(realization, PinnedContextRealization::Cow) {
+        let policy = ryeos_state::project_materialization::load_project_policy_bounded(
+            &cas,
+            &snapshot.effective_policy_hash,
+        )
+        .map_err(|e| ProjectSourceError::CheckoutFailed(format!("{e:#}")))?
         .ok_or_else(|| {
             ProjectSourceError::CheckoutFailed(format!(
-                "snapshot {} not found in CAS",
-                snapshot_hash
+                "project snapshot policy {} not found in CAS",
+                snapshot.effective_policy_hash
             ))
         })?;
+        refuse_ai_only_mutable_base(policy.sync_scope, realization, snapshot_hash)?;
+    }
     tracing::debug!(
         checkout_id,
         recovery_stage = "snapshot-validated",
@@ -780,7 +902,7 @@ fn resolve_pinned_snapshot_context_admitted(
         PinnedContextRealization::ReadOnly => (None, None),
         PinnedContextRealization::Cow => {
             ryeos_engine::execution_workspace::validate_workspace_id(checkout_id)
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+                .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?;
             let execution_root = runtime_cache.join("executions");
             let workspace_root = execution_root.join(checkout_id);
             state
@@ -794,11 +916,11 @@ fn resolve_pinned_snapshot_context_admitted(
                         )
                     })?,
                 )
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+                .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?;
             let reserved = state
                 .state_store
                 .execution_workspace(checkout_id)
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?
+                .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?
                 .ok_or_else(|| {
                     ProjectSourceError::CheckoutFailed(
                         "workspace reservation disappeared".to_string(),
@@ -815,7 +937,7 @@ fn resolve_pinned_snapshot_context_admitted(
             // adoption proof; retained recovery has its own journal-backed path.
             let (project, guard) =
                 ryeos_app::temp_dir_guard::create_runtime_workspace(&runtime_cache, checkout_id)
-                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?;
             guard.preserve_for_explicit_cleanup();
             state
                 .state_store
@@ -825,7 +947,7 @@ fn resolve_pinned_snapshot_context_admitted(
                     WorkspaceState::Constructing,
                     None,
                 )
-                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+                .map_err(|error| ProjectSourceError::CheckoutFailed(format!("{error:#}")))?;
             (Some(project), Some(guard))
         }
     };
@@ -847,7 +969,7 @@ fn resolve_pinned_snapshot_context_admitted(
             project_materialization,
             &materialization_cache,
         )
-        .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+        .map_err(|e| ProjectSourceError::CheckoutFailed(format!("{e:#}")))?;
     tracing::debug!(
         checkout_id,
         recovery_stage = "snapshot-materialized",
@@ -865,7 +987,6 @@ fn resolve_pinned_snapshot_context_admitted(
         snapshot_hash: snapshot_hash.to_string(),
     };
 
-    let immutable_project_root = materialization_cache.cache_dir(snapshot_hash);
     tracing::debug!(
         checkout_id,
         recovery_stage = "request-engine-reconstruction",
@@ -875,19 +996,12 @@ fn resolve_pinned_snapshot_context_admitted(
         cache_key,
         || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
             // Installed executor registries are admitted once at the daemon
-            // generation boundary. Derive only the project trust view here;
-            // rebuilding the node engine would duplicate admission and could
-            // observe a different ambient registry generation.
-            let built = state
-                .engine
-                .for_project_root(immutable_project_root.as_path(), None)
-                .map_err(|e| {
-                    ProjectSourceError::CheckoutFailed(format!(
-                        "per-request project trust derivation failed: {e}"
-                    ))
-                })?;
-
-            Ok((Arc::new(built), None))
+            // generation boundary, and trust is node state that does not
+            // depend on the project. The request engine is the admitted
+            // generation itself; rebuilding the node engine would duplicate
+            // admission and could observe a different ambient registry
+            // generation.
+            Ok((Arc::clone(&state.engine), None))
         },
     )?;
     tracing::debug!(
@@ -1274,5 +1388,89 @@ mod canonical_project_ref_tests {
         .unwrap();
 
         assert!(Arc::ptr_eq(&ctx.request_engine, &engine));
+    }
+}
+
+#[cfg(test)]
+mod ai_only_base_tests {
+    use super::*;
+    use ryeos_state::project_sync::ProjectSyncScope;
+
+    #[test]
+    fn a_mutable_run_on_an_ai_only_base_is_refused_with_a_typed_error() {
+        let error = refuse_ai_only_mutable_base(
+            ProjectSyncScope::AiOnly,
+            PinnedContextRealization::Cow,
+            "abc",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProjectSourceError::AiOnlyBaseNotMutable { ref snapshot_hash } if snapshot_hash == "abc"
+        ));
+        assert!(error.to_string().contains("ai_only"));
+    }
+
+    #[test]
+    fn read_only_runs_and_full_project_bases_are_unaffected() {
+        for (scope, realization) in [
+            (ProjectSyncScope::AiOnly, PinnedContextRealization::ReadOnly),
+            (ProjectSyncScope::FullProject, PinnedContextRealization::Cow),
+            (
+                ProjectSyncScope::FullProject,
+                PinnedContextRealization::ReadOnly,
+            ),
+        ] {
+            refuse_ai_only_mutable_base(scope, realization, "abc").unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod pinned_consumer_head_binding_tests {
+    use super::*;
+
+    const PROJECT: &str = "/work/registered-project";
+
+    #[test]
+    fn the_current_head_states_the_canonical_project_as_the_logical_root() {
+        let snapshot = "a".repeat(64);
+        let root = bind_logical_project_root(PROJECT, &snapshot, Some(&snapshot)).unwrap();
+        assert_eq!(root, PathBuf::from(PROJECT));
+    }
+
+    #[test]
+    fn a_snapshot_that_is_not_the_head_of_the_stated_path_is_refused() {
+        let snapshot = "a".repeat(64);
+        let head = "b".repeat(64);
+        match bind_logical_project_root(PROJECT, &snapshot, Some(&head)) {
+            Err(ProjectSourceError::SnapshotNotCurrentHead {
+                project_path,
+                snapshot_hash,
+                head: stated_head,
+            }) => {
+                assert_eq!(project_path, PROJECT);
+                assert_eq!(snapshot_hash, snapshot);
+                assert_eq!(stated_head, head);
+            }
+            other => panic!("a mismatched head must be refused with a typed error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_path_with_no_head_is_refused_not_resolved_projectless() {
+        let snapshot = "a".repeat(64);
+        let error = bind_logical_project_root(PROJECT, &snapshot, None).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ProjectSourceError::SnapshotNotCurrentHead { head, .. } if head == "none"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("is not the current head"),
+            "{error}"
+        );
     }
 }

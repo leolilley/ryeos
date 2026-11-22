@@ -1,0 +1,197 @@
+{
+ "format": 1,
+ "scene": "launcher",
+ "provenance": "synthetic",
+ "clock_ms": 1794494400000,
+ "session": {
+  "session_id": "S-fixture",
+  "project_path": "/home/fixture/ryeos-next",
+  "thread_id": "fixture-seat",
+  "chain_root_id": "fixture-chain"
+ },
+ "viewport": {
+  "width": 0,
+  "height": 0,
+  "device_pixel_ratio": 1.0
+ },
+ "surface": {
+  "root_ref": "surface:ryeos/ui/workbench",
+  "title": "Workbench",
+  "current": "first",
+  "definition": {
+   "name": "workbench",
+   "title": "Workbench",
+   "version": "1.0.0",
+   "tiling": {
+    "mode": "master_stack",
+    "master": {
+     "side": "left",
+     "arrange": "vertical",
+     "ratio": 0.6,
+     "count": 1
+    },
+    "stack": {
+     "arrange": "vertical"
+    },
+    "insert": "end"
+   },
+   "tiles": [
+    "view:ryeos/threads/history",
+    "view:ryeos/chain/timeline"
+   ],
+   "views": {
+    "view:ryeos/threads/history": {
+     "from_bundle": "views/ryeos/threads/history.yaml"
+    },
+    "view:ryeos/development/execution": {
+     "from_bundle": "views/ryeos/development/execution.yaml",
+     "patch": [
+      {
+       "path": "/sources/execution/params/thread_id",
+       "value": "T-build-root"
+      }
+     ]
+    },
+    "view:ryeos/chain/timeline": {
+     "from_bundle": "views/ryeos/chain/timeline.yaml"
+    },
+    "view:ryeos/thread/conversation": {
+     "from_bundle": "views/ryeos/thread/transcript.yaml",
+     "patch": [
+      {
+       "path": "/title",
+       "copy_from": {
+        "from_bundle": "views/ryeos/thread/conversation.yaml",
+        "path": "/title"
+       }
+      },
+      {
+       "path": "/input",
+       "copy_from": {
+        "from_bundle": "views/ryeos/thread/conversation.yaml",
+        "path": "/input"
+       }
+      },
+      {
+       "path": "/sources/default/params/chain_root_id",
+       "value": "chain-demo"
+      }
+     ]
+    },
+    "view:ryeos/schedules/list": {
+     "from_bundle": "views/ryeos/schedules/list.yaml"
+    },
+    "view:ryeos/surfaces/list": {
+     "from_bundle": "views/ryeos/surfaces/list.yaml"
+    }
+   }
+  }
+ },
+ "shared": {
+  "binding_attachment_id": "shared-attachment",
+  "binding_generation": 2,
+  "binding_digest": "shared-binding",
+  "root_ref": "config:fixture/presentation",
+  "root_generation": "shared-generation",
+  "project_path": "/home/fixture/ryeos-next",
+  "subject": {
+   "kind": "unregistered_project"
+  },
+  "posture": "observation_only",
+  "binding_request_bounds": {
+   "max_request_bytes": 4096,
+   "max_input_bytes": 1024,
+   "max_seat_append_bytes": 65536
+  },
+  "presentation": {
+   "definition": {
+    "kind": "shared_presentation",
+    "config": {
+     "category": "ui",
+     "shared_presentation": {
+      "schema": 2,
+      "title": "Fixture",
+      "launcher": "launcher",
+      "dialogs": [
+       {
+        "id": "launcher",
+        "title": "Launch",
+        "view": "view:ryeos/ui/launcher"
+       }
+      ],
+      "capabilities": {
+       "sources": [],
+       "affordances": []
+      }
+     }
+    }
+   },
+   "views": {
+    "view:ryeos/ui/launcher": {
+     "from_bundle": "views/ryeos/ui/launcher.yaml"
+    }
+   }
+  }
+ },
+ "steps": [
+  {
+   "do": "open_launcher"
+  },
+  {
+   "do": "type_find",
+   "text": "tree"
+  }
+ ],
+ "sources": [
+  {
+   "view": "view:ryeos/threads/history",
+   "channel": "default",
+   "service": "service:ui/ryeos-ui/threads/list",
+   "params": {
+    "active": "",
+    "limit": 200,
+    "project": "current",
+    "project_path": "@session:project_root",
+    "sort": "watch"
+   },
+   "response": {
+    "coverage": {
+     "reason": "projection_locator_not_exhaustive",
+     "state": "observed"
+    },
+    "threads": [
+     {
+      "created_at": "2026-11-12T09:12:00Z",
+      "item_ref": "directive:ryeos/ops/base",
+      "kind": "directive_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "running",
+      "thread_id": "T-7f3a"
+     },
+     {
+      "created_at": "2026-11-12T08:40:00Z",
+      "item_ref": "tool:ryeos/dev/gate",
+      "kind": "tool_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "completed",
+      "thread_id": "T-61c0"
+     },
+     {
+      "created_at": "2026-11-12T07:03:00Z",
+      "item_ref": "directive:ryeos/review/diff",
+      "kind": "directive_run",
+      "project": {
+       "name": "ryeos-next"
+      },
+      "status": "failed",
+      "thread_id": "T-5d21"
+     }
+    ]
+   }
+  }
+ ]
+}

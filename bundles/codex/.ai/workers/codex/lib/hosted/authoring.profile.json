@@ -1,5 +1,5 @@
 {
-  "schema_version": 10,
+  "schema_version": 13,
   "external_candidate": null,
   "transport": "stdio_jsonrpc",
   "http_sse": null,
@@ -27,7 +27,7 @@
     "-c",
     "approvals_reviewer=\"user\"",
     "-c",
-    "default_permissions=\"danger-full-access\"",
+    "default_permissions=\":danger-full-access\"",
     "-c",
     "web_search=\"disabled\"",
     "-c",
@@ -162,6 +162,11 @@
   "baseline_destination": "config.toml",
   "auxiliary_configs": [],
   "runtime_configs": [],
+  "configuration_absence": {
+    "absolute_paths": [],
+    "startup_ancestor_paths": [],
+    "route_ancestor_paths": []
+  },
   "portable_state": {
     "schema": 1,
     "restore_contract": "ryeos.worker_session.restore.v1",
@@ -577,7 +582,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "danger-full-access"
+          "equals": ":danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -672,7 +677,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "danger-full-access"
+          "equals": ":danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -944,7 +949,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/login/completed",
@@ -990,7 +998,10 @@
           }
         }
       ],
-      "ceremony_clear": true
+      "ceremony_clear": true,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/rateLimits/updated",
@@ -1007,7 +1018,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/updated",
@@ -1024,7 +1038,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "turn/completed",
@@ -1079,7 +1096,10 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": true,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/agentMessage/delta",
@@ -1112,7 +1132,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/commandExecution/outputDelta",
@@ -1144,7 +1167,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/fileChange/outputDelta",
@@ -1176,7 +1202,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/fileChange/patchUpdated",
@@ -1208,7 +1237,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/started",
@@ -1226,7 +1258,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/status/changed",
@@ -1249,7 +1284,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "turn/started",
@@ -1299,7 +1337,10 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "configWarning",
@@ -1316,7 +1357,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "deprecationNotice",
@@ -1333,7 +1377,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "error",
@@ -1350,7 +1397,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "warning",
@@ -1367,7 +1417,10 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/summaryPartAdded",
@@ -1379,7 +1432,10 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/summaryTextDelta",
@@ -1391,7 +1447,10 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/textDelta",
@@ -1403,7 +1462,90 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "thread/environment/connected",
+      "schema": "schema/EnvironmentConnectionNotification.json",
+      "event_type": "workload.environment_connected",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "thread/environment/disconnected",
+      "schema": "schema/EnvironmentConnectionNotification.json",
+      "event_type": "workload.environment_disconnected",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "thread/compacted",
+      "schema": "schema/ContextCompactedNotification.json",
+      "event_type": "workload.context_compacted",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
+    },
+    {
+      "method": "guardianWarning",
+      "schema": "schema/GuardianWarningNotification.json",
+      "event_type": "workload.guardian_warning",
+      "durable": true,
+      "payload": {
+        "op": "object",
+        "fields": {
+          "observed": {
+            "op": "literal",
+            "value": true
+          }
+        }
+      },
+      "observations": [],
+      "ceremony_clear": false,
+      "result": false,
+      "result_cost": null,
+      "result_status": null
     }
   ],
   "ignored_notifications": {
@@ -1420,7 +1562,13 @@
     "serverRequest/resolved": "schema/ServerRequestResolvedNotification.json",
     "model/rerouted": "schema/ModelReroutedNotification.json",
     "model/verification": "schema/ModelVerificationNotification.json",
-    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json"
+    "remoteControl/status/changed": "schema/RemoteControlStatusChangedNotification.json",
+    "turn/moderationMetadata": "schema/TurnModerationMetadataNotification.json",
+    "model/safetyBuffering/updated": "schema/ModelSafetyBufferingUpdatedNotification.json",
+    "item/commandExecution/terminalInteraction": "schema/TerminalInteractionNotification.json",
+    "thread/goal/updated": "schema/ThreadGoalUpdatedNotification.json",
+    "rawResponseItem/completed": "schema/RawResponseItemCompletedNotification.json",
+    "rawResponse/completed": "schema/RawResponseCompletedNotification.json"
   },
   "server_requests": [
     {
@@ -1436,12 +1584,6 @@
           "op": "literal",
           "value": {
             "decision": "accept"
-          }
-        },
-        "cancel": {
-          "op": "literal",
-          "value": {
-            "decision": "cancel"
           }
         },
         "decline": {
@@ -1522,12 +1664,6 @@
             "decision": "accept"
           }
         },
-        "cancel": {
-          "op": "literal",
-          "value": {
-            "decision": "cancel"
-          }
-        },
         "decline": {
           "op": "literal",
           "value": {
@@ -1582,17 +1718,6 @@
       },
       "responses": {
         "accept": {
-          "op": "literal",
-          "value": {
-            "permissions": {
-              "fileSystem": null,
-              "network": null
-            },
-            "scope": "turn",
-            "strictAutoReview": true
-          }
-        },
-        "cancel": {
           "op": "literal",
           "value": {
             "permissions": {

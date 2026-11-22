@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T02:33:59Z:57b1e7ea8bbde1c282a1de0c3ba50a45dd19f521474e49a7c5b75b4da9c2b377:r7aK+G2s6cuwHCz4KUwzIaJ7dDmuwRP9sOP8H1VS0VxorX1rROlPdYQNogg6ntBvIx/cWHZiGozU8BGLe9ZlAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-15T23:13:27Z:ebc118788deae78b1ac98d1ea5b3c7938885c97e06e518ce3a24a5b5a33b49f4:5cl0ggH8dlIJpTpi3YtqACiPEM8yi4A4RbFus+S3JPWr7GzsdVhWCHp3dJeuawtJeY62J5Vnj99ZFsPJm6oiCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: local-inference
 version: 0.1.0
 description: Optional admitted local-model workers and provider routes
@@ -6,6 +6,9 @@ provides_kinds: []
 requires_kinds:
 - config
 - directive
+- graph
 - knowledge
+- protocol
+- tool
 - worker
 uses_kinds: []

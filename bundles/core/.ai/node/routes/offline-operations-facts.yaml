@@ -1,0 +1,9 @@
+# ryeos:signed:2026-10-28T22:38:56Z:5e802576c649750e114bf418777ce11dea85d1dd4dc46e01c5dff06bbfdb9b53:0T1Wt1YZbKcuctGezX2RpUqrwUqHv6szdlCGsUbrhtOm4oa2hCGdXEX8r8DNEtJz86nGfMt2bhOp7S6Fk9FGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: core/offline-operations-facts
+path: /offline-operations/facts
+methods:
+  - GET
+auth: ryeos_signed
+response:
+  mode: json
+  source: service:offline-operations/facts

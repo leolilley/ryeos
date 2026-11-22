@@ -33,6 +33,8 @@ pub mod qualification;
 
 pub mod qualification_publication;
 
+pub mod qualification_testimony;
+
 pub mod transfer;
 
 pub const PRODUCT_DECLARATIONS_SCHEMA: &str = "ryeos.build_products.v1";
@@ -610,14 +612,16 @@ pub fn validate_binding_name(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_hash(label: &str, value: &str) -> anyhow::Result<()> {
+pub(super) fn validate_hash(label: &str, value: &str) -> anyhow::Result<()> {
     if !lillux::valid_hash(value) || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
         bail!("{label} must be a canonical digest");
     }
     Ok(())
 }
 
-pub(crate) fn validate_canonical_unsuffixed_ref(label: &str, value: &str) -> anyhow::Result<()> {
+/// Validate an exact item reference using the same grammar as product admission.
+/// External checkers can reuse this preflight without inventing a weaker grammar.
+pub fn validate_canonical_unsuffixed_ref(label: &str, value: &str) -> anyhow::Result<()> {
     if value.len() > 2_048
         || value.trim() != value
         || value.chars().any(char::is_control)
@@ -626,7 +630,7 @@ pub(crate) fn validate_canonical_unsuffixed_ref(label: &str, value: &str) -> any
         bail!("{label} ref is not a bounded unsuffixed canonical ref");
     }
     crate::objects::thread_snapshot::validate_canonical_item_ref(value)
-        .map_err(|error| anyhow::anyhow!("{label} ref is not canonical: {error}"))
+        .map_err(|error| anyhow::anyhow!("{label} ref is not canonical: {error:#}"))
 }
 
 #[cfg(test)]

@@ -239,7 +239,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid request body: {e}")))?;
         req.execution_policy
             .validate()
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         req.launch_mode = match req.execution_policy.response {
             ryeos_app::execution_policy::ExecutionResponse::Wait => "wait".to_string(),
             ryeos_app::execution_policy::ExecutionResponse::Accepted => "accepted".to_string(),
@@ -263,7 +263,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
         }
         req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         if req
             .target_site_id
             .as_deref()
@@ -290,8 +290,8 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             })?;
 
         // Capability check: derive the required cap from the item_ref
-        // (e.g. "directive:apps/tv-tracker/ai_chat" →
-        //  "ryeos.execute.directive.apps/tv-tracker/ai_chat") and check
+        // (e.g. "directive:apps/example-app/ai_chat" →
+        //  "ryeos.execute.directive.apps/example-app/ai_chat") and check
         // via the unified Authorizer. Supports fine-grained scopes and
         // wildcards.
         {
@@ -349,7 +349,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         let usage_subject_asserted_by = if let Some(subject) = &usage_subject {
             subject
                 .validate()
-                .map_err(|e| RouteDispatchError::BadRequest(e.to_string()))?;
+                .map_err(|e| RouteDispatchError::BadRequest(format!("{e:#}")))?;
             let principal = ctx
                 .principal
                 .as_ref()
@@ -424,7 +424,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // Policy capability checks precede canonicalization or any other
         // caller-selected project filesystem access.
         preauthorize_execution_policy(&req.execution_policy, &principal_scopes, &ctx.state)
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+            .map_err(|error| {
+                crate::routes::response_modes::execute_mode::operator_vault_route_error(&error)
+                    .unwrap_or_else(|| RouteDispatchError::BadRequest(format!("{error:#}")))
+            })?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         if let Some(timings) = ctx.launch_timings.as_ref() {
@@ -498,7 +501,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             if let Some(timings) = ctx.launch_timings.as_ref() {
                 timings.emit("gateway_execution_contract_failed");
             }
-            RouteDispatchError::BadRequest(format!("resolve stream execution authority: {error}"))
+            RouteDispatchError::BadRequest(format!("resolve stream execution authority: {error:#}"))
         })?;
 
         ryeos_app::command_invocation::normalize_selected_parameters(
@@ -541,6 +544,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 usage_subject_asserted_by: usage_subject_asserted_by.clone(),
                 launch_timings: ctx.launch_timings.clone(),
                 pinned_project_snapshot: None,
+                remote_consumer: None,
             },
         )
         .await;
@@ -549,7 +553,11 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             if let Some(timings) = ctx.launch_timings.as_ref() {
                 timings.emit("gateway_preflight_failed");
             }
-            RouteDispatchError::BadRequest(format!("stream root launch admission failed: {error}"))
+            crate::routes::launch::typed_launch_policy_refusal(&error).unwrap_or_else(|| {
+                RouteDispatchError::BadRequest(format!(
+                    "stream root launch admission failed: {error}"
+                ))
+            })
         })?;
         if !preflight.class.persists_pre_minted_root() {
             return Err(RouteDispatchError::BadRequest(
@@ -581,6 +589,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         options.launch_mode = req.launch_mode;
         options.target_site_id = req.target_site_id;
         options.validate_only = req.validate_only;
+        options = options.with_application_publication(ctx.publication.clone());
         options.usage_subject = usage_subject;
         options.usage_subject_asserted_by = usage_subject_asserted_by;
         options.call = req.call;
@@ -741,6 +750,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                         thread_id: Some(thread_id_for_stream.clone()),
                                         after_chain_seq: next_after,
                                         limit: replay_batch_size,
+                                        event_types: None,
                                     });
                                     match page {
                                         Ok(page_result) => {
@@ -762,7 +772,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             next_after = Some(lag_max);
                                         }
                                         Err(e) => {
-                                            lag_error = Some(format!("lag replay failed: {e}"));
+                                            lag_error = Some(format!("lag replay failed: {e:#}"));
                                             break;
                                         }
                                     }
@@ -827,6 +837,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                         thread_id: Some(thread_id_for_stream.clone()),
                                         after_chain_seq: next_after,
                                         limit: replay_batch_size,
+                                        event_types: None,
                                     });
                                     match page {
                                         Ok(page_result) => {
@@ -852,7 +863,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                             next_after = Some(current_max);
                                         }
                                         Err(e) => {
-                                            yield Ok(error_envelope("post_launch_replay_failed", &format!("post-launch replay failed: {e}")));
+                                            yield Ok(error_envelope("post_launch_replay_failed", &format!("post-launch replay failed: {e:#}")));
                                             return;
                                         }
                                     }
@@ -1065,6 +1076,26 @@ mod tests {
     }
 
     #[test]
+    fn source_observation_cannot_enter_streaming_launch() {
+        let body = serde_json::json!({
+            "item_ref": "worker:example/author",
+            "ref_bindings": {},
+            "parameters": {},
+            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+            "validate_only": true,
+            "validation_scope": "source_observation"
+        });
+        assert!(
+            ryeos_handler_protocol::from_json_slice_strict::<LaunchRequest>(
+                &serde_json::to_vec(&body).unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn launch_request_rejects_open_product_selector_values() {
         let result = serde_json::from_value::<LaunchRequest>(serde_json::json!({
             "item_ref": "directive:x",
@@ -1198,12 +1229,13 @@ mod tests {
     #[tokio::test]
     async fn launch_task_panic_before_handoff_is_a_launch_task_error() {
         let (sender, ready) = tokio::sync::oneshot::channel();
-        let mut launch_handle = tokio::spawn(async move {
+        async fn panic_before_handoff<T: Send + 'static>(
+            sender: tokio::sync::oneshot::Sender<T>,
+        ) -> Result<(), crate::routes::launch::LaunchSpawnError> {
             let _sender = sender;
             panic!("synthetic launch panic");
-            #[allow(unreachable_code)]
-            Ok::<(), crate::routes::launch::LaunchSpawnError>(())
-        });
+        }
+        let mut launch_handle = tokio::spawn(panic_before_handoff(sender));
 
         let result = await_launch_handoff(&mut launch_handle, ready).await;
         let Err(envelope) = result else {

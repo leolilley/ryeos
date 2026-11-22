@@ -1993,23 +1993,52 @@ pub mod test_support {
         pub total_handoff_recovery_ms: Option<u64>,
     }
 
+    /// What the host that ran the acceptance matrix could prove. A host
+    /// without qualified process scopes refuses every portable-worker launch,
+    /// so its report records that refusal and no measurements rather than
+    /// standing for a measurement it never made.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    pub enum HandoffReportHost {
+        Qualified,
+        Unqualified { refusal: String },
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct HandoffMeasurementReport {
         pub schema: String,
+        pub host: HandoffReportHost,
         pub records: Vec<HandoffMeasurementRecord>,
     }
 
     impl HandoffMeasurementReport {
         pub const MAX_RECORDS: usize = 128;
+        pub const MAX_REFUSAL_BYTES: usize = 8 * 1024;
         pub const MAX_ENCODED_BYTES: usize = 256 * 1024;
 
         pub fn validate(&self) -> Result<()> {
             if self.schema != "ryeos.worker_handoff_qualification_report.v1" {
                 anyhow::bail!("unknown worker handoff qualification report schema");
             }
-            if self.records.is_empty() || self.records.len() > Self::MAX_RECORDS {
-                anyhow::bail!("worker handoff qualification report has an invalid record count");
+            match &self.host {
+                HandoffReportHost::Qualified => {
+                    if self.records.is_empty() || self.records.len() > Self::MAX_RECORDS {
+                        anyhow::bail!(
+                            "worker handoff qualification report has an invalid record count"
+                        );
+                    }
+                }
+                HandoffReportHost::Unqualified { refusal } => {
+                    if refusal.is_empty() || refusal.len() > Self::MAX_REFUSAL_BYTES {
+                        anyhow::bail!(
+                            "unqualified-host handoff report refusal is empty or unbounded"
+                        );
+                    }
+                    if !self.records.is_empty() {
+                        anyhow::bail!("unqualified-host handoff report cannot carry measurements");
+                    }
+                }
             }
             for record in &self.records {
                 if record.schema != "ryeos.worker_handoff_qualification_record.v1" {
@@ -2155,7 +2184,6 @@ pub struct WorkerSessionHandoffJobOperation {
 }
 
 impl WorkerSessionHandoffJobOperation {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         role: WorkerHandoffJobRole,
         operation_id: String,
@@ -2530,7 +2558,6 @@ impl WorkerPlacementPreflightRequest {
 }
 
 impl WorkerPlacementPreflightEvidence {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         request: &WorkerPlacementPreflightRequest,
         outer_exact_program_hash: String,
@@ -2679,15 +2706,15 @@ impl WorkerPlacementPreflightEvidence {
             bail!("preflight target operator authority contradicts its owner or origin");
         }
         match self.target_operator_authority.principal_class {
-            crate::identity::AuthorizedKeyPrincipalClass::LocalClient
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
                 if self.target_chain_owner_anchor_hash.is_none() =>
             {
                 bail!("local-operator preflight has no target chain owner anchor");
             }
-            crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal
                 if self.target_chain_owner_anchor_hash.is_some() =>
             {
-                bail!("remote-operator preflight carries a local chain owner anchor");
+                bail!("remote-principal preflight carries a local chain owner anchor");
             }
             _ => {}
         }
@@ -3729,7 +3756,6 @@ impl PreparedPlacementTransferManifest {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn prepare_placement_transfer_manifest(
     operation_id: &str,
     owner_principal: &str,
@@ -3769,7 +3795,6 @@ impl PreparedPlacementRuntimeSeed {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn prepare_placement_runtime_seed(
     operation_id: &str,
     chain_root_id: &str,
@@ -3992,7 +4017,10 @@ fn load_persistent_capsule(
     hash: &str,
 ) -> anyhow::Result<ryeos_state::objects::AdmittedPersistentSessionCapsule> {
     let value = cas
-        .get_object(hash)?
+        .get_object_bounded(
+            hash,
+            ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+        )?
         .ok_or_else(|| anyhow::anyhow!("persistent-session capsule is absent: {hash}"))?;
     let capsule =
         ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
@@ -4120,15 +4148,24 @@ fn equivalent_remote_environment(
         (
             EnvironmentAuthority::ProjectOverlay {
                 include_operator_vault: source_vault,
+                recipient_principal: source_principal,
+                recipient_scopes: source_scopes,
                 name_authority: source_names,
                 ..
             },
             EnvironmentAuthority::ProjectOverlay {
                 include_operator_vault: target_vault,
+                recipient_principal: target_principal,
+                recipient_scopes: target_scopes,
                 name_authority: target_names,
                 ..
             },
-        ) => source_vault == target_vault && source_names == target_names,
+        ) => {
+            source_vault == target_vault
+                && source_principal == target_principal
+                && source_scopes == target_scopes
+                && source_names == target_names
+        }
         _ => source == target,
     }
 }
@@ -4137,7 +4174,6 @@ fn equivalent_remote_environment(
 /// authority and a configured directional project endpoint. Paths and
 /// environment-overlay identities are rebuilt for the target; immutable base,
 /// capabilities, and child policy are copied exactly.
-#[allow(clippy::too_many_arguments)]
 pub fn build_remote_project_rebind(
     source: &ExecutionProjectAuthority,
     target_project_path: &std::path::Path,
@@ -4184,6 +4220,8 @@ pub fn build_remote_project_rebind(
     let (target_environment, target_overlay_root) = match environment {
         EnvironmentAuthority::ProjectOverlay {
             include_operator_vault,
+            recipient_principal,
+            recipient_scopes,
             name_authority,
             ..
         } => (
@@ -4198,6 +4236,8 @@ pub fn build_remote_project_rebind(
                 ),
                 source_identity: format!("dotenv:{}", target_project_path.join(".env").display()),
                 include_operator_vault: *include_operator_vault,
+                recipient_principal: recipient_principal.clone(),
+                recipient_scopes: recipient_scopes.clone(),
                 name_authority: name_authority.clone(),
             },
             Some(target_project_path.to_path_buf()),
@@ -5022,7 +5062,8 @@ mod tests {
             crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: request.owner_principal.clone(),
                 origin_site_id: request.origin_site_id.clone(),
-                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class:
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "e".repeat(64),
                 scopes: vec!["*".to_owned()],
             },
@@ -5202,7 +5243,8 @@ mod tests {
             target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: format!("fp:{}", "e".repeat(64)),
                 origin_site_id: "site:a".into(),
-                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class:
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "5".repeat(64),
                 scopes: vec!["*".into()],
             },
@@ -5257,10 +5299,12 @@ mod tests {
     fn qualification_measurement_report_is_bounded_and_canonical() {
         use crate::worker_handoff::test_support::{
             HandoffMeasurementRecord, HandoffMeasurementReport, HandoffObservedMeasurements,
+            HandoffReportHost,
         };
 
         let report = HandoffMeasurementReport {
             schema: "ryeos.worker_handoff_qualification_report.v1".into(),
+            host: HandoffReportHost::Qualified,
             records: vec![HandoffMeasurementRecord {
                 schema: "ryeos.worker_handoff_qualification_record.v1".into(),
                 case_id: "portable_success".into(),

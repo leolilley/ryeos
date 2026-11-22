@@ -30,15 +30,123 @@ impl RetainedProjectAccess {
     pub fn try_clone_directory(&self) -> anyhow::Result<lillux::PinnedDirectory> {
         self.authority.try_clone()
     }
+
+    /// The retained project directory itself. Reads through it traverse from
+    /// the held descriptor; its `path()` is the identity it was bound to and
+    /// is never to be reopened as a pathname.
+    pub fn directory(&self) -> &lillux::PinnedDirectory {
+        self.authority.as_ref()
+    }
+
+    /// The retained directory as project-content authority: every project
+    /// read through it traverses from the held descriptor.
+    pub fn content_authority(
+        &self,
+    ) -> &dyn ryeos_engine::project_content::AuthoritativeProjectContent {
+        self.authority.as_ref()
+    }
+}
+
+/// Resolve `item_ref` over `roots`. When the roots' project space is this
+/// retained access's descriptor path, project candidates are judged by the
+/// retained directory owner: the descriptor pathname is a magic link that
+/// no-follow pathname traversal refuses, and it is never existence authority.
+/// Without retained access, resolution walks the roots' pathnames.
+/// At most `max_bytes` of the item source at `path`, with the source's full
+/// length. A source beneath `access` is read through its retained directory
+/// owner, never by reopening the descriptor pathname; any other source, such
+/// as a bundle item, is read by its own pathname.
+pub(crate) fn read_item_source(
+    path: &std::path::Path,
+    access: Option<&RetainedProjectAccess>,
+    max_bytes: usize,
+) -> Option<(Vec<u8>, u64)> {
+    if let Some(access) = access
+        && let Ok(relative) = path.strip_prefix(&access.descriptor_path)
+    {
+        let file = access
+            .authority
+            .open_pinned_regular_descendant(relative, false)
+            .ok()??;
+        let size = file.size().ok()?;
+        return Some((file.read_prefix(max_bytes).ok()?, size));
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, max_bytes as u64), &mut bytes)
+        .ok()?;
+    Some((bytes, size))
+}
+
+/// The whole UTF-8 item source at `path`, read as [`read_item_source`] reads
+/// it. A source over the engine's item-source bound reads as absent.
+pub(crate) fn read_whole_item_source(
+    path: &std::path::Path,
+    access: Option<&RetainedProjectAccess>,
+) -> Option<String> {
+    let limit = ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES;
+    let (bytes, size) = read_item_source(path, access, limit as usize)?;
+    if size > limit || bytes.len() as u64 != size {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Enumerate `kind`'s refs over `roots`, with project-space candidates listed
+/// by the retained directory owner exactly as [`resolve_item_for_access`]
+/// judges them. An unreadable corpus enumerates nothing, as for
+/// [`ryeos_engine::item_resolution::enumerate_kind_refs`].
+pub(crate) fn enumerate_kind_refs_for_access(
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    schema: &ryeos_engine::kind_registry::KindSchema,
+    kind: &str,
+    access: Option<&RetainedProjectAccess>,
+) -> Vec<ryeos_engine::canonical_ref::CanonicalRef> {
+    match access {
+        Some(access) => ryeos_engine::item_resolution::enumerate_kind_refs_under_project_authority(
+            roots,
+            schema,
+            kind,
+            &access.descriptor_path,
+            access.authority.as_ref(),
+        )
+        .unwrap_or_default(),
+        None => ryeos_engine::item_resolution::enumerate_kind_refs(roots, schema, kind),
+    }
+}
+
+pub(crate) fn resolve_item_for_access(
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    schema: &ryeos_engine::kind_registry::KindSchema,
+    item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
+    access: Option<&RetainedProjectAccess>,
+) -> Result<ryeos_engine::item_resolution::ResolutionResult, ryeos_engine::error::EngineError> {
+    match access {
+        Some(access) => ryeos_engine::item_resolution::resolve_item_full_under_project_authority(
+            roots,
+            schema,
+            item_ref,
+            &access.descriptor_path,
+            access.authority.as_ref(),
+        ),
+        None => ryeos_engine::item_resolution::resolve_item_full(roots, schema, item_ref),
+    }
 }
 
 fn validate_attachment_project(
     attachment: &AdmittedBindingAttachment,
 ) -> Result<Option<&std::sync::Arc<lillux::PinnedDirectory>>, HandlerError> {
-    match (
-        attachment.project_authority.as_ref(),
-        attachment.project_query_identity.as_deref(),
-    ) {
+    // The attachment's query identity is a copy derived from the compiled
+    // binding at admission; the compiled binding's own project root stays
+    // the identity the directory authority must answer to.
+    let compiled_root = attachment.compiled_binding.binding.project_root.as_deref();
+    if attachment.project_query_identity.as_deref() != compiled_root {
+        return Err(HandlerError::Forbidden(
+            "project authority contradicts the compiled project identity".into(),
+        ));
+    }
+    match (attachment.project_authority.as_ref(), compiled_root) {
         (None, None) => Ok(None),
         (Some(authority), Some(project_root)) => {
             authority
@@ -66,7 +174,7 @@ pub(crate) fn attachment_project_access(
                 authority: authority.clone(),
                 descriptor_path: authority
                     .descriptor_path()
-                    .map_err(|error| HandlerError::Internal(error.to_string()))?,
+                    .map_err(|error| HandlerError::Internal(format!("{error:#}")))?,
             })
         })
         .transpose()
@@ -82,7 +190,17 @@ tokio::task_local! {
     /// Daemon-retained authority for one compiled UI dispatch. This sideband
     /// is scoped by `ui.invocations.dispatch`; it is neither serialized into
     /// a request nor reconstructible from a browser cookie.
-    static COMPILED_UI_ATTACHMENT: std::sync::Arc<AdmittedBindingAttachment>;
+    static COMPILED_UI_DISPATCH: CompiledUiDispatchContext;
+}
+
+#[derive(Clone)]
+struct CompiledUiDispatchContext {
+    attachment: std::sync::Arc<AdmittedBindingAttachment>,
+    browser_session_id: Option<String>,
+    producer: Option<ryeos_client_base::ui::UiPresentationProducer>,
+    /// Whether this dispatch runs a source that a project-authored view or
+    /// Surface declared. Set by dispatch from the retained compiled binding.
+    project_authored_source: bool,
 }
 
 pub async fn with_compiled_ui_attachment<F>(
@@ -92,16 +210,181 @@ pub async fn with_compiled_ui_attachment<F>(
 where
     F: std::future::Future,
 {
-    COMPILED_UI_ATTACHMENT.scope(attachment, future).await
+    COMPILED_UI_DISPATCH
+        .scope(
+            CompiledUiDispatchContext {
+                attachment,
+                browser_session_id: None,
+                producer: None,
+                project_authored_source: false,
+            },
+            future,
+        )
+        .await
+}
+
+/// Run `future` as the dispatch of a source that a project-authored item
+/// declared on `attachment`. Reads made inside it are held to the session's
+/// own live project.
+pub async fn with_project_authored_compiled_ui_source<F>(
+    attachment: std::sync::Arc<AdmittedBindingAttachment>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    COMPILED_UI_DISPATCH
+        .scope(
+            CompiledUiDispatchContext {
+                attachment,
+                browser_session_id: None,
+                producer: None,
+                project_authored_source: true,
+            },
+            future,
+        )
+        .await
+}
+
+/// Whether the current task is the dispatch of a source that a
+/// project-authored item declared. False outside a compiled UI dispatch.
+pub(crate) fn compiled_ui_source_is_project_authored() -> bool {
+    COMPILED_UI_DISPATCH
+        .try_with(|context| context.project_authored_source)
+        .unwrap_or(false)
 }
 
 pub fn compiled_ui_attachment() -> Option<std::sync::Arc<AdmittedBindingAttachment>> {
-    COMPILED_UI_ATTACHMENT.try_with(Clone::clone).ok()
+    COMPILED_UI_DISPATCH
+        .try_with(|context| context.attachment.clone())
+        .ok()
+}
+
+/// Retain the authenticated transport association without replacing the
+/// durable principal used by verified execution. Only the dispatch owner can
+/// establish this scope after resolving the attachment in the browser session.
+#[cfg(test)]
+pub(crate) async fn with_compiled_ui_session<F>(
+    session: &crate::browser_session::BrowserSession,
+    attachment: std::sync::Arc<AdmittedBindingAttachment>,
+    producer: Option<ryeos_client_base::ui::UiPresentationProducer>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    with_compiled_ui_source_session(session, attachment, producer, false, future).await
+}
+
+/// [`with_compiled_ui_session`] for a dispatch whose bound entry may be a
+/// source a project-authored item declared. `project_authored_source` comes
+/// from the retained compiled binding.
+pub(crate) async fn with_compiled_ui_source_session<F>(
+    session: &crate::browser_session::BrowserSession,
+    attachment: std::sync::Arc<AdmittedBindingAttachment>,
+    producer: Option<ryeos_client_base::ui::UiPresentationProducer>,
+    project_authored_source: bool,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    COMPILED_UI_DISPATCH
+        .scope(
+            CompiledUiDispatchContext {
+                attachment,
+                browser_session_id: Some(session.session_id.clone()),
+                producer,
+                project_authored_source,
+            },
+            future,
+        )
+        .await
+}
+
+/// The scope that re-enters the current compiled dispatch authority on
+/// another task. A recorded service handler runs on a daemon-owned task, which
+/// does not inherit this task's authority; the executor enters the scope
+/// around that handler call. `None` outside a compiled dispatch.
+pub(crate) fn current_compiled_ui_task_scope()
+-> Option<ryeos_app::handler_context::HandlerTaskScope> {
+    let dispatch = COMPILED_UI_DISPATCH.try_with(Clone::clone).ok()?;
+    Some(ryeos_app::handler_context::HandlerTaskScope::new(
+        move |handler| {
+            let dispatch = dispatch.clone();
+            Box::pin(COMPILED_UI_DISPATCH.scope(dispatch, handler))
+        },
+    ))
+}
+
+pub(crate) fn require_compiled_ui_producer()
+-> Result<ryeos_client_base::ui::UiPresentationProducer, HandlerError> {
+    COMPILED_UI_DISPATCH
+        .try_with(|context| context.producer.clone())
+        .ok()
+        .flatten()
+        .ok_or_else(|| HandlerError::Forbidden("compiled presentation producer required".into()))
+}
+
+pub(crate) fn require_compiled_ui_session(
+    ctx: &HandlerContext,
+    state: &AppState,
+) -> Result<
+    (
+        crate::browser_session::BrowserSession,
+        std::sync::Arc<AdmittedBindingAttachment>,
+    ),
+    HandlerError,
+> {
+    let ui = get_ui_state(state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    resolve_compiled_ui_session(ctx, &ui.browser_sessions)
+}
+
+fn resolve_compiled_ui_session(
+    ctx: &HandlerContext,
+    store: &crate::browser_session::BrowserSessionStore,
+) -> Result<
+    (
+        crate::browser_session::BrowserSession,
+        std::sync::Arc<AdmittedBindingAttachment>,
+    ),
+    HandlerError,
+> {
+    let dispatch = COMPILED_UI_DISPATCH
+        .try_with(Clone::clone)
+        .map_err(|_| HandlerError::Forbidden("compiled browser UI dispatch required".into()))?;
+    let session_id = dispatch.browser_session_id.as_deref().ok_or_else(|| {
+        HandlerError::Forbidden("authenticated browser session association required".into())
+    })?;
+    let session = store
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let caller_matches = if ctx.verified {
+        ctx.fingerprint == session.principal_id
+    } else {
+        ctx.fingerprint.strip_prefix("session:") == Some(session_id)
+    };
+    if !caller_matches
+        || dispatch.attachment.compiled_binding.binding.principal_id != session.principal_id
+    {
+        return Err(HandlerError::Forbidden(
+            "compiled UI session principal mismatch".into(),
+        ));
+    }
+    let retained = store
+        .resolve_attachment(session_id, &dispatch.attachment.coordinate())
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if !std::sync::Arc::ptr_eq(&retained, &dispatch.attachment) {
+        return Err(HandlerError::Forbidden(
+            "compiled UI attachment association mismatch".into(),
+        ));
+    }
+    Ok((session, retained))
 }
 
 pub enum SeatCaller {
     Attachment(std::sync::Arc<AdmittedBindingAttachment>),
-    Operator { fingerprint: String },
+    Operator { principal_id: String },
 }
 
 impl SeatCaller {
@@ -111,7 +394,7 @@ impl SeatCaller {
     pub fn principal_id(&self) -> &str {
         match self {
             Self::Attachment(attachment) => &attachment.compiled_binding.binding.principal_id,
-            Self::Operator { fingerprint } => fingerprint,
+            Self::Operator { principal_id } => principal_id,
         }
     }
 
@@ -158,7 +441,11 @@ pub fn require_seat_caller(
     }
     let fingerprint = ryeos_app::operator_authority::require_admitted_operator(state, ctx)
         .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
-    Ok(SeatCaller::Operator { fingerprint })
+    // Admission answers with the bare key fingerprint; durable owners, thread
+    // subjects and compiled bindings all name principals in `fp:` form.
+    Ok(SeatCaller::Operator {
+        principal_id: format!("fp:{fingerprint}"),
+    })
 }
 
 #[cfg(test)]
@@ -178,6 +465,7 @@ mod tests {
                 binding_digest: "11".repeat(32),
                 posture: crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
                 binding: crate::compiled_binding::CompiledUiBinding {
+                    view_sets: Default::default(),
                     contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
                     principal_id: "fp:test".into(),
                     project_root: None,
@@ -196,10 +484,16 @@ mod tests {
                     affordances: Default::default(),
                     surface_route: None,
                     attenuated: Vec::new(),
+                    art: Default::default(),
+                    project_source_ceiling_digest: String::new(),
                 },
             }),
-            effective_surface: serde_json::json!({}),
-            surface_ref: "surface:ryeos/ui/base-observe".into(),
+            presentation:
+                ryeos_client_base::presentation::UiCompositionPresentation::from_effective_surface(
+                    serde_json::json!({"name": "test-surface"}),
+                )
+                .expect("fixture presentation"),
+            root_ref: "surface:ryeos/ui/base-observe".into(),
             project_query_identity: None,
             project_authority: None,
         })
@@ -238,6 +532,152 @@ mod tests {
         })
         .await;
         assert!(compiled_ui_attachment().is_none());
+    }
+
+    fn active_session(
+        store: &crate::browser_session::BrowserSessionStore,
+    ) -> (
+        crate::browser_session::BrowserSession,
+        Arc<AdmittedBindingAttachment>,
+    ) {
+        let seed = attachment();
+        let launch = crate::browser_session::LaunchContext {
+            compiled_binding: seed.compiled_binding.clone(),
+            presentation: seed.presentation.clone(),
+            granted_caps: vec!["ui.read".into()],
+            timing: crate::browser_session::SessionTiming::new(
+                std::time::Duration::from_secs(8 * 3600),
+                std::time::Duration::from_secs(3600),
+                std::time::Duration::from_secs(60),
+            ),
+            user_principal_id: None,
+            project_authority: None,
+            registered_project_id: None,
+        };
+        let (id, token, retained) = store
+            .mint_token(launch, 8, &"22".repeat(32))
+            .expect("mint fixture session");
+        store
+            .activate_launch_token(&token)
+            .expect("activate fixture session");
+        (
+            store.get_session(&id).expect("active fixture session"),
+            retained,
+        )
+    }
+
+    #[tokio::test]
+    async fn verified_dispatch_retains_exact_browser_session_without_replacing_principal() {
+        let store = crate::browser_session::BrowserSessionStore::new();
+        let (session, retained) = active_session(&store);
+        let ctx = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        with_compiled_ui_session(&session, retained.clone(), None, async {
+            tokio::task::yield_now().await;
+            let (resolved, binding) = resolve_compiled_ui_session(&ctx, &store)
+                .expect("verified dispatch keeps browser association");
+            assert_eq!(resolved.session_id, session.session_id);
+            assert!(Arc::ptr_eq(&binding, &retained));
+            assert_eq!(ctx.fingerprint, session.principal_id);
+            assert!(ctx.verified);
+            assert_eq!(ctx.scopes, session.granted_caps);
+        })
+        .await;
+        assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+    }
+
+    #[tokio::test]
+    async fn browser_session_association_refuses_foreign_callers_and_attachments() {
+        let store = crate::browser_session::BrowserSessionStore::new();
+        let (session, retained) = active_session(&store);
+        let (other, foreign_attachment) = active_session(&store);
+        let ctx = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        with_compiled_ui_session(&session, retained.clone(), None, async {
+            let foreign = HandlerContext::new("another-principal".into(), vec!["*".into()], true);
+            assert!(resolve_compiled_ui_session(&foreign, &store).is_err());
+            let other_cookie = HandlerContext::new(
+                format!("session:{}", other.session_id),
+                vec!["*".into()],
+                false,
+            );
+            assert!(resolve_compiled_ui_session(&other_cookie, &store).is_err());
+            let unsigned_principal =
+                HandlerContext::new(session.principal_id.clone(), vec!["*".into()], false);
+            assert!(resolve_compiled_ui_session(&unsigned_principal, &store).is_err());
+            let exact_cookie =
+                HandlerContext::new(format!("session:{}", session.session_id), vec![], false);
+            assert!(resolve_compiled_ui_session(&exact_cookie, &store).is_ok());
+        })
+        .await;
+        with_compiled_ui_session(&session, foreign_attachment, None, async {
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        })
+        .await;
+        // Reconstructed JSON/coordinates cannot substitute for the retained object.
+        with_compiled_ui_session(&session, Arc::new((*retained).clone()), None, async {
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        })
+        .await;
+        with_compiled_ui_attachment(retained, async {
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn browser_session_association_rechecks_revocation_inside_dispatch_scope() {
+        let store = crate::browser_session::BrowserSessionStore::new();
+        let (session, retained) = active_session(&store);
+        let ctx = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        with_compiled_ui_session(&session, retained.clone(), None, async {
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_ok());
+            store
+                .revoke_attachment(&session.session_id, &retained.coordinate())
+                .expect("revoke fixture attachment");
+            tokio::task::yield_now().await;
+            assert!(resolve_compiled_ui_session(&ctx, &store).is_err());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_dispatch_task_scope_reenters_authority_on_another_task() {
+        assert!(current_compiled_ui_task_scope().is_none());
+        let scope = with_compiled_ui_attachment(attachment(), async {
+            current_compiled_ui_task_scope().expect("a compiled dispatch has a task scope")
+        })
+        .await;
+        let probe = |scope: Option<ryeos_app::handler_context::HandlerTaskScope>| {
+            let work: ryeos_app::handler_context::HandlerFuture =
+                Box::pin(async { Ok(serde_json::json!(compiled_ui_attachment().is_some())) });
+            let work = match scope {
+                Some(scope) => scope.enter(work),
+                None => work,
+            };
+            tokio::spawn(work)
+        };
+        assert_eq!(
+            probe(None).await.expect("join").expect("probe"),
+            serde_json::json!(false),
+            "a spawned task does not inherit the dispatch authority"
+        );
+        assert_eq!(
+            probe(Some(scope)).await.expect("join").expect("probe"),
+            serde_json::json!(true),
+            "the scope restores exactly the admitted dispatch authority"
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,53 @@
+# ryeos:signed:2026-11-16T08:18:29Z:d00d88b1cc0f5cc26a39699dc3c9e847bc33a32d77a4b915e872b1849a169296:f2TtUdfwPRfMQcteRpl51v3hf9A4yVdUt/Ry34UQCfEkwVHXE08RAJ9m3QVwFgXj8XMf4AQSWc7luPaDR8FeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: runtime
+serves: knowledge
+default: true
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-knowledge-runtime
+abi_version: "v3"
+required_caps:
+  - runtime.execute
+launch_contract:
+  primary_allowed_kinds:
+    - knowledge
+  primary_allowed_spaces:
+    - bundle
+    - project
+  primary_allowed_trust:
+    - trusted_bundle
+    - trusted_project
+  ref_bindings: {}
+  preparation:
+    kind: none
+  config_inputs: {}
+  execution_dependencies:
+    max_dependencies: 0
+    allowed_kinds: []
+    allowed_spaces: []
+    allowed_trust: []
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
+    max_delivered_secrets: 0
+  financial_authority:
+    kind: none
+  external_effect_authority:
+    kind: none
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: []
+  runtime_facts: {}
+description: "Knowledge interpretation runtime for verified context composition, lexical query, knowledge-graph traversal and validation"

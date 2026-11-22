@@ -12,7 +12,7 @@
 //!   4. A non-owner asking for the descriptor gets 404 (no existence leak),
 //!      matching the route's own ownership check.
 
-mod common;
+use ryeosd::test_support as common;
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use common::DaemonHarness;
 use common::fast_fixture::{
-    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    FastFixture, register_config_fixture_bundle, register_workflow_bundles,
     write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
@@ -177,7 +177,7 @@ const TERMINAL_EVENTS: [&str; 5] = [
     "thread_timed_out",
 ];
 
-/// Boot a daemon with the standard bundle (provides the thread-events route +
+/// Boot a daemon with the workflow bundles (core provides the thread-events route +
 /// the `service:threads/tail` item), run a directive to completion, and return
 /// the harness, the owner signing key, the node fingerprint (audience), the
 /// completed thread id, and the project path (reused for service dispatch).
@@ -185,7 +185,15 @@ const TERMINAL_EVENTS: [&str; 5] = [
 /// ownership branch instead of being rejected by the signature verifier.
 async fn boot_and_run_directive(
     extra_keys: &[SigningKey],
-) -> (DaemonHarness, SigningKey, String, String, String) {
+) -> (
+    // The mock and project come first so they outlive the harness's teardown.
+    Box<dyn std::any::Any>,
+    DaemonHarness,
+    SigningKey,
+    String,
+    String,
+    String,
+) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("world".into()),
@@ -196,7 +204,7 @@ async fn boot_and_run_directive(
     let extra_key_bytes: Vec<[u8; 32]> = extra_keys.iter().map(|sk| sk.to_bytes()).collect();
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
+            register_workflow_bundles(state_path, fixture)?;
             register_config_fixture_bundle(
                 state_path,
                 "fixture-thread-tail-model-config",
@@ -218,7 +226,7 @@ async fn boot_and_run_directive(
         );
     })
     .await
-    .expect("start daemon with standard bundle");
+    .expect("start daemon with the workflow bundles");
 
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
@@ -248,14 +256,19 @@ async fn boot_and_run_directive(
         .expect("thread.thread_id")
         .to_string();
 
-    std::mem::forget(project);
-    std::mem::forget(mock);
-    (h, user_sk, node_fp, thread_id, project_path)
+    (
+        Box::new((project, mock)),
+        h,
+        user_sk,
+        node_fp,
+        thread_id,
+        project_path,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn thread_tail_descriptor_round_trip() {
-    let (h, user_sk, node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
+    let (_keep, h, user_sk, node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
 
     // 1. Owner POSTs /execute service:threads/tail with thread_only=true → the
     //    daemon returns the single-thread descriptor. (The default follows the
@@ -346,7 +359,7 @@ async fn thread_tail_descriptor_defaults_to_braid() {
     // With no flag, `thread tail` follows the braid: the descriptor points at the
     // chain-events route and declares `follow: chain`. The stream is not opened
     // here — a chain stream stays open across continuations and wouldn't EOF.
-    let (h, _user_sk, _node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
+    let (_keep, h, _user_sk, _node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
 
     let (status, body) = h
         .post_execute(
@@ -380,7 +393,7 @@ async fn thread_tail_descriptor_defaults_to_braid() {
 #[tokio::test(flavor = "multi_thread")]
 async fn thread_tail_descriptor_denied_for_non_owner() {
     let other_sk = SigningKey::generate(&mut rand::rngs::OsRng);
-    let (h, _user_sk, node_fp, thread_id, project_path) =
+    let (_keep, h, _user_sk, node_fp, thread_id, project_path) =
         boot_and_run_directive(std::slice::from_ref(&other_sk)).await;
 
     // A different (but authorized) principal asks for the descriptor of a thread

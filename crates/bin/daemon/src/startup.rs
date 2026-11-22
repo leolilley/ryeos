@@ -28,9 +28,13 @@ const STARTUP_RETRY_AFTER_MS: u64 = 1_000;
 /// Best-effort cleanup for all ordinary return/error paths after listener
 /// binding. Crash/SIGKILL is handled by stale-socket discovery on next boot.
 pub struct DiscoveryCleanup {
-    uds_path: PathBuf,
-    uds_identity: SocketIdentity,
+    sockets: Vec<OwnedSocket>,
     daemon_json_path: PathBuf,
+}
+
+struct OwnedSocket {
+    path: PathBuf,
+    identity: SocketIdentity,
 }
 
 #[derive(Clone, Copy)]
@@ -39,44 +43,61 @@ struct SocketIdentity {
     inode: u64,
 }
 
-impl DiscoveryCleanup {
-    pub fn new(uds_path: PathBuf, daemon_json_path: PathBuf) -> Result<Self> {
+impl OwnedSocket {
+    fn inspect(path: PathBuf) -> Result<Self> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
-        let metadata = std::fs::symlink_metadata(&uds_path)
-            .with_context(|| format!("inspect bound daemon socket {}", uds_path.display()))?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect bound daemon socket {}", path.display()))?;
         if !metadata.file_type().is_socket() {
             anyhow::bail!(
                 "bound daemon control path is not a socket: {}",
-                uds_path.display()
+                path.display()
             );
         }
         Ok(Self {
-            uds_path,
-            uds_identity: SocketIdentity {
+            path,
+            identity: SocketIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
             },
+        })
+    }
+
+    fn remove_if_still_owned(&self) {
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if metadata.dev() == self.identity.device && metadata.ino() == self.identity.inode {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+impl DiscoveryCleanup {
+    pub fn new(uds_path: PathBuf, daemon_json_path: PathBuf) -> Result<Self> {
+        Ok(Self {
+            sockets: vec![OwnedSocket::inspect(uds_path)?],
             daemon_json_path,
         })
     }
 
-    fn remove_owned_socket(&self) {
-        use std::os::unix::fs::MetadataExt;
-
-        let Ok(metadata) = std::fs::symlink_metadata(&self.uds_path) else {
-            return;
-        };
-        if metadata.dev() == self.uds_identity.device && metadata.ino() == self.uds_identity.inode {
-            let _ = std::fs::remove_file(&self.uds_path);
-        }
+    /// Also remove the callback-only socket on every ordinary exit path, by
+    /// the same inode-identity rule as the control socket.
+    pub fn with_runtime_socket(mut self, runtime_uds_path: PathBuf) -> Result<Self> {
+        self.sockets.push(OwnedSocket::inspect(runtime_uds_path)?);
+        Ok(self)
     }
 }
 
 impl Drop for DiscoveryCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.daemon_json_path);
-        self.remove_owned_socket();
+        for socket in &self.sockets {
+            socket.remove_if_still_owned();
+        }
     }
 }
 
@@ -306,6 +327,10 @@ struct CoordinatorState {
     snapshot: StartupSnapshot,
     phase_started: Instant,
     stage: StartupStage,
+    /// Whether the node's installed composition selects the scheduler.
+    /// Unknown until declared once; scheduler-dependent ordering refuses
+    /// while it is unknown.
+    scheduler_selected: Option<bool>,
 }
 
 /// Internal monotonic startup ordering. `ReplayingHeadChanges` is visible at
@@ -325,9 +350,15 @@ enum StartupStage {
     ReconcilingScheduler,
 }
 
-fn advance_startup_stage(current: StartupStage, phase: StartupPhase) -> Result<StartupStage> {
+fn advance_startup_stage(
+    current: StartupStage,
+    phase: StartupPhase,
+    scheduler_selected: Option<bool>,
+) -> Result<StartupStage> {
     use StartupPhase as Phase;
     use StartupStage as Stage;
+    let scheduler = scheduler_selected == Some(true);
+    let scheduler_free = scheduler_selected == Some(false);
 
     let next = match (current, phase) {
         (Stage::Bootstrapping, Phase::Bootstrapping) => Stage::Bootstrapping,
@@ -336,18 +367,24 @@ fn advance_startup_stage(current: StartupStage, phase: StartupPhase) -> Result<S
         (Stage::OpeningProjection, Phase::OpeningProjection) => Stage::OpeningProjection,
         (Stage::OpeningProjection, Phase::RebuildingProjection) => Stage::RebuildingProjection,
         (Stage::OpeningProjection, Phase::ReplayingHeadChanges) => Stage::InitialHeadReplay,
-        (Stage::OpeningProjection, Phase::RecoveringSchedulerProjection) => {
+        (Stage::OpeningProjection, Phase::RecoveringSchedulerProjection) if scheduler => {
             Stage::RecoveringSchedulerProjection
         }
 
         (Stage::RebuildingProjection, Phase::RebuildingProjection) => Stage::RebuildingProjection,
         (Stage::RebuildingProjection, Phase::ReplayingHeadChanges) => Stage::InitialHeadReplay,
-        (Stage::RebuildingProjection, Phase::RecoveringSchedulerProjection) => {
+        (Stage::RebuildingProjection, Phase::RecoveringSchedulerProjection) if scheduler => {
             Stage::RecoveringSchedulerProjection
         }
 
         (Stage::InitialHeadReplay, Phase::ReplayingHeadChanges) => Stage::InitialHeadReplay,
-        (Stage::InitialHeadReplay, Phase::RecoveringSchedulerProjection) => {
+        // A composition without the scheduler has no scheduler projection
+        // recovery, so the terminal-history replay stays in this stage and
+        // threads follow it.
+        (Stage::InitialHeadReplay, Phase::ReconcilingThreads) if scheduler_free => {
+            Stage::ReconcilingThreads
+        }
+        (Stage::InitialHeadReplay, Phase::RecoveringSchedulerProjection) if scheduler => {
             Stage::RecoveringSchedulerProjection
         }
 
@@ -366,12 +403,14 @@ fn advance_startup_stage(current: StartupStage, phase: StartupPhase) -> Result<S
 
         (Stage::ReconcilingFollow, Phase::ReconcilingFollow) => Stage::ReconcilingFollow,
         (Stage::ReconcilingFollow, Phase::ReplayingHeadChanges) => Stage::PostReconcileHeadReplay,
-        (Stage::ReconcilingFollow, Phase::ReconcilingScheduler) => Stage::ReconcilingScheduler,
+        (Stage::ReconcilingFollow, Phase::ReconcilingScheduler) if scheduler => {
+            Stage::ReconcilingScheduler
+        }
 
         (Stage::PostReconcileHeadReplay, Phase::ReplayingHeadChanges) => {
             Stage::PostReconcileHeadReplay
         }
-        (Stage::PostReconcileHeadReplay, Phase::ReconcilingScheduler) => {
+        (Stage::PostReconcileHeadReplay, Phase::ReconcilingScheduler) if scheduler => {
             Stage::ReconcilingScheduler
         }
 
@@ -385,6 +424,34 @@ fn advance_startup_stage(current: StartupStage, phase: StartupPhase) -> Result<S
         ),
     };
     Ok(next)
+}
+
+/// The last reconciliation stage before Ready. A composition that selects
+/// the scheduler ends in scheduler reconciliation; one without it ends after
+/// follow reconciliation or its post-reconcile projection repair. An
+/// undeclared selection is never complete.
+fn ready_stage_complete(
+    stage: StartupStage,
+    phase: StartupPhase,
+    scheduler_selected: Option<bool>,
+) -> bool {
+    match scheduler_selected {
+        Some(true) => {
+            stage == StartupStage::ReconcilingScheduler
+                && phase == StartupPhase::ReconcilingScheduler
+        }
+        Some(false) => matches!(
+            (stage, phase),
+            (
+                StartupStage::ReconcilingFollow,
+                StartupPhase::ReconcilingFollow
+            ) | (
+                StartupStage::PostReconcileHeadReplay,
+                StartupPhase::ReplayingHeadChanges
+            )
+        ),
+        None => false,
+    }
 }
 
 /// Publishes one monotonic lifecycle stream to both stable front doors.
@@ -417,6 +484,7 @@ impl StartupCoordinator {
                 snapshot: startup,
                 phase_started: Instant::now(),
                 stage: StartupStage::Bootstrapping,
+                scheduler_selected: None,
             })),
             publication,
             shutting_down,
@@ -431,6 +499,23 @@ impl StartupCoordinator {
 
     pub fn http_state(&self) -> DynamicHttpState {
         self.http.clone()
+    }
+
+    /// Declare, once, whether the node's installed composition selects the
+    /// scheduler. Startup ordering and Ready completion follow it.
+    pub fn select_scheduler(&self, selected: bool) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("startup coordinator poisoned"))?;
+        match state.scheduler_selected {
+            None => {
+                state.scheduler_selected = Some(selected);
+                Ok(())
+            }
+            Some(declared) if declared == selected => Ok(()),
+            Some(_) => anyhow::bail!("scheduler selection cannot change during startup"),
+        }
     }
 
     pub fn phase(&self, phase: StartupPhase, message: impl Into<String>) -> Result<()> {
@@ -450,7 +535,7 @@ impl StartupCoordinator {
             .lock()
             .map_err(|_| anyhow!("startup coordinator poisoned"))?;
         let previous_stage = state.stage;
-        let next_stage = advance_startup_stage(previous_stage, phase)?;
+        let next_stage = advance_startup_stage(previous_stage, phase, state.scheduler_selected)?;
         let previous = state.snapshot.phase;
         let previous_duration = state.phase_started.elapsed();
         let phase_changed = previous != phase;
@@ -554,7 +639,7 @@ impl StartupCoordinator {
             .lock()
             .map_err(|_| anyhow!("startup coordinator poisoned"))?;
         let previous_stage = state.stage;
-        let next_stage = advance_startup_stage(previous_stage, phase)?;
+        let next_stage = advance_startup_stage(previous_stage, phase, state.scheduler_selected)?;
         let previous_snapshot = state.snapshot.clone();
         let previous_phase_started = state.phase_started;
         let phase_changed = state.snapshot.phase != phase;
@@ -635,7 +720,7 @@ impl StartupCoordinator {
 
     pub fn publish_application(
         &self,
-        app: Arc<ryeos_app::state::AppState>,
+        publication: Arc<ryeos_executor::SelectedApplicationPublication>,
         api: ryeos_api::ApiState,
     ) -> Result<()> {
         let _publication = self
@@ -651,9 +736,17 @@ impl StartupCoordinator {
         if self.uds.application_is_published() || self.http.application_is_published() {
             anyhow::bail!("application surfaces may be published exactly once");
         }
+        let Some(api_publication) = api.publication.as_ref() else {
+            anyhow::bail!("HTTP application lacks the paired Executor publication");
+        };
+        if !Arc::ptr_eq(api_publication, &publication)
+            || !Arc::ptr_eq(api_publication.app(), &api.app)
+        {
+            anyhow::bail!("HTTP and UDS application publications do not share one generation");
+        }
         // Runtime callbacks use AppState; HTTP routes use the richer ApiState.
         // Both pointers are release-published before readiness can be observed.
-        self.uds.publish_application(app);
+        self.uds.publish_application(publication);
         self.http.publish_application(api);
         Ok(())
     }
@@ -684,10 +777,8 @@ impl StartupCoordinator {
             .state
             .lock()
             .map_err(|_| anyhow!("startup coordinator poisoned"))?;
-        if state.stage != StartupStage::ReconcilingScheduler
-            || state.snapshot.phase != StartupPhase::ReconcilingScheduler
-        {
-            anyhow::bail!("Ready requires completed scheduler reconciliation");
+        if !ready_stage_complete(state.stage, state.snapshot.phase, state.scheduler_selected) {
+            anyhow::bail!("Ready requires completed startup reconciliation");
         }
         let previous_phase = state.snapshot.phase;
         let previous_duration = state.phase_started.elapsed();
@@ -845,7 +936,7 @@ fn require_non_increasing(name: &str, previous: Option<u64>, next: Option<u64>) 
 impl ryeos_state::ProjectionRecoveryObserver for StartupCoordinator {
     fn update(&self, progress: ryeos_state::ProjectionRecoveryProgress) {
         if let Err(error) = self.projection_recovery_progress(progress) {
-            tracing::warn!(%error, "failed to publish projection recovery progress");
+            tracing::warn!(error = %format!("{error:#}"), "failed to publish projection recovery progress");
         }
     }
 
@@ -866,7 +957,7 @@ pub async fn progress_ticker(coordinator: StartupCoordinator) {
         }
         let refresh_result = coordinator.refresh();
         if let Err(error) = refresh_result {
-            tracing::warn!(%error, "failed to refresh startup lifecycle progress");
+            tracing::warn!(error = %format!("{error:#}"), "failed to refresh startup lifecycle progress");
             return;
         }
     }
@@ -891,6 +982,24 @@ mod tests {
         assert!(uds_path.exists());
         drop(replacement);
         drop(original);
+    }
+
+    #[test]
+    fn discovery_cleanup_removes_both_sockets_on_stop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let control = tmp.path().join("ryeosd.sock");
+        let runtime = tmp.path().join("ryeosd-runtime.sock");
+        let _control = std::os::unix::net::UnixListener::bind(&control).unwrap();
+        let _runtime = std::os::unix::net::UnixListener::bind(&runtime).unwrap();
+        let cleanup = DiscoveryCleanup::new(control.clone(), tmp.path().join("daemon.json"))
+            .unwrap()
+            .with_runtime_socket(runtime.clone())
+            .unwrap();
+
+        drop(cleanup);
+
+        assert!(!control.exists());
+        assert!(!runtime.exists());
     }
 
     fn next_progress(previous: &StartupSnapshot) -> StartupSnapshot {
@@ -963,9 +1072,118 @@ mod tests {
             StartupPhase::ReplayingHeadChanges,
             StartupPhase::ReconcilingScheduler,
         ] {
-            stage = advance_startup_stage(stage, phase).unwrap();
+            stage = advance_startup_stage(stage, phase, Some(true)).unwrap();
         }
         assert_eq!(stage, StartupStage::ReconcilingScheduler);
+    }
+
+    #[test]
+    fn startup_stage_without_scheduling_reconciles_after_terminal_replay() {
+        let mut stage = StartupStage::Bootstrapping;
+        for phase in [
+            StartupPhase::OpeningProjection,
+            StartupPhase::ReplayingHeadChanges,
+            StartupPhase::ReplayingHeadChanges,
+            StartupPhase::ReconcilingThreads,
+            StartupPhase::ReconcilingFollow,
+            StartupPhase::ReplayingHeadChanges,
+        ] {
+            stage = advance_startup_stage(stage, phase, Some(false)).unwrap();
+        }
+        assert_eq!(stage, StartupStage::PostReconcileHeadReplay);
+    }
+
+    #[test]
+    fn ready_requires_the_composition_s_final_reconciliation_stage() {
+        for selected in [None, Some(false), Some(true)] {
+            assert!(!ready_stage_complete(
+                StartupStage::ReconcilingThreads,
+                StartupPhase::ReconcilingThreads,
+                selected
+            ));
+            assert!(!ready_stage_complete(
+                StartupStage::InitialHeadReplay,
+                StartupPhase::ReplayingHeadChanges,
+                selected
+            ));
+        }
+        assert!(ready_stage_complete(
+            StartupStage::ReconcilingFollow,
+            StartupPhase::ReconcilingFollow,
+            Some(false)
+        ));
+        assert!(ready_stage_complete(
+            StartupStage::PostReconcileHeadReplay,
+            StartupPhase::ReplayingHeadChanges,
+            Some(false)
+        ));
+        assert!(!ready_stage_complete(
+            StartupStage::ReconcilingScheduler,
+            StartupPhase::ReconcilingScheduler,
+            Some(false)
+        ));
+        assert!(!ready_stage_complete(
+            StartupStage::ReconcilingFollow,
+            StartupPhase::ReconcilingFollow,
+            Some(true)
+        ));
+        assert!(ready_stage_complete(
+            StartupStage::ReconcilingScheduler,
+            StartupPhase::ReconcilingScheduler,
+            Some(true)
+        ));
+        assert!(!ready_stage_complete(
+            StartupStage::ReconcilingFollow,
+            StartupPhase::ReconcilingFollow,
+            None
+        ));
+        assert!(!ready_stage_complete(
+            StartupStage::ReconcilingScheduler,
+            StartupPhase::ReconcilingScheduler,
+            None
+        ));
+    }
+
+    #[test]
+    fn startup_stage_with_scheduling_requires_scheduler_recovery_before_threads() {
+        assert!(
+            advance_startup_stage(
+                StartupStage::InitialHeadReplay,
+                StartupPhase::ReconcilingThreads,
+                Some(true),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn startup_stage_refuses_scheduler_phases_outside_a_scheduler_composition() {
+        for selected in [None, Some(false)] {
+            assert!(
+                advance_startup_stage(
+                    StartupStage::InitialHeadReplay,
+                    StartupPhase::RecoveringSchedulerProjection,
+                    selected,
+                )
+                .is_err()
+            );
+            assert!(
+                advance_startup_stage(
+                    StartupStage::ReconcilingFollow,
+                    StartupPhase::ReconcilingScheduler,
+                    selected,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            advance_startup_stage(
+                StartupStage::InitialHeadReplay,
+                StartupPhase::ReconcilingThreads,
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -974,6 +1192,7 @@ mod tests {
             advance_startup_stage(
                 StartupStage::InitialHeadReplay,
                 StartupPhase::OpeningProjection,
+                Some(true),
             )
             .is_err()
         );
@@ -981,6 +1200,7 @@ mod tests {
             advance_startup_stage(
                 StartupStage::RecoveringSchedulerProjection,
                 StartupPhase::ReconcilingThreads,
+                Some(true),
             )
             .is_err()
         );
@@ -988,6 +1208,7 @@ mod tests {
             advance_startup_stage(
                 StartupStage::ReconcilingFollow,
                 StartupPhase::ReconcilingThreads,
+                Some(true),
             )
             .is_err()
         );
@@ -995,6 +1216,7 @@ mod tests {
             advance_startup_stage(
                 StartupStage::ReconcilingScheduler,
                 StartupPhase::ReplayingHeadChanges,
+                Some(true),
             )
             .is_err()
         );

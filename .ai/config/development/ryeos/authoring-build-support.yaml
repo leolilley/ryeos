@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T16:56:40Z:dc091e4665a24779f7ba54b799d6f6971b9c8862c1f8af59ffd100f9871f8dc1:bi8bLeT+e5F3Ty1SGVSI1wOKTuF9PWXIiL1r/fjphn1FuWc/25iaZW0+T4UBnTunYbgHbf34uaiMxWxg+f25Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-27T11:14:20Z:8f9506372b60f7ab8f6578eafd122bf3eeede0a213c8cbd1a14b27424547d7c6:pUEtzLdhMzqnJrYqPGbNJavYLSvXlNj/9Q9Xrc8PWaQjN2zh8PjkOoRKfZGDiKWuwit64wtLo2uFksw7vIBpAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 {
   "category": "development/ryeos",
   "name": "authoring-build-support",
@@ -48,7 +48,7 @@
       "RYEOS-BUILD-SUPPORT.json": {
         "bytes": 13056,
         "mode": 420,
-        "sha256": "cb33412926d878e917ca641a50d8244cb8158d396de3bc67246ceb6dbcd5f009"
+        "sha256": "bd857c672c7393fab90efe2358ef0a2ebb5592c32d41ec167da235647e8290ec"
       },
       "bin/awk": {
         "bytes": 176201,

@@ -267,11 +267,9 @@ fn main() -> anyhow::Result<()> {
 fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<ResolvedLaunch> {
     let envelope: ryeos_runtime::envelope::LaunchEnvelope =
         serde_json::from_slice(stdin_data).map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
-    if envelope.schema_version()
-        != ryeos_engine::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION
-    {
-        anyhow::bail!("unsupported managed launch envelope schema");
-    }
+    envelope
+        .validate_wire()
+        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
     if !envelope.runtime_data.is_empty() {
         anyhow::bail!(
             "graph launch runtime_data must be empty; received keys: {:?}",
@@ -307,17 +305,23 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
     })
 }
 
-fn runtime_status_for_graph(status: model::GraphRunStatus) -> RuntimeResultStatus {
+fn runtime_status_for_graph(
+    status: ryeos_runtime::graph_result::GraphRunStatus,
+) -> RuntimeResultStatus {
     match status {
-        model::GraphRunStatus::Valid
-        | model::GraphRunStatus::Completed
-        | model::GraphRunStatus::CompletedWithErrors => RuntimeResultStatus::Completed,
-        model::GraphRunStatus::Invalid
-        | model::GraphRunStatus::Error
-        | model::GraphRunStatus::MaxStepsExceeded => RuntimeResultStatus::Failed,
-        model::GraphRunStatus::Continued => RuntimeResultStatus::Continued,
-        model::GraphRunStatus::Cancelled => RuntimeResultStatus::Cancelled,
-        model::GraphRunStatus::Killed => RuntimeResultStatus::Killed,
+        ryeos_runtime::graph_result::GraphRunStatus::Valid
+        | ryeos_runtime::graph_result::GraphRunStatus::Completed
+        | ryeos_runtime::graph_result::GraphRunStatus::CompletedWithErrors => {
+            RuntimeResultStatus::Completed
+        }
+        ryeos_runtime::graph_result::GraphRunStatus::Invalid
+        | ryeos_runtime::graph_result::GraphRunStatus::Error
+        | ryeos_runtime::graph_result::GraphRunStatus::MaxStepsExceeded => {
+            RuntimeResultStatus::Failed
+        }
+        ryeos_runtime::graph_result::GraphRunStatus::Continued => RuntimeResultStatus::Continued,
+        ryeos_runtime::graph_result::GraphRunStatus::Cancelled => RuntimeResultStatus::Cancelled,
+        ryeos_runtime::graph_result::GraphRunStatus::Killed => RuntimeResultStatus::Killed,
     }
 }
 
@@ -505,7 +509,7 @@ mod tests {
 
     #[test]
     fn graph_outcomes_map_to_closed_runtime_terminal_statuses() {
-        use model::GraphRunStatus;
+        use ryeos_runtime::graph_result::GraphRunStatus;
 
         let cases = [
             (GraphRunStatus::Valid, RuntimeResultStatus::Completed),

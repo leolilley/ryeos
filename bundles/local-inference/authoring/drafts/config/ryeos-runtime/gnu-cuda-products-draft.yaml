@@ -1,0 +1,113 @@
+# UNSIGNED DRAFT: private-origin GNU policy is authored but not run; CUDA driver/device claims remain unresolved; not safe for admission.
+category: ryeos-runtime
+version: 1.0.0
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+  - name: gnu_runtime_to_private_worker
+    producer:
+      canonical_ref: graph:ryeos/development/gnu-python-private-production
+      recipe_binding: product_recipe
+      product_name: runtime_private
+      parameters: {}
+    consumer:
+      canonical_ref: worker:local-inference/qwen3-0.6b-gnu-cuda-graph-free-2048-draft
+      declaration_id: python-gnu
+    required_product:
+      shape: tree
+      storage: large_content
+      bounds:
+        maximum_entries: 10000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    qualification:
+      policy_ref: config:ryeos/environments/qualification/gnu-python-private
+      required_claims:
+      - gnu_python_private_origin_startup_providers_v1
+      - gnu_python_zlib_1_3_2
+  - name: gnu_runtime_to_driver_normalizer
+    producer:
+      canonical_ref: graph:ryeos/development/gnu-python-private-production
+      recipe_binding: product_recipe
+      product_name: runtime_private
+      parameters: {}
+    consumer:
+      canonical_ref: tool:local-inference/modal-driver-normalize/normalize
+      declaration_id: gnu_runtime
+    required_product:
+      shape: tree
+      storage: large_content
+      bounds:
+        maximum_entries: 10000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    qualification:
+      policy_ref: config:ryeos/environments/qualification/gnu-python-private
+      required_claims:
+      - gnu_python_private_origin_startup_providers_v1
+      - gnu_python_zlib_1_3_2
+  - name: gnu_runtime_to_qualification_verifier
+    producer:
+      canonical_ref: graph:ryeos/development/gnu-python-private-production
+      recipe_binding: product_recipe
+      product_name: runtime_private
+      parameters: {}
+    consumer:
+      canonical_ref: tool:local-inference/gnu-cuda-driver-qualification/verify
+      declaration_id: gnu_runtime
+    required_product:
+      shape: tree
+      storage: large_content
+      bounds:
+        maximum_entries: 10000
+        maximum_depth: 64
+        maximum_file_bytes: 134217728
+        maximum_total_bytes: 268435456
+    qualification:
+      policy_ref: config:ryeos/environments/qualification/gnu-python-private
+      required_claims:
+      - gnu_python_private_origin_startup_providers_v1
+      - gnu_python_zlib_1_3_2
+  - name: driver_to_private_worker
+    producer:
+      canonical_ref: graph:local-inference/modal-user-driver-production
+      recipe_binding: product_recipe
+      product_name: modal_guest_user_driver
+      parameters: {}
+    consumer:
+      canonical_ref: worker:local-inference/qwen3-0.6b-gnu-cuda-graph-free-2048-draft
+      declaration_id: driver
+    required_product:
+      shape: tree
+      storage: large_content
+      bounds:
+        maximum_entries: 514
+        maximum_depth: 34
+        maximum_file_bytes: 268435456
+        maximum_total_bytes: 1073741824
+    qualification:
+      policy_ref: config:ryeos-runtime/gnu-cuda-driver-qualification
+      required_claims:
+      - gnu_user_driver_static_closure_v1
+  - name: driver_to_qualification_verifier
+    producer:
+      canonical_ref: graph:local-inference/modal-user-driver-production
+      recipe_binding: product_recipe
+      product_name: modal_guest_user_driver
+      parameters: {}
+    consumer:
+      canonical_ref: tool:local-inference/gnu-cuda-driver-qualification/verify
+      declaration_id: subject
+    required_product:
+      shape: tree
+      storage: large_content
+      bounds:
+        maximum_entries: 514
+        maximum_depth: 34
+        maximum_file_bytes: 268435456
+        maximum_total_bytes: 1073741824
+    qualification:
+      policy_ref: null
+      required_claims: []

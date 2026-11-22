@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-16T02:16:20Z:d8530ce413bf861014b795006be868a9981a77f2f8b9fc53c5d50df1f74d8244:i7TRidR1Nge/kiWWuHFxNf0QTSh9qLyg+P5kyaWydmLomWLRymmADE9kplUlPsROzXsVF41SkO8W1RiKUFH5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:312def4a4d55041bf4b8b71d8933a353ff23997512305749beb472e5ea2db1a1:RBDYIRJhDYeHjwR2LoO7SNxdoJEDW6HAFvIQfOW86V+tN2FrE3x5IZEWL1hkJA47G5XMLx3S9eZAaNdBGu0zAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-replay
 version: "1.0.0"
-description: Replay the session's seat braid so seat state folds from history - live and replay are the same fold
+description: Resolve one exact retained seat-append receipt for idempotent retry; fixed-anchor cold history uses the authenticated seat stream
 endpoint: ui.seat.replay
 ui_read_only: true
 # Lifecycle routes preserve the authenticated browser context directly.

@@ -16,6 +16,11 @@ on:
         required: true
         default: true
         type: boolean
+      merge_gates:
+        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. A branch whose changed paths are all UI paths runs the UI-only gate instead (see the classify job). Every gate also runs the tests of each crate the branch changed (touched-tests job). Full tests run on next after merge."
+        required: true
+        default: false
+        type: boolean
       refresh_bundles:
         description: "Run the expensive bundle refresh/populate path"
         required: true
@@ -23,6 +28,11 @@ on:
         type: boolean
       installed_resume_smoke:
         description: "Run the installed init/start/restart resume smoke (expensive)"
+        required: true
+        default: false
+        type: boolean
+      browser_smoke:
+        description: "Run the installed browser client smoke in headless Chromium (expensive)"
         required: true
         default: false
         type: boolean
@@ -34,12 +44,11 @@ on:
       bundle_set:
         description: "Bundle set for refresh_bundles"
         required: true
-        default: full
+        default: development
         type: choice
         options:
-          - full
+          - development
           - standard
-          - hosted-node
           - hosted-workflow
 
 permissions:
@@ -47,21 +56,82 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # next is pushed every half hour or so by several threads and a full run takes
+  # hours: cancelling there meant no run ever finished. On next a newer push
+  # waits (GitHub keeps one pending run per group and replaces older pending
+  # ones), so every started run completes. Other refs still cancel superseded runs.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/next' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Keep CI resource usage predictable. Override in workflow YAML if the runner
-  # class changes; local gate defaults remain machine-sensitive.
-  GATE_BUILD_JOBS: 2
-  GATE_TEST_THREADS: 2
+  # Every rustc invocation goes through sccache backed by the Actions cache, so
+  # compilation units are shared across jobs, build profiles and lockfile
+  # changes instead of being rebuilt whenever the artifact cache key moves.
+  # Incremental compilation is off because its artifacts cannot be shared.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+  # A hosted runner is dedicated to one job, so cargo and nextest use every core
+  # (0 selects their own defaults). The gate's half-the-cores defaults are for
+  # shared desktops and apply only to local runs.
+  GATE_BUILD_JOBS: 0
+  GATE_TEST_THREADS: 0
 
 jobs:
+  # Decides which merge gate a merge_gates dispatch runs. Every other event, and
+  # any doubt (unknown path, no merge base, script fault), gets the full gate.
+  # The UI-only gate skips the workspace test archive, the crash qualification
+  # build and the scheduler composition checks, and runs the UI crates' tests
+  # (ui-gate job) instead; secret scan, static policy and rust-policy always run.
+  classify:
+    name: Gate classification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.classify.outputs.mode || 'full' }}
+      bundles_changed: ${{ steps.classify.outputs.bundles_changed || 'true' }}
+      # JSON list of the packages whose tests the touched-tests job runs. An unset or
+      # unreadable value is ERROR, which fails that job; it is never read as "none".
+      test_packages: ${{ steps.classify.outputs.test_packages || 'ERROR' }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify the branch against next
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          MERGE_GATES: ${{ inputs.merge_gates }}
+        run: |
+          set -uo pipefail
+          if [[ "$EVENT" != workflow_dispatch || "$MERGE_GATES" != true ]]; then
+            {
+              echo "mode=full"
+              echo "bundles_changed=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "### Gate: full (not a merge_gates dispatch)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # A classifier fault must leave the output unset (the job defaults it to full).
+          if ! python3 -I .ai/tools/ryeos/development/repository-validation/lib/classify-merge-gate.py --base-ref origin/next --rule wide > "$RUNNER_TEMP/classification"; then
+            echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          grep -E '^(mode|bundles_changed|test_packages)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Gate: $(sed -n 's/^mode=//p' "$RUNNER_TEMP/classification")"
+            echo '```'
+            sed -n 's/^# //p' "$RUNNER_TEMP/classification"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   static-policy:
     name: Static repository policy
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -72,6 +142,84 @@ jobs:
       - name: Check workflows and release/install shell
         run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
 
+      - name: Check signed files match their signed content hash
+        # Mirrors lillux::signature::content_hash_after_signature
+        # (crates/kernel/lillux/src/signature.rs): sha256 of the whole file
+        # with the signature line (line 1, or line 2 under a shebang) removed,
+        # terminator included. Hash only; the Ed25519 signature is not checked.
+        run: |
+          python3 -I - <<'PY'
+          import hashlib, os, re, shutil, subprocess, sys, tempfile
+
+          HEADER = re.compile(r"^\s*(?:#|<!--)\s*ryeos:signed:(.*?)(?:-->)?\s*$")
+
+          def check(data):
+              """Return None if unsigned or fresh, else (header_hash, content_hash)."""
+              try:
+                  text = data.decode("utf-8")
+              except UnicodeDecodeError:
+                  return None
+              # Split on "\n" only, like Rust str::lines (a "\r" stays on its line).
+              lines = re.findall(r"[^\n]*\n|[^\n]+\Z", text)
+              for idx in ((1, 0) if lines and lines[0].startswith("#!") else (0,)):
+                  if idx >= len(lines):
+                      continue
+                  m = HEADER.match(lines[idx].rstrip("\r\n"))
+                  if not m:
+                      continue
+                  parts = m.group(1).rsplit(":", 3)
+                  if len(parts) != 4:
+                      continue
+                  signed = "".join(lines[:idx] + lines[idx + 1:]).encode("utf-8")
+                  actual = hashlib.sha256(signed).hexdigest()
+                  return None if actual == parts[1] else (parts[1], actual)
+              return None
+
+          def signed_files():
+              out = subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout
+              for name in out.decode().split("\0"):
+                  if not name or os.path.islink(name) or not os.path.isfile(name):
+                      continue
+                  with open(name, "rb") as fh:
+                      data = fh.read()
+                  if b"ryeos:signed:" in data:
+                      yield name, data
+
+          # Self-check: a signed file with one byte altered must be reported stale.
+          sample = next((n for n, d in signed_files() if check(d) is None and HEADER.match(d.decode("utf-8", "replace").splitlines()[0])), None)
+          if sample is None:
+              sys.exit("self-check: no signed sample file found")
+          tmp = tempfile.mkdtemp()
+          try:
+              copy = os.path.join(tmp, "sample")
+              shutil.copyfile(sample, copy)
+              with open(copy, "rb") as fh:
+                  good = fh.read()
+              assert check(good) is None, "self-check: pristine copy reported stale"
+              assert check(good + b"x") is not None, "self-check: altered copy not reported stale"
+          finally:
+              shutil.rmtree(tmp)
+
+          stale = checked = 0
+          for name, data in signed_files():
+              try:
+                  first = data.decode("utf-8").splitlines()[:2]
+              except UnicodeDecodeError:
+                  continue
+              if not any(HEADER.match(l) for l in first):
+                  continue
+              checked += 1
+              res = check(data)
+              if res:
+                  stale += 1
+                  print(f"stale signature: {name} (header {res[0][:12]}, content {res[1][:12]})")
+          print(f"checked {checked} signed files, {stale} stale")
+          sys.exit(1 if stale else 0)
+          PY
+
+      - name: Check custody token ban
+        run: ./scripts/ci/check-custody-tokens.sh
+
       - name: Check release input validation
         run: ./scripts/release/test-resolve-version.sh
 
@@ -81,11 +229,26 @@ jobs:
       - name: Check deterministic official bundle packaging
         run: ./scripts/release/test-package-bundle-artifact.sh
 
+      - name: Check released bundle materialization
+        run: ./scripts/release/test-materialize-release-bundles.sh
+
       - name: Check explicit publisher trust boundaries
         run: ./scripts/ci/test-publisher-trust-policy.sh
 
       - name: Check daemon image init boundaries
         run: ./scripts/ci/test-daemon-image-init-policy.sh
+
+      - name: Check composition daemon features match their bundle sets
+        run: |
+          python3 -B scripts/release/test-check-composition-daemon-features.py
+          python3 -B scripts/release/check-composition-daemon-features.py
+
+      - name: Run central-auth bundle Python tests
+        working-directory: bundles/central-auth
+        run: python3 -B -m unittest discover -s tests
+
+      - name: Check image build cache boundaries
+        run: ./scripts/ci/test-image-build-cache.sh
 
       - name: Check contained OCI product boundaries
         run: |
@@ -93,12 +256,61 @@ jobs:
           python3 tests/development/hosted_oci_runtime_verifier.py
           python3 tests/development/oci_hook_contract.py
           python3 tests/development/contained_workflow_products.py
+          python3 -B tests/development/prove_contained_oci_provider.py
+
+      - name: Check build-support input rebuild planning
+        run: python3 -B tests/e2e/authoring-environment/test_rebuild_build_support_inputs.py
+
+      - name: Check development host tools
+        run: python3 tests/development/dev_host_tools.py
+
+      - name: Check supervised smoke tool
+        run: python3 -I -B tests/development/supervised_smoke_tests.py
 
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh
 
+      - name: Check native bundle publication inventories
+        run: python3 -B scripts/release/test-native-bundle-wp0.py
+
+      - name: Check installer lifecycle boundaries
+        run: bash scripts/pkg/test-install-lifecycle.sh
+
+      - name: Check contained Docker host setup
+        run: |
+          python3 -B scripts/pkg/test-contained-docker-node.py
+          python3 -B scripts/pkg/test-contained-docker-runtime.py
+          python3 -B scripts/release/test-contained-oci-hook-artifact.py
+
+      - name: Check workspace version gate
+        run: python3 -B scripts/release/test-check-workspace-versions.py
+
+      - name: Check gate package selection
+        run: python3 -B scripts/test-gate-package-selection.py
+
+      - name: Check development registry bootstrap entry
+        run: python3 -B scripts/release/test-development-registry.py
+
+      - name: Check bundle-release sources
+        run: |
+          for test in bundles/bundle-release/tests/test-*.py; do
+            echo "::group::$test"
+            python3 -B "$test"
+            echo "::endgroup::"
+          done
+
+      - name: Check release-candidate inspection tooling
+        run: |
+          python3 -B scripts/release/test-audit-bundle-generation.py
+          python3 -B scripts/release/test-inspect-core-native-set.py
+          python3 -B scripts/release/test-inspect-native-bundle-input.py
+          python3 -B scripts/release/test-release-candidate.py
+
       - name: Check Codex authored contract
         run: python3 bundles/codex/test_contract.py
+
+      - name: Check claude-code authored contract
+        run: python3 -B bundles/claude-code/test_contract.py
 
       - name: Check local-inference authored contract
         run: python3 bundles/local-inference/test_contract.py
@@ -120,12 +332,28 @@ jobs:
       - name: Check removed compatibility vocabulary
         run: python3 .ai/tools/ryeos/development/repository-validation/no-content-wrap.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
+      - name: Check shared static payload ownership
+        run: python3 -B scripts/release/test-shared-static-payloads.py
+
       - name: Check workspace dependency direction
         run: python3 .ai/tools/ryeos/development/repository-validation/dependency-layers.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
-      - name: Check browser key adapter
-        working-directory: crates/clients/web
-        run: npm test
+      - name: Check the browser package is not stale
+        # A source change with no package rebuild leaves the package, its manifest and
+        # the generated registry consistent but out of date; nothing else notices.
+        run: |
+          python3 -I -B tests/development/ci_gate_scripts.py
+          python3 -I -B .ai/tools/ryeos/development/browser-assets-production/lib/web-package-source-digest.py --check
+
+      # The manifest's ui_binding_revision mirrors the client code constant; the registry
+      # script derives it and fails here when the committed manifest or generated table differs.
+      - name: Check the browser asset registry matches the code
+        run: python3 -I -B crates/daemon/ryeos-ui/generate_asset_registry.py --check
+
+      # The browser renderer is its own Cargo workspace; every package its lock shares with the
+      # root lock must resolve identically.
+      - name: Check the browser renderer lock agrees with the root lock
+        run: python3 -I .ai/tools/ryeos/development/repository-validation/rune-lock.py --check --project-path "$PWD"
 
   rust-policy:
     name: Rust formatting, lint, and dependency policy
@@ -138,16 +366,20 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -157,44 +389,67 @@ jobs:
           key: workspace-crates-v1
           cache-workspace-crates: true
           cache-on-failure: true
+          workspaces: |
+            . -> target
+            crates/clients/rune -> target
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path crates/clients/rune/Cargo.toml --all -- --check
+
+      - name: Check test-support features stay out of shipped builds
+        run: ./scripts/ci/check-test-support-feature-leak.sh
 
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The browser renderer is its own Cargo workspace (crates/clients/rune), so the root
+      # workspace commands above do not reach it. Its page entry and the runtime's web platform
+      # compile only for wasm32; the native build carries its tests (tests/headless.rs).
+      - name: Check browser renderer Clippy policy
+        run: |
+          cargo clippy --locked -p ryeos-client-runtime --target wasm32-unknown-unknown -- -D warnings
+          cargo clippy --locked --manifest-path crates/clients/rune/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path crates/clients/rune/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Test the browser renderer
+        run: cargo test --locked --manifest-path crates/clients/rune/Cargo.toml
+
+      # Rune's JS snippets are declared once (rune-snippets.toml); a pin bump that adds or
+      # drops one fails here instead of at the next manual package build.
+      - name: Check Rune JS snippets match the declared list
+        run: python3 -I .ai/tools/ryeos/development/browser-assets-production/lib/check-rune-snippets.py
+
       - name: Check dependency advisories, licenses, and sources
-        run: cargo deny check
+        run: |
+          cargo deny check
+          cargo deny --manifest-path crates/clients/rune/Cargo.toml --config deny.toml check
+
+      - name: Check client and daemon-side crate layering
+        run: python3 .ai/tools/ryeos/development/repository-validation/client-layering.py --project-path "$PWD"
 
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: ${{ github.event_name != 'workflow_dispatch' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
+      # Pushes and pull requests scan the whole history through the action.
       - name: Scan repository history
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  secrets-manual:
-    name: Secret scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    steps:
-      - name: Check out repository history
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-
+      # Manual dispatches run on work branches; they scan only the commits
+      # introduced since next with a pinned gitleaks binary.
       - name: Install gitleaks
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           archive="$RUNNER_TEMP/gitleaks_8.24.3_linux_x64.tar.gz"
           install_dir="$RUNNER_TEMP/gitleaks-8.24.3"
@@ -209,18 +464,28 @@ jobs:
           printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
 
       - name: Scan commits introduced from next
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           base="$(git merge-base HEAD origin/next)"
-          gitleaks git --redact --exit-code=2 --log-opts="$base..HEAD"
+          gitleaks git --redact --verbose --exit-code=2 --config .gitleaks.toml --log-opts="$base..HEAD"
 
-  test:
-    name: Workspace tests
+  # The workspace gate is split so that its long serial stages overlap:
+  #
+  #   bundles ---------------------------------------+
+  #   archive (test-profile build, nextest archive) -+--> shards 1..8 --> Workspace tests
+  #   scheduler-compositions ------------------------------------------+
+  #
+  #   bundles ----------------------------------------+
+  #   crash-archive (crash features build + CLI) -----+--> crash phases --> Crash recovery
+  #
+  # Every test the single-runner gate ran still runs, with the same flags; the
+  # shards partition one archive by test hash, so each test runs exactly once.
+
+  bundles:
+    name: Bundle refresh for tests
     runs-on: ubuntu-latest
-    # The full two-thread gate now reaches more than 5,250 tests and has
-    # repeatedly been canceled by the previous 90-minute ceiling while still
-    # making progress near the end of the suite.
-    timeout-minutes: 120
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    timeout-minutes: 90
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -228,7 +493,109 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Refresh and sign the bundle sources
+        # --refresh-bundles populates + dev-key-signs the bundle bin trees the
+        # live-registry tests load from. The release build graph lives in a
+        # disposable target that the gate removes afterwards.
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
+
+      - name: Pack the refreshed bundle state
+        run: |
+          mkdir -p "$RUNNER_TEMP/bundle-state"
+          ./scripts/ci/pack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Upload the refreshed bundle state
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state/bundle-state.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  init-profiles:
+    name: Real init of every shipped profile
+    # The release packaging preflight runs the production `ryeos init` on an
+    # app root, and that init refuses storage that is not durable. This job runs
+    # the real binary for every shipped profile and host class on a separate
+    # mount against the dev-signed bundle state the bundles job refreshed, so
+    # that gate cannot stop being exercised until release day.
+    needs: [bundles]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Prepare the runner
+        # Places TMPDIR on a loop-mounted volume: a mount distinct from the
+        # root disk, which the durable-root gate accepts.
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Build the ryeos CLI
+        run: cargo build --locked -p ryeos-cli --bin ryeos
+
+      - name: Initialize every profile under every host class
+        run: |
+          mkdir -p "$TMPDIR/init-profiles-root"
+          ./tests/e2e/init-profiles/check.sh \
+            --ryeos "$PWD/target/debug/ryeos" \
+            --source "$PWD/bundles" \
+            --trust-file "$PWD/bundles/.ai/PUBLISHER_TRUST.toml" \
+            --verify-root "$TMPDIR/init-profiles-root"
+
+  workspace-archive:
+    name: Workspace test archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [classify]
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_tests) && needs.classify.outputs.mode != 'ui-only' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -238,10 +605,13 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # Keep the expensive bundle/test compilation warm across CI repair runs.
+          # Keep the expensive test compilation warm across CI repair runs.
           key: workspace-crates-v1
           cache-workspace-crates: true
           cache-on-failure: true
@@ -252,28 +622,65 @@ jobs:
           cargo --version
           cargo nextest --version
 
-      - name: Run workspace gate
-        # --refresh-bundles populates + dev-key-signs the bundle bin trees the
-        # live-registry tests load from, then runs the suite (with per-test
-        # bundle refresh skipped so it isn't repeated).
-        env:
-          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
-          # The follow-child admission future retains several complete sealed
-          # launch-authority maps across awaits. Libtest's default 2 MiB worker
-          # stack aborts while polling its deep rejection-path tests in debug
-          # builds; 8 MiB is the standard Rust thread-stack escape hatch and
-          # leaves the production state machine unchanged.
-          RUST_MIN_STACK: 8388608
-        run: ./scripts/gate.sh --refresh-bundles --skip-crash-qualification
+      - name: Prepare the runner
+        # The gate links one large debug test binary per crate; the hosted
+        # image's preinstalled SDKs take the space those binaries need.
+        run: ./scripts/ci/prepare-runner.sh --no-scratch
 
-  crash-qualification:
-    name: Crash recovery qualification
+      - name: Build the workspace test archive
+        # Compiles every test binary once, exactly as the single-runner gate
+        # did (same workspace, features and profile), and runs the Core
+        # reporter unit tests that no cargo target covers.
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-archive"
+          ./scripts/gate.sh --nextest-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
+
+      - name: Build the static guest executables and carry them with the archive
+        # The remote-lease scenario runs the real guest owner in an enclosure
+        # that holds no host libraries, so its guests must be statically
+        # linked. They are built into the same target directory the tests read
+        # them from and appended to the archive's companion tarball, which each
+        # shard unpacks beside the test binaries.
+        run: |
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build \
+            --target x86_64-unknown-linux-gnu \
+            -p ryeos-synthetic-external-lifecycle-adapter \
+            --bin ryeos-synthetic-mounted-candidate-supervisor \
+            --bin ryeos-synthetic-external-candidate-launcher \
+            --bin ryeos-synthetic-external-candidate-connector
+          target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+          (
+            cd "$target_dir"
+            for guest in \
+              ryeos-synthetic-mounted-candidate-supervisor \
+              ryeos-synthetic-external-candidate-launcher \
+              ryeos-synthetic-external-candidate-connector; do
+              test -f "x86_64-unknown-linux-gnu/debug/$guest"
+              printf '%s\0' "x86_64-unknown-linux-gnu/debug/$guest"
+            done | tar --null --files-from=- -rf "$RUNNER_TEMP/test-archive/workspace.tar.zst.extras.tar"
+          )
+
+      - name: Upload the workspace test archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: workspace-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/test-archive
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  test-shard:
+    name: Workspace tests shard ${{ matrix.shard }}/8
+    needs: [bundles, workspace-archive]
     runs-on: ubuntu-latest
-    # The serial two-node handoff matrix takes roughly 40 minutes on the
-    # development host by itself. Keep it outside the already-near-ceiling
-    # workspace gate so neither mandatory validation lane can starve the other.
-    timeout-minutes: 120
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      # Shards only run prebuilt binaries.
+      RUSTC_WRAPPER: ""
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -281,7 +688,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -290,6 +697,572 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Prepare the runner
+        # The durable-root probe refuses an app root on the root disk, so this
+        # also places TMPDIR on a loop-mounted volume.
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Download the workspace test archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: workspace-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/test-archive
+
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Run this shard of the workspace tests
+        env:
+          # The follow-child admission future retains several complete sealed
+          # launch-authority maps across awaits. Libtest's default 2 MiB worker
+          # stack aborts while polling its deep rejection-path tests in debug
+          # builds; 8 MiB is the standard Rust thread-stack escape hatch and
+          # leaves the production state machine unchanged.
+          RUST_MIN_STACK: 8388608
+        run: >-
+          ./scripts/gate.sh
+          --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
+          --partition "hash:${{ matrix.shard }}/8"
+
+  multicall-coreutils:
+    name: Multi-call coreutils (Ubuntu 26.04)
+    # Ubuntu 26.04's Rust coreutils refuse unless the executable's own file
+    # name matches the requested utility. The rest of CI stays pinned to 24.04;
+    # this job runs the disabled-isolation command delivery and the e2e tools
+    # that call echo and sleep against the patched coreutils.
+    needs: [bundles, workspace-archive]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Show the coreutils under test
+        run: |
+          readlink -f /usr/bin/echo
+          /usr/bin/echo --version | head -1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Download the workspace test archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: workspace-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/test-archive
+
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Run the multi-call coreutils tests
+        env:
+          RUST_MIN_STACK: 8388608
+        run: >-
+          ./scripts/gate.sh
+          --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
+          -E 'test(/authority::isolation::tests::disabled_/) | test(/unwritable/) | binary(launch_trust_floor_e2e) | binary(vault_provider_narrow_e2e) | binary(launch_trust_scheduler_e2e) | binary(launch_trust_hook_e2e) | test(/host_service::installation::tests::the_hosts_own_sudo/)'
+
+  scheduler-compositions:
+    name: Scheduler composition checks
+    runs-on: ubuntu-latest
+    # Three no-default-features checks at -j 1 take 20-30 minutes on a runner; the
+    # job ceiling, not a step, bounds a stuck compilation.
+    timeout-minutes: 60
+    needs: [classify]
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_tests) && needs.classify.outputs.mode != 'ui-only' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: scheduler-compositions-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Check explicit scheduler compositions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -j 1 -p ryeos-app --lib --no-default-features
+          cargo tree --locked -p ryeos-app --no-default-features \
+            --edges normal,build --prefix none > "$RUNNER_TEMP/app-production-dependencies.txt"
+          if grep -Eq '^ryeos-scheduler(-service)? v' "$RUNNER_TEMP/app-production-dependencies.txt"; then
+            echo 'Shared App unexpectedly depends on the scheduler implementation' >&2
+            exit 1
+          fi
+          for package in ryeosd ryeos-cli; do
+            cargo check --locked -j 1 -p "$package" --bins --no-default-features
+            cargo tree --locked -p "$package" --no-default-features \
+              --edges normal,build --prefix none > "$RUNNER_TEMP/$package-scheduler-off.txt"
+            if grep -Eq '^ryeos-scheduler(-service)? v' "$RUNNER_TEMP/$package-scheduler-off.txt"; then
+              echo "$package scheduler-free selection retains the scheduler implementation" >&2
+              exit 1
+            fi
+            cargo check --locked -j 1 -p "$package" --bins --no-default-features --features scheduling
+            cargo tree --locked -p "$package" --no-default-features --features scheduling \
+              --edges normal,build --prefix none > "$RUNNER_TEMP/$package-scheduler-on.txt"
+            grep -Eq '^ryeos-scheduler v' "$RUNNER_TEMP/$package-scheduler-on.txt"
+            grep -Eq '^ryeos-scheduler-service v' "$RUNNER_TEMP/$package-scheduler-on.txt"
+          done
+          # Provider setup is selected independently from scheduler capability.
+          cargo check --locked -j 1 -p ryeos-api --lib --no-default-features
+          cargo tree --locked -p ryeos-api --no-default-features \
+            --edges normal,build --prefix none > "$RUNNER_TEMP/api-provider-off.txt"
+          if grep -Eq '^ryeos-directive-definition v' "$RUNNER_TEMP/api-provider-off.txt"; then
+            echo 'Core API unexpectedly retains directive provider implementation' >&2
+            exit 1
+          fi
+          cargo test --locked -j 1 -p ryeos-api --no-default-features \
+            --test provider_setup_composition -- --test-threads=1
+          cargo test --locked -j 1 -p ryeos-api --no-default-features \
+            --features model-provider-setup --test provider_setup_composition -- --test-threads=1
+          cargo test --locked -j 1 -p ryeos-cli --no-default-features \
+            --test provider_setup_composition -- --test-threads=1
+          cargo test --locked -j 1 -p ryeos-cli --no-default-features \
+            --features model-provider-setup --test provider_setup_composition -- --test-threads=1
+          for package in ryeosd ryeos-cli; do
+            cargo check --locked -j 1 -p "$package" --bins --no-default-features \
+              --features scheduling,model-provider-setup
+            cargo tree --locked -p "$package" --no-default-features \
+              --features scheduling,model-provider-setup --edges normal,build --prefix none \
+              > "$RUNNER_TEMP/$package-standard.txt"
+            grep -Eq '^ryeos-directive-definition v' "$RUNNER_TEMP/$package-standard.txt"
+            if grep -Eq '^ryeos-directive-definition v' "$RUNNER_TEMP/$package-scheduler-off.txt"; then
+              echo "$package Core selection retains provider setup implementation" >&2
+              exit 1
+            fi
+          done
+
+  # Every merge_gates dispatch, in both gate modes, builds ryeos-ui and runs its embedded-asset
+  # tests: the full gate skips the test shards and the ui-only gate is the only other place
+  # that runs this crate, so without this job a manifest/code disagreement passed the gate.
+  ui-assets:
+    name: Browser asset registry tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      # Read the crate cache the other jobs save; never save from here.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Check the browser asset registry matches the code
+        run: python3 -I -B crates/daemon/ryeos-ui/generate_asset_registry.py --check
+
+      - name: Test the embedded browser assets
+        run: 'cargo test --locked -p ryeos-ui --lib assets::'
+
+  # The UI-only merge gate's tests (see the classify job): the client crates and the UI
+  # daemon crate. The Rune workspace tests run in rust-policy and the package freshness
+  # check in static-policy, both of which every merge gate runs.
+  ui-gate:
+    name: UI targeted tests
+    needs: [classify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.mode == 'ui-only' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      # Read the crate cache the other jobs save; never save from here.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      # A branch that changes bundle sources tests against its own refresh. Otherwise next's
+      # bundle state is restored (it refuses when it would hide a branch change); if no usable
+      # state exists the branch refresh runs instead.
+      - name: Restore next's bundle state
+        id: restore
+        if: ${{ needs.classify.outputs.bundles_changed != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Restores the bundle state of the newest next CI run whose bundles job succeeded and
+        # whose artifact is live. Refused (exit 1) when the branch differs from that next commit
+        # on any path the state would write or delete, or anywhere under bundles/, because the
+        # run would then test next's version of those files; the step after this one then
+        # refreshes the bundles from the branch instead.
+        run: |
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          run_id=""
+          sha=""
+          runs="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=30" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')"
+          while read -r id head; do
+              [[ -n "$id" ]] || continue
+              ok="$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" \
+                  --jq '[.jobs[] | select(.name == "Bundle refresh for tests" and .conclusion == "success")] | length')"
+              [[ "$ok" -gt 0 ]] || continue
+              live="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(.name == \"bundle-state-$head\" and (.expired | not))] | length")"
+              if [[ "$live" -gt 0 ]]; then
+                  run_id="$id"
+                  sha="$head"
+                  break
+              fi
+          done <<<"$runs"
+
+          if [[ -z "$run_id" ]]; then
+              echo "::error::No unexpired bundle state found: none of the last 30 ci.yml runs on next has a successful bundles job with a live artifact (retention is 1 day). Wait for a next CI run to finish its bundles job, or run with bundles=none."
+              exit 1
+          fi
+          echo "Bundle state comes from next $sha (ci.yml run $run_id)"
+          echo "https://github.com/$repo/actions/runs/$run_id"
+
+          gh run download "$run_id" --repo "$repo" -n "bundle-state-$sha" -D "$work/dl"
+          state="$work/dl/bundle-state.tar.zst"
+
+          # Paths the state would write or delete.
+          tar --zstd -tf "$state" | grep -v -e '^\.ci-deleted-files$' -e '/$' | sort -u > "$work/state-paths" || true
+          tar --zstd -xOf "$state" .ci-deleted-files | sort -u > "$work/deleted-paths"
+          sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
+
+          git fetch --no-tags --depth=1 origin "$sha"
+          git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
+
+          { comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
+          conflicts="$(cat "$work/conflicts")"
+          if [[ -n "$conflicts" ]]; then
+              echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
+              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
+              exit 1
+          fi
+
+          if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
+              echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
+          fi
+
+          ./scripts/ci/unpack-bundle-state.sh "$state"
+          {
+              echo "### Bundle state"
+              echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Refresh the bundles from this branch
+        if: ${{ needs.classify.outputs.bundles_changed == 'true' || steps.restore.outcome == 'failure' }}
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
+
+      - name: Test the client crates and the UI crate
+        env:
+          RUST_MIN_STACK: 8388608
+        run: cargo test --locked -p ryeos-client-base -p ryeos-client-terminal -p ryeos-ui
+
+  # Every merge_gates dispatch runs the tests of each crate the branch changed: a branch that
+  # only adds tests, or changes a crate the skipped shards would have covered, otherwise merged
+  # with those tests never run. The classify job picks the packages (see
+  # classify-merge-gate.py: --rule wide = every crate with a changed file, minus the daemon's
+  # end-to-end test binaries, which the next-branch shards run; --rule narrow = crates with
+  # changed test code only). Tests run through gate.sh so they get the same composition
+  # features as the shards, on next's restored bundle state, because many crates' tests need
+  # populated bundle binaries.
+  touched-tests:
+    name: Changed crates' tests
+    needs: [classify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.test_packages != '[]' }}
+    steps:
+      - name: Require a readable package list
+        env:
+          PACKAGES: ${{ needs.classify.outputs.test_packages }}
+        run: |
+          if [[ "$PACKAGES" == ERROR ]]; then
+            echo "::error::The classifier could not decide which crates' tests to run; refusing to treat that as none."
+            exit 1
+          fi
+          printf '%s\n' "$PACKAGES" | jq -r '.[] | "\(.package) \(.manifest // "-") \(.args | join(" "))"'
+
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      # Read the crate cache the other jobs save; never save from here.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      # A branch that changes bundle sources tests against its own refresh. Otherwise next's
+      # bundle state is restored (it refuses when it would hide a branch change); if no usable
+      # state exists the branch refresh runs instead.
+      - name: Restore next's bundle state
+        id: restore
+        if: ${{ needs.classify.outputs.bundles_changed != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Restores the bundle state of the newest next CI run whose bundles job succeeded and
+        # whose artifact is live. Refused (exit 1) when the branch differs from that next commit
+        # on any path the state would write or delete, or anywhere under bundles/, because the
+        # run would then test next's version of those files; the step after this one then
+        # refreshes the bundles from the branch instead.
+        run: |
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          run_id=""
+          sha=""
+          runs="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=30" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')"
+          while read -r id head; do
+              [[ -n "$id" ]] || continue
+              ok="$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" \
+                  --jq '[.jobs[] | select(.name == "Bundle refresh for tests" and .conclusion == "success")] | length')"
+              [[ "$ok" -gt 0 ]] || continue
+              live="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(.name == \"bundle-state-$head\" and (.expired | not))] | length")"
+              if [[ "$live" -gt 0 ]]; then
+                  run_id="$id"
+                  sha="$head"
+                  break
+              fi
+          done <<<"$runs"
+
+          if [[ -z "$run_id" ]]; then
+              echo "::error::No unexpired bundle state found: none of the last 30 ci.yml runs on next has a successful bundles job with a live artifact (retention is 1 day). Wait for a next CI run to finish its bundles job, or run with bundles=none."
+              exit 1
+          fi
+          echo "Bundle state comes from next $sha (ci.yml run $run_id)"
+          echo "https://github.com/$repo/actions/runs/$run_id"
+
+          gh run download "$run_id" --repo "$repo" -n "bundle-state-$sha" -D "$work/dl"
+          state="$work/dl/bundle-state.tar.zst"
+
+          # Paths the state would write or delete.
+          tar --zstd -tf "$state" | grep -v -e '^\.ci-deleted-files$' -e '/$' | sort -u > "$work/state-paths" || true
+          tar --zstd -xOf "$state" .ci-deleted-files | sort -u > "$work/deleted-paths"
+          sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
+
+          git fetch --no-tags --depth=1 origin "$sha"
+          git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
+
+          { comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
+          conflicts="$(cat "$work/conflicts")"
+          if [[ -n "$conflicts" ]]; then
+              echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
+              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
+              exit 1
+          fi
+
+          if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
+              echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
+          fi
+
+          ./scripts/ci/unpack-bundle-state.sh "$state"
+          {
+              echo "### Bundle state"
+              echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Refresh the bundles from this branch
+        if: ${{ needs.classify.outputs.bundles_changed == 'true' || steps.restore.outcome == 'failure' }}
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
+
+      # The synthetic lifecycle adapter's remote-lease test runs real guests in an enclosure with
+      # no host libraries, so it needs the statically linked guest executables the workspace
+      # test archive job builds. Build them only when that crate is among the selected packages.
+      - name: Build the static guest executables
+        if: ${{ contains(needs.classify.outputs.test_packages, '"ryeos-synthetic-external-lifecycle-adapter"') }}
+        run: |
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build \
+            --target x86_64-unknown-linux-gnu \
+            -p ryeos-synthetic-external-lifecycle-adapter \
+            --bin ryeos-synthetic-mounted-candidate-supervisor \
+            --bin ryeos-synthetic-external-candidate-launcher \
+            --bin ryeos-synthetic-external-candidate-connector
+
+      - name: Run the changed crates' tests
+        env:
+          PACKAGES: ${{ needs.classify.outputs.test_packages }}
+          RUST_MIN_STACK: 8388608
+        run: |
+          set -uo pipefail
+          # The publish idempotency tests want the staged core binaries, not a cold build each.
+          staged="$PWD/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+          if [[ -d "$staged" ]]; then
+            export RYEOS_TEST_HANDLER_BIN_DIR="$staged"
+          fi
+          failed=0
+          # Root-workspace packages with no special arguments share one run.
+          mapfile -t plain < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest == null and (.args | length) == 0) | "-p", .package')
+          if [[ ${#plain[@]} -gt 0 ]]; then
+            ./scripts/gate.sh "${plain[@]}" || failed=1
+          fi
+          # Packages with their own arguments (the daemon: lib and bin tests, or named test binaries).
+          while IFS= read -r entry; do
+            [[ -n "$entry" ]] || continue
+            mapfile -t words < <(printf '%s\n' "$entry" | jq -r '"-p", .package, .args[]')
+            ./scripts/gate.sh "${words[@]}" || failed=1
+          done < <(printf '%s\n' "$PACKAGES" | jq -c '.[] | select(.manifest == null and (.args | length) > 0)')
+          # Packages of a separate workspace (Rune) need their own manifest.
+          while IFS= read -r manifest; do
+            [[ -n "$manifest" ]] || continue
+            cargo test --locked --manifest-path "$manifest" || failed=1
+          done < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest != null) | .manifest' | sort -u)
+          exit "$failed"
+
+  test:
+    name: Workspace tests
+    # Aggregates the build, shards and composition checks so the required
+    # check keeps its name and fails if any part failed or was skipped.
+    needs: [bundles, workspace-archive, test-shard, multicall-coreutils, scheduler-compositions]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
+    steps:
+      - name: Require every workspace-test job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
+
+  crash-archive:
+    name: Crash qualification build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [classify]
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.run_tests) && needs.classify.outputs.mode != 'ui-only' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -304,19 +1277,122 @@ jobs:
           cargo --version
           cargo nextest --version
 
-      - name: Run crash recovery qualification
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh --no-scratch
+
+      - name: Build the crash qualification archive and CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/crash-archive"
+          ./scripts/gate.sh --crash-archive "$RUNNER_TEMP/crash-archive/crash.tar.zst"
+
+      - name: Upload the crash qualification archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: crash-qualification-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/crash-archive
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  crash-phase:
+    name: Crash recovery ${{ matrix.label }}
+    needs: [bundles, crash-archive]
+    runs-on: ubuntu-latest
+    # The serial two-node handoff matrix takes roughly 15 minutes of test time
+    # on a runner by itself; every phase gets a runner of its own and keeps its
+    # single test thread.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: directive native-resume cuts
+            phase: directive
+          - label: explicit worker handoff cuts
+            phase: handoff
+          - label: project schedule deploy cuts
+            phase: schedule-deploy
+          - label: scheduler reset cuts (1/2)
+            phase: reset-scheduler
+            partition: hash:1/2
+          - label: scheduler reset cuts (2/2)
+            phase: reset-scheduler
+            partition: hash:2/2
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Prepare the runner
+        # The crash cuts start enforce-mode nodes whose sandbox probes map a
+        # user namespace, the same test-host baseline the workspace tests select.
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Download the crash qualification archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: crash-qualification-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/crash-archive
+
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Run crash recovery qualification phase
         env:
-          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
           RUST_MIN_STACK: 8388608
-        run: ./scripts/gate.sh --refresh-bundles --crash-qualification-only
+          CRASH_PHASE: ${{ matrix.phase }}
+          CRASH_PARTITION: ${{ matrix.partition }}
+        run: |
+          partition_args=()
+          if [[ -n "$CRASH_PARTITION" ]]; then
+            partition_args=(--crash-partition "$CRASH_PARTITION")
+          fi
+          ./scripts/gate.sh \
+            --crash-run-archive "$RUNNER_TEMP/crash-archive/crash.tar.zst" \
+            --crash-phase "$CRASH_PHASE" "${partition_args[@]}"
 
       - name: Retain explicit worker-handoff qualification
+        if: ${{ matrix.phase == 'handoff' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: explicit-worker-handoff-qualification-${{ github.sha }}
           path: target/qualification/explicit-worker-handoff.json
           if-no-files-found: error
           retention-days: 30
+
+  crash-qualification:
+    name: Crash recovery qualification
+    needs: [bundles, crash-archive, crash-phase]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
+    steps:
+      - name: Require every crash qualification job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null
 
   bundle-refresh:
     name: Bundle refresh
@@ -330,12 +1406,15 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -353,9 +1432,14 @@ jobs:
 
   installed-resume-smoke:
     name: Installed restart/resume smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # Lillux now resolves a root-owned /usr/bin/sudo symlink hop by hop (sudo-rs
+    # on ubuntu-26.04). Move this job to `ubuntu-26.04` once a dispatched run
+    # there has shown the elevation path working end to end.
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.installed_resume_smoke }}
+    env:
+      RYEOS_SMOKE_PREFIX: /ryeos-ci
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -363,28 +1447,121 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build and install standard distribution
         run: |
+          # The runner makes /usr/share and /opt world-writable (mode 777), so
+          # Lillux refuses them as a package namespace. Install under a prefix
+          # at the filesystem root, which stays root-owned and 0755.
+          mkdir -p "$RUNNER_TEMP/ryeos-node"
           CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
+            --prefix "$RYEOS_SMOKE_PREFIX" --app-root "$RUNNER_TEMP/ryeos-node" \
             --populate --all --bundle-set standard --no-init --no-daemon-restart
+
+      - name: Prepare the runner
+        # The durable-root probe refuses an app root on the VM's root disk, so
+        # this places TMPDIR on a loop-mounted volume.
+        run: ./scripts/ci/prepare-runner.sh --host-service
 
       - name: Exercise installed restart and resume
         env:
+          RYEOS_SMOKE_HOST_SERVICE: "1"
           # The manual smoke job populates bundles with the repository's dev
           # publisher. Trust that exact document explicitly; release artifacts
           # use the hardcoded official publisher and need no override.
-          RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
-        run: ./tests/e2e/installed-resume/smoke.sh
+          RYEOS_SMOKE_TRUST_FILE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_BUNDLE_SOURCE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos
+        run: |
+          PATH="$RYEOS_SMOKE_PREFIX/bin:$PATH" ./tests/e2e/installed-resume/smoke.sh
+
+  browser-smoke:
+    name: Installed browser client smoke
+    runs-on: ubuntu-24.04
+    # Lillux now resolves a root-owned /usr/bin/sudo symlink hop by hop (sudo-rs
+    # on ubuntu-26.04). Move this job to `ubuntu-26.04` once a dispatched run
+    # there has shown the elevation path working end to end.
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_smoke }}
+    env:
+      RYEOS_SMOKE_PREFIX: /ryeos-ci
+      # Playwright 1.58 refuses ubuntu-26.04 as a host. Resolve its Chromium
+      # and system dependencies as the closest supported release.
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ubuntu24.04-x64
+    steps:
+      - name: Show package namespace ownership
+        run: |
+          stat -c '%U:%G %a %n' / /usr /usr/share /opt
+          getfacl -p /usr/share /opt || true
+          id
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build and install standard distribution
+        run: |
+          # The runner makes /usr/share and /opt world-writable (mode 777), so
+          # Lillux rightly refuses them as a package namespace. Install under a
+          # prefix at the filesystem root, which stays root-owned and 0755.
+          mkdir -p "$RUNNER_TEMP/ryeos-node"
+          CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
+            --prefix "$RYEOS_SMOKE_PREFIX" --app-root "$RUNNER_TEMP/ryeos-node" \
+            --populate --all --bundle-set standard --no-init --no-daemon-restart
+
+      - name: Install headless Chromium for the smoke driver
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/playwright" @playwright/test@1.58.2
+          "$RUNNER_TEMP/playwright/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Prepare the runner
+        # The durable-root probe refuses an app root on the VM's root disk, so
+        # this places TMPDIR on a loop-mounted volume.
+        run: ./scripts/ci/prepare-runner.sh --host-service
+
+      - name: Exercise the browser client
+        env:
+          RYEOS_SMOKE_HOST_SERVICE: "1"
+          RYEOS_SMOKE_TRUST_FILE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_BUNDLE_SOURCE: ${{ env.RYEOS_SMOKE_PREFIX }}/share/ryeos
+          RYEOS_SMOKE_SHOTS: ${{ runner.temp }}/browser-smoke
+          PLAYWRIGHT_ROOT: ${{ runner.temp }}/playwright
+        run: |
+          PATH="$RYEOS_SMOKE_PREFIX/bin:$PATH" ./tests/e2e/browser-smoke/smoke.sh
+
+      - name: Keep the smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: browser-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/browser-smoke
+          if-no-files-found: ignore
+          retention-days: 14
 
   rust-2024-audit:
     name: Rust 2024 compatibility audit
@@ -398,7 +1575,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -437,27 +1614,36 @@ jobs:
       - name: Audit WASM client
         run: |
           set +e
+          # The runtime is a root workspace member; the browser renderer is its own Cargo
+          # workspace, where the runtime is a path dependency whose warnings Cargo caps.
           CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-wasm-target" \
           RUSTFLAGS="-W rust-2024-compatibility" \
-            cargo check --locked -p ryeos-client-web \
+            cargo check --locked -p ryeos-client-runtime \
               --target wasm32-unknown-unknown --lib --message-format=json \
               >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.jsonl" \
               2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.stderr"
-          printf '%s\n' "$?" \
+          runtime="$?"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-wasm-target" \
+          RUSTFLAGS="-W rust-2024-compatibility" \
+            cargo check --locked --manifest-path crates/clients/rune/Cargo.toml \
+              --target wasm32-unknown-unknown --lib --message-format=json \
+              >>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.jsonl" \
+              2>>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.stderr"
+          renderer="$?"
+          printf '%s\n' "$(( runtime > renderer ? runtime : renderer ))" \
             >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.status"
 
-      - name: Audit excluded bubblewrap adapter
+      - name: Audit browser renderer native targets
         run: |
           set +e
-          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-adapter-target" \
+          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-rune-target" \
           RUSTFLAGS="-W rust-2024-compatibility" \
-            cargo check --locked \
-              --manifest-path bundles/sandbox-linux-bubblewrap/adapter/Cargo.toml \
-              --all-targets --message-format=json \
-              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.jsonl" \
-              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.stderr"
+            cargo check --locked --manifest-path crates/clients/rune/Cargo.toml \
+              --all-targets --keep-going --message-format=json \
+              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/rune.jsonl" \
+              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/rune.stderr"
           printf '%s\n' "$?" \
-            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.status"
+            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/rune.status"
 
       - name: Upload compatibility diagnostics
         if: ${{ always() }}
@@ -471,7 +1657,7 @@ jobs:
       - name: Require every audit surface to compile
         run: |
           failed=0
-          for surface in workspace doctest wasm adapter; do
+          for surface in workspace doctest wasm rune; do
             status="$(cat "$RUNNER_TEMP/ryeos-rust-2024-diagnostics/$surface.status")"
             if [[ "$status" != 0 ]]; then
               echo "::error::$surface compatibility audit exited with status $status"

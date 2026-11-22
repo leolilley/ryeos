@@ -1,0 +1,7 @@
+default = "ryeos-external-candidate"
+include_local = false
+[[environments]]
+id = "ryeos-external-candidate"
+program = "__RYEOS_VERIFIER_GUEST_PROGRAM__"
+cwd = "__RYEOS_VERIFIER_GUEST_CWD__"
+env = {}

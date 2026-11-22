@@ -20,6 +20,23 @@ pub struct ExecutionDecorations {
     pub native_async: Option<NativeAsyncSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_resume: Option<NativeResumeSpec>,
+    /// Stop policy for a subprocess that declares no `native_async` block,
+    /// resolved at compile time from the signed execution config
+    /// (`cancellation_mode` / `cancellation_grace_secs`). A `native_async`
+    /// declaration owns the policy instead, so the two are never both set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_mode: Option<CancellationMode>,
+}
+
+impl ExecutionDecorations {
+    /// The stop policy this subprocess was compiled with: the `native_async`
+    /// declaration, else the execution-config policy.
+    pub fn stop_policy(&self) -> Option<CancellationMode> {
+        self.native_async
+            .as_ref()
+            .map(|declared| declared.cancellation_mode)
+            .or(self.cancellation_mode)
+    }
 }
 
 /// Resume policy declared by the `native_resume` runtime handler.
@@ -115,9 +132,16 @@ pub enum CancellationMode {
     Graceful { grace_secs: u64 },
 }
 
+/// Grace used when no execution-config layer supplies
+/// `cancellation_grace_secs`. The shipped core execution config sets the same
+/// value explicitly.
+pub const DEFAULT_CANCELLATION_GRACE_SECS: u64 = 5;
+
 impl Default for CancellationMode {
     fn default() -> Self {
-        CancellationMode::Graceful { grace_secs: 5 }
+        CancellationMode::Graceful {
+            grace_secs: DEFAULT_CANCELLATION_GRACE_SECS,
+        }
     }
 }
 

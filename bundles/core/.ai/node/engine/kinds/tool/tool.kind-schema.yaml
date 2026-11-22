@@ -1,12 +1,18 @@
-# ryeos:signed:2026-09-27T22:01:05Z:91cb6e0825fc849e544038faa83564004e8751f9cb092cab7a361cda2b078d90:QBGKxHU2FxdTA4sLE4SF+wkXPJsQwPg7gcexrYOI6RK2157E8f9Aazc2oVln1lXMVwevnhHXByT/E2ovz5waBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T12:51:39Z:13e754d067c91c1a7749b8ae696af3a72dfd2d2d114da0e4308e8ca9b3f25ad2:fIj9Af0RWGO9eEVFcnzQFOVLPVXCt2nhB1mogavkUlePmgW+Lz+aHipiPa3hctk635RwVF+gg5zGx1XQuGtlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
-version: "1.3.0"
+version: "1.6.0"
 location:
   directory: tools
   excluded_directories: [lib]
 effective_trust:
   include_references: false
 resolution: []
+# Which spaces and trust classes may supply a launch root of this kind.
+# Work signed by an unpinned key runs only where node policy admits it.
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
+  operator_may_admit: [untrusted_project]
 execution:
   source_closure:
     derived: effective_source_closure
@@ -19,9 +25,13 @@ execution:
     max_depth: 64
   # Kind-owned location of the author's durable-effect ceiling. Generic
   # dispatch consumes only this signed mechanical projection; it never names
-  # or interprets the tool document's `effects` field directly.
+  # or interprets the tool document's `effects` field directly. A tool's
+  # `effects` is the author's testimony: without qualification evidence it
+  # admits at most `recorded`, so a `sealed` request against a tool that
+  # declares `sealed` is refused (`durable_effect_sealed_unqualified`).
   effect_class_ceiling:
     path: [effects]
+    unproven_max: recorded
   # Generic shared-workspace relationship for workload-delegated children.
   # Absence on an item is deny-all for that surface. This is not inferred from
   # durable effects: replay semantics cannot grant workspace mutation.
@@ -38,6 +48,39 @@ execution:
   filesystem_authority_ceiling:
     path: [filesystem_authority]
     default: node_policy
+  # Declared host authority. An item that authors `host_authority: required`
+  # asks to run on the host, unconfined, as the daemon user: authority equal
+  # to the operator's. Declaring it grants nothing. A launch runs on the host
+  # only when the node's isolation lane says `host_direct: operator_granted`,
+  # the operator granted that exact item (signer, source closure and runtime
+  # bytes) in the `host_access` node-policy section, and the caller is the
+  # configured local operator through an origin the grant names. The paths
+  # below are claims that cannot be true for such a process, so an item that
+  # combines them with host authority is refused; it runs live, with no
+  # callbacks.
+  host_authority:
+    path: [host_authority]
+    incompatible:
+      - [network_authority]
+      - [filesystem_authority]
+      - [workspace_access]
+      - [execution_endpoint]
+      - [supported_target]
+      - [resource_authority]
+      - [project_lane]
+      - [external_content]
+      - [external_product_slots]
+    admitted_effects: [live]
+    admitted_protocols: [protocol:ryeos/core/opaque]
+    # A host-authority item launched from inside another thread is a
+    # `graph_child` origin only when its parent runs this profile; any other
+    # parent (directive, worker, tool) is delegation and refused.
+    graph_parent_profiles: [graph_run]
+  # Optional declaration that the tool runs against a pinned project snapshot
+  # (a pushed-head project source). Protocols that gate that capability on a
+  # declaration admit only tools that author `project_lane: pinned_snapshot`.
+  pushed_head_declaration:
+    path: [project_lane]
   # Direct opaque producers and evaluators use the same signed target
   # contract as resident workers. Ordinary tools omit it and request no
   # constrained execution resource.
@@ -53,6 +96,8 @@ execution:
       max_requirements: 1
       max_resource_count: 1
       max_facts_per_requirement: 16
+  subprocess_limits:
+    path: [subprocess_limits]
   resource_authority_ceiling:
     path: [resource_authority]
     default: node_policy
@@ -65,9 +110,13 @@ execution:
     # authority from a tool name, executable, or caller.
     protocol:
       from_composed: [execution_protocol]
+      from_composed_set: [execution_protocols]
       allowed:
         - protocol:ryeos/core/tool_callback
         - protocol:ryeos/core/qualification_scoped_callback
+        - protocol:ryeos/core/qualification_consumer_callback
+        - protocol:ryeos/core/qualification_consumer_callback_contained
+        - protocol:ryeos/core/qualification_consumer_callback_trusted
         - protocol:ryeos/core/opaque
         - protocol:ryeos/core/tool_streaming
   thread_profile:
@@ -137,7 +186,9 @@ composed_value_contract:
     # than the item declares here — a tool that writes outside its result
     # envelope declares `live`, and no graph node can then record it, because
     # replay serves the stored result and would silently skip the writes.
-    # Absent means live/ineligible. Durable replay is never inferred.
+    # Absent means live/ineligible. Durable replay is never inferred. A
+    # declared `sealed` is unproven: callers may claim at most `recorded`
+    # (see `effect_class_ceiling.unproven_max`).
     effects:
       type: single
       prim: string
@@ -158,24 +209,43 @@ composed_value_contract:
     execution_protocol:
       type: single
       prim: string
+    # Alternative to `execution_protocol`: the admissible protocols, one of
+    # which the running node selects by the holding each declares.
+    execution_protocols:
+      type: single
+      prim: sequence
     source_scope:
       type: single
       prim: mapping
     external_content:
       type: single
-      prim: array
+      prim: sequence
     external_product_slots:
       type: single
-      prim: array
+      prim: sequence
     supported_target:
       type: single
       prim: mapping
     execution_endpoint:
       type: single
       prim: mapping
+    subprocess_limits:
+      type: single
+      prim: mapping
     resource_authority:
       type: single
       prim: string
+    # Declared host authority (`required`); see execution.host_authority.
+    host_authority:
+      type: single
+      prim: string
+    # How the timeline draws a call of this tool: ordered paths over the call's
+    # arguments and result for the headline, detail and body, and a count key.
+    # It is a hint for display, never authority; the timeline service reads it
+    # from the composed value pinned in the call's launch capsule.
+    presentation:
+      type: single
+      prim: mapping
 runtime:
   # Tool invocation selectors remain ordinary schema-validated input. The
   # shared runtime template may project one scalar `params` value into one
@@ -193,6 +263,7 @@ runtime:
   # claimed by a registered handler is a hard `UnknownRuntimeBlock`
   # error.
   ignored_keys:
+    - subprocess_limits
     - version
     - category
     - description
@@ -219,12 +290,18 @@ runtime:
     # Consumed only through the kind-owned workspace-access projection above.
     # Dispatch must not grow tool/provider-specific interpretations of it.
     - workspace_access
+    # Consumed by the kind-owned pushed-head declaration projection above; it
+    # is not a runtime-handler block.
+    - project_lane
     # Consumed by the kind-owned network-authority projection above; it is not
     # a runtime-handler block.
     - network_authority
     - filesystem_authority
+    # Consumed by the kind-owned host-authority projection above.
+    - host_authority
     # Mechanically selected through execution.terminator.protocol above.
     - execution_protocol
+    - execution_protocols
     # Signed executor-chain policy for adjacent source admission. The daemon
     # consumes this before plan compilation; it is not a runtime handler.
     - source_scope
@@ -262,6 +339,9 @@ runtime:
     # resolver, not by a runtime handler; ignored here so terminal tools carrying
     # it don't trip UnknownRuntimeBlock during plan compilation.
     - terminal_executor
+    # Display hint read from the pinned composed value by the timeline
+    # service; it is not a runtime-handler block.
+    - presentation
 metadata:
   # Tool YAML files use plain keys (`category`, `version`, etc.). Tool
   # Python files use a comment-YAML `# ryeos-tool:` header that parses

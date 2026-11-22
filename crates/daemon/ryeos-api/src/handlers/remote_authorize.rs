@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::handlers::remote_push::named_remote_client;
 use crate::registry::ServiceDescriptor;
-use crate::remote::client::RemoteClient;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -17,12 +17,11 @@ pub struct Request {
     /// Remote name (default: "default").
     #[serde(default = "default_remote")]
     pub remote: String,
-    /// Optional local project path. When supplied, project-level remotes are
-    /// layered over user-level so a project can authorize against its own
-    /// configured remote.
+    /// Local project path the CLI may forward. Remote pins are node-level
+    /// records, so a project never changes which remote is used.
     #[serde(default, alias = "project")]
     pub project_path: Option<PathBuf>,
-    /// Pass-through for the CLI's `--no-project` flag.
+    /// Pass-through for the CLI's `--no-project` flag. Has no effect.
     #[serde(default)]
     pub no_project: bool,
     /// Ed25519 public key in `ed25519:<base64>` format.
@@ -40,13 +39,12 @@ fn default_remote() -> String {
     "default".to_string()
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let project = if req.no_project {
-        None
-    } else {
-        req.project_path.as_deref()
-    };
-    let client = RemoteClient::from_named_remote(&state, &req.remote, project)?;
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let client = named_remote_client(&state, &req.remote, &ctx)?;
     let resp = client
         .authorize_key(&req.public_key, &req.label, &req.scopes)
         .await?;
@@ -58,10 +56,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "remote.authorize",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote/admin"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

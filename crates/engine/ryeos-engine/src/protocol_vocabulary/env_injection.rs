@@ -19,6 +19,15 @@ pub enum EnvInjectionSource {
     /// Opaque durable-state namespace derived from admitted project identity.
     /// Projectless executions receive an empty value.
     ProjectStateScope,
+    /// Daemon-owned directory this launch may write its own state into. A
+    /// read-only pinned project keeps it apart from the project; every other
+    /// project authority keeps it at the project path.
+    RuntimeStateRoot,
+    /// The one node-owned bundle state namespace this launch may use: the
+    /// isolation mount destination under enforced isolation, the real
+    /// directory otherwise. Yields no variable when the launch opened no
+    /// state home.
+    BundleStateHome,
     /// Acting principal fingerprint (key used to authorize the dispatch).
     ActingPrincipal,
     /// Path to the daemon's CAS root (objects directory).
@@ -46,6 +55,19 @@ pub fn is_reserved_env_name(name: &str) -> bool {
     RESERVED_ENV_NAMES.contains(&name) || name.starts_with("LD_") || name.starts_with("RUST_")
 }
 
+/// The environment value `source` yields for `request`, or `None` when the
+/// source is optional and the launch has nothing to name (a launch without a
+/// state home sets no state-home variable). Every other source is required.
+pub fn produce_optional_env_value(
+    source: EnvInjectionSource,
+    request: &SubprocessBuildRequest,
+) -> Result<Option<String>, EngineError> {
+    match (source, request.bundle_state_home.as_deref()) {
+        (EnvInjectionSource::BundleStateHome, None) => Ok(None),
+        _ => produce_env_value(source, request).map(Some),
+    }
+}
+
 pub fn produce_env_value(
     source: EnvInjectionSource,
     request: &SubprocessBuildRequest,
@@ -60,6 +82,22 @@ pub fn produce_env_value(
         EnvInjectionSource::ProjectStateScope => {
             Ok(request.project_state_scope.clone().unwrap_or_default())
         }
+        EnvInjectionSource::RuntimeStateRoot => request
+            .runtime_state_root
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("runtime state root is not valid UTF-8".into())),
+        EnvInjectionSource::BundleStateHome => request
+            .bundle_state_home
+            .as_deref()
+            .ok_or_else(|| {
+                EngineError::Internal(
+                    "bundle_state_home requested but the launch opened no state home".into(),
+                )
+            })?
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("bundle state home is not valid UTF-8".into())),
         EnvInjectionSource::ActingPrincipal => Ok(request.acting_principal.clone()),
         EnvInjectionSource::CasRoot => request
             .cas_root
@@ -112,6 +150,8 @@ mod tests {
             item_ref: crate::canonical_ref::CanonicalRef::parse("tool:test/id").unwrap(),
             thread_id: "T-test-thread".to_string(),
             project_path: PathBuf::from("/project"),
+            runtime_state_root: PathBuf::from("/state/launch"),
+            bundle_state_home: None,
             acting_principal: "fp:abc123".to_string(),
             cas_root: PathBuf::from("/cas/root"),
             callback_token: Some("tok-abc".to_string()),
@@ -131,6 +171,8 @@ mod tests {
             EnvInjectionSource::ThreadId,
             EnvInjectionSource::ProjectPath,
             EnvInjectionSource::ProjectStateScope,
+            EnvInjectionSource::RuntimeStateRoot,
+            EnvInjectionSource::BundleStateHome,
             EnvInjectionSource::ActingPrincipal,
             EnvInjectionSource::CasRoot,
             EnvInjectionSource::ThreadAuthToken,
@@ -172,6 +214,36 @@ mod tests {
         assert_eq!(
             produce_env_value(EnvInjectionSource::ProjectStateScope, &req).unwrap(),
             ""
+        );
+    }
+
+    #[test]
+    fn producer_runtime_state_root_is_not_the_project_path() {
+        let req = make_request();
+        let val = produce_env_value(EnvInjectionSource::RuntimeStateRoot, &req).unwrap();
+        assert_eq!(val, "/state/launch");
+    }
+
+    #[test]
+    fn producer_bundle_state_home_is_optional() {
+        let mut req = make_request();
+        assert_eq!(
+            produce_optional_env_value(EnvInjectionSource::BundleStateHome, &req).unwrap(),
+            None
+        );
+        assert!(produce_env_value(EnvInjectionSource::BundleStateHome, &req).is_err());
+        req.bundle_state_home = Some(PathBuf::from("/run/ryeos/bundle-state"));
+        assert_eq!(
+            produce_optional_env_value(EnvInjectionSource::BundleStateHome, &req)
+                .unwrap()
+                .as_deref(),
+            Some("/run/ryeos/bundle-state")
+        );
+        // Required sources stay required.
+        assert!(
+            produce_optional_env_value(EnvInjectionSource::ThreadId, &req)
+                .unwrap()
+                .is_some()
         );
     }
 

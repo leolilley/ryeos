@@ -1,4 +1,11 @@
-"""
+"""MCP server for RYE OS — thin wrapper over the `ryeos` CLI.
+
+Exposes a single tool `cli` that shells to the data-driven CLI binary.
+Verbs are signed `.ai/node/commands/*.yaml` items in the installed
+bundles (e.g. `bundles/codex/.ai/node/commands/`), read by the CLI on
+every invocation, so new verbs become callable immediately after bundle
+install with no MCP redeploy.
+
 THREAT MODEL — MCP SERVER
 
 The MCP server is intended for LOCAL SINGLE-USER use:
@@ -20,14 +27,8 @@ This means:
 
 The proper auth design (signed-request from delegated principal,
 audience binding, replay protection) is tracked in
-`docs/future/mcp-server-auth.md`. It is NOT yet implemented.
-"""
-
-"""MCP server for RYE OS — thin wrapper over the `ryeos` CLI.
-
-Exposes a single tool `cli` that shells to the data-driven CLI binary.
-Every invocation re-reads `.ai/config/cli/*.yaml`, so new verbs become
-callable immediately after bundle install with no MCP redeploy.
+`.ai/knowledge/ryeos/future/mcp-server-auth.md` at the repository root.
+It is NOT yet implemented.
 """
 
 import asyncio
@@ -42,14 +43,16 @@ from mcp.server.models import InitializationOptions
 from mcp.server.lowlevel import NotificationOptions
 from mcp.types import Tool, TextContent
 
+from ryeosd_mcp import __version__
+
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 60.0
 TOOL_NAME = "cli"
 TOOL_DESCRIPTION = (
-    "Run any Rye CLI verb. Verbs are loaded data-driven from "
-    "`.ai/config/cli/*.yaml` in the bundle hierarchy — call with "
+    "Run any Rye CLI verb. Verbs are loaded data-driven from signed "
+    "`.ai/node/commands/*.yaml` items in the installed bundles — call with "
     "`args: [\"help\"]` to list available verbs in the current project. "
     "Pass `project_path` to set the subprocess working directory; the "
     "CLI defaults project_path to `.` when no -p flag is supplied. "
@@ -263,7 +266,7 @@ class RYEServer:
                 write_stream,
                 InitializationOptions(
                     server_name="ryeos",
-                    server_version="0.5.4",
+                    server_version=__version__,
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},

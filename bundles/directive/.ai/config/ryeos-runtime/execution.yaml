@@ -1,0 +1,37 @@
+# ryeos:signed:2026-11-22T01:37:20Z:505c6cba7c22c9d749d33f275895be915a524b74d06c0f0c3e1f6baf02ddef4e:PFVwPr+CL0n61ABA6QBFVOu9rRDqGyFWL9BSD4vFDdAgbGIG3v/c4Qvun6HDxDLYjMlULc4mFi96o32PYzdfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime"
+retries: 2
+retry_status_codes: [429, 500, 502, 503, 504, 529]
+never_retry: ["401", "403", "404"]
+backoff_base_ms: 1000
+backoff_max_ms: 60000
+timeout_seconds: 300
+max_provider_output_tokens_per_turn: 32768
+max_stream_output_bytes_per_turn: 131072
+max_provider_stream_frame_bytes: 1048576
+accounting:
+  failure_policy: auto
+  budget_mode: settled
+tool_images:
+  max_bytes_per_image: 2097152
+  max_images_per_result: 4
+  max_bytes_per_result: 3000000
+  max_images_per_run: 256
+  max_bytes_per_run: 50331648
+  max_image_dimension: 8000
+tool_output:
+  spill_threshold_bytes: 65536
+  preview_head_bytes: 24576
+  preview_tail_bytes: 8192
+  max_stored_bytes: 4194304
+  hard_cut_bytes: 102400
+loop_guards:
+  enabled: true
+  window_turns: 16
+  repeat_threshold: 5
+  pingpong_cycles: 4
+  pingpong_max_period: 4
+  no_progress_turns: 8
+  idle_turns: 3
+  grace_turns: 2
+tool_preload: false

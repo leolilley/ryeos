@@ -33,7 +33,6 @@ use super::external_content::{
 /// workspace. Intermediate absence/emptiness is not final-product success.
 /// Every new manifest extends the caller's existing source-result stage while
 /// the shared guard protects payload ingest; no independent publication exists.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn capture_native_workspace_outputs(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
@@ -53,7 +52,6 @@ pub(crate) fn capture_native_workspace_outputs(
 /// never changes the source verifier's definition of an exact project tree.
 /// A partial failure leaves an unready workspace for its lifecycle owner to
 /// discard/recover; it cannot be admitted as a source-only successful restore.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn restore_workspace_outputs_before_view(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
@@ -61,6 +59,7 @@ pub(crate) fn restore_workspace_outputs_before_view(
     capture: &WorkspaceOutputCapture,
     policy: &ProjectSnapshotPolicy,
     budget: &PrivateMaterializationBudget,
+    process_pin_owner: Option<&ryeos_app::state_store::StateStore>,
 ) -> anyhow::Result<()> {
     authority.ensure_guard(guard)?;
     capture.validate()?;
@@ -108,6 +107,7 @@ pub(crate) fn restore_workspace_outputs_before_view(
                 manifest_hash,
                 root.storage,
                 budget,
+                process_pin_owner,
             )?;
         }
         target.ensure_path_binding()?;
@@ -155,12 +155,11 @@ fn open_output_directory(
     relative: &str,
 ) -> anyhow::Result<Option<lillux::PinnedDirectory>> {
     let mut directory = project.try_clone()?;
-    let (device, _) = project.device_inode()?;
     for component in relative.split('/') {
         let Some(child) = directory.open_child_directory(OsStr::new(component))? else {
             return Ok(None);
         };
-        if child.device_inode()?.0 != device {
+        if directory.ensure_open_child_same_mount(&child).is_err() {
             bail!("workspace output crossed the admitted project filesystem");
         }
         directory = child;
@@ -312,7 +311,7 @@ mod tests {
     fn both_storage_tiers_preserve_links_modes_empty_and_absent_roots() {
         for storage in [ProductStorage::Content, ProductStorage::LargeContent] {
             let temporary = tempfile::tempdir().unwrap();
-            let state = ryeos_state::StateDb::open(
+            let state = ryeos_app::test_support::TestState::open(
                 temporary.path(),
                 std::sync::Arc::new(ryeos_state::TrustStore::new()),
             )
@@ -411,14 +410,14 @@ mod tests {
             capture.result_project_snapshot_hash = "d".repeat(64);
             assert!(
                 restore_workspace_outputs_before_view(
-                    &authority, &guard, &source, &capture, &policy, &budget
+                    &authority, &guard, &source, &capture, &policy, &budget, None
                 )
                 .is_err()
             );
             assert!(!target.path().join("products").exists());
             capture.result_project_snapshot_hash = snapshot_hash;
             restore_workspace_outputs_before_view(
-                &authority, &guard, &source, &capture, &policy, &budget,
+                &authority, &guard, &source, &capture, &policy, &budget, None,
             )
             .unwrap();
             assert!(!target.path().join("products/absent").exists());
@@ -449,7 +448,7 @@ mod tests {
             assert!(source.ensure_path_binding().is_err());
             assert!(
                 restore_workspace_outputs_before_view(
-                    &authority, &guard, &source, &capture, &policy, &budget
+                    &authority, &guard, &source, &capture, &policy, &budget, None
                 )
                 .is_err()
             );
@@ -461,7 +460,7 @@ mod tests {
         use ryeos_isolation_protocol::{WorkspaceMutation, WorkspaceMutationKind as Mutation};
         for storage in [ProductStorage::Content, ProductStorage::LargeContent] {
             let temporary = tempfile::tempdir().unwrap();
-            let state = ryeos_state::StateDb::open(
+            let state = ryeos_app::test_support::TestState::open(
                 temporary.path(),
                 std::sync::Arc::new(ryeos_state::TrustStore::new()),
             )

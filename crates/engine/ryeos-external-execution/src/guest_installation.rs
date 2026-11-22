@@ -10,10 +10,15 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::guest_owner_report::{
+    GuestOwnerSite, GuestOwnerStep, RefusedAt as _,
+};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
     SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
-    SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
+    SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS, SUPERVISOR_PRIVATE_PARENT_FD,
+    SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, SUPERVISOR_RELAY_MAILBOX_FD,
+    SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
     fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_external_execution_contract::staging_package::{
@@ -55,6 +60,10 @@ struct GuestSupervisorLaunchIntent {
     private_parent: lillux::PinnedDirectoryIdentity,
     scratch: Vec<GuestScratchIdentity>,
     supervisor_state_root: lillux::PinnedDirectoryIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay_mailbox: Option<lillux::PinnedDirectoryIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay_mailbox_path: Option<String>,
     bootstrap_sha256: String,
     supervisor_sha256: String,
     launcher_sha256: String,
@@ -63,6 +72,27 @@ struct GuestSupervisorLaunchIntent {
     launch_timeout_bits: u64,
     stage_mount_destination: String,
     control_descriptors: Vec<u32>,
+    /// The activation inputs the outer owner verified before launch, in
+    /// delivery order: activation request digest, signed import digest, guest
+    /// package payload digest. Present only for a leased guest, whose Ready
+    /// must name exactly these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ready_boot_inputs: Option<Vec<String>>,
+}
+
+/// Number of verified activation inputs a leased guest's Ready names.
+const READY_BOOT_INPUT_COUNT: usize = 3;
+
+fn validate_ready_boot_inputs(inputs: &[String]) -> Result<()> {
+    ensure!(
+        inputs.len() == READY_BOOT_INPUT_COUNT
+            && inputs.iter().all(|digest| digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+        "leased guest ready inputs must be {READY_BOOT_INPUT_COUNT} canonical SHA-256 digests"
+    );
+    Ok(())
 }
 
 /// Supervisor-side interpretation of the sealed post-import record. This is
@@ -72,6 +102,9 @@ pub struct MountedGuestSupervisorHandoff {
     stage: GuestStageIdentity,
     launcher_sha256: String,
     record_sha256: String,
+    relay_mailbox: Option<lillux::PinnedDirectoryIdentity>,
+    relay_mailbox_path: Option<String>,
+    ready_boot_inputs: Option<Vec<String>>,
 }
 
 impl MountedGuestSupervisorHandoff {
@@ -86,6 +119,20 @@ impl MountedGuestSupervisorHandoff {
     pub fn record_sha256(&self) -> &str {
         &self.record_sha256
     }
+
+    pub fn relay_mailbox_identity(&self) -> Option<lillux::PinnedDirectoryIdentity> {
+        self.relay_mailbox
+    }
+
+    pub fn relay_mailbox_path(&self) -> Option<&str> {
+        self.relay_mailbox_path.as_deref()
+    }
+
+    /// The verified activation inputs a leased guest's Ready must name, in
+    /// order; `None` for an ordinary guest.
+    pub fn ready_boot_inputs(&self) -> Option<&[String]> {
+        self.ready_boot_inputs.as_deref()
+    }
 }
 
 pub fn decode_mounted_supervisor_handoff(
@@ -95,6 +142,24 @@ pub fn decode_mounted_supervisor_handoff(
     candidate_runtime: &lillux::PinnedDirectory,
     private_parent: &lillux::PinnedDirectory,
 ) -> Result<MountedGuestSupervisorHandoff> {
+    decode_mounted_supervisor_handoff_with_mailbox(
+        sealed_record,
+        bootstrap,
+        state_root,
+        candidate_runtime,
+        private_parent,
+        None,
+    )
+}
+
+pub fn decode_mounted_supervisor_handoff_with_mailbox(
+    sealed_record: &[u8],
+    bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+    state_root: &lillux::PinnedDirectory,
+    candidate_runtime: &lillux::PinnedDirectory,
+    private_parent: &lillux::PinnedDirectory,
+    relay_mailbox: Option<&lillux::PinnedDirectory>,
+) -> Result<MountedGuestSupervisorHandoff> {
     ensure!(
         sealed_record.len() <= MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES,
         "sealed guest supervisor launch record exceeds bound"
@@ -102,14 +167,30 @@ pub fn decode_mounted_supervisor_handoff(
     bootstrap.validate()?;
     let record: GuestSupervisorLaunchIntent = serde_json::from_slice(sealed_record)?;
     ensure!(
-        record.schema == 2
+        record.schema == if relay_mailbox.is_some() { 3 } else { 2 }
             && canonical_launch_record(&record)? == sealed_record
             && record.stage_mount_destination == SUPERVISOR_STAGE_MOUNT_DESTINATION
-            && record.control_descriptors == SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS
+            && record.control_descriptors.as_slice()
+                == if relay_mailbox.is_some() {
+                    SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS.as_slice()
+                } else {
+                    SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.as_slice()
+                }
+            && bootstrap.controller.relay().is_ok() == relay_mailbox.is_some()
+            && record.relay_mailbox
+                == relay_mailbox
+                    .map(lillux::PinnedDirectory::identity)
+                    .transpose()?
+            && record.relay_mailbox_path.as_deref()
+                == relay_mailbox
+                    .map(|_| bootstrap.relay_mailbox_root())
+                    .transpose()?
+                    .as_deref()
             && record.occurrence_id == bootstrap.occurrence_id
             && record.bootstrap_sha256 == lillux::sha256_hex(&bootstrap.canonical_bytes()?)
             && record.launcher_sha256 == bootstrap.launcher_artifact_hash
             && record.guest_input_identity == bootstrap.guest_input_identity
+            && record.ready_boot_inputs.is_some() == bootstrap.report_capabilities
             && record.supervisor_state_root == state_root.identity()?
             && record.candidate_runtime == candidate_runtime.identity()?
             && record.private_parent == private_parent.identity()?
@@ -117,12 +198,18 @@ pub fn decode_mounted_supervisor_handoff(
             && f64::from_bits(record.launch_timeout_bits) > 0.0,
         "sealed guest supervisor launch record differs from bootstrap or private handles"
     );
+    if let Some(inputs) = record.ready_boot_inputs.as_deref() {
+        validate_ready_boot_inputs(inputs)?;
+    }
     record.stage.validate()?;
     recheck_scratch_bindings(private_parent, &record.scratch, &bootstrap.guest_inputs)?;
     Ok(MountedGuestSupervisorHandoff {
         stage: record.stage,
         launcher_sha256: record.launcher_sha256,
         record_sha256: lillux::sha256_hex(sealed_record),
+        relay_mailbox: record.relay_mailbox,
+        relay_mailbox_path: record.relay_mailbox_path,
+        ready_boot_inputs: record.ready_boot_inputs,
     })
 }
 
@@ -259,6 +346,7 @@ pub struct PreparedGuestPrivateInputs {
 pub struct PreparedGuestLaunchArtifacts {
     pub(crate) private: PreparedGuestPrivateInputs,
     pub(crate) state_root: lillux::PinnedDirectory,
+    pub(crate) relay_mailbox: Option<lillux::PinnedDirectory>,
     pub(crate) bootstrap_source: lillux::InheritedDescriptorAuthority,
     pub(crate) supervisor: lillux::InheritedDescriptorAuthority,
     pub(crate) launcher: lillux::InheritedDescriptorAuthority,
@@ -273,6 +361,7 @@ pub struct PreparedGuestSupervisorRequest {
     request: lillux::SubprocessRequest,
     plan: GuestSupervisorDescriptorPlan,
     bootstrap_sha256: String,
+    ready_boot_inputs: Option<Vec<String>>,
 }
 
 /// One exact staged generation selected from the still-owned sealed source.
@@ -310,9 +399,48 @@ pub struct CommittedGuestSupervisorLaunchIntent {
 pub struct PreparedGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
-    _controls: [lillux::InheritedDescriptorAuthority; 5],
-    _network_inputs: [lillux::InheritedDescriptorAuthority; 2],
+    _private_mount: lillux::InheritedDescriptorAuthority,
+    _controls: Vec<lillux::InheritedDescriptorAuthority>,
+    _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     request: lillux::LinuxSandboxRequest,
+    report_sink: Option<GuestOwnerReportSink>,
+}
+
+/// Where the owner records how its released supervisor ended: the
+/// occurrence's own relay mailbox, which the controller can already read.
+/// Identity fields bind the file to this occurrence and sealed bootstrap.
+pub struct GuestOwnerReportSink {
+    mailbox: lillux::PinnedDirectory,
+    occurrence_id: String,
+    allocation_request_digest: String,
+    bootstrap_digest: String,
+}
+
+impl GuestOwnerReportSink {
+    /// Publish the report once. The file takes the owner's account and the
+    /// mode of the supervisor's own mailbox files; an existing report is
+    /// never replaced.
+    pub fn publish(
+        &self,
+        exit: ryeos_external_execution_contract::guest_owner_report::GuestSupervisorExit,
+    ) -> Result<()> {
+        use ryeos_external_execution_contract::guest_owner_report::GuestOwnerReportFile;
+        use ryeos_external_execution_contract::relay_file::OWNER_REPORT_FILE_NAME;
+        let bytes = GuestOwnerReportFile::new(
+            &self.occurrence_id,
+            &self.allocation_request_digest,
+            &self.bootstrap_digest,
+            exit,
+        )
+        .canonical_bytes()?;
+        self.mailbox.atomic_write_if_same(
+            OsStr::new(OWNER_REPORT_FILE_NAME),
+            None,
+            &bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )
+    }
 }
 
 /// A held native supervisor in its dedicated private-source owner. The target
@@ -324,9 +452,11 @@ pub struct HeldGuestMountedSandbox {
     held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
-    _controls: [lillux::InheritedDescriptorAuthority; 5],
-    _network_inputs: [lillux::InheritedDescriptorAuthority; 2],
+    _private_mount: lillux::InheritedDescriptorAuthority,
+    _controls: Vec<lillux::InheritedDescriptorAuthority>,
+    _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     request: lillux::LinuxSandboxRequest,
+    report_sink: Option<GuestOwnerReportSink>,
 }
 
 /// Compose the admitted occurrence's sole import, installation and native
@@ -334,6 +464,13 @@ pub struct HeldGuestMountedSandbox {
 /// independently qualified and writer-excluded by its caller; observing it
 /// here does not establish either fact. Failure after the owner record is
 /// created never grants a replacement import or launch.
+///
+/// `ready_boot_inputs` is present only for a leased guest: the verified
+/// activation inputs its Ready must name, in order. `on_phase` is told as
+/// each long step begins, so the owner can report where it is.
+/// `supervisor_stderr`, when present, becomes the held supervisor's standard
+/// error so its owner can read what the supervisor reports about its own
+/// failure.
 ///
 /// The result is held, not running or Ready. Its caller must inspect Lillux's
 /// mount receipt, release exactly once, join the authenticated supervisor
@@ -346,45 +483,82 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     signed_assignment_bytes: &[u8],
     source: lillux::sandbox::LinuxPrivateSourceFilesystem,
     import_deadline: lillux::time::MonotonicDeadline,
+    ready_boot_inputs: Option<Vec<String>>,
+    supervisor_stderr: Option<std::fs::File>,
+    on_phase: &mut dyn FnMut(GuestOwnerStep),
 ) -> Result<HeldGuestMountedSandbox> {
-    ensure!(
-        source.limits() == installed_runtime.profile().private_source_limits(),
-        "private source limits differ from exact installed guest-owner profile"
-    );
-    installed_runtime.require_disjoint_directory_tree(occurrence)?;
-    installed_runtime.require_disjoint_directory_tree(source.root())?;
-    let verified =
-        installed_runtime.verify_import_documents(signed_import_bytes, signed_assignment_bytes)?;
-    verified.require_fresh_admission()?;
-    let stage_bytes = verified
-        .authorization()
-        .ticket
-        .framed_bytes
-        .checked_sub(20)
-        .context("guest package has no bounded staged-content floor")?;
-    ensure!(
-        stage_bytes <= source.limits().max_bytes,
-        "guest package cannot fit the installed private-source ceiling"
-    );
+    use GuestOwnerStep as Step;
+    (|| -> Result<_> {
+        ensure!(
+            source.limits() == installed_runtime.profile().private_source_limits(),
+            "private source limits differ from exact installed guest-owner profile"
+        );
+        Ok(())
+    })()
+    .refused_at(Step::PrivateSourceEntry)?;
+    installed_runtime
+        .require_disjoint_directory_tree(occurrence)
+        .refused_at(Step::OccurrenceRoot)?;
+    installed_runtime
+        .require_disjoint_directory_tree(source.root())
+        .refused_at(Step::PrivateSourceEntry)?;
+    let verified = installed_runtime
+        .verify_import_documents(signed_import_bytes, signed_assignment_bytes)
+        .refused_at(Step::ImportVerify)?;
+    verified
+        .require_fresh_admission()
+        .refused_at(Step::AdmissionExpired)?;
+    (|| -> Result<_> {
+        let stage_bytes = verified
+            .authorization()
+            .ticket
+            .framed_bytes
+            .checked_sub(crate::guest_import_authorization::GUEST_PACKAGE_FRAME_OVERHEAD_BYTES)
+            .context("guest package has no bounded staged-content floor")?;
+        ensure!(
+            stage_bytes <= source.limits().max_bytes,
+            "guest package cannot fit the installed private-source ceiling"
+        );
+        Ok(())
+    })()
+    .refused_at(Step::PrivateSourceCeiling)?;
     let authority = verified.authorization().clone();
     let context = authority.context();
     let inputs = &authority.guest_inputs;
-    let owner = GuestOccurrenceOwner::begin_authorized(occurrence, verified)?;
-    let staged = owner.stage_uploaded_once(upload, source, &context, inputs, import_deadline)?;
-    let installed = staged.install_base_once(&context, inputs)?;
-    let prepared = installed
-        .prepare_content_for_adoption(&context, inputs)?
-        .create_private_scratch_once(&context, inputs)?
-        .prepare_launch_artifacts_once(&context, inputs)?
-        .prepare_supervisor_request(
-            &context,
-            inputs,
-            installed_runtime.profile().owner_timeout_seconds(),
-        )?;
-    let committed = prepared.commit_outer_launch_intent(&context, inputs)?;
+    let owner = GuestOccurrenceOwner::begin_authorized(occurrence, verified)
+        .refused_at(Step::OccurrenceRoot)?;
+    on_phase(Step::Stage);
+    let staged = owner
+        .stage_uploaded_once(upload, source, &context, inputs, import_deadline)
+        .refused_at(Step::Stage)?;
+    on_phase(Step::Install);
+    let installed = staged
+        .install_base_once(&context, inputs)
+        .refused_at(Step::Install)?;
+    on_phase(Step::LaunchPreparation);
+    let committed = (|| -> Result<_> {
+        let prepared = installed
+            .prepare_content_for_adoption(&context, inputs)?
+            .create_private_scratch_once(&context, inputs)?
+            .prepare_launch_artifacts_once(&context, inputs)?
+            .prepare_supervisor_request(
+                &context,
+                inputs,
+                installed_runtime.profile().owner_timeout_seconds(),
+            )?;
+        let prepared = prepared.with_ready_boot_inputs(&context, inputs, ready_boot_inputs)?;
+        prepared.commit_outer_launch_intent(&context, inputs)
+    })()
+    .refused_at(Step::LaunchPreparation)?;
+    on_phase(Step::HeldPrepare);
     committed
-        .prepare_mounted_sandbox_request(&context, inputs)?
-        .prepare_held_in_dedicated_owner()
+        .prepare_mounted_sandbox_request(&context, inputs)
+        .and_then(|request| {
+            request
+                .prepare_held_in_dedicated_owner(supervisor_stderr)
+                .at_site(GuestOwnerSite::HeldNamespace)
+        })
+        .refused_at(Step::HeldPrepare)
 }
 
 /// The sole released native supervisor attempt. Applied launch is still only
@@ -395,10 +569,12 @@ pub struct ReleasedGuestMountedSandbox {
     held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
-    _controls: [lillux::InheritedDescriptorAuthority; 5],
-    _network_inputs: [lillux::InheritedDescriptorAuthority; 2],
+    _private_mount: lillux::InheritedDescriptorAuthority,
+    _controls: Vec<lillux::InheritedDescriptorAuthority>,
+    _network_inputs: Vec<lillux::InheritedDescriptorAuthority>,
     expected_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     expected_mounts: lillux::LinuxSandboxMountPreparationCommitments,
+    report_sink: Option<GuestOwnerReportSink>,
 }
 
 /// Terminal proof for the sole native supervisor target. A code-zero target
@@ -487,15 +663,23 @@ impl HeldGuestMountedSandbox {
             held: self.held,
             _committed: self._committed,
             _source_copy: self._source_copy,
+            _private_mount: self._private_mount,
             _controls: self._controls,
             _network_inputs: self._network_inputs,
             expected_launch,
             expected_mounts,
+            report_sink: self.report_sink,
         })
     }
 }
 
 impl ReleasedGuestMountedSandbox {
+    /// Where to record this supervisor's end for the controller, present
+    /// only when the occurrence has a relay mailbox.
+    pub fn report_sink(&self) -> Option<&GuestOwnerReportSink> {
+        self.report_sink.as_ref()
+    }
+
     /// Cancel the sole released supervisor attempt under the caller's fixed
     /// cleanup deadline. Lillux terminates the exact namespace-init lifetime
     /// and proves descendant death; a timeout retains this owner for further
@@ -609,13 +793,44 @@ fn check_applied_supervisor_receipt(
     Ok(())
 }
 
+/// The held supervisor's view admits read-only stage and network inputs and
+/// exactly one writable mount: the private parent at its fixed destination.
+fn require_held_supervisor_mounts(mounts: &[lillux::LinuxSandboxMount]) -> Result<()> {
+    let writable: Vec<_> = mounts
+        .iter()
+        .filter(|mount| mount.access == lillux::LinuxSandboxMountAccess::Writable)
+        .collect();
+    ensure!(
+        writable.len() == 1
+            && writable[0].destination
+                == std::path::Path::new(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION),
+        "held supervisor admits only its private parent as a writable mount"
+    );
+    ensure!(
+        mounts
+            .iter()
+            .filter(|mount| {
+                mount.destination
+                    == std::path::Path::new(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION)
+            })
+            .count()
+            == 1,
+        "held supervisor private parent is mounted more than once"
+    );
+    Ok(())
+}
+
 /// Capture only the two guest-local files selected by the sealed bootstrap.
 /// Lillux resolves symlinks once, pins exact regular files and seals bounded
 /// bytes; the mounted supervisor sees those bytes at the original policy
-/// paths, not ambient files from a controller or a later namespace.
+/// paths, not ambient files from a controller or a later namespace. A source
+/// that does not exist is mounted as nothing: only an input the policy does
+/// not require may be missing, and the supervisor then finds it absent too.
+/// The returned descriptors and destinations cover the present inputs only,
+/// in policy order.
 fn capture_supervisor_network_mounts(
     policy: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
-) -> Result<([lillux::InheritedDescriptorAuthority; 2], [PathBuf; 2])> {
+) -> Result<(Vec<lillux::InheritedDescriptorAuthority>, Vec<PathBuf>)> {
     policy.validate()?;
     let destinations = [
         std::path::Path::new(&policy.resolver.source),
@@ -633,24 +848,44 @@ fn capture_supervisor_network_mounts(
     let capture =
         |selection: &ryeos_state::external_execution::transport::ExternalNetworkInputSelection,
          name: &std::ffi::CStr|
-         -> Result<(lillux::InheritedDescriptorAuthority, PathBuf, Vec<u8>)> {
-            let source =
-                lillux::canonicalize_existing_path(std::path::Path::new(&selection.source))?;
-            let file = lillux::open_pinned_regular_file_no_follow(&source)?;
-            let captured =
-                file.capture_sealed_bounded(&file.observation()?, selection.max_bytes)?;
+         -> Result<Option<(lillux::InheritedDescriptorAuthority, PathBuf, Vec<u8>)>> {
+            let Some(captured) = lillux::capture_optional_sealed_regular_file(
+                std::path::Path::new(&selection.source),
+                selection.max_bytes,
+            )?
+            else {
+                ensure!(
+                    !selection.required,
+                    "required network input {} does not exist",
+                    selection.source
+                );
+                return Ok(None);
+            };
             let bytes = captured.bytes().to_vec();
             let sealed = lillux::sealed_memfd(name, &bytes)
                 .map_err(anyhow::Error::msg)?
                 .duplicate_at_or_above(59)
                 .map_err(anyhow::Error::msg)?;
-            Ok((sealed, PathBuf::from(&selection.source), bytes))
+            Ok(Some((sealed, PathBuf::from(&selection.source), bytes)))
         };
-    let (resolver, resolver_path, resolver_bytes) =
-        capture(&policy.resolver, c"ryeos-guest-resolver")?;
-    let (hosts, hosts_path, hosts_bytes) = capture(&policy.hosts, c"ryeos-guest-hosts")?;
-    lillux::network::NetworkContext::from_config_bytes(&resolver_bytes, &hosts_bytes)?;
-    Ok(([resolver, hosts], [resolver_path, hosts_path]))
+    let resolver = capture(&policy.resolver, c"ryeos-guest-resolver")?;
+    let hosts = capture(&policy.hosts, c"ryeos-guest-hosts")?;
+    lillux::network::NetworkContext::from_config_bytes(
+        resolver
+            .as_ref()
+            .map_or(&[][..], |(_, _, bytes)| bytes.as_slice()),
+        hosts
+            .as_ref()
+            .map_or(&[][..], |(_, _, bytes)| bytes.as_slice()),
+    )
+    .map_err(anyhow::Error::from)
+    .at_site(GuestOwnerSite::NetworkInputParse)?;
+    let (mut sealed, mut paths) = (Vec::new(), Vec::new());
+    for (descriptor, path, _) in [resolver, hosts].into_iter().flatten() {
+        sealed.push(descriptor);
+        paths.push(path);
+    }
+    Ok((sealed, paths))
 }
 
 impl CommittedGuestSupervisorLaunchIntent {
@@ -691,9 +926,39 @@ impl CommittedGuestSupervisorLaunchIntent {
         let parsed: GuestSupervisorLaunchIntent = serde_json::from_slice(&bytes)?;
         ensure!(
             canonical_launch_record(&parsed)? == bytes
-                && parsed.schema == 2
+                && parsed.schema
+                    == if self._prepared._artifacts.relay_mailbox.is_some() {
+                        3
+                    } else {
+                        2
+                    }
                 && parsed.stage_mount_destination == SUPERVISOR_STAGE_MOUNT_DESTINATION
-                && parsed.control_descriptors == SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS
+                && parsed.control_descriptors.as_slice()
+                    == if self._prepared._artifacts.relay_mailbox.is_some() {
+                        SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS.as_slice()
+                    } else {
+                        SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.as_slice()
+                    }
+                && parsed.relay_mailbox
+                    == self
+                        ._prepared
+                        ._artifacts
+                        .relay_mailbox
+                        .as_ref()
+                        .map(lillux::PinnedDirectory::identity)
+                        .transpose()?
+                && parsed.relay_mailbox_path.as_deref()
+                    == self
+                        ._prepared
+                        ._artifacts
+                        .relay_mailbox
+                        .as_ref()
+                        .map(|mailbox| mailbox
+                            .path()
+                            .to_str()
+                            .context("relay mailbox path is not UTF-8"))
+                        .transpose()?
+                && parsed.ready_boot_inputs == self._prepared.ready_boot_inputs
                 && parsed.stage == *self._source_mount.stage()
                 && parsed.install_record_file
                     == self
@@ -721,76 +986,135 @@ impl CommittedGuestSupervisorLaunchIntent {
     ) -> Result<PreparedGuestMountedSandbox> {
         let artifacts = &self._prepared._artifacts;
         let installed = &artifacts.private.content._installed;
-        installed.owner.recheck(context, inputs)?;
-        installed.recheck_for_adoption(context, inputs)?;
-        ensure!(
-            self._source_mount.stage() == &installed.imported.stage_identity()?,
-            "mounted supervisor source differs from committed stage"
-        );
-        let bootstrap = artifacts.seal_supervisor_bootstrap(context, inputs)?;
-        let bootstrap_bytes = lillux::read_sealed_inherited_descriptor(
-            bootstrap
-                .inherited_descriptor()
-                .map_err(anyhow::Error::msg)?,
-            ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
-        )
-        .map_err(anyhow::Error::msg)?;
-        let parsed_bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
-            serde_json::from_slice(&bootstrap_bytes)?;
-        ensure!(
-            parsed_bootstrap.canonical_bytes()? == bootstrap_bytes,
-            "sealed supervisor bootstrap changed before network-input capture"
-        );
-        let (network_inputs, network_destinations) =
-            capture_supervisor_network_mounts(&parsed_bootstrap.controller.network_inputs)?;
-        let state = artifacts.state_root.inherited_descriptor_authority()?;
-        let runtime = installed.runtime.inherited_descriptor_authority()?;
-        let private = artifacts
-            .private
-            .private_parent
-            .inherited_descriptor_authority()?;
-        let launch_record = self.seal_record_for_supervisor()?;
-        let controls: [lillux::InheritedDescriptorAuthority; 5] =
-            [bootstrap, state, runtime, private, launch_record]
-                .into_iter()
-                .map(|authority| {
-                    authority
-                        .duplicate_at_or_above(59)
-                        .map_err(anyhow::Error::msg)
-                })
-                .collect::<Result<Vec<_>>>()?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("supervisor control inventory changed length"))?;
-        let channels = controls
-            .iter()
-            .zip(SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS)
-            .map(|(authority, target)| {
-                Ok::<_, anyhow::Error>((
-                    authority
-                        .inherited_descriptor()
-                        .map_err(anyhow::Error::msg)?,
-                    target,
+        (|| -> Result<()> {
+            installed.owner.recheck(context, inputs)?;
+            installed.recheck_for_adoption(context, inputs)?;
+            ensure!(
+                self._source_mount.stage() == &installed.imported.stage_identity()?,
+                "mounted supervisor source differs from committed stage"
+            );
+            Ok(())
+        })()
+        .at_site(GuestOwnerSite::InstalledRecheck)?;
+        let (bootstrap, parsed_bootstrap) = (|| -> Result<_> {
+            let bootstrap = artifacts.seal_supervisor_bootstrap(context, inputs)?;
+            let bootstrap_bytes = lillux::read_sealed_inherited_descriptor(
+                bootstrap
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let parsed_bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
+                serde_json::from_slice(&bootstrap_bytes)?;
+            ensure!(
+                parsed_bootstrap.canonical_bytes()? == bootstrap_bytes,
+                "sealed supervisor bootstrap changed before network-input capture"
+            );
+            Ok((bootstrap, parsed_bootstrap))
+        })()
+        .at_site(GuestOwnerSite::BootstrapSeal)?;
+        let (network_inputs, network_destinations) = if let Ok(http) =
+            parsed_bootstrap.controller.http()
+        {
+            let (inputs, destinations) = capture_supervisor_network_mounts(&http.network_inputs)
+                .at_site(GuestOwnerSite::NetworkInputCapture)?;
+            (inputs, destinations)
+        } else {
+            parsed_bootstrap.controller.relay()?;
+            (Vec::new(), Vec::new())
+        };
+        let (relay_mailbox, controls, channels, source_copy, source_fd, private_mount) =
+            (|| -> Result<_> {
+                let state = artifacts.state_root.inherited_descriptor_authority()?;
+                let runtime = installed.runtime.inherited_descriptor_authority()?;
+                let private = artifacts
+                    .private
+                    .private_parent
+                    .inherited_descriptor_authority()?;
+                let launch_record = self.seal_record_for_supervisor()?;
+                let mut original_controls = vec![bootstrap, state, runtime, private, launch_record];
+                let relay_mailbox = artifacts.relay_mailbox.as_ref();
+                ensure!(
+                    relay_mailbox.is_some() == parsed_bootstrap.controller.relay().is_ok(),
+                    "relay mailbox custody differs from sealed transport"
+                );
+                if let Some(mailbox) = relay_mailbox {
+                    ensure!(
+                        Some(mailbox.identity()?) == artifacts.observation.relay_mailbox,
+                        "relay mailbox changed since launch artifact preparation"
+                    );
+                    original_controls.push(mailbox.inherited_descriptor_authority()?);
+                }
+                let controls: Vec<lillux::InheritedDescriptorAuthority> = original_controls
+                    .into_iter()
+                    .map(|authority| {
+                        authority
+                            .duplicate_at_or_above(60)
+                            .map_err(anyhow::Error::msg)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let control_descriptors = if relay_mailbox.is_some() {
+                    SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS.as_slice()
+                } else {
+                    SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.as_slice()
+                };
+                let channels = controls
+                    .iter()
+                    .zip(control_descriptors.iter().copied())
+                    .map(|(authority, target)| {
+                        Ok::<_, anyhow::Error>((
+                            authority
+                                .inherited_descriptor()
+                                .map_err(anyhow::Error::msg)?,
+                            target,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let source_copy = self
+                    ._source_mount
+                    .mount_authority()
+                    .duplicate_at_or_above(60)
+                    .map_err(anyhow::Error::msg)?;
+                let source_fd = source_copy
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?;
+                ensure!(
+                    channels.iter().all(|(fd, _)| *fd != source_fd),
+                    "sealed source descriptor entered supervisor control channels"
+                );
+                let private_mount = artifacts
+                    .private
+                    .private_parent
+                    .inherited_descriptor_authority()?
+                    .duplicate_at_or_above(60)
+                    .map_err(anyhow::Error::msg)?;
+                Ok((
+                    relay_mailbox,
+                    controls,
+                    channels,
+                    source_copy,
+                    source_fd,
+                    private_mount,
                 ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let source_copy = self
-            ._source_mount
-            .mount_authority()
-            .duplicate_at_or_above(59)
-            .map_err(anyhow::Error::msg)?;
-        let source_fd = source_copy
-            .inherited_descriptor()
-            .map_err(anyhow::Error::msg)?;
-        ensure!(
-            channels.iter().all(|(fd, _)| *fd != source_fd),
-            "sealed source descriptor entered supervisor control channels"
-        );
-        let mut mounts = vec![lillux::LinuxSandboxMount {
-            source_fd,
-            destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
-            access: lillux::LinuxSandboxMountAccess::ReadOnly,
-            layer: 0,
-        }];
+            })()
+            .at_site(GuestOwnerSite::ControlDescriptors)?;
+        let mut mounts = vec![
+            lillux::LinuxSandboxMount {
+                source_fd,
+                destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
+                access: lillux::LinuxSandboxMountAccess::ReadOnly,
+                layer: 0,
+            },
+            lillux::LinuxSandboxMount {
+                source_fd: private_mount
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                destination: PathBuf::from(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION),
+                access: lillux::LinuxSandboxMountAccess::Writable,
+                layer: 0,
+            },
+        ];
         for (source, destination) in network_inputs.iter().zip(network_destinations) {
             mounts.push(lillux::LinuxSandboxMount {
                 source_fd: source.inherited_descriptor().map_err(anyhow::Error::msg)?,
@@ -808,7 +1132,11 @@ impl CommittedGuestSupervisorLaunchIntent {
             mounts,
             fixed_parent_views: Vec::new(),
             overlay: None,
-            network: lillux::LinuxSandboxNetwork::Host,
+            network: if relay_mailbox.is_some() {
+                lillux::LinuxSandboxNetwork::Isolated
+            } else {
+                lillux::LinuxSandboxNetwork::Host
+            },
             private_tmp: true,
             proc_filesystem: lillux::LinuxSandboxProcFilesystem::PidNamespaceNested,
             minimal_devices: true,
@@ -818,13 +1146,27 @@ impl CommittedGuestSupervisorLaunchIntent {
             contain_process_group: false,
             nested_sandbox: true,
             aggregate_limits: None,
+            target_limits: None,
         };
+        require_held_supervisor_mounts(&request.mounts).at_site(GuestOwnerSite::MountSet)?;
+        let report_sink = relay_mailbox
+            .map(|mailbox| -> Result<_> {
+                Ok(GuestOwnerReportSink {
+                    mailbox: mailbox.try_clone()?,
+                    occurrence_id: parsed_bootstrap.occurrence_id.clone(),
+                    allocation_request_digest: parsed_bootstrap.allocation_request_digest.clone(),
+                    bootstrap_digest: parsed_bootstrap.digest()?,
+                })
+            })
+            .transpose()?;
         Ok(PreparedGuestMountedSandbox {
             _committed: self,
             _source_copy: source_copy,
+            _private_mount: private_mount,
             _controls: controls,
             _network_inputs: network_inputs,
             request,
+            report_sink,
         })
     }
 }
@@ -833,7 +1175,10 @@ impl PreparedGuestMountedSandbox {
     /// Enter the one-way native preparation cut in a dedicated, unprivileged
     /// owner process. Lillux exits that process on a source mismatch or failed
     /// namespace transition; this must never run on a shared daemon worker.
-    pub fn prepare_held_in_dedicated_owner(mut self) -> Result<HeldGuestMountedSandbox> {
+    pub fn prepare_held_in_dedicated_owner(
+        mut self,
+        supervisor_stderr: Option<std::fs::File>,
+    ) -> Result<HeldGuestMountedSandbox> {
         let installed = &mut self
             ._committed
             ._prepared
@@ -852,6 +1197,7 @@ impl PreparedGuestMountedSandbox {
             OsStr::new(&stage_name),
             std::path::Path::new(SUPERVISOR_STAGE_MOUNT_DESTINATION),
             self.request.clone(),
+            supervisor_stderr,
         );
         let receipt = held
             .held()
@@ -867,9 +1213,11 @@ impl PreparedGuestMountedSandbox {
             held,
             _committed: self._committed,
             _source_copy: self._source_copy,
+            _private_mount: self._private_mount,
             _controls: self._controls,
             _network_inputs: self._network_inputs,
             request: self.request,
+            report_sink: self.report_sink,
         })
     }
 }
@@ -913,6 +1261,26 @@ impl PreparedGuestSupervisorRequest {
         })
     }
 
+    /// Seal the verified activation inputs a leased guest's Ready must name
+    /// into the outer launch intent. Only a bootstrap that asks the supervisor
+    /// to report capabilities is a leased guest: for one, the inputs are
+    /// required; for any other, they are not part of the intent.
+    pub fn with_ready_boot_inputs(
+        mut self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+        supplied: Option<Vec<String>>,
+    ) -> Result<Self> {
+        let (_, bootstrap) = self._artifacts.read_imported_bootstrap(context, inputs)?;
+        if bootstrap.report_capabilities {
+            let supplied = supplied
+                .context("a leased guest bootstrap needs the verified activation inputs")?;
+            validate_ready_boot_inputs(&supplied)?;
+            self.ready_boot_inputs = Some(supplied);
+        }
+        Ok(self)
+    }
+
     fn exact_request_timeout_bits(&self) -> Result<u64> {
         let request = &self.request;
         ensure!(
@@ -951,30 +1319,58 @@ impl PreparedGuestSupervisorRequest {
         let installed = &self._artifacts.private.content._installed;
         let ticket = installed.imported.ticket();
         let owner = &installed.owner;
+        let mut expected_plan = fixed_guest_supervisor_descriptor_plan(inputs)?;
+        if self._artifacts.relay_mailbox.is_some() {
+            expected_plan
+                .inherited_descriptors
+                .push(SUPERVISOR_RELAY_MAILBOX_FD);
+        }
         ensure!(
-            self.plan == fixed_guest_supervisor_descriptor_plan(inputs)?,
+            self.plan == expected_plan,
             "guest supervisor content plan changed before outer intent"
         );
         canonical_launch_record(&GuestSupervisorLaunchIntent {
-            schema: 2,
+            schema: if self._artifacts.relay_mailbox.is_some() {
+                3
+            } else {
+                2
+            },
             ticket_sha256: digest_ticket(ticket)?,
             occurrence_id: owner.record.occurrence_id.clone(),
             occurrence_directory: owner.occurrence.identity()?,
             owner_directory: owner.root.identity()?,
-            install_record_file: installed.intent_identity.record_file.clone(),
+            install_record_file: installed.intent_identity.record_file,
             install_record_sha256: installed.intent_identity.record_sha256.clone(),
             stage: installed.imported.stage_identity()?,
             candidate_runtime: installed.runtime.identity()?,
-            private_parent: self._artifacts.private.observation.private_parent.clone(),
+            private_parent: self._artifacts.private.observation.private_parent,
             scratch: self._artifacts.private.observation.scratch.clone(),
-            supervisor_state_root: self._artifacts.observation.state_root.clone(),
+            supervisor_state_root: self._artifacts.observation.state_root,
+            relay_mailbox: self._artifacts.observation.relay_mailbox,
+            relay_mailbox_path: self
+                ._artifacts
+                .relay_mailbox
+                .as_ref()
+                .map(|mailbox| {
+                    mailbox
+                        .path()
+                        .to_str()
+                        .context("relay mailbox path is not UTF-8")
+                        .map(str::to_owned)
+                })
+                .transpose()?,
             bootstrap_sha256: self.bootstrap_sha256.clone(),
             supervisor_sha256: ticket.supervisor_sha256.clone(),
             launcher_sha256: ticket.launcher_sha256.clone(),
             guest_input_identity: inputs.identity_digest()?,
             launch_timeout_bits: self.exact_request_timeout_bits()?,
             stage_mount_destination: SUPERVISOR_STAGE_MOUNT_DESTINATION.into(),
-            control_descriptors: SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.to_vec(),
+            control_descriptors: if self._artifacts.relay_mailbox.is_some() {
+                SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS.to_vec()
+            } else {
+                SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.to_vec()
+            },
+            ready_boot_inputs: self.ready_boot_inputs.clone(),
         })
     }
 
@@ -1075,6 +1471,8 @@ impl PreparedGuestSupervisorRequest {
 pub struct GuestLaunchArtifactObservation {
     pub schema: u32,
     pub state_root: lillux::PinnedDirectoryIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_mailbox: Option<lillux::PinnedDirectoryIdentity>,
     pub bootstrap: lillux::PinnedRegularFileIdentity,
     pub supervisor: lillux::PinnedRegularFileIdentity,
     pub launcher: lillux::PinnedRegularFileIdentity,
@@ -1113,7 +1511,7 @@ impl PreparedGuestLaunchArtifacts {
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         };
-        let (mut request, plan) = self
+        let (mut request, mut plan) = self
             .private
             .bind_content_to_supervisor_request(context, inputs, request)?;
         self.supervisor
@@ -1129,6 +1527,17 @@ impl PreparedGuestLaunchArtifacts {
         self.launcher
             .bind_to_subprocess_request(&mut request, SUPERVISOR_LAUNCHER_FD)
             .map_err(anyhow::Error::msg)?;
+        if let Some(mailbox) = self.relay_mailbox.as_ref() {
+            ensure!(
+                self.observation.relay_mailbox == Some(mailbox.identity()?),
+                "relay mailbox changed before supervisor descriptor binding"
+            );
+            mailbox
+                .inherited_descriptor_authority()?
+                .bind_to_subprocess_request(&mut request, SUPERVISOR_RELAY_MAILBOX_FD)
+                .map_err(anyhow::Error::msg)?;
+            plan.inherited_descriptors.push(SUPERVISOR_RELAY_MAILBOX_FD);
+        }
         let mut actual = request
             .inherited_fd_mappings
             .iter()
@@ -1154,6 +1563,7 @@ impl PreparedGuestLaunchArtifacts {
             request,
             plan,
             bootstrap_sha256,
+            ready_boot_inputs: None,
         })
     }
 
@@ -1166,6 +1576,21 @@ impl PreparedGuestLaunchArtifacts {
         context: &GuestImportContext<'_>,
         inputs: &ExternalGuestInputProjection,
     ) -> Result<lillux::InheritedDescriptorAuthority> {
+        let (bytes, _) = self.read_imported_bootstrap(context, inputs)?;
+        lillux::sealed_memfd(c"ryeos-external-supervisor-bootstrap", &bytes)
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Re-read the opened package bootstrap and join it to the retained
+    /// occurrence. Returns its exact canonical bytes with the decoded value.
+    fn read_imported_bootstrap(
+        &self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<(
+        Vec<u8>,
+        ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+    )> {
         let source = &self.bootstrap_source;
         let ticket = self.private.content._installed.imported.ticket();
         ticket.validate_for_context(context)?;
@@ -1196,8 +1621,7 @@ impl PreparedGuestLaunchArtifacts {
                 && bootstrap.launcher_artifact_hash == ticket.launcher_sha256,
             "imported supervisor bootstrap differs from retained occurrence authority"
         );
-        lillux::sealed_memfd(c"ryeos-external-supervisor-bootstrap", &bytes)
-            .map_err(anyhow::Error::msg)
+        Ok((bytes, bootstrap))
     }
 }
 
@@ -1220,6 +1644,18 @@ impl PreparedGuestPrivateInputs {
             &imported.ticket().bootstrap_sha256,
             false,
         )?;
+        let (bootstrap_bytes, _) = bootstrap_source.read_regular_file_stable_bounded(
+            ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES
+                as u64,
+        )?;
+        let bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
+            serde_json::from_slice(&bootstrap_bytes)?;
+        ensure!(
+            bootstrap.canonical_bytes()? == bootstrap_bytes
+                && bootstrap.occurrence_id == context.occurrence_id
+                && bootstrap.guest_input_identity == inputs.identity_digest()?,
+            "relay mailbox source differs from retained guest import"
+        );
         let (supervisor, supervisor_identity) = open_verified_guest_artifact(
             imported,
             "supervisor",
@@ -1246,9 +1682,49 @@ impl PreparedGuestPrivateInputs {
         state_root.require_disjoint_directory_tree(&self.content._installed.runtime)?;
         state_root.require_disjoint_directory_tree(&self.private_parent)?;
         state_root.require_disjoint_directory_tree(imported.root())?;
+        let relay_mailbox = if bootstrap.controller.relay().is_ok() {
+            // The mailbox lives inside this occurrence's own directory, which
+            // the signed parent and the occurrence name together address.
+            let parent = &self.content._installed.owner.occurrence;
+            ensure!(
+                parent.path()
+                    == std::path::Path::new(&bootstrap.controller.relay()?.private_mailbox_parent)
+                        .join(&bootstrap.occurrence_id),
+                "signed relay mailbox parent differs from original occurrence root"
+            );
+            // Q inputs admit only ProductManifest and PrivateScratch. Their
+            // complete handles originate from the staged source and private
+            // parent, both proved disjoint from this new child below.
+            bootstrap.candidate_program.validate_guest_inputs(inputs)?;
+            let mailbox_path = bootstrap.relay_mailbox_root()?;
+            let name = std::path::Path::new(&mailbox_path)
+                .file_name()
+                .context("signed relay mailbox has no child name")?;
+            let mailbox = parent.create_child(name, 0o700)?;
+            mailbox.require_owner_private_directory()?;
+            ensure!(
+                mailbox.entries_no_follow_bounded(0)?.is_empty(),
+                "new relay mailbox contains ambient content"
+            );
+            for protected in [
+                &state_root,
+                &self.content._installed.runtime,
+                &self.private_parent,
+                imported.root(),
+            ] {
+                mailbox.require_disjoint_directory_tree(protected)?;
+            }
+            Some(mailbox)
+        } else {
+            None
+        };
         let observation = GuestLaunchArtifactObservation {
-            schema: 1,
+            schema: if relay_mailbox.is_some() { 2 } else { 1 },
             state_root: state_root.identity()?,
+            relay_mailbox: relay_mailbox
+                .as_ref()
+                .map(lillux::PinnedDirectory::identity)
+                .transpose()?,
             bootstrap: bootstrap_identity,
             supervisor: supervisor_identity,
             launcher: launcher_identity,
@@ -1256,6 +1732,7 @@ impl PreparedGuestPrivateInputs {
         Ok(PreparedGuestLaunchArtifacts {
             private: self,
             state_root,
+            relay_mailbox,
             bootstrap_source,
             supervisor,
             launcher,
@@ -1829,9 +2306,34 @@ fn recover_guest_occurrence_inner(
         let launch_bytes =
             launch_file.read_stable_bounded(&launch_observation, MAX_RECORD_BYTES)?;
         let launch: GuestSupervisorLaunchIntent = serde_json::from_slice(&launch_bytes)?;
+        let relay_mailbox = if let Some(path) = launch.relay_mailbox_path.as_deref() {
+            ensure!(
+                launch.schema == 3
+                    && std::path::Path::new(path).parent() == Some(occurrence.path()),
+                "recovered relay mailbox path differs from original occurrence"
+            );
+            let child_name = std::path::Path::new(path)
+                .file_name()
+                .context("recovered relay mailbox path has no child")?;
+            let mailbox = occurrence
+                .open_child_directory(child_name)?
+                .context("original relay mailbox disappeared")?;
+            mailbox.require_owner_private_directory()?;
+            ensure!(
+                launch.relay_mailbox == Some(mailbox.identity()?),
+                "recovered relay mailbox changed its original inode"
+            );
+            for protected in [&root, &runtime, &private_parent, &state_root] {
+                mailbox.require_disjoint_directory_tree(protected)?;
+            }
+            Some(mailbox)
+        } else {
+            None
+        };
         ensure!(
             canonical_launch_record(&launch)? == launch_bytes
-                && launch.schema == 2
+                && launch.schema == if relay_mailbox.is_some() { 3 } else { 2 }
+                && launch.relay_mailbox.is_some() == relay_mailbox.is_some()
                 && launch.ticket_sha256 == owner.ticket_sha256
                 && launch.occurrence_id == owner.occurrence_id
                 && launch.occurrence_directory == owner.occurrence_directory
@@ -1851,7 +2353,12 @@ fn recover_guest_occurrence_inner(
                 && f64::from_bits(launch.launch_timeout_bits).is_finite()
                 && f64::from_bits(launch.launch_timeout_bits) > 0.0
                 && launch.stage_mount_destination == SUPERVISOR_STAGE_MOUNT_DESTINATION
-                && launch.control_descriptors == SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
+                && launch.control_descriptors.as_slice()
+                    == if relay_mailbox.is_some() {
+                        SUPERVISOR_MOUNTED_RELAY_CONTROL_DESCRIPTORS.as_slice()
+                    } else {
+                        SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.as_slice()
+                    },
             "guest supervisor launch intent differs from retained authority"
         );
         ensure_child_binding(occurrence, CANDIDATE_PRIVATE_DIRECTORY, &private_parent)?;
@@ -2020,8 +2527,13 @@ impl GuestOccurrenceOwner {
             owner_directory: root.identity()?,
         };
         let bytes = canonical_owner_record(&record)?;
-        root.atomic_create_regular(OsStr::new(OWNER_RECORD_NAME), &bytes, 0o600)?
-            .context("guest occurrence owner record already exists")?;
+        root.atomic_create_regular(
+            OsStr::new(OWNER_RECORD_NAME),
+            &bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
+        .context("guest occurrence owner record already exists")?;
         Ok(Self {
             occurrence: occurrence.try_clone()?,
             root,
@@ -2258,7 +2770,12 @@ fn prepare_guest_base_install_locked<'a>(
     };
     let bytes = canonical_record(&intent)?;
     let record = journal
-        .atomic_create_regular(OsStr::new(RECORD_NAME), &bytes, 0o600)?
+        .atomic_create_regular(
+            OsStr::new(RECORD_NAME),
+            &bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
         .context("guest installation intent already exists")?;
     let marker = GuestBaseInstallMarker {
         schema: 1,
@@ -2269,7 +2786,12 @@ fn prepare_guest_base_install_locked<'a>(
     let marker_bytes = canonical_marker(&marker)?;
     let marker_file = imported
         .root()
-        .atomic_create_regular(OsStr::new(STAGE_MARKER_NAME), &marker_bytes, 0o600)?
+        .atomic_create_regular(
+            OsStr::new(STAGE_MARKER_NAME),
+            &marker_bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
         .context("ticketed guest stage already has an installation owner")?;
     let identity = GuestBaseInstallIntentIdentity {
         schema: 1,
@@ -2402,7 +2924,12 @@ fn create_launch_intent_record(
         "guest supervisor launch intent is not canonical"
     );
     let record = owner_root
-        .atomic_create_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), bytes, 0o600)?
+        .atomic_create_regular(
+            OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME),
+            bytes,
+            0o600,
+            crate::GUEST_TEMP_PURPOSE,
+        )?
         .context("guest supervisor launch intent already exists")?;
     Ok((
         lillux::pinned_regular_file_identity(&record)?,
@@ -2416,6 +2943,24 @@ pub(crate) fn create_launch_intent_record_for_test(
     bytes: &[u8],
 ) -> Result<(lillux::PinnedRegularFileIdentity, String)> {
     create_launch_intent_record(owner_root, bytes)
+}
+
+fn canonical_record(intent: &GuestBaseInstallIntent) -> Result<Vec<u8>> {
+    let bytes = lillux::canonical_json(&serde_json::to_value(intent)?)?.into_bytes();
+    ensure!(
+        bytes.len() as u64 <= MAX_RECORD_BYTES,
+        "guest installation intent exceeds bound"
+    );
+    Ok(bytes)
+}
+
+fn canonical_marker(marker: &GuestBaseInstallMarker) -> Result<Vec<u8>> {
+    let bytes = lillux::canonical_json(&serde_json::to_value(marker)?)?.into_bytes();
+    ensure!(
+        bytes.len() as u64 <= MAX_RECORD_BYTES,
+        "guest installation owner marker exceeds bound"
+    );
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -2433,10 +2978,12 @@ mod recovery_binding_tests {
             resolver: ExternalNetworkInputSelection {
                 source: resolver.to_str().unwrap().into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
             hosts: ExternalNetworkInputSelection {
                 source: hosts.to_str().unwrap().into(),
                 max_bytes: 64 * 1024,
+                required: true,
             },
         }
     }
@@ -2454,7 +3001,8 @@ mod recovery_binding_tests {
         std::fs::write(&hosts, hosts_bytes).unwrap();
         let (mounted, destinations) =
             capture_supervisor_network_mounts(&network_policy(&resolver_link, &hosts)).unwrap();
-        assert_eq!(destinations, [resolver_link, hosts.clone()]);
+        assert_eq!(destinations, vec![resolver_link, hosts.clone()]);
+        assert_eq!(mounted.len(), 2);
         std::fs::write(&resolver, b"nameserver 192.0.2.1\n").unwrap();
         std::fs::write(&hosts, b"192.0.2.1 changed\n").unwrap();
         assert_eq!(
@@ -2472,6 +3020,64 @@ mod recovery_binding_tests {
             )
             .unwrap(),
             hosts_bytes
+        );
+    }
+
+    #[test]
+    fn supervisor_network_mounts_skip_an_absent_optional_input_and_refuse_a_required_one() {
+        let temporary = tempfile::tempdir().unwrap();
+        let resolver = temporary.path().join("resolver");
+        let hosts = temporary.path().join("hosts");
+        std::fs::write(&resolver, b"nameserver 127.0.0.1\n").unwrap();
+        let mut policy = network_policy(&resolver, &hosts);
+        assert!(capture_supervisor_network_mounts(&policy).is_err());
+        policy.hosts.required = false;
+        let (mounted, destinations) = capture_supervisor_network_mounts(&policy).unwrap();
+        assert_eq!((mounted.len(), destinations), (1, vec![resolver.clone()]));
+        // An existing empty file is present and mounted, not skipped.
+        std::fs::write(&hosts, b"").unwrap();
+        let (mounted, destinations) = capture_supervisor_network_mounts(&policy).unwrap();
+        assert_eq!((mounted.len(), destinations), (2, vec![resolver, hosts]));
+        // The resolver stays required.
+        std::fs::remove_file(temporary.path().join("resolver")).unwrap();
+        assert!(capture_supervisor_network_mounts(&policy).is_err());
+    }
+
+    #[test]
+    fn held_supervisor_admits_only_its_private_parent_writable() {
+        let mount = |destination: &str, access| lillux::LinuxSandboxMount {
+            source_fd: 60,
+            destination: PathBuf::from(destination),
+            access,
+            layer: 0,
+        };
+        use lillux::LinuxSandboxMountAccess::{ReadOnly, Writable};
+        let stage = mount(SUPERVISOR_STAGE_MOUNT_DESTINATION, ReadOnly);
+        let private = mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, Writable);
+        require_held_supervisor_mounts(&[stage.clone(), private.clone()]).unwrap();
+        assert!(require_held_supervisor_mounts(std::slice::from_ref(&stage)).is_err());
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage.clone(),
+                private.clone(),
+                mount("/ryeos/elsewhere", Writable),
+            ])
+            .is_err()
+        );
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage.clone(),
+                mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, ReadOnly),
+            ])
+            .is_err()
+        );
+        assert!(
+            require_held_supervisor_mounts(&[
+                stage,
+                private.clone(),
+                mount(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, ReadOnly),
+            ])
+            .is_err()
         );
     }
 
@@ -2608,20 +3214,53 @@ mod recovery_binding_tests {
     }
 }
 
-fn canonical_record(intent: &GuestBaseInstallIntent) -> Result<Vec<u8>> {
-    let bytes = lillux::canonical_json(&serde_json::to_value(intent)?)?.into_bytes();
-    ensure!(
-        bytes.len() as u64 <= MAX_RECORD_BYTES,
-        "guest installation intent exceeds bound"
-    );
-    Ok(bytes)
-}
+#[cfg(test)]
+mod owner_report_sink_tests {
+    use super::*;
+    use ryeos_external_execution_contract::guest_owner_report::{
+        GuestOwnerReportFile, GuestSupervisorExit, GuestSupervisorStatus,
+    };
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-fn canonical_marker(marker: &GuestBaseInstallMarker) -> Result<Vec<u8>> {
-    let bytes = lillux::canonical_json(&serde_json::to_value(marker)?)?.into_bytes();
-    ensure!(
-        bytes.len() as u64 <= MAX_RECORD_BYTES,
-        "guest installation owner marker exceeds bound"
-    );
-    Ok(bytes)
+    #[test]
+    fn report_is_one_canonical_private_file_bound_to_its_occurrence() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sink = GuestOwnerReportSink {
+            mailbox: lillux::PinnedDirectory::open(directory.path())
+                .unwrap()
+                .unwrap(),
+            occurrence_id: "sbx-a".into(),
+            allocation_request_digest: "a".repeat(64),
+            bootstrap_digest: "b".repeat(64),
+        };
+        let exit = GuestSupervisorExit::from_raw_tail(GuestSupervisorStatus::Code(126), b"cause\n");
+        sink.publish(exit.clone()).unwrap();
+        let path = directory.path().join("owner-report.json");
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+        assert_eq!(
+            metadata.uid(),
+            std::fs::metadata(directory.path()).unwrap().uid()
+        );
+        assert_eq!(
+            GuestOwnerReportFile::decode_for(
+                &std::fs::read(&path).unwrap(),
+                "sbx-a",
+                &"a".repeat(64),
+                &"b".repeat(64)
+            )
+            .unwrap(),
+            exit
+        );
+        // A second report never replaces the first, and no temp file lingers.
+        assert!(
+            sink.publish(GuestSupervisorExit::from_raw_tail(
+                GuestSupervisorStatus::Code(1),
+                b"later"
+            ))
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 }

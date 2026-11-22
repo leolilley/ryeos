@@ -1,7 +1,7 @@
 //! `ui.ryeos.remotes.list` and `ui.ryeos.remotes.probe` — remotes
 //! inspection for the ryeos-ui.
 //!
-//! `remotes.list` returns configured remotes (with project-layer merging)
+//! `remotes.list` returns configured remotes
 //! without probing. `remotes.probe` performs an on-demand status check
 //! against a named remote.
 
@@ -25,12 +25,6 @@ fn retained_attachment()
         .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()))
 }
 
-fn retained_project_access(
-    attachment: &crate::browser_session::AdmittedBindingAttachment,
-) -> Result<Option<crate::seat_auth::RetainedProjectAccess>> {
-    Ok(crate::seat_auth::attachment_project_access(attachment)?)
-}
-
 // ── remotes.list ──────────────────────────────────────────────────
 
 pub async fn handle_remotes_list(
@@ -38,12 +32,14 @@ pub async fn handle_remotes_list(
     _ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let attachment = retained_attachment()?;
-    let project_access = retained_project_access(&attachment)?;
-    let project = project_access.as_ref().map(|access| access.path());
+    let _attachment = retained_attachment()?;
+    remotes_list(&state.config.app_root)
+}
 
-    let report =
-        ryeos_api::remote::config::load_remotes_layered_report(&state.config.app_root, project)?;
+/// The `remotes.list` projection. Remote pins are node-signed records; a
+/// project never contributes remotes.
+pub fn remotes_list(app_root: &std::path::Path) -> Result<Value> {
+    let report = ryeos_api::remote::config::load_remotes_report(app_root)?;
 
     let mut entries: Vec<Value> = report
         .remotes
@@ -55,7 +51,8 @@ pub async fn handle_remotes_list(
                 "url": r.url,
                 "principal_id": r.principal_id,
                 "site_id": r.site_id,
-                "scope": loaded.scope.label(),
+                "pin_source": loaded.pin_source.as_str(),
+                "pinned_at": loaded.pinned_at,
                 "config_path": loaded.config_path,
                 "project_bindings": r.project_bindings,
             })
@@ -68,7 +65,7 @@ pub async fn handle_remotes_list(
         .map(|entry| {
             serde_json::json!({
                 "name": entry.name,
-                "scope": entry.scope.label(),
+                "code": entry.code,
                 "config_path": entry.config_path,
                 "url": entry.url,
                 "error": entry.error,
@@ -88,17 +85,15 @@ pub async fn handle_remotes_probe(
     _ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let attachment = retained_attachment()?;
-    let project_access = retained_project_access(&attachment)?;
-    let project = project_access.as_ref().map(|access| access.path());
+    let _attachment = retained_attachment()?;
 
     let req: ProbeRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let remotes = ryeos_api::remote::config::load_remotes_layered(&state.config.app_root, project)?;
+    let remotes = ryeos_api::remote::config::load_remotes(&state.config.app_root)?;
     let remote_cfg = ryeos_api::remote::config::get_remote(&remotes, &req.remote)?;
 
-    let client = ryeos_api::remote::client::RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = ryeos_api::remote::client::RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
 
     let health = match tokio::time::timeout(REMOTE_PROBE_TIMEOUT, client.get_health()).await {
         Ok(Ok(health)) => health,

@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TurnStartResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "turn_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "required": [
+    "turn_id"
+  ]
+}

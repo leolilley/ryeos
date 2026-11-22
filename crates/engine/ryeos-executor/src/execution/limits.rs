@@ -6,7 +6,7 @@ use ryeos_engine::runtime_registry::RuntimeLimitsDecl;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::launch_envelope::{AggregateExecutionLimits, HardLimits};
+use super::launch_envelope::{AggregateExecutionLimits, DeadlineLimits, HardLimits};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +17,21 @@ pub struct AggregateLimitValues {
     pub worker_executions: u32,
     #[serde(default)]
     pub provider_contacts: u32,
+}
+
+/// Authored share of the tree-wide run deadline. Only the reserve is authored;
+/// the hold-back and the absolute end are daemon-derived.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DeadlineLimitValues {
+    #[serde(default)]
+    pub reserve_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DeadlineLimitCaps {
+    pub reserve_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -64,6 +79,8 @@ pub struct LimitValues {
     pub duration_seconds: u64,
     #[serde(default)]
     pub aggregate: AggregateLimitValues,
+    #[serde(default)]
+    pub deadline: DeadlineLimitValues,
     /// Runtime-declared dimensions remain flat in authored/config YAML for
     /// compatibility, but are captured generically and validated against the
     /// selected runtime's signed declaration before use.
@@ -81,6 +98,7 @@ impl Default for LimitValues {
             depth: default_depth(),
             duration_seconds: default_duration(),
             aggregate: AggregateLimitValues::default(),
+            deadline: DeadlineLimitValues::default(),
             runtime: BTreeMap::new(),
         }
     }
@@ -105,6 +123,8 @@ pub struct LimitCaps {
     pub duration_seconds: Option<u64>,
     #[serde(default)]
     pub aggregate: AggregateLimitCaps,
+    #[serde(default)]
+    pub deadline: DeadlineLimitCaps,
     #[serde(flatten)]
     pub runtime: BTreeMap<String, u64>,
 }
@@ -196,6 +216,17 @@ pub fn compute_effective_limits(
                 caps.aggregate.provider_contacts.unwrap_or(0),
             ),
         },
+        // Only the authored reserve is set here. The hold-back and the absolute
+        // end depend on the launch time and the tree deadline, which the
+        // launcher stamps once it has both.
+        deadline: DeadlineLimits {
+            reserve_seconds: sentinel_clamp(
+                requested.deadline.reserve_seconds,
+                caps.deadline.reserve_seconds.unwrap_or(0),
+            ),
+            hold_back_ms: 0,
+            at_ms: None,
+        },
         runtime: clamp_runtime_dimensions(
             &requested.runtime,
             &caps.runtime,
@@ -228,6 +259,26 @@ pub fn compute_effective_limits(
         }
     }
 
+    hard
+}
+
+/// Clamp a fire's hard limits under its schedule owner's per-fire ceiling.
+///
+/// This is one more cap layer after item, node caps and parent: a present
+/// ceiling field bounds that dimension, an absent one leaves it alone. The
+/// aggregate execution-tree ceilings and runtime-declared dimensions are not
+/// part of a schedule ceiling.
+pub fn clamp_to_schedule_ceiling(
+    mut hard: HardLimits,
+    ceiling: &ryeos_engine::scheduled_fire_context::ScheduleFireLimits,
+) -> HardLimits {
+    hard.turns = sentinel_clamp(hard.turns, ceiling.turns.unwrap_or(0));
+    hard.tokens = sentinel_clamp(hard.tokens, ceiling.tokens.unwrap_or(0));
+    hard.spend_usd = sentinel_clamp(hard.spend_usd, ceiling.spend_usd.unwrap_or(UsdNanos::ZERO));
+    hard.spawns = sentinel_clamp(hard.spawns, ceiling.spawns.unwrap_or(0));
+    hard.depth = sentinel_clamp(hard.depth, ceiling.depth.unwrap_or(0));
+    hard.duration_seconds =
+        sentinel_clamp(hard.duration_seconds, ceiling.duration_seconds.unwrap_or(0));
     hard
 }
 
@@ -295,15 +346,15 @@ pub fn merge_header_limits(
         .as_object_mut()
         .expect("LimitValues always serializes to a JSON object");
     for (k, v) in overlay {
-        if k == "aggregate" {
-            let aggregate = v
+        if k == "aggregate" || k == "deadline" {
+            let nested = v
                 .as_object()
-                .ok_or_else(|| anyhow::anyhow!("`limits.aggregate` must be an object"))?;
+                .ok_or_else(|| anyhow::anyhow!("`limits.{k}` must be an object"))?;
             let target = m
-                .get_mut("aggregate")
+                .get_mut(k)
                 .and_then(Value::as_object_mut)
-                .expect("LimitValues aggregate always serializes to an object");
-            for (name, value) in aggregate {
+                .expect("LimitValues nested groups always serialize to objects");
+            for (name, value) in nested {
                 target.insert(name.clone(), value.clone());
             }
         } else {
@@ -327,7 +378,7 @@ pub fn load_limits_config_from_loader(
         return Ok(None);
     };
     let config = loader
-        .load_config_strict::<LimitsConfig>(config_identity)
+        .load_config_strict_signed::<LimitsConfig>(config_identity)
         .map_err(|e| anyhow::anyhow!("limits config: {e}"))?;
     if let Some(config) = &config {
         config.validate(declaration)?;
@@ -440,10 +491,19 @@ pub fn policy_item_override<T>(value: Option<&Sourced<T>>) -> bool {
     value.is_some_and(|value| value.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
 }
 
+pub use ryeos_runtime::callback::PARAM_RUN_TIMEOUT;
+
 pub fn apply_caller_limit_overrides(
     mut requested: LimitValues,
     parameters: &Value,
 ) -> anyhow::Result<LimitValues> {
+    if let Some(raw) = parameters.get(PARAM_RUN_TIMEOUT) {
+        requested.aggregate.duration_seconds = raw.as_u64().ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid caller {PARAM_RUN_TIMEOUT}: expected unsigned integer seconds, got {raw}"
+            )
+        })?;
+    }
     if let Some(raw) = parameters.get("timeout") {
         requested.duration_seconds = raw.as_u64().ok_or_else(|| {
             anyhow::anyhow!("invalid caller timeout: expected unsigned integer seconds, got {raw}")
@@ -657,6 +717,48 @@ mod tests {
     }
 
     #[test]
+    fn schedule_limits_clamp_below_item_and_node_caps() {
+        let requested = LimitValues {
+            turns: 100,
+            tokens: 50_000,
+            duration_seconds: 0,
+            spend_usd: UsdNanos::parse_canonical("5").unwrap(),
+            ..Default::default()
+        };
+        let caps = LimitCaps {
+            turns: Some(30),
+            duration_seconds: Some(600),
+            ..Default::default()
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &caps,
+            None,
+            &runtime_declaration(),
+        );
+        assert_eq!((hard.turns, hard.duration_seconds), (30, 600));
+
+        let ceiling = ryeos_engine::scheduled_fire_context::ScheduleFireLimits {
+            // Tighter than the node cap and the item request.
+            turns: Some(5),
+            // Tighter than the node cap on an item that asked for unlimited.
+            duration_seconds: Some(120),
+            // Looser than the item request: the request stays.
+            tokens: Some(1_000_000),
+            spend_usd: Some(UsdNanos::parse_canonical("0.5").unwrap()),
+            ..Default::default()
+        };
+        let clamped = clamp_to_schedule_ceiling(hard, &ceiling);
+        assert_eq!(clamped.turns, 5);
+        assert_eq!(clamped.duration_seconds, 120);
+        assert_eq!(clamped.tokens, 50_000);
+        assert_eq!(clamped.spend_usd, UsdNanos::parse_canonical("0.5").unwrap());
+        // Dimensions the ceiling leaves out keep their computed value.
+        assert_eq!(clamped.spawns, 0);
+    }
+
+    #[test]
     fn missing_caps_do_not_silently_clamp_duration_to_default() {
         let requested = LimitValues {
             duration_seconds: 7200,
@@ -776,37 +878,203 @@ mod tests {
         assert_eq!(hard.depth, default_depth());
     }
 
+    fn limits_test_key() -> lillux::crypto::SigningKey {
+        lillux::crypto::SigningKey::from_bytes(&[91u8; 32])
+    }
+
+    fn trusted_signers_for(
+        key: &lillux::crypto::SigningKey,
+    ) -> Vec<ryeos_engine::trust::TrustedSignerEntry> {
+        use base64::Engine as _;
+        let verifying_key = key.verifying_key();
+        vec![ryeos_engine::trust::TrustedSignerEntry {
+            fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+            public_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes())
+            ),
+            label: "limits-test".to_string(),
+            scope: ryeos_engine::trust::SignerScope::everywhere(),
+            endorsements: None,
+        }]
+    }
+
+    fn write_limits_config(project: &std::path::Path, document: &str) {
+        let config_dir = ryeos_engine::roots::RuntimeRoot::new(project.to_path_buf())
+            .config()
+            .join("example-runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("limits.yaml"), document).unwrap();
+    }
+
     #[test]
     fn load_limits_config_missing_file_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
             tmp.path().join("project"),
             vec![],
-            &tmp.path().join("operator/.ai/config/keys/trusted"),
+            &[],
         )
         .unwrap();
         let config = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap();
         assert!(config.is_none(), "missing file should return Ok(None)");
     }
 
+    /// Execution limits are config the daemon loads under the request's trust.
+    /// An authoring-signed limits file is honoured only while an endorsement
+    /// covers it, and the signer list that carries the endorsements is what
+    /// the config's dependency proof and cache key record.
     #[test]
-    fn load_limits_config_rejects_invalid_spend_cap() {
+    fn an_endorsed_authoring_signed_limits_file_is_honoured_until_revoked() {
+        use lillux::crypto::SigningKey;
+        use ryeos_engine::trust::{
+            EndorsedItem, EndorsementBody, EndorsementIndex, EndorsementLedger, SignedEndorsement,
+            SignerRecord, SignerRole, SignerScope, SignerStatus, TrustStore, record_endorsement,
+            revoke_endorsement, trusted_signers_digest,
+        };
+
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
+        let app_root = tmp.path().join("node");
+        let node = SigningKey::from_bytes(&[1u8; 32]);
+        let operator = SigningKey::from_bytes(&[2u8; 32]);
+        let authoring = SigningKey::from_bytes(&[3u8; 32]);
+        let trust = TrustStore::from_registry(
+            node.verifying_key(),
+            vec![
+                SignerRecord::new(
+                    &operator.verifying_key(),
+                    "operator",
+                    SignerRole::Operator,
+                    SignerScope::operator_default(),
+                    SignerStatus::Active,
+                ),
+                SignerRecord::new(
+                    &authoring.verifying_key(),
+                    "authoring",
+                    SignerRole::Authoring,
+                    SignerScope::authoring_default(),
+                    SignerStatus::Active,
+                ),
+            ],
+        )
+        .unwrap();
         let config_dir = ryeos_engine::roots::RuntimeRoot::new(project.clone())
             .config()
             .join("example-runtime");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("limits.yaml"),
-            "defaults: {}\ncaps:\n  spend_usd: -1.0\n",
+        let signed = lillux::signature::sign_content("defaults: {}\n", &authoring, "#", None);
+        std::fs::write(config_dir.join("limits.yaml"), &signed).unwrap();
+        let digest = ryeos_engine::item_resolution::parse_signature_header(
+            &signed,
+            &ryeos_engine::contracts::SignatureEnvelope {
+                prefix: "#".to_string(),
+                suffix: None,
+                after_shebang: false,
+            },
+        )
+        .unwrap()
+        .content_hash;
+
+        // The signer list a launch of this project carries right now.
+        let launch_entries = || {
+            let ledger = EndorsementLedger::load(&app_root, &node.verifying_key()).unwrap();
+            let frozen = trust
+                .clone()
+                .with_endorsement_index(EndorsementIndex::build(&ledger, &trust).unwrap());
+            trust.launch_signer_entries(&frozen, Some(&project))
+        };
+        let loads = |entries: &[ryeos_engine::trust::TrustedSignerEntry]| {
+            let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+                project.clone(),
+                vec![],
+                entries,
+            )
+            .unwrap();
+            load_limits_config_from_loader(&loader, &runtime_declaration())
+                .is_ok_and(|config| config.is_some())
+        };
+
+        let before = launch_entries();
+        assert!(
+            !loads(&before),
+            "unendorsed: a machine draft sets no limits"
+        );
+
+        let ledger = EndorsementLedger::load(&app_root, &node.verifying_key()).unwrap();
+        let body = EndorsementBody::for_items(
+            project.canonicalize().unwrap().to_str().unwrap(),
+            &format!(
+                "fp:{}",
+                lillux::signature::compute_fingerprint(&operator.verifying_key())
+            ),
+            vec![EndorsedItem {
+                item_ref: "config:example-runtime/limits".to_string(),
+                kind: "config".to_string(),
+                digest,
+            }],
+            &lillux::time::iso8601_now(),
+            &"a".repeat(32),
+            &ledger.head(&node.verifying_key()),
+        );
+        let recorded = record_endorsement(
+            &app_root,
+            &node,
+            &trust,
+            SignedEndorsement::sign(body, &operator).unwrap(),
+            lillux::time::unix_secs_now(),
         )
         .unwrap();
+
+        let endorsed = launch_entries();
+        assert!(loads(&endorsed), "endorsed: the limits file is honoured");
+        assert_ne!(
+            trusted_signers_digest(&before),
+            trusted_signers_digest(&endorsed),
+            "the digest every proof and cache key records covers the endorsements"
+        );
+
+        revoke_endorsement(
+            &app_root,
+            &node,
+            &trust,
+            &recorded.digest,
+            &lillux::signature::compute_fingerprint(&operator.verifying_key()),
+            "withdrawn",
+            lillux::time::unix_secs_now(),
+        )
+        .unwrap();
+        let revoked = launch_entries();
+        assert!(!loads(&revoked), "revoked: refused again");
+        assert_eq!(
+            trusted_signers_digest(&before),
+            trusted_signers_digest(&revoked),
+            "back to the unendorsed trust identity"
+        );
+        // The launch that froze the endorsed list keeps honouring it, and a
+        // proof it made no longer matches the next launch's trust identity.
+        assert!(loads(&endorsed));
+    }
+
+    #[test]
+    fn load_limits_config_rejects_invalid_spend_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let key = limits_test_key();
+        write_limits_config(
+            &project,
+            &lillux::signature::sign_content(
+                "defaults: {}\ncaps:\n  spend_usd: -1.0\n",
+                &key,
+                "#",
+                None,
+            ),
+        );
 
         let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
             project,
             vec![],
-            &tmp.path().join("operator/.ai/config/keys/trusted"),
+            &trusted_signers_for(&key),
         )
         .unwrap();
         let err = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap_err();
@@ -814,6 +1082,50 @@ mod tests {
             err.to_string().contains("canonical decimal string"),
             "got {err}"
         );
+    }
+
+    #[test]
+    fn load_limits_config_accepts_trusted_signed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let key = limits_test_key();
+        write_limits_config(
+            &project,
+            &lillux::signature::sign_content("defaults: {}\ncaps: {}\n", &key, "#", None),
+        );
+        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+            project,
+            vec![],
+            &trusted_signers_for(&key),
+        )
+        .unwrap();
+        let config = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap();
+        assert!(config.is_some());
+    }
+
+    #[test]
+    fn load_limits_config_refuses_unsigned_and_untrusted_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let key = limits_test_key();
+        let stranger = lillux::crypto::SigningKey::from_bytes(&[92u8; 32]);
+        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+            project.clone(),
+            vec![],
+            &trusted_signers_for(&key),
+        )
+        .unwrap();
+
+        write_limits_config(&project, "defaults: {}\ncaps: {}\n");
+        let err = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap_err();
+        assert!(err.to_string().contains("is unsigned"), "got {err}");
+
+        write_limits_config(
+            &project,
+            &lillux::signature::sign_content("defaults: {}\ncaps: {}\n", &stranger, "#", None),
+        );
+        let err = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap_err();
+        assert!(err.to_string().contains("not trusted"), "got {err}");
     }
 
     #[test]
@@ -950,5 +1262,134 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("exceeds u32"), "got {err}");
+    }
+
+    #[test]
+    fn run_timeout_sets_the_tree_deadline_and_is_clamped_by_the_node_cap() {
+        let requested = apply_caller_limit_overrides(
+            LimitValues::default(),
+            &serde_json::json!({"run_timeout": 7200}),
+        )
+        .unwrap();
+        assert_eq!(requested.aggregate.duration_seconds, 7200);
+        assert_eq!(requested.duration_seconds, 0, "segment timeout untouched");
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps {
+                aggregate: AggregateLimitCaps {
+                    duration_seconds: Some(3600),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+            &runtime_declaration(),
+        );
+        assert_eq!(hard.aggregate.duration_seconds, 3600);
+    }
+
+    #[test]
+    fn run_timeout_must_be_unsigned_seconds() {
+        let err = apply_caller_limit_overrides(
+            LimitValues::default(),
+            &serde_json::json!({"run_timeout": -5}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("run_timeout"), "got {err}");
+    }
+
+    #[test]
+    fn a_child_keeps_the_parent_tree_deadline_whatever_it_requests() {
+        let parent = HardLimits {
+            aggregate: AggregateExecutionLimits {
+                duration_seconds: 600,
+                ..Default::default()
+            },
+            ..HardLimits::default()
+        };
+        let requested = LimitValues {
+            aggregate: AggregateLimitValues {
+                duration_seconds: 9000,
+                ..Default::default()
+            },
+            ..LimitValues::default()
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps::default(),
+            Some(&parent),
+            &runtime_declaration(),
+        );
+        assert_eq!(hard.aggregate.duration_seconds, 600);
+    }
+
+    #[test]
+    fn header_deadline_overlay_sets_the_reserve_and_keeps_other_fields() {
+        let base = LimitValues {
+            turns: 12,
+            deadline: DeadlineLimitValues {
+                reserve_seconds: 30,
+            },
+            ..LimitValues::default()
+        };
+        let merged = merge_header_limits(
+            &base,
+            &serde_json::json!({"deadline": {"reserve_seconds": 45}}),
+            &runtime_declaration(),
+        )
+        .unwrap();
+        assert_eq!(merged.deadline.reserve_seconds, 45);
+        assert_eq!(merged.turns, 12);
+        let untouched = merge_header_limits(
+            &base,
+            &serde_json::json!({"turns": 3}),
+            &runtime_declaration(),
+        )
+        .unwrap();
+        assert_eq!(untouched.deadline.reserve_seconds, 30);
+        let err = merge_header_limits(
+            &base,
+            &serde_json::json!({"deadline": 5}),
+            &runtime_declaration(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("limits.deadline"), "got {err}");
+    }
+
+    #[test]
+    fn reserve_is_authored_per_execution_and_clamped_by_the_node_cap() {
+        let parent = HardLimits {
+            deadline: DeadlineLimits {
+                reserve_seconds: 90,
+                hold_back_ms: 5_000,
+                at_ms: None,
+            },
+            ..HardLimits::default()
+        };
+        let requested = LimitValues {
+            deadline: DeadlineLimitValues {
+                reserve_seconds: 120,
+            },
+            ..LimitValues::default()
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps {
+                deadline: DeadlineLimitCaps {
+                    reserve_seconds: Some(60),
+                },
+                ..Default::default()
+            },
+            Some(&parent),
+            &runtime_declaration(),
+        );
+        assert_eq!(hard.deadline.reserve_seconds, 60, "own reserve, capped");
+        assert_eq!(
+            hard.deadline.hold_back_ms, 0,
+            "hold-back is stamped at launch"
+        );
     }
 }

@@ -10,7 +10,7 @@ fn generation_value() -> Value {
     json!({
         "schema": BUNDLE_GENERATION_SCHEMA,
         "kind": BUNDLE_GENERATION_KIND,
-        "bundle_name": "standard",
+        "bundle_name": "knowledge",
         "authored_version": "1.2.3",
         "content_manifest_hash": h('a'),
         "manifest_item_hash": h('b'),
@@ -25,6 +25,7 @@ fn generation_value() -> Value {
         "accepted_capture_result_hash": h('f'),
         "selected_signed_product_identity": "signed-bundle",
         "selected_signed_product_witness": h('9'),
+        "payload_ownership_hash": h('8'),
         "source_snapshot_hash": null,
         "qualification_evidence_hashes": [h('1'), h('2')],
         "provenance_hash": null,
@@ -59,7 +60,7 @@ fn set_value() -> Value {
         "substrate_release_attestation_hash": h('5'),
         "entries": [
             {"bundle_name":"core","generation_hash":h('1'),"publisher_attestation_hash":h('2')},
-            {"bundle_name":"standard","generation_hash":h('3'),"publisher_attestation_hash":h('4')}
+            {"bundle_name":"knowledge","generation_hash":h('3'),"publisher_attestation_hash":h('4')}
         ],
         "migration_requirement": "none"
     })
@@ -119,7 +120,7 @@ fn snapshot_value() -> Value {
         "publisher": format!("fp:{}", h('1')),
         "bundle_channels": [
             {"bundle_name":"core","channel":"stable","generation_attestation_hash":h('2')},
-            {"bundle_name":"standard","channel":"stable","generation_attestation_hash":h('3')}
+            {"bundle_name":"knowledge","channel":"stable","generation_attestation_hash":h('3')}
         ],
         "set_channels": [
             {"set_name":"complete","channel":"stable","set_attestation_hash":h('4')}
@@ -142,19 +143,30 @@ fn payload_ownership_value() -> Value {
     json!({
         "schema": BUNDLE_PAYLOAD_OWNERSHIP_SCHEMA,
         "kind": BUNDLE_PAYLOAD_OWNERSHIP_KIND,
+        "host_packages": ["ryeos-api", "ryeosd"],
+        "no_default_features_packages": [],
+        "feature_implications": {
+            "ryeos-handler-bins": {"graph-handlers": ["core-handlers"]}
+        },
+        "data_only_bundles": ["central-auth"],
+        "host_only_bundles": [
+            {"bundle_name": "scheduling", "bundle_sets": ["standard"], "host_features": ["scheduling"]}
+        ],
         "bundles": [
             {
                 "bundle_name": "browser",
-                "bundle_sets": ["full", "release-artifacts"],
+                "bundle_sets": ["release-artifacts", "standard"],
+                "host_features": [],
                 "payloads": [
-                    {"binary":"ryeos-browser-tools","cargo_package":"ryeos-browser-tools","build_class":"release"}
+                    {"binary":"ryeos-browser-tools","cargo_package":"ryeos-browser-tools","build_class":"release","cargo_features":[]}
                 ]
             },
             {
                 "bundle_name": "web",
-                "bundle_sets": ["central-host", "full", "release-artifacts"],
+                "bundle_sets": ["central-host", "release-artifacts", "standard"],
+                "host_features": ["web-host"],
                 "payloads": [
-                    {"binary":"ryeos-web-tools","cargo_package":"ryeos-web-tools","build_class":"release"}
+                    {"binary":"ryeos-web-tools","cargo_package":"ryeos-web-tools","build_class":"release","cargo_features":[]}
                 ]
             }
         ]
@@ -204,6 +216,45 @@ fn payload_ownership_is_closed_sorted_and_globally_unique() {
 
     let mut value = payload_ownership_value();
     value["bundles"][0]["payloads"][0]["build_class"] = json!("debug");
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["bundles"][0]["payloads"][0]["cargo_features"] = json!(["b", "a"]);
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["bundles"][0]["host_features"] = json!(["x", "x"]);
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["host_packages"] = json!(["ryeosd", "ryeos-api"]);
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["feature_implications"]["ryeos-handler-bins"]["graph-handlers"] =
+        json!(["graph-handlers"]);
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["host_packages"] = json!(["ryeos-api", "ryeos-browser-tools", "ryeosd"]);
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["no_default_features_packages"] = json!(["ryeos-browser-tools"]);
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_ok());
+    value["no_default_features_packages"] = json!(["b-pkg", "a-pkg"]);
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["data_only_bundles"] = json!(["browser"]);
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["host_only_bundles"][0]["bundle_name"] = json!("web");
+    assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
+
+    let mut value = payload_ownership_value();
+    value["bundles"][0]["payloads"] = json!([]);
     assert!(BundlePayloadOwnership::from_current_value(&value).is_err());
 }
 

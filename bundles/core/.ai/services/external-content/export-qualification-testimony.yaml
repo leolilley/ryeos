@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-14T11:51:10Z:08bffdc167d6c58c5488be49b998ea32736f46b736e144eb45758ade67fb2bf3:oXIv581O8xCtX05D7NKLl6WDHkj0NbsBEvnjqo8cNYWLvwsWlvy0st95vZ3vVsMm/12zndl4E0QdY31B0meqAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.export-qualification-testimony
+required_caps: ["ryeos.execute.service.external-content/export-qualification-testimony"]
+schema:
+  remote: string
+  qualification_hash: string
+  acceptance_policy_ref: string
+  content: object?
+  signed_testimony: object?
+description: "Origin-side export of one exact local qualification (product lane, or content lane when `content` names the activation_ref, coordinate_id and manifest_hash of the activated content). The node holds no operator key, so this is two steps: without `signed_testimony` it returns {remote, qualification_hash, acceptance_policy_ref, coordinate_id, unsigned_testimony}, the exact statement the operator signs; with `signed_testimony` (that statement plus the operator's signature, made by `ryeos external-content export-qualification-testimony`) it verifies the signature against the operator identity the node pins, submits the testimony to the pinned node remote under the named acceptance policy, and returns {remote, qualification_hash, acceptance_policy_ref, testimony_hash, acceptance_hash, coordinate_id, reused_existing, testimony}"

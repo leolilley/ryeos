@@ -144,7 +144,7 @@ fn check_directive_file(path: &std::path::Path) -> Vec<String> {
 fn bundle_directives_use_canonical_context_refs() {
     let workspace = workspace_root();
     let dirs = [
-        workspace.join("bundles/standard/.ai/directives"),
+        workspace.join("bundles/directive/.ai/directives"),
         workspace.join("bundles/core/.ai/directives"),
     ];
 

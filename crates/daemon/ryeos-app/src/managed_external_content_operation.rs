@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::managed_external_content::ResolvedManagedExternalContentActivation;
-use crate::node_policy::sections::external_content::{
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportPolicyRecord, ManagedExternalContentActivationPolicy,
 };
 
@@ -146,7 +146,9 @@ impl ManagedActivationJobOperation {
                 bail!("online managed activation cannot name an offline archive root")
             }
             (AcquisitionMode::Offline, Some(root), Some(digest)) => {
-                crate::node_policy::sections::external_content::validate_root_name(root)?;
+                ryeos_node_runtime::node_policy::sections::external_content::validate_root_name(
+                    root,
+                )?;
                 validate_hash("offline activation root authority", digest)?;
             }
             (AcquisitionMode::Offline, None, None) => {}
@@ -199,7 +201,7 @@ fn offline_archive_root_authority_digest(
     policy: &ExternalContentImportPolicyRecord,
     root: &str,
 ) -> anyhow::Result<String> {
-    crate::node_policy::sections::external_content::validate_root_name(root)?;
+    ryeos_node_runtime::node_policy::sections::external_content::validate_root_name(root)?;
     let authority = policy.roots.get(root).ok_or_else(|| {
         anyhow::anyhow!("offline managed activation archive root is not admitted by node policy")
     })?;
@@ -211,7 +213,7 @@ fn offline_archive_root_authority_digest(
 }
 
 pub fn managed_policy_digest(
-    limits: &crate::node_policy::sections::external_content::ExternalContentImportLimits,
+    limits: &ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits,
     managed: &ManagedExternalContentActivationPolicy,
 ) -> anyhow::Result<String> {
     limits.validate()?;
@@ -232,7 +234,7 @@ pub fn publish_activation_receipt(
     operation.validate_current(
         activation,
         state.node_policy.require::<
-            crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+            ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
         >()?,
         &crate::operator_authority::admitted_operator_authority_digest(
             state,
@@ -261,6 +263,9 @@ pub fn publish_activation_receipt(
         .state_store
         .with_state_db(|db| db.read_generic_head_ref(namespace, &operation.activation_id))?;
     if let Some(current) = current.as_ref() {
+        if current.signer != state.identity.fingerprint() {
+            bail!("managed activation head is not signed by the current node");
+        }
         let value = cas
             .get_object(&current.target_hash)?
             .ok_or_else(|| anyhow::anyhow!("managed activation head target is absent"))?;
@@ -284,7 +289,7 @@ pub fn publish_activation_receipt(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire activation write permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire activation write permit: {error:#}"))?;
     let mut stage = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(&guard, "managed-external-content-activation")?;
@@ -317,13 +322,290 @@ pub fn publish_activation_receipt(
         )
     })?;
     if let Err(error) = stage.finish_admitted(&guard) {
-        tracing::warn!(%error, activation_id = %operation.activation_id, "activation head published while temporary roots remained recoverable");
+        tracing::warn!(error = %format!("{error:#}"), activation_id = %operation.activation_id, "activation head published while temporary roots remained recoverable");
     }
     Ok(ManagedActivationPublication {
         activation_id: operation.activation_id.clone(),
         receipt_hash,
         idempotent: false,
     })
+}
+
+/// Read the current node-authored activation head against the current signed
+/// activation/consumer pair. This establishes only the acquisition record;
+/// the caller must still check each current binding and independently qualify
+/// the runtime before admitting execution.
+pub fn load_current_activation_receipt(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+) -> anyhow::Result<(
+    ResolvedManagedExternalContentActivation,
+    String,
+    ryeos_state::objects::ExternalContentActivationReceipt,
+)> {
+    let activation = crate::managed_external_content::resolve_activation(
+        state,
+        activation_ref,
+        acquisition_mode,
+    )?;
+    load_activation_receipt_for_resolution(state, activation)
+}
+
+/// Whether this node holds a completed activation head for the exact
+/// activation program it currently resolves. Absence is a fact a caller may
+/// name to the operator; presence is not authority, because the receipt it
+/// names is still authenticated by the full current join.
+pub fn has_completed_activation_head(
+    state: &crate::state::AppState,
+    activation: &ResolvedManagedExternalContentActivation,
+) -> anyhow::Result<bool> {
+    let activation_id =
+        ryeos_state::objects::ExternalContentActivationReceipt::derive_activation_id(
+            &activation.activation_program_digest,
+            &activation.document.consumer_ref,
+            &activation.publisher_fingerprint,
+        )?;
+    Ok(state
+        .state_store
+        .with_state_db(|db| {
+            db.read_generic_head_ref(
+                ryeos_state::objects::EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE,
+                &activation_id,
+            )
+        })?
+        .is_some())
+}
+
+fn load_activation_receipt_for_resolution(
+    state: &crate::state::AppState,
+    activation: ResolvedManagedExternalContentActivation,
+) -> anyhow::Result<(
+    ResolvedManagedExternalContentActivation,
+    String,
+    ryeos_state::objects::ExternalContentActivationReceipt,
+)> {
+    let activation_id =
+        ryeos_state::objects::ExternalContentActivationReceipt::derive_activation_id(
+            &activation.activation_program_digest,
+            &activation.document.consumer_ref,
+            &activation.publisher_fingerprint,
+        )?;
+    let namespace = ryeos_state::objects::EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE;
+    let head = state
+        .state_store
+        .with_state_db(|db| db.read_generic_head_ref(namespace, &activation_id))?
+        .ok_or_else(|| anyhow::anyhow!("current managed activation has no completed head"))?;
+    if head.signer != state.identity.fingerprint() {
+        bail!("managed activation head is not signed by the current node");
+    }
+    let authority = state.state_store.pinned_state_authority()?;
+    let cas = authority.cas_store()?;
+    let value = cas
+        .get_object(&head.target_hash)?
+        .ok_or_else(|| anyhow::anyhow!("managed activation head target is absent"))?;
+    let receipt = ryeos_state::objects::ExternalContentActivationReceipt::from_value(&value)?;
+    validate_current_activation_receipt(
+        &activation,
+        &activation_id,
+        state.identity.fingerprint(),
+        &receipt,
+    )?;
+    Ok((activation, head.target_hash, receipt))
+}
+
+/// Join one current managed activation component to its current authorized
+/// binding and exact large-content manifest. The mount is resolved from the
+/// signed consumer; the `realization` must come from its independently admitted
+/// execution definition. This relationship
+/// is deliberately not a runtime-qualification or execution grant.
+pub fn load_current_runtime_content_record(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+    realization: &ryeos_state::objects::ExternalContentRealization,
+) -> anyhow::Result<ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin> {
+    let (activation, receipt_hash, receipt) =
+        load_current_activation_receipt(state, activation_ref, acquisition_mode)?;
+    join_current_runtime_content_record(state, &activation, &receipt_hash, &receipt, realization)
+}
+
+/// Resolve the signed consumer selection and authenticate current source
+/// records from one activation resolution. The selected policy is resolved in
+/// that same checked generation. Exact manifest entries are checked against
+/// resident payload bytes. This does not approve qualification or authorize
+/// execution; recipe and applied-launch evidence remain independent checks.
+pub fn load_current_runtime_qualification_inputs(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+    realization: &ryeos_state::objects::ExternalContentRealization,
+) -> anyhow::Result<(
+    ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
+    ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
+    ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin,
+    ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
+)>{
+    let (activation, policy, declaration_authority) =
+        crate::managed_external_content::resolve_activation_qualification_authority(
+            state,
+            activation_ref,
+            acquisition_mode,
+            &realization.id,
+        )?;
+    let (activation, receipt_hash, receipt) =
+        load_activation_receipt_for_resolution(state, activation)?;
+    let allowance = activation.qualification_allowance(&realization.id)?.clone();
+    let authority = state.state_store.pinned_state_authority()?;
+    let _guard = authority.acquire_shared_guard()?;
+    let records = join_current_runtime_content_record(
+        state,
+        &activation,
+        &receipt_hash,
+        &receipt,
+        realization,
+    )?;
+    let limits = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let cas = authority.cas_store()?;
+    let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        &cas,
+        &realization.manifest_hash,
+        (ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64)
+            .min(limits.max_object_bytes),
+    )?;
+    let manifest = ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&value)?;
+    ryeos_state::external_content::payload::verify_large_manifest_payload(
+        &authority, &manifest, limits,
+    )?;
+    Ok((allowance, policy, records, declaration_authority))
+}
+
+/// Recheck source and signed selection at a later admission cut. Callers must
+/// retain all three prepared coordinates; a matching manifest alone does not
+/// preserve the activation, binding grant, policy or required claims.
+pub fn require_current_runtime_qualification_inputs(
+    state: &crate::state::AppState,
+    acquisition_mode: AcquisitionMode,
+    allowance: &ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
+    policy: &ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
+    subject: &ryeos_state::external_content::qualification_subject::ContentQualificationSubject,
+    declaration_authority: &ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
+) -> anyhow::Result<()> {
+    allowance.validate_policy_source(policy)?;
+    subject.validate()?;
+    let (current_allowance, current_policy, current_records, current_authority) =
+        load_current_runtime_qualification_inputs(
+            state,
+            &allowance.activation_ref,
+            acquisition_mode,
+            &subject.realization,
+        )?;
+    anyhow::ensure!(
+        &current_allowance == allowance
+            && &current_policy == policy
+            && &current_authority == declaration_authority,
+        "runtime qualification signed selection changed after preparation"
+    );
+    current_records.verify_retained_subject(subject)
+}
+
+fn join_current_runtime_content_record(
+    state: &crate::state::AppState,
+    activation: &ResolvedManagedExternalContentActivation,
+    receipt_hash: &str,
+    receipt: &ryeos_state::objects::ExternalContentActivationReceipt,
+    realization: &ryeos_state::objects::ExternalContentRealization,
+) -> anyhow::Result<ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin> {
+    let component = activation.component(&realization.id)?;
+    if component.declaration_kind != ryeos_engine::external_content::ExternalContentKind::Tree
+        || component.declaration_mount_root
+            != ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime
+        || component.recipe.storage
+            != crate::managed_external_content::ManagedComponentStorage::LargeContent
+        || component.expected_manifest_kind
+            != ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND
+    {
+        bail!("runtime activation component is not an exact large-content tree");
+    }
+    let component_receipt = receipt
+        .components
+        .iter()
+        .find(|record| record.id == component.recipe.id)
+        .ok_or_else(|| anyhow::anyhow!("runtime activation component has no retained binding"))?;
+    let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+        activation.document.consumer_ref.clone(),
+        activation.publisher_fingerprint.clone(),
+    )?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let cas = authority.cas_store()?;
+    let (binding_hash, binding) = crate::operator_external_content::active_binding_from_store(
+        &state.state_store,
+        &cas,
+        &component.expected_manifest_hash,
+        &consumer,
+        state.identity.fingerprint(),
+    )?
+    .ok_or_else(|| anyhow::anyhow!("runtime activation component has no current active binding"))?;
+    crate::operator_external_content::require_current_binding_authorizer(state, &binding)?;
+    if binding_hash != component_receipt.binding_hash {
+        bail!("runtime activation receipt does not name the current active binding");
+    }
+    let manifest_value = cas
+        .get_object(&component.expected_manifest_hash)?
+        .ok_or_else(|| anyhow::anyhow!("runtime activation large-content manifest is absent"))?;
+    let manifest =
+        ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&manifest_value)?;
+    ryeos_state::external_execution::runtime_content::RuntimeContentRecordJoin::verify(
+        receipt_hash,
+        receipt,
+        &binding_hash,
+        &binding,
+        &manifest,
+        realization,
+        &activation.document.consumer_ref,
+        &component.recipe.id,
+        &component.expected_manifest_hash,
+        &component.declaration_mount,
+        state.identity.fingerprint(),
+    )
+}
+
+fn validate_current_activation_receipt(
+    activation: &ResolvedManagedExternalContentActivation,
+    activation_id: &str,
+    node_fingerprint: &str,
+    receipt: &ryeos_state::objects::ExternalContentActivationReceipt,
+) -> anyhow::Result<()> {
+    receipt.validate()?;
+    if receipt.activation_id != activation_id
+        || receipt.activation_ref != activation.activation_ref
+        || receipt.activation_program_digest != activation.activation_program_digest
+        || receipt.consumer_ref != activation.document.consumer_ref
+        || receipt.publisher_fingerprint != activation.publisher_fingerprint
+        || receipt.node_fingerprint != node_fingerprint
+    {
+        bail!("managed activation receipt differs from current signed program or node");
+    }
+    let expected: std::collections::BTreeSet<_> = activation
+        .components
+        .iter()
+        .map(|component| component.recipe.id.as_str())
+        .collect();
+    let actual: std::collections::BTreeSet<_> = receipt
+        .components
+        .iter()
+        .map(|component| component.id.as_str())
+        .collect();
+    if expected.len() != activation.components.len()
+        || actual.len() != receipt.components.len()
+        || expected != actual
+    {
+        bail!("managed activation receipt component set differs from current signed program");
+    }
+    Ok(())
 }
 
 fn same_activation_subject(
@@ -387,6 +669,99 @@ fn validate_canonical_ref(label: &str, value: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn resolved_receipt_fixture() -> ResolvedManagedExternalContentActivation {
+        use crate::managed_external_content::{
+            ManagedActivationComponent, ManagedActivationComponentBounds,
+            ManagedActivationComponentShape, ManagedComponentStorage,
+            ManagedExternalContentActivation, ResolvedManagedActivationComponent,
+        };
+
+        let recipe = ManagedActivationComponent {
+            id: "runtime".to_owned(),
+            storage: ManagedComponentStorage::LargeContent,
+            shape: ManagedActivationComponentShape::Mapped { members: vec![] },
+        };
+        ResolvedManagedExternalContentActivation {
+            activation_ref: "config:fixture/activation".to_owned(),
+            activation_program_digest: "a".repeat(64),
+            publisher_fingerprint: "b".repeat(64),
+            document: ManagedExternalContentActivation {
+                schema: "fixture".to_owned(),
+                consumer_ref: "worker:fixture/hosted".to_owned(),
+                sources: vec![],
+                components: vec![recipe.clone()],
+            },
+            components: vec![ResolvedManagedActivationComponent {
+                recipe,
+                expected_manifest_hash: "d".repeat(64),
+                expected_manifest_kind: "fixture".to_owned(),
+                declaration_kind: ryeos_engine::external_content::ExternalContentKind::Tree,
+                declaration_mount_root:
+                    ryeos_engine::external_content::ExternalContentMountRoot::ExecutionRuntime,
+                declaration_mount: "runtime".to_owned(),
+                qualification_allowance: None,
+                capture_bounds: ManagedActivationComponentBounds {
+                    maximum_entries: 1,
+                    maximum_depth: 1,
+                    maximum_file_bytes: 1,
+                    maximum_total_bytes: 1,
+                },
+                expected_file_sha256: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn qualification_selection_requires_the_signed_consumer_allowance() {
+        use ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance;
+        let mut activation = resolved_receipt_fixture();
+        assert!(activation.qualification_allowance("runtime").is_err());
+        activation.components[0].qualification_allowance = Some(ContentQualificationAllowance {
+            activation_ref: activation.activation_ref.clone(),
+            policy_ref: "config:fixture/qualification-policy".into(),
+            required_claims: vec!["settled".into()],
+        });
+        assert_eq!(
+            activation
+                .qualification_allowance("runtime")
+                .unwrap()
+                .required_claims,
+            ["settled"]
+        );
+        activation.components[0]
+            .qualification_allowance
+            .as_mut()
+            .unwrap()
+            .activation_ref = "config:fixture/other".into();
+        assert!(activation.qualification_allowance("runtime").is_err());
+        assert!(activation.qualification_allowance("missing").is_err());
+    }
+
+    #[test]
+    fn current_receipt_requires_exact_program_node_and_component_set() {
+        let activation = resolved_receipt_fixture();
+        let mut retained = receipt('e', 'f');
+        let id = retained.activation_id.clone();
+        validate_current_activation_receipt(&activation, &id, &"c".repeat(64), &retained).unwrap();
+
+        retained.activation_program_digest = "3".repeat(64);
+        assert!(
+            validate_current_activation_receipt(&activation, &id, &"c".repeat(64), &retained)
+                .is_err()
+        );
+        let mut retained = receipt('e', 'f');
+        retained.components[0].id = "other".to_owned();
+        assert!(
+            validate_current_activation_receipt(&activation, &id, &"c".repeat(64), &retained)
+                .is_err()
+        );
+        let retained = receipt('e', 'f');
+        assert!(
+            validate_current_activation_receipt(&activation, &id, &"4".repeat(64), &retained)
+                .is_err()
+        );
+    }
+
     fn managed_policy() -> ManagedExternalContentActivationPolicy {
         ManagedExternalContentActivationPolicy {
             allow_online: true,
@@ -405,9 +780,10 @@ mod tests {
         }
     }
 
-    fn import_limits() -> crate::node_policy::sections::external_content::ExternalContentImportLimits
+    fn import_limits()
+    -> ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits
     {
-        crate::node_policy::sections::external_content::ExternalContentImportLimits {
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportLimits {
             max_depth: 8,
             max_entries: 64,
             max_file_bytes: 8192,
@@ -476,45 +852,53 @@ mod tests {
         );
     }
 
+    fn directory_identity(device: u64, inode: u64) -> lillux::PinnedDirectoryIdentity {
+        serde_json::from_value(
+            serde_json::json!({"filesystem": {"device": device}, "inode": inode}),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn offline_root_authority_digest_binds_only_the_selected_node_root() {
         let mut policy = ExternalContentImportPolicyRecord {
-            schema: 1,
+            schema: 2,
+            declared_roots: std::collections::BTreeMap::new(),
             roots: std::collections::BTreeMap::from([
                 (
                     "archives".to_owned(),
-                    crate::node_policy::sections::external_content::ExternalContentImportRoot {
+                    ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot {
                         path: std::path::PathBuf::from("/srv/ryeos-offline"),
-                        containing_device: 7,
-                        root_inode: 11,
+                        root_identity: directory_identity(7, 11),
+                        in_place: None,
                     },
                 ),
                 (
                     "unrelated".to_owned(),
-                    crate::node_policy::sections::external_content::ExternalContentImportRoot {
+                    ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportRoot {
                         path: std::path::PathBuf::from("/srv/unrelated"),
-                        containing_device: 8,
-                        root_inode: 12,
+                        root_identity: directory_identity(8, 12),
+                        in_place: None,
                     },
                 ),
             ]),
             limits: import_limits(),
             managed_activation:
-                crate::node_policy::sections::external_content::ManagedExternalContentPolicy {
+                ryeos_node_runtime::node_policy::sections::external_content::ManagedExternalContentPolicy {
                     enabled: true,
                     limits: Some(managed_policy()),
                 },
         };
         let baseline = offline_archive_root_authority_digest(&policy, "archives").unwrap();
 
-        policy.roots.get_mut("unrelated").unwrap().root_inode += 1;
+        policy.roots.get_mut("unrelated").unwrap().root_identity = directory_identity(8, 13);
         assert_eq!(
             baseline,
             offline_archive_root_authority_digest(&policy, "archives").unwrap(),
             "unselected roots must not perturb an offline acquisition job"
         );
 
-        policy.roots.get_mut("archives").unwrap().root_inode += 1;
+        policy.roots.get_mut("archives").unwrap().root_identity = directory_identity(7, 12);
         assert_ne!(
             baseline,
             offline_archive_root_authority_digest(&policy, "archives").unwrap(),

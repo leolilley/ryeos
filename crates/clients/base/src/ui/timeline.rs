@@ -1,37 +1,52 @@
-//! The thread-execution-stream concern, in one place.
+//! The thread-timeline concern, in one place.
 //!
-//! A ryeos "timeline" is not a chat transcript — it is the event log of a
-//! thread's execution (cognition turns, tool calls, forks, lifecycle). This
-//! module owns that feature end to end so it does not smear across the
-//! already-large `reducer`/`view_model`/`model` modules and so the execution
-//! milestones (status, directive header, limits, forks) land in one
-//! discoverable home as they grow:
+//! The daemon folds a chain's events into timeline items (entries, clusters,
+//! turn folds) by a signed definition; this module only maps those items onto the
+//! renderer contract and owns the client-side presentation state around them:
 //!
 //! - `RyeOsTimelineEntryVm` — the rendered entry shapes (clients render
 //!   these; the path stays `ui::view_model::RyeOsTimelineEntryVm` via a
 //!   re-export so existing imports are unaffected).
-//! - `timeline_entries` / `append_live_delta` — building the entries from
-//!   projected braid events plus the transient live cognition buffer.
-//! - `RyeOsLiveDelta` — the live buffer state.
-//! - `impl RyeOsCore { apply_thread_tail, … }` — the reducer semantics for
-//!   the head thread's SSE tail, reached by BOTH clients through `dispatch`
-//!   (the only ryeos-event-semantics authority; clients are pure transport).
+//! - `timeline_layout` — service items to entries, indents, detail sources
+//!   and collapsible sections.
+//! - `fold_timeline_window` — the windowed, fold-aware render projection.
+//! - `RyeOsLiveDelta` / `live_delta_entry` — the transient streamed cognition
+//!   text shown as a trailing in-progress block. It is not durable.
+//! - `impl RyeOsCore { apply_thread_tail }` — the head thread's live tail:
+//!   streamed text accumulates locally; anything else means the durable
+//!   timeline changed, so the timeline source is refetched.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::content::{ProjectedRecord, TimelineRole};
-use super::dto::CognitionOutPayload;
 use super::effect::RyeOsEffect;
 use super::event::RyeOsUiIntent;
 use super::model::RyeOsCore;
 use super::view_model::{RyeOsTone, tone_from_name};
 
-/// Detail source for one rendered timeline entry. Kept parallel to
-/// `RyeOsTimelineEntryVm`/indents so the view-model layer can apply a
-/// content-declared `projections.expand.fields` block without teaching the
-/// timeline entry enum about row expansion. `None` means the rendered entry is
-/// structural or coalesced prose with no single source event to expand.
+pub use ryeos_timeline::TIMELINE_CONTRACT_VERSION;
+
+/// Refuses a timeline response that is not the contract version this client
+/// speaks. There is no reader for any other version: a mismatch is a failed
+/// source with this message, never a best-effort drawing.
+pub fn require_timeline_contract(response: &Value) -> Result<(), String> {
+    match response.get("timeline_contract").and_then(Value::as_str) {
+        Some(TIMELINE_CONTRACT_VERSION) => Ok(()),
+        Some(other) => Err(format!(
+            "timeline contract mismatch: the daemon speaks '{other}', this client requires '{TIMELINE_CONTRACT_VERSION}'"
+        )),
+        None => Err(format!(
+            "timeline contract mismatch: the response names no contract version, this client requires '{TIMELINE_CONTRACT_VERSION}'"
+        )),
+    }
+}
+
+/// Detail source for one rendered timeline entry: the service item it came
+/// from, so the view-model layer can apply a content-declared
+/// `projections.expand.fields` block without teaching the entry enum about row
+/// expansion. `None` means the rendered entry is structural.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TimelineEntrySource {
     pub key: String,
@@ -39,7 +54,7 @@ pub(crate) struct TimelineEntrySource {
 }
 
 /// Accumulated live cognition text for one head thread, shown as a
-/// trailing in-progress block until the durable snapshot catches up.
+/// trailing in-progress block until the durable timeline catches up.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RyeOsLiveDelta {
     pub thread: String,
@@ -61,17 +76,20 @@ pub enum RyeOsTimelineEntryVm {
         meta: Option<String>,
         tone: RyeOsTone,
         /// What activating this entry (Enter on the point) does — e.g. a
-        /// forked-subthread line aims the route at that child thread so the
-        /// feed re-projects to its braid; an error terminal inspects its full
-        /// structured error. Most lines carry no intent.
+        /// child-thread link aims the route at that child so the feed
+        /// re-projects to its chain; an outcome with a reason inspects it.
+        /// Most lines carry no intent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         intent: Option<RyeOsUiIntent>,
-        /// A second affordance for this entry, surfaced through command overlays
-        /// (its Shift+Enter secondary and a distinct context item) rather than
-        /// a direct key — e.g. "retry this failed turn" beside the entry's
-        /// Enter=inspect intent. Most lines carry none.
+        /// A second, non-activating affordance on the line, surfaced through
+        /// the commands overlay — e.g. retrying the failed turn an outcome
+        /// reports. Most lines carry none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secondary_intent: Option<RyeOsUiIntent>,
+        /// The item's state in plain words (underscores as spaces), for the
+        /// accessible label. Lines with no state carry none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
     Pair {
         summary: String,
@@ -79,58 +97,1016 @@ pub enum RyeOsTimelineEntryVm {
         meta: Option<String>,
         tone: RyeOsTone,
         pending: bool,
+        /// The item's state in plain words (underscores as spaces), for the
+        /// accessible label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
     Separator {
         label: String,
     },
 }
 
-/// The section (turn) index of each entry. A `Separator` opens a new turn,
-/// so it heads the section it begins; entries before the first separator are
-/// section 0. Used to fold a whole turn shut from its header.
-pub(crate) fn timeline_sections(entries: &[RyeOsTimelineEntryVm]) -> Vec<usize> {
-    let mut sections = Vec::with_capacity(entries.len());
-    let mut current = 0usize;
-    for (i, entry) in entries.iter().enumerate() {
-        if i != 0 && matches!(entry, RyeOsTimelineEntryVm::Separator { .. }) {
-            current += 1;
-        }
-        sections.push(current);
+/// Decorations the renderers draw around an entry's text; they are not part
+/// of what a screen reader announces or a copy carries.
+const DECORATIONS: [char; 4] = ['✻', '↘', '▍', '▸'];
+
+/// The state word followed by the entry's own detail, so a label reads
+/// "fetch, failed: 404".
+fn with_state(state: Option<&str>, meta: Option<&str>) -> Option<String> {
+    match (state, meta) {
+        (Some(state), Some(meta)) => Some(format!("{state}: {meta}")),
+        (Some(state), None) => Some(state.to_string()),
+        (None, meta) => meta.map(str::to_string),
     }
-    sections
 }
 
-/// The section index per entry, plus the sections headed by a real
-/// `Separator` (the ones a fold key can collapse) — the per-entry metadata
-/// [`fold_timeline_window`] needs but does not itself derive. Depends only
-/// on `full`, so it is computed once when a source's entries are (re)built
-/// (`RyeOsTimelineSourceCache::sections`/`collapsible`) rather than
-/// rescanned on every windowed render frame.
-pub(crate) fn timeline_section_index(
-    full: &[RyeOsTimelineEntryVm],
-) -> (Vec<usize>, std::collections::BTreeSet<usize>) {
-    let sections = timeline_sections(full);
-    let mut collapsible = std::collections::BTreeSet::new();
-    for (i, entry) in full.iter().enumerate() {
-        if matches!(entry, RyeOsTimelineEntryVm::Separator { .. }) {
-            collapsible.insert(sections[i]);
-        }
-    }
-    (sections, collapsible)
+/// An item's `state` value as plain words: underscores become spaces.
+fn state_words(entry: &Value) -> Option<String> {
+    entry
+        .get("state")
+        .and_then(Value::as_str)
+        .map(|state| state.replace('_', " "))
+        .filter(|state| !state.trim().is_empty())
 }
 
-/// A timeline with folds applied: collapsed turns keep only their header
-/// (the `Separator`, marked), their bodies hidden.
+impl RyeOsTimelineEntryVm {
+    /// The entry's text as a screen reader or a copy receives it: the visible
+    /// text flattened, without drawing decorations, and never empty (an entry
+    /// with no text is named by its shape).
+    pub fn label(&self) -> String {
+        let join = |parts: &[Option<&str>]| {
+            parts
+                .iter()
+                .flatten()
+                .map(|part| part.replace(DECORATIONS, ""))
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (text, fallback) = match self {
+            Self::Block { text, .. } => (join(&[Some(text.as_str())]), "text"),
+            Self::Line {
+                primary,
+                meta,
+                state,
+                ..
+            } => {
+                let detail = with_state(state.as_deref(), meta.as_deref());
+                (join(&[Some(primary.as_str()), detail.as_deref()]), "line")
+            }
+            Self::Pair {
+                summary,
+                meta,
+                pending,
+                state,
+                ..
+            } => {
+                let state = state.as_deref().or(pending.then_some("running"));
+                let detail = with_state(state, meta.as_deref());
+                (join(&[Some(summary.as_str()), detail.as_deref()]), "step")
+            }
+            Self::Separator { label } => (join(&[Some(label.as_str())]), "message"),
+        };
+        if text.is_empty() {
+            fallback.to_string()
+        } else {
+            text
+        }
+    }
+}
+
+/// What a timeline entry can be asked to do beyond its own activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RyeOsTimelineEntryAction {
+    /// Copy the entry's plain-text label.
+    CopyText,
+    /// Fetch the raw events behind the entry and copy them.
+    CopyRaw,
+    /// Fetch the raw events behind the entry and show them in the inspector.
+    InspectRaw,
+}
+
+/// The status lane under the transcript: what the thread is doing now, in the
+/// words the definition's lane table gives. A renderer reserves its height
+/// whether or not a lane is present, so the transcript does not jump.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTimelineLaneVm {
+    pub label: String,
+    pub tone: RyeOsTone,
+}
+
+/// A pending ask docked at the tail of the thread tile, directly above the
+/// composer. While pending the ask is drawn here only; once answered it is
+/// an ordinary entry in the flow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTimelineDockVm {
+    /// The ask entry's id.
+    pub id: String,
+    pub entry: RyeOsTimelineEntryVm,
+    /// What the view lets the operator do with the ask. Empty where the
+    /// surface does not admit answering, so an observation-only surface shows
+    /// the ask without buttons.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<RyeOsTimelineDockActionVm>,
+}
+
+/// One action on a docked ask: a view affordance eligible for the ask.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTimelineDockActionVm {
+    pub label: String,
+    /// The key cap the button shows: the label's initial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The affordance's invocation; absent when it is not enabled for this ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<RyeOsUiIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+}
+
+/// Whether a service item is a pending ask. A pending ask is drawn in the
+/// dock and only there; once answered it is an ordinary entry. This one
+/// condition both puts an ask in the dock and keeps it out of the feed.
+fn is_docked(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("ask")
+        && item.get("state").and_then(Value::as_str) == Some("pending")
+}
+
+/// The role of one service item: its entry type, or `cluster` / `recap`.
+pub(crate) fn item_role(item: &Value) -> String {
+    match item.get("item").and_then(Value::as_str) {
+        Some("cluster") => "cluster".to_string(),
+        Some("recap") => "recap".to_string(),
+        _ => item
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or("entry")
+            .to_string(),
+    }
+}
+
+/// The inclusive `chain_seq` range of the events behind one service item: an
+/// entry's own range, a cluster's span over its members. A recap has none.
+pub(crate) fn item_seq_range(item: &Value) -> Option<(i64, i64)> {
+    let own = |entry: &Value| {
+        let seq = entry.get("seq")?.as_array()?;
+        Some((seq.first()?.as_i64()?, seq.get(1)?.as_i64()?))
+    };
+    if item.get("item").and_then(Value::as_str) == Some("cluster") {
+        return item
+            .get("members")?
+            .as_array()?
+            .iter()
+            .filter_map(own)
+            .reduce(|(first, last), (a, b)| (first.min(a), last.max(b)));
+    }
+    own(item)
+}
+
+/// The full, unfolded timeline built from one service response, with the
+/// per-entry metadata the windowed projection needs. Built once when a source
+/// response lands, never per render frame.
+///
+/// Sections group entries so a fold key can collapse them. Every section has
+/// at most one parent (a cluster nests inside its exchange); the first entry
+/// placed in a collapsible section is its header and stays visible when the
+/// section is folded.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TimelineLayout {
+    pub entries: Vec<RyeOsTimelineEntryVm>,
+    /// Nesting depth per entry.
+    pub indents: Vec<u8>,
+    pub sources: Vec<Option<TimelineEntrySource>>,
+    /// Innermost section per entry.
+    pub sections: Vec<usize>,
+    /// Whether the entry heads its section.
+    pub headers: Vec<bool>,
+    /// Parent section per section id.
+    pub section_parent: Vec<Option<usize>>,
+    /// Sections that can be folded (they have a header entry).
+    pub collapsible: BTreeSet<usize>,
+    /// Stable fold key per section id: the item id of a cluster or recap, the
+    /// exchange id of a turn. Section ids shift when items are inserted above;
+    /// these keys do not, so an operator's fold choice is stored by key.
+    pub section_keys: Vec<Option<String>>,
+    /// Sections that are folded until the operator opens them: clusters and
+    /// recaps. Exchange sections (the conversation turns) start open.
+    pub starts_collapsed: BTreeSet<usize>,
+}
+
+impl TimelineLayout {
+    /// Whether a section is folded given the operator's departures from the
+    /// defaults (`overrides`: section key to folded).
+    pub(crate) fn section_folded(
+        &self,
+        section: usize,
+        overrides: &BTreeMap<String, bool>,
+    ) -> bool {
+        if !self.collapsible.contains(&section) {
+            return false;
+        }
+        let default = self.starts_collapsed.contains(&section);
+        self.section_keys
+            .get(section)
+            .and_then(Option::as_ref)
+            .and_then(|key| overrides.get(key))
+            .copied()
+            .unwrap_or(default)
+    }
+}
+
+const SUMMARY_MAX: usize = 120;
+
+fn clip(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if text.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+}
+
+fn slot<'a>(entry: &'a Value, name: &str) -> Option<&'a str> {
+    entry
+        .get("slots")
+        .and_then(|slots| slots.get(name))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
+fn entry_tone(entry: &Value) -> RyeOsTone {
+    if let Some(name) = entry.get("tone").and_then(Value::as_str) {
+        return tone_from_name(Some(name));
+    }
+    match entry.get("state").and_then(Value::as_str) {
+        Some("running") => RyeOsTone::Accent,
+        Some("retrying") => RyeOsTone::Warn,
+        _ => RyeOsTone::Neutral,
+    }
+}
+
+fn join_meta(parts: &[Option<&str>]) -> Option<String> {
+    let parts: Vec<String> = parts
+        .iter()
+        .flatten()
+        .map(|part| clip(first_line(part), SUMMARY_MAX))
+        .filter(|part| !part.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// Map one service entry onto the renderer contract by its type, state, tone
+/// and slots.
+fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
+    let kind = entry.get("type").and_then(Value::as_str).unwrap_or("");
+    let state = entry.get("state").and_then(Value::as_str);
+    let tone = entry_tone(entry);
+    let headline = slot(entry, "headline");
+    let detail = slot(entry, "detail");
+    let body = slot(entry, "body");
+    let badge = slot(entry, "badge");
+    let reason = slot(entry, "reason");
+    let tool = slot(entry, "tool");
+    let target = slot(entry, "target");
+    match kind {
+        // The operator's words are drawn whole: the bubble wraps them.
+        "message" => RyeOsTimelineEntryVm::Separator {
+            label: body.or(headline).unwrap_or("message").trim().to_string(),
+        },
+        "prose" => RyeOsTimelineEntryVm::Block {
+            text: body.or(headline).unwrap_or_default().to_string(),
+            tone,
+        },
+        // A thought is one quiet line; its text is the opened detail.
+        "thought" => RyeOsTimelineEntryVm::Line {
+            primary: headline.unwrap_or("Thought").to_string(),
+            meta: None,
+            tone: RyeOsTone::Neutral,
+            intent: None,
+            secondary_intent: None,
+            state: None,
+        },
+        "activity" => {
+            let summary = headline.or(tool).unwrap_or("activity");
+            let tool_meta = if headline.is_some() { tool } else { None };
+            RyeOsTimelineEntryVm::Pair {
+                summary: clip(first_line(summary), SUMMARY_MAX),
+                meta: join_meta(&[tool_meta, detail, badge]),
+                tone,
+                pending: matches!(state, Some("running" | "retrying")),
+                state: state_words(entry),
+            }
+        }
+        "link" => RyeOsTimelineEntryVm::Line {
+            primary: format!("↘ {}", headline.unwrap_or("child")),
+            meta: target.map(|thread| format!("child thread {thread}")),
+            tone,
+            intent: target.map(|thread| RyeOsUiIntent::DrillThread {
+                thread_id: thread.to_string(),
+                chain_root_id: thread.to_string(),
+                label: headline.map(str::to_string),
+            }),
+            secondary_intent: None,
+            // The cost or size badge follows the state word.
+            state: match (state_words(entry), badge) {
+                (Some(state), Some(badge)) => Some(format!("{state} · {badge}")),
+                (state, _) => state,
+            },
+        },
+        // The reason leads; the state word and the headline follow it.
+        "outcome" => {
+            let label = state.or(headline).unwrap_or("outcome");
+            let primary = match reason {
+                Some(reason) => clip(first_line(reason), SUMMARY_MAX),
+                None => label.to_string(),
+            };
+            // The inspector's title still names the state beside the reason.
+            let intent = reason.map(|reason| RyeOsUiIntent::InspectSummary {
+                title: format!("{label} — {}", clip(first_line(reason), SUMMARY_MAX)),
+                detail: entry.clone(),
+            });
+            RyeOsTimelineEntryVm::Line {
+                primary,
+                meta: join_meta(&[headline.filter(|text| Some(*text) != Some(label)), detail]),
+                tone,
+                intent,
+                secondary_intent: None,
+                state: reason.and_then(|_| state_words(entry)),
+            }
+        }
+        "marker" => RyeOsTimelineEntryVm::Line {
+            primary: clip(
+                first_line(headline.or(detail).or(body).unwrap_or("marker")),
+                SUMMARY_MAX,
+            ),
+            meta: join_meta(&[if headline.is_some() { detail } else { None }, target]),
+            tone,
+            intent: None,
+            secondary_intent: None,
+            state: state_words(entry),
+        },
+        "ask" => RyeOsTimelineEntryVm::Line {
+            primary: clip(
+                first_line(headline.or(body).or(detail).unwrap_or("ask")),
+                SUMMARY_MAX,
+            ),
+            meta: join_meta(&[if headline.is_some() { detail } else { None }]),
+            tone: if entry.get("tone").is_some() {
+                tone
+            } else {
+                RyeOsTone::Accent
+            },
+            intent: None,
+            secondary_intent: None,
+            state: state_words(entry),
+        },
+        other => RyeOsTimelineEntryVm::Line {
+            primary: if other.is_empty() { "item" } else { other }.to_string(),
+            meta: join_meta(&[headline, detail]),
+            tone,
+            intent: None,
+            secondary_intent: None,
+            state: state_words(entry),
+        },
+    }
+}
+
+/// An entry that projects a `retry_input` slot offers that input back as a
+/// pre-filled continuation of its own thread, for the operator to review and
+/// resubmit. The definition decides which entries carry the slot; the client
+/// names no event type.
+fn retry_intent(entry: &Value, chain_root_id: &str) -> Option<RyeOsUiIntent> {
+    let input = slot(entry, "retry_input")?;
+    let thread_id = entry.get("thread").and_then(Value::as_str)?;
+    (!chain_root_id.is_empty()).then(|| RyeOsUiIntent::PrefillRetryTurn {
+        thread_id: thread_id.to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        input: input.to_string(),
+    })
+}
+
+/// A token count in the short form a usage line reads: whole below a
+/// thousand, thousands as `K`, millions with one decimal as `M`.
+fn short_count(count: i64) -> String {
+    if count < 1_000 {
+        count.to_string()
+    } else if count < 1_000_000 {
+        format!("{}K", count / 1_000)
+    } else {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    }
+}
+
+/// The chain's usage totals from a response's `summary`, as the quiet line the
+/// composer carries ("184K in · 21K out · $1.62 · 7 turns"). `None` when the
+/// response carries no summary, so the line only appears where it means
+/// something.
+pub(crate) fn usage_text(response: &Value) -> Option<String> {
+    let summary = response.get("summary")?;
+    let count = |field: &str| summary.get(field).and_then(Value::as_i64).unwrap_or(0);
+    let cost = summary
+        .get("spend_usd")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let turns = count("turns");
+    Some(format!(
+        "{} in · {} out · ${cost:.2} · {turns} {}",
+        short_count(count("input_tokens")),
+        short_count(count("output_tokens")),
+        if turns == 1 { "turn" } else { "turns" },
+    ))
+}
+
+/// The "N older" line that opens a windowed timeline. Activating it runs
+/// `intent`, when the view declares how to widen the window.
+fn older_entry(older: u64, intent: Option<RyeOsUiIntent>) -> RyeOsTimelineEntryVm {
+    RyeOsTimelineEntryVm::Line {
+        primary: format!("{older} older"),
+        meta: None,
+        tone: RyeOsTone::Neutral,
+        intent,
+        secondary_intent: None,
+        state: None,
+    }
+}
+
+/// Every entry in a response window, in order, including those a cluster or a
+/// turn fold holds.
+fn window_entries<'a>(items: &'a [Value], out: &mut Vec<&'a Value>) {
+    for item in items {
+        match item.get("item").and_then(Value::as_str) {
+            Some("entry") => out.push(item),
+            Some("cluster" | "recap") => window_entries(item_members(item), out),
+            _ => {}
+        }
+    }
+}
+
+/// The status lane a response names, with the tone of the entry it matched
+/// when that entry is in the window.
+pub(crate) fn timeline_lane(response: &Value, items: &[Value]) -> Option<RyeOsTimelineLaneVm> {
+    let lane = response.get("lane").filter(|lane| lane.is_object())?;
+    let label = lane
+        .get("label")
+        .and_then(Value::as_str)
+        .filter(|label| !label.is_empty())?;
+    let mut entries = Vec::new();
+    window_entries(items, &mut entries);
+    let id = lane.get("entry").and_then(Value::as_str);
+    let tone = entries
+        .into_iter()
+        .find(|entry| id.is_some() && entry.get("id").and_then(Value::as_str) == id)
+        .map_or(RyeOsTone::Accent, entry_tone);
+    Some(RyeOsTimelineLaneVm {
+        label: label.to_string(),
+        tone,
+    })
+}
+
+/// The actions a docked ask offers: the view's affordances that declare when
+/// they are visible and are visible for the ask's record. The activate
+/// affordance and affordances with no condition belong to the transcript, not
+/// to an ask. The record is the ask's fields and the chain id, so an
+/// affordance names them as `{record.<field>}`. An affordance the surface does
+/// not admit is already absent from the binding.
+fn dock_actions(
+    binding: &super::content::ViewBinding,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+    view_ref: &str,
+    record: &Value,
+) -> Vec<RyeOsTimelineDockActionVm> {
+    let activate = super::view_model::activate_affordance(binding);
+    binding
+        .affordances
+        .iter()
+        .filter_map(|affordance| {
+            let id = affordance.get("id").and_then(Value::as_str)?;
+            affordance.get("visible_when")?;
+            if activate.as_deref() == Some(id) {
+                return None;
+            }
+            let eligibility = super::content::affordance_eligibility(affordance, record);
+            if !eligibility.visible {
+                return None;
+            }
+            let label = affordance
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(id)
+                .to_string();
+            Some(RyeOsTimelineDockActionVm {
+                key: label
+                    .chars()
+                    .next()
+                    .map(|initial| initial.to_uppercase().to_string()),
+                label,
+                intent: eligibility
+                    .enabled
+                    .then(|| RyeOsUiIntent::InvokeAffordance {
+                        instance_key: instance_key.clone(),
+                        view_ref: view_ref.to_string(),
+                        affordance_id: id.to_string(),
+                        record: record.clone(),
+                    }),
+                disabled_reason: eligibility.disabled_reason,
+            })
+        })
+        .collect()
+}
+
+/// The asks whose latest state is pending, in window order, with the actions
+/// the view offers for each.
+pub(crate) fn pending_asks(
+    binding: &super::content::ViewBinding,
+    response: &Value,
+    items: &[Value],
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Vec<RyeOsTimelineDockVm> {
+    let mut entries = Vec::new();
+    window_entries(items, &mut entries);
+    let chain_root_id = response
+        .get("chain_root_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut asks: Vec<RyeOsTimelineDockVm> = entries
+        .into_iter()
+        .filter(|entry| is_docked(entry))
+        .map(|entry| {
+            let slot_text = |name: &str| slot(entry, name);
+            // Without the fence fields an ask cannot be answered from here.
+            let actions = match (slot_text("approval_id"), slot_text("request_digest")) {
+                (Some(approval_id), Some(request_digest)) if !chain_root_id.is_empty() => {
+                    let record = serde_json::json!({
+                        "type": "ask",
+                        "state": "pending",
+                        "chain_root_id": chain_root_id,
+                        "approval_id": approval_id,
+                        "request_digest": request_digest,
+                        "accept_allowed": slot_text("accept_allowed") == Some("true"),
+                    });
+                    dock_actions(binding, instance_key, view_ref, &record)
+                }
+                _ => Vec::new(),
+            };
+            RyeOsTimelineDockVm {
+                id: entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                entry: entry_vm(entry),
+                actions,
+            }
+        })
+        .collect();
+    // Keys answer the first ask only, so only its buttons show key caps.
+    for ask in asks.iter_mut().skip(1) {
+        for action in &mut ask.actions {
+            action.key = None;
+        }
+    }
+    asks
+}
+
+/// Events the definition has no rule for: how many, and the noun the
+/// definition counts them under.
+pub(crate) struct SystemEvents {
+    noun_one: String,
+    noun_many: String,
+    /// Event type and count, in the response's order.
+    counts: Vec<(String, u64)>,
+}
+
+/// The response's undeclared events. `None` when there are none, or when the
+/// response carries no noun to count them under (the wording is the
+/// definition's, never the client's).
+fn system_events(response: &Value) -> Option<SystemEvents> {
+    let counts: Vec<(String, u64)> = response
+        .get("undeclared")?
+        .as_object()?
+        .iter()
+        .filter_map(|(event_type, count)| Some((event_type.clone(), count.as_u64()?)))
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    if counts.is_empty() {
+        return None;
+    }
+    let noun = response.get("notice_noun")?;
+    Some(SystemEvents {
+        noun_one: noun.get("one")?.as_str()?.to_string(),
+        noun_many: noun.get("many")?.as_str()?.to_string(),
+        counts,
+    })
+}
+
+impl SystemEvents {
+    fn headline(&self) -> String {
+        let total: u64 = self.counts.iter().map(|(_, count)| count).sum();
+        let noun = if total == 1 {
+            &self.noun_one
+        } else {
+            &self.noun_many
+        };
+        format!("{total} {noun}")
+    }
+}
+
+/// Fold key of the system events notice.
+const SYSTEM_EVENTS_KEY: &str = "notice:system_events";
+
+fn duration_text(seconds: i64) -> String {
+    if seconds >= 3600 {
+        format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Incremental construction of a [`TimelineLayout`].
+struct LayoutBuilder {
+    layout: TimelineLayout,
+    /// Whether each section id may be folded once it has a header.
+    foldable: Vec<bool>,
+    current: usize,
+    exchange: Option<String>,
+    /// The next entry placed directly in `current` heads that section.
+    header_pending: bool,
+    indent_by_id: HashMap<String, u8>,
+    /// The chain the response describes; a retry continues within it.
+    chain_root_id: String,
+    /// Leave docked asks out: the feed of a client that draws the dock.
+    hide_docked: bool,
+}
+
+impl LayoutBuilder {
+    fn new(chain_root_id: &str, hide_docked: bool) -> Self {
+        Self {
+            hide_docked,
+            layout: TimelineLayout {
+                section_parent: vec![None],
+                section_keys: vec![None],
+                ..TimelineLayout::default()
+            },
+            foldable: vec![false],
+            current: 0,
+            exchange: None,
+            header_pending: false,
+            indent_by_id: HashMap::new(),
+            chain_root_id: chain_root_id.to_string(),
+        }
+    }
+
+    fn new_section(
+        &mut self,
+        parent: Option<usize>,
+        foldable: bool,
+        key: Option<String>,
+        starts_collapsed: bool,
+    ) -> usize {
+        self.layout.section_parent.push(parent);
+        self.foldable.push(foldable);
+        let section = self.layout.section_parent.len() - 1;
+        // A section whose item has no id still folds, by position.
+        self.layout
+            .section_keys
+            .push(key.or_else(|| foldable.then(|| format!("section:{section}"))));
+        if starts_collapsed {
+            self.layout.starts_collapsed.insert(section);
+        }
+        section
+    }
+
+    fn push(
+        &mut self,
+        entry: RyeOsTimelineEntryVm,
+        indent: u8,
+        source: Option<TimelineEntrySource>,
+        section: usize,
+        header: bool,
+    ) {
+        if header && self.foldable[section] {
+            self.layout.collapsible.insert(section);
+        }
+        self.layout.entries.push(entry);
+        self.layout.indents.push(indent);
+        self.layout.sources.push(source);
+        self.layout.sections.push(section);
+        self.layout.headers.push(header);
+    }
+
+    /// Items of a new exchange open a new foldable section; leaving every
+    /// exchange opens a plain one.
+    fn enter_exchange(&mut self, exchange: Option<&str>) {
+        if exchange == self.exchange.as_deref() {
+            return;
+        }
+        self.exchange = exchange.map(str::to_string);
+        let key = exchange.map(|id| format!("exchange:{id}"));
+        self.current = self.new_section(None, exchange.is_some(), key, false);
+        self.header_pending = true;
+    }
+
+    fn indent_for(&mut self, entry: &Value, base: u8) -> u8 {
+        let indent = entry
+            .get("parent")
+            .and_then(Value::as_str)
+            .and_then(|parent| self.indent_by_id.get(parent))
+            .map_or(base, |parent| parent.saturating_add(1));
+        if let Some(id) = entry.get("id").and_then(Value::as_str) {
+            self.indent_by_id.insert(id.to_string(), indent);
+        }
+        indent
+    }
+
+    fn push_entry(&mut self, entry: &Value, base: u8, section: usize, header: bool) {
+        let indent = self.indent_for(entry, base);
+        let key = entry.get("id").and_then(Value::as_str).unwrap_or("");
+        let mut vm = entry_vm(entry);
+        if let RyeOsTimelineEntryVm::Line {
+            secondary_intent, ..
+        } = &mut vm
+        {
+            *secondary_intent = retry_intent(entry, &self.chain_root_id);
+        }
+        self.push(
+            vm,
+            indent,
+            Some(TimelineEntrySource {
+                key: format!("item:{key}"),
+                raw: entry.clone(),
+            }),
+            section,
+            header,
+        );
+    }
+
+    /// A foldable group: a header line, then its members one level deeper. A
+    /// recap's members may themselves be clusters, which nest as sub-groups.
+    fn group(&mut self, item: &Value, parent: usize, indent: u8) {
+        let id = item.get("id").and_then(Value::as_str).unwrap_or("");
+        let section = self.new_section(
+            Some(parent),
+            true,
+            (!id.is_empty()).then(|| format!("item:{id}")),
+            true,
+        );
+        let (primary, meta) = match item.get("item").and_then(Value::as_str) {
+            Some("recap") => {
+                let work = item.get("work").and_then(Value::as_u64).unwrap_or(0);
+                let primary = match item.get("duration_s").and_then(Value::as_i64) {
+                    Some(seconds) => format!("Worked for {}", duration_text(seconds)),
+                    None => "Worked".to_string(),
+                };
+                (primary, Some(format!("{work} steps")))
+            }
+            _ => (
+                item.get("headline")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                None,
+            ),
+        };
+        let key = item.get("id").and_then(Value::as_str).unwrap_or("");
+        self.push(
+            RyeOsTimelineEntryVm::Line {
+                primary,
+                meta,
+                tone: RyeOsTone::Neutral,
+                intent: None,
+                secondary_intent: None,
+                state: None,
+            },
+            indent,
+            Some(TimelineEntrySource {
+                key: format!("item:{key}"),
+                raw: item.clone(),
+            }),
+            section,
+            true,
+        );
+        for member in item_members(item) {
+            if member.get("item").and_then(Value::as_str) == Some("cluster") {
+                self.group(member, section, indent + 1);
+            } else if !(self.hide_docked && is_docked(member)) {
+                self.push_entry(member, indent + 1, section, false);
+            }
+        }
+    }
+
+    /// The system events notice: a folded group whose header counts the events
+    /// and whose members list each event type with its count.
+    fn notice(&mut self, notice: &SystemEvents) {
+        let section = self.new_section(None, true, Some(SYSTEM_EVENTS_KEY.to_string()), true);
+        let line = |primary: String, meta: Option<String>| RyeOsTimelineEntryVm::Line {
+            primary,
+            meta,
+            tone: RyeOsTone::Neutral,
+            intent: None,
+            secondary_intent: None,
+            state: None,
+        };
+        self.push(line(notice.headline(), None), 0, None, section, true);
+        for (event_type, count) in &notice.counts {
+            self.push(
+                line(event_type.clone(), Some(count.to_string())),
+                1,
+                None,
+                section,
+                false,
+            );
+        }
+    }
+
+    fn item(&mut self, item: &Value) {
+        match item.get("item").and_then(Value::as_str) {
+            Some("entry") if self.hide_docked && is_docked(item) => {}
+            Some("entry") => {
+                self.enter_exchange(item.get("exchange").and_then(Value::as_str));
+                let header = std::mem::take(&mut self.header_pending);
+                self.push_entry(item, 0, self.current, header);
+            }
+            Some("cluster") => {
+                let members = item_members(item);
+                self.enter_exchange(
+                    members
+                        .first()
+                        .and_then(|member| member.get("exchange"))
+                        .and_then(Value::as_str),
+                );
+                self.group(item, self.current, 0);
+            }
+            Some("recap") => {
+                self.enter_exchange(item.get("exchange").and_then(Value::as_str));
+                self.group(item, self.current, 0);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn item_members(item: &Value) -> &[Value] {
+    item.get("members")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+}
+
+/// Map a service response's items onto the renderer contract. `lead` entries
+/// (the chain header, the "N older" line) open the timeline as structural
+/// lines with no item behind them.
+pub(crate) fn timeline_layout(
+    items: &[Value],
+    chain_root_id: &str,
+    lead: Vec<RyeOsTimelineEntryVm>,
+) -> TimelineLayout {
+    build_layout(items, chain_root_id, lead, None, false)
+}
+
+/// [`timeline_layout`] with the system events notice, a folded group after the
+/// lead lines.
+fn build_layout(
+    items: &[Value],
+    chain_root_id: &str,
+    lead: Vec<RyeOsTimelineEntryVm>,
+    notice: Option<&SystemEvents>,
+    hide_docked: bool,
+) -> TimelineLayout {
+    let mut builder = LayoutBuilder::new(chain_root_id, hide_docked);
+    for entry in lead {
+        builder.push(entry, 0, None, 0, false);
+    }
+    if let Some(notice) = notice {
+        builder.notice(notice);
+        // The items that follow sit outside the notice's section.
+        builder.current = 0;
+    }
+    for item in items {
+        builder.item(item);
+    }
+    builder.layout
+}
+
+/// The intent behind the "N older" line: the view's `selection.activate`
+/// affordance, handed `{older, next_limit}` as its record. Absent when the
+/// view names no such affordance or the service offers no wider window.
+fn older_intent(
+    binding: &super::content::ViewBinding,
+    response: &Value,
+    older: u64,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Option<RyeOsUiIntent> {
+    let next_limit = response.get("next_limit").and_then(Value::as_u64)?;
+    let affordance_id = super::view_model::activate_affordance(binding)?;
+    let record = serde_json::json!({ "older": older, "next_limit": next_limit });
+    let affordance = binding
+        .affordances
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(affordance_id.as_str()))?;
+    super::content::affordance_eligibility(affordance, &record)
+        .enabled
+        .then(|| RyeOsUiIntent::InvokeAffordance {
+            instance_key: instance_key.clone(),
+            view_ref: view_ref.to_string(),
+            affordance_id,
+            record,
+        })
+}
+
+/// The layout for a bound timeline view's source response, as mounted at
+/// `instance_key`.
+pub(crate) fn timeline_layout_for(
+    binding: &super::content::ViewBinding,
+    response: &Value,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> TimelineLayout {
+    let older = response.get("older").and_then(Value::as_u64).unwrap_or(0);
+    let mut lead = Vec::new();
+    if older > 0 {
+        lead.push(older_entry(
+            older,
+            older_intent(binding, response, older, instance_key, view_ref),
+        ));
+    }
+    build_layout(
+        super::content::source_collection(binding, response),
+        response
+            .get("chain_root_id")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        lead,
+        system_events(response).as_ref(),
+        true,
+    )
+}
+
+/// The window to store after a source response arrives. A response carrying
+/// `order` is an incremental update: its `items` are upserted by id into the
+/// stored window, and the result holds the window's items in `order`. `None`
+/// means an id in `order` is in neither the update nor the stored window, or
+/// the stored window was folded by a different definition (another
+/// `definition_digest`), so the stored window cannot be brought current from
+/// this update and the caller refetches the whole window. A response without
+/// `order` is a whole window.
+pub(crate) fn merge_window(stored: Option<&Value>, mut update: Value) -> Option<Value> {
+    let Some(order) = update.get("order").and_then(Value::as_array).cloned() else {
+        return Some(update);
+    };
+    // An upsert is only meaningful against a window folded by the same
+    // definition: a changed definition re-folds every entry.
+    let digest = |response: &Value| {
+        response
+            .get("definition_digest")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    if stored.is_some_and(|held| digest(held) != digest(&update)) {
+        return None;
+    }
+    let id_of = |item: &Value| item.get("id").and_then(Value::as_str).map(str::to_string);
+    let mut window: HashMap<String, Value> = HashMap::new();
+    let held = stored
+        .and_then(|response| response.get("items"))
+        .and_then(Value::as_array);
+    let sent = update.get("items").and_then(Value::as_array);
+    for item in held.into_iter().flatten().chain(sent.into_iter().flatten()) {
+        window.insert(id_of(item)?, item.clone());
+    }
+    let items = order
+        .iter()
+        .map(|id| window.remove(id.as_str()?))
+        .collect::<Option<Vec<Value>>>()?;
+    let fields = update.as_object_mut()?;
+    fields.remove("order");
+    fields.insert("items".to_string(), Value::Array(items));
+    Some(update)
+}
+
+/// A timeline with folds applied, as a bounded render window.
 pub(crate) struct FoldedTimeline {
     pub entries: Vec<RyeOsTimelineEntryVm>,
     /// Section index per *visible* entry (parallel to `entries`).
     pub sections: Vec<usize>,
-    /// Call-tree indent depth per *visible* entry (parallel to `entries`).
+    /// Nesting depth per *visible* entry (parallel to `entries`).
     pub indents: Vec<u8>,
     /// Detail sources per *visible* entry (parallel to `entries`).
     pub sources: Vec<Option<TimelineEntrySource>>,
-    /// Sections that *can* be folded — those headed by a real `Separator`.
-    pub collapsible: std::collections::BTreeSet<usize>,
+    /// Sections that *can* be folded.
+    pub collapsible: BTreeSet<usize>,
 }
 
 pub(crate) struct FoldedTimelineWindow {
@@ -141,116 +1117,78 @@ pub(crate) struct FoldedTimelineWindow {
     pub cursors: Vec<usize>,
 }
 
-/// Apply the operator's folds to a coalesced timeline. A section is foldable
-/// only if it is headed by a `Separator` (section 0 without one can't collapse
-/// to nothing). Collapsed sections keep their header, marked `▸`, body hidden.
-/// `full_indents` is the call-tree depth parallel to `full`; it is filtered in
-/// lockstep with the entries so the visible `indents` stay aligned.
-pub(crate) fn fold_timeline(
-    full: Vec<RyeOsTimelineEntryVm>,
-    full_indents: Vec<u8>,
-    full_sources: Vec<Option<TimelineEntrySource>>,
-    collapsed: &std::collections::BTreeSet<usize>,
-) -> FoldedTimeline {
-    let section_of = timeline_sections(&full);
-    let is_header: Vec<bool> = (0..full.len())
-        .map(|i| i == 0 || section_of[i] != section_of[i - 1])
-        .collect();
-    let mut collapsible = std::collections::BTreeSet::new();
-    for i in 0..full.len() {
-        if is_header[i] && matches!(full[i], RyeOsTimelineEntryVm::Separator { .. }) {
-            collapsible.insert(section_of[i]);
-        }
+/// Mark a folded section's header so it reads as collapsed.
+fn folded_header(entry: &RyeOsTimelineEntryVm) -> RyeOsTimelineEntryVm {
+    match entry {
+        RyeOsTimelineEntryVm::Separator { label } => RyeOsTimelineEntryVm::Separator {
+            label: format!("{label} ▸"),
+        },
+        RyeOsTimelineEntryVm::Line {
+            primary,
+            meta,
+            tone,
+            intent,
+            secondary_intent,
+            state,
+        } => RyeOsTimelineEntryVm::Line {
+            primary: format!("{primary} ▸"),
+            meta: meta.clone(),
+            tone: *tone,
+            intent: intent.clone(),
+            secondary_intent: secondary_intent.clone(),
+            state: state.clone(),
+        },
+        other => other.clone(),
     }
-    let mut entries = Vec::new();
-    let mut sections = Vec::new();
-    let mut indents = Vec::new();
-    let mut sources = Vec::new();
-    for (i, entry) in full.into_iter().enumerate() {
-        let sec = section_of[i];
-        let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
-        if folded && !is_header[i] {
-            continue;
-        }
-        let entry = if folded {
-            match entry {
-                RyeOsTimelineEntryVm::Separator { label } => RyeOsTimelineEntryVm::Separator {
-                    label: format!("{label} ▸"),
-                },
-                other => other,
-            }
-        } else {
-            entry
-        };
-        entries.push(entry);
-        sections.push(sec);
-        indents.push(full_indents.get(i).copied().unwrap_or(0));
-        sources.push(full_sources.get(i).cloned().unwrap_or(None));
-    }
-    FoldedTimeline {
-        entries,
-        sections,
-        indents,
-        sources,
-        collapsible,
-    }
-}
-
-/// Borrowed view over the cached full-transcript arrays
-/// [`fold_timeline_window`] reads — the parallel per-entry slices built
-/// once per source (`RyeOsTimelineSourceCache`), never rescanned here.
-pub(crate) struct TimelineWindowInput<'a> {
-    pub entries: &'a [RyeOsTimelineEntryVm],
-    pub indents: &'a [u8],
-    pub sources: &'a [Option<TimelineEntrySource>],
-    pub sections: &'a [usize],
-    pub collapsible: &'a std::collections::BTreeSet<usize>,
 }
 
 /// Fold a render window around the selected visible entry, cloning only the
 /// entries the renderer can plausibly draw. This keeps transcript render cost
 /// bounded while preserving the cursor's distance-from-bottom semantics.
 ///
-/// `full_sections`/`collapsible` are `full`'s per-entry section index and
-/// foldable-section set — [`timeline_section_index`], cached alongside `full`
-/// at build time (`RyeOsTimelineSourceCache`) rather than rescanned here. So
-/// this does only bounded work: locating the selected entry scans at most
-/// `cursor_from_bottom` (+ any folded runs skipped) entries back from the
-/// bottom, and collecting the window scans at most `window` entries out from
-/// there in each direction — never the full transcript length, no matter how
-/// long the thread is.
+/// `overrides` holds the operator's departures from each section's default
+/// fold, by section key: clusters and recaps start folded, exchanges start open.
+///
+/// An entry is hidden when its own section is folded and it is not that
+/// section's header, or when any ancestor section is folded. The optional
+/// `tail_entry` (the live cognition block) extends the last section.
 pub(crate) fn fold_timeline_window(
-    input: TimelineWindowInput<'_>,
+    layout: &TimelineLayout,
     tail_entry: Option<RyeOsTimelineEntryVm>,
-    collapsed: &std::collections::BTreeSet<usize>,
+    overrides: &BTreeMap<String, bool>,
     cursor_from_bottom: usize,
     window: usize,
 ) -> FoldedTimelineWindow {
-    let TimelineWindowInput {
-        entries: full,
-        indents: full_indents,
-        sources: full_sources,
-        sections: full_sections,
-        collapsible,
-    } = input;
+    let full = layout.entries.as_slice();
+    let collapsible = &layout.collapsible;
     let total = full.len() + tail_entry.is_some() as usize;
-    // The live tail entry is never a `Separator` (a Block or a "working…"
-    // Line), so it always extends the last real section rather than opening
-    // one — it needs no entry of its own in `full_sections`/`collapsible`.
-    let tail_section = full_sections.last().copied().unwrap_or(0);
+    let tail_section = layout.sections.last().copied().unwrap_or(0);
     let section_at = |i: usize| {
         if i < full.len() {
-            full_sections[i]
+            layout.sections[i]
         } else {
             tail_section
         }
     };
-    let entry_at = |i: usize| timeline_window_entry(full, tail_entry.as_ref(), i);
-    let is_header_at =
-        |i: usize| i == 0 || matches!(entry_at(i), Some(RyeOsTimelineEntryVm::Separator { .. }));
+    let is_folded = |section: usize| layout.section_folded(section, overrides);
+    let is_header_at = |i: usize| i < full.len() && layout.headers[i];
     let is_visible_at = |i: usize| {
-        let sec = section_at(i);
-        !(collapsed.contains(&sec) && collapsible.contains(&sec) && !is_header_at(i))
+        let own = section_at(i);
+        if is_folded(own) && !is_header_at(i) {
+            return false;
+        }
+        let mut ancestor = layout.section_parent.get(own).copied().flatten();
+        while let Some(section) = ancestor {
+            if is_folded(section) {
+                return false;
+            }
+            ancestor = layout.section_parent.get(section).copied().flatten();
+        }
+        true
+    };
+    let entry_at = |i: usize| {
+        full.get(i)
+            .or_else(|| (i == full.len()).then_some(tail_entry.as_ref()).flatten())
     };
 
     let empty = || FoldedTimelineWindow {
@@ -269,9 +1207,7 @@ pub(crate) fn fold_timeline_window(
     }
 
     // Locate the selected entry: the visible entry `cursor_from_bottom` back
-    // from the bottom. Falls back to the topmost visible entry if the
-    // transcript has fewer visible entries than that (cursor pinned to the
-    // top), mirroring the old `cursor_from_bottom.min(last_visible)` clamp.
+    // from the bottom, or the topmost visible entry when fewer exist.
     let mut selected_index = None;
     let mut selected_cursor = 0usize;
     let mut remaining = cursor_from_bottom;
@@ -291,12 +1227,8 @@ pub(crate) fn fold_timeline_window(
         return empty();
     };
 
-    // Collect the window's visible entries centered on `selected_index`:
-    // nominally `window / 2` above and the rest at-or-below. Either side
-    // that runs out early (the selection sits near the top or bottom of the
-    // visible list) hands its shortfall to the other side, so a full
-    // `window` is still shown whenever that many visible entries exist
-    // anywhere in the transcript — matching the prior min-clamped centering.
+    // Collect the window's visible entries centered on `selected_index`;
+    // a side that runs out early hands its shortfall to the other.
     let window = window.max(1);
     let want_above = window / 2;
     let want_below = window - want_above;
@@ -341,26 +1273,20 @@ pub(crate) fn fold_timeline_window(
     let mut sources = Vec::with_capacity(visible_full_indices.len());
     let mut cursors = Vec::with_capacity(visible_full_indices.len());
     for (visible_index, i) in visible_full_indices.into_iter().enumerate() {
-        let sec = section_at(i);
-        let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
+        let section = section_at(i);
         let Some(source_entry) = entry_at(i) else {
             continue;
         };
-        let entry = if folded {
-            match source_entry {
-                RyeOsTimelineEntryVm::Separator { label } => RyeOsTimelineEntryVm::Separator {
-                    label: format!("{label} ▸"),
-                },
-                other => other.clone(),
-            }
+        let entry = if is_folded(section) && is_header_at(i) {
+            folded_header(source_entry)
         } else {
             source_entry.clone()
         };
         entries.push(entry);
-        sections.push(sec);
-        indents.push(full_indents.get(i).copied().unwrap_or(0));
+        sections.push(section);
+        indents.push(layout.indents.get(i).copied().unwrap_or(0));
         sources.push(if i < full.len() {
-            full_sources.get(i).cloned().unwrap_or(None)
+            layout.sources.get(i).cloned().unwrap_or(None)
         } else {
             None
         });
@@ -384,1319 +1310,34 @@ pub(crate) fn fold_timeline_window(
     }
 }
 
-fn timeline_window_entry<'a>(
-    full: &'a [RyeOsTimelineEntryVm],
-    tail_entry: Option<&'a RyeOsTimelineEntryVm>,
-    index: usize,
-) -> Option<&'a RyeOsTimelineEntryVm> {
-    full.get(index)
-        .or_else(|| (index == full.len()).then_some(tail_entry).flatten())
-}
-
-/// Entries without the indent vector — a test convenience over
-/// [`timeline_entries_indented`]. Only the indent-aware form is used in the
-/// render path, so this is compiled for tests alone.
-#[cfg(test)]
-pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<RyeOsTimelineEntryVm> {
-    timeline_entries_indented(records).0
-}
-
-/// Build the timeline entries AND a parallel indent depth per entry, so a graph
-/// braid reads as a call tree: a graph node's tool calls and its directive/
-/// sub-graph fork nest one level under the node's step. Depth tracks open graph
-/// steps — a `graph_step_started` opens a level (its own header sits at the
-/// parent depth), `graph_step_completed` closes it; tool calls and cognition in
-/// between inherit the open depth. `indents[i]` is the depth of `entries[i]`;
-/// the two vectors stay the same length (the renderer degrades a mismatch to
-/// depth 0 rather than trusting the index). Only graph steps move the depth —
-/// tool calls and cognition never nest each other.
-pub(crate) fn timeline_entries_indented(
-    records: Vec<ProjectedRecord>,
-) -> (
-    Vec<RyeOsTimelineEntryVm>,
-    Vec<u8>,
-    Vec<Option<TimelineEntrySource>>,
-) {
-    let mut entries = Vec::new();
-    let mut indents: Vec<u8> = Vec::new();
-    let mut sources: Vec<Option<TimelineEntrySource>> = Vec::new();
-    let mut depth: u8 = 0;
-    let mut pending_flow: Option<(String, RyeOsTone)> = None;
-    let mut pending_pairs = std::collections::BTreeMap::<String, usize>::new();
-    // Turn-opening stimulus text per thread, so a failed terminal can recover
-    // its own input for retry without mis-attributing across interleaved
-    // chains. Prescanned before the render loop so a failed event finds its
-    // stimulus regardless of iteration order.
-    let stimulus = stimulus_index(&records);
-
-    for (record_index, record) in records.into_iter().enumerate() {
-        // This record's entry depth, and the running open-step depth. A step's
-        // own header sits at the parent depth (compute `d` before incrementing);
-        // a completed step drops back before its (rare) degraded line renders.
-        let d = match feed_event_type(&record) {
-            Some(FeedEventType::GraphStepStarted) => {
-                let d = depth;
-                depth = depth.saturating_add(1);
-                d
-            }
-            Some(FeedEventType::GraphStepCompleted) => {
-                depth = depth.saturating_sub(1);
-                depth
-            }
-            _ => depth,
-        };
-        // One record → 0+ entries. The labeled block lets every early exit fall
-        // through to the single indent-resize below, which pads any entries this
-        // record pushed with `d` — keeping `indents` parallel to `entries`
-        // across the pair-coalescer's in-place updates without threading the
-        // depth through every push site.
-        'record: {
-            // Plumbing/stream lifecycle events are the substrate's bookkeeping,
-            // not cognition — drop them so the feed reads as the cognition braid.
-            // Outcomes (completed/failed/cancelled) and usage still render via
-            // execution_entry; cognition and tool calls still render via roles.
-            if is_plumbing_event(&record) {
-                break 'record;
-            }
-            // Execution milestones (lifecycle, usage, forks) read as an
-            // execution, not as bare default-projection lines.
-            if let Some(entry) = execution_entry(&record, &stimulus.by_thread) {
-                flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                push_entry(&mut entries, &mut sources, entry, Some(&record));
-                break 'record;
-            }
-            // Paired runtime exchanges (graph steps, tool calls) have multiple
-            // producer shapes: directive tools emit `{tool, call_id}`, graph
-            // intent nodes emit `{item_id, node, step}`. When the authored
-            // projection does not match the producer's shape, the raw event would
-            // otherwise degrade to a bare `event_type` line. Read the stable
-            // payload fields directly and pair start with settle so the tail
-            // remains useful regardless of producer.
-            if let Some(kind) = paired_runtime_kind(&record) {
-                flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                apply_paired_runtime_entry(
-                    kind,
-                    record,
-                    &mut entries,
-                    &mut sources,
-                    &mut pending_pairs,
-                );
-                break 'record;
-            }
-            // `cognition_in` arrives in two shapes: the run-opening *stimulus*
-            // (`{content}`) and a per-turn marker (`{turn}`). The stimulus is the
-            // operator's turn-opening message — render its content (accent), read
-            // straight from the raw event so a binding that only projects `turn`
-            // can't drop it to raw JSON. The bare turn marker carries no content
-            // and falls through to its boundary separator below.
-            if feed_event_type(&record) == Some(FeedEventType::CognitionIn)
-                && let Some(content) = stimulus
-                    .by_record
-                    .get(&timeline_entry_key(&record.raw, record_index))
-                    .map(String::as_str)
-            {
-                flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                push_entry(
-                    &mut entries,
-                    &mut sources,
-                    RyeOsTimelineEntryVm::Line {
-                        primary: content.to_string(),
-                        meta: None,
-                        tone: RyeOsTone::Accent,
-                        intent: None,
-                        secondary_intent: None,
-                    },
-                    Some(&record),
-                );
-                break 'record;
-            }
-            // A `cognition_out` cut short by a live interrupt: render whatever partial
-            // content it produced (normal tone — it is real, if truncated, cognition),
-            // then a seam separator marking where the cognition was cut and the next
-            // `cognition_in` folds in. Read from the raw event because `cognition_out`
-            // is projected by role, not a FeedEventType.
-            if is_interrupted_cognition_out(&record) {
-                flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                if !record.primary.trim().is_empty() {
-                    push_entry(
-                        &mut entries,
-                        &mut sources,
-                        RyeOsTimelineEntryVm::Block {
-                            text: record.primary.clone(),
-                            tone: tone_from_name(record.tone.as_deref()),
-                        },
-                        Some(&record),
-                    );
-                }
-                push_entry(
-                    &mut entries,
-                    &mut sources,
-                    RyeOsTimelineEntryVm::Separator {
-                        label: "interrupted".to_string(),
-                    },
-                    Some(&record),
-                );
-                break 'record;
-            }
-            match record.role {
-                TimelineRole::Flow => {
-                    if record.primary.is_empty() {
-                        break 'record;
-                    }
-                    let tone = tone_from_name(record.tone.as_deref());
-                    if let Some((text, existing_tone)) = pending_flow.as_mut() {
-                        text.push_str(&record.primary);
-                        if *existing_tone == RyeOsTone::Neutral {
-                            *existing_tone = tone;
-                        }
-                    } else {
-                        pending_flow = Some((record.primary, tone));
-                    }
-                }
-                TimelineRole::Boundary => {
-                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                    push_entry(
-                        &mut entries,
-                        &mut sources,
-                        RyeOsTimelineEntryVm::Separator {
-                            label: record.primary.clone(),
-                        },
-                        Some(&record),
-                    );
-                }
-                TimelineRole::PairOpen => {
-                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                    let key = record.pair_key.clone().unwrap_or_default();
-                    let index = entries.len();
-                    push_entry(
-                        &mut entries,
-                        &mut sources,
-                        RyeOsTimelineEntryVm::Pair {
-                            summary: record.primary.clone(),
-                            meta: record.meta.clone(),
-                            tone: tone_from_name(record.tone.as_deref()),
-                            pending: true,
-                        },
-                        Some(&record),
-                    );
-                    if let Some(source) = sources.get_mut(index) {
-                        *source = Some(entry_source_with_key(&record, format!("pair:{key}")));
-                    }
-                    pending_pairs.insert(key, index);
-                }
-                TimelineRole::PairClose => {
-                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                    let Some(key) = record.pair_key.as_deref() else {
-                        let entry = line_entry(record.clone());
-                        push_entry(&mut entries, &mut sources, entry, Some(&record));
-                        break 'record;
-                    };
-                    if let Some(index) = pending_pairs.remove(key) {
-                        if let Some(RyeOsTimelineEntryVm::Pair {
-                            meta,
-                            tone,
-                            pending,
-                            ..
-                        }) = entries.get_mut(index)
-                        {
-                            *meta = record.meta.clone();
-                            *tone = tone_from_name(record.tone.as_deref());
-                            *pending = false;
-                        }
-                        if let Some(source) = sources.get_mut(index) {
-                            *source = Some(entry_source_with_key(&record, format!("pair:{key}")));
-                        }
-                    } else {
-                        let entry = line_entry(record.clone());
-                        push_entry(&mut entries, &mut sources, entry, Some(&record));
-                    }
-                }
-                TimelineRole::Line => {
-                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                    let entry = line_entry(record.clone());
-                    push_entry(&mut entries, &mut sources, entry, Some(&record));
-                }
-            }
-        }
-        indents.resize(entries.len(), d);
-    }
-    flush_flow(&mut pending_flow, &mut entries, &mut sources);
-    indents.resize(entries.len(), depth);
-    sources.resize(entries.len(), None);
-    (entries, indents, sources)
-}
-
-/// Append the transient live cognition stream as a trailing block, if the
-/// buffer belongs to the route's current head thread. Rendered accent-toned
-/// with a cursor so it reads as in-progress and distinct from the settled
-/// blocks the durable snapshot already carries; replaced by the durable
-/// block once the snapshot catches up.
-pub(crate) fn append_live_delta(core: &RyeOsCore, entries: &mut Vec<RyeOsTimelineEntryVm>) {
-    let Some(entry) = live_delta_entry(core) else {
-        return;
-    };
-    entries.push(entry);
-}
-
+/// The transient live cognition stream as a trailing block, if the buffer
+/// belongs to the route's current head thread. Rendered accent-toned with a
+/// cursor so it reads as in-progress; it disappears once the durable
+/// timeline is refetched. Whether work is in progress is the status lane's
+/// to say, not this block's.
 pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
     let head = core.focused_input_route().thread?;
-    // Streaming output for the head thread → render it with a trailing cursor.
-    if let Some(buf) = core.data.live_delta.as_ref()
-        && !buf.text.is_empty()
-        && buf.thread == head
-    {
-        return Some(RyeOsTimelineEntryVm::Block {
-            text: format!("{}▍", buf.text),
-            tone: RyeOsTone::Accent,
-        });
-    }
-    // No streaming tail yet, but the head thread is still running → a quiet
-    // working indicator so the feed reads as alive (just launched and awaiting
-    // the first token, or running a tool that hasn't emitted prose).
-    if core.head_thread_running(&head) {
-        return Some(RyeOsTimelineEntryVm::Line {
-            primary: "▍ working…".to_string(),
-            meta: None,
-            tone: RyeOsTone::Accent,
-            intent: None,
-            secondary_intent: None,
-        });
-    }
-    None
-}
-
-fn flush_flow(
-    pending_flow: &mut Option<(String, RyeOsTone)>,
-    entries: &mut Vec<RyeOsTimelineEntryVm>,
-    sources: &mut Vec<Option<TimelineEntrySource>>,
-) {
-    if let Some((text, tone)) = pending_flow.take() {
-        push_entry(
-            entries,
-            sources,
-            RyeOsTimelineEntryVm::Block { text, tone },
-            None,
-        );
-    }
-}
-
-fn push_entry(
-    entries: &mut Vec<RyeOsTimelineEntryVm>,
-    sources: &mut Vec<Option<TimelineEntrySource>>,
-    entry: RyeOsTimelineEntryVm,
-    record: Option<&ProjectedRecord>,
-) {
-    let index = entries.len();
-    sources.push(record.map(|record| entry_source(record, index)));
-    entries.push(entry);
-}
-
-fn entry_source(record: &ProjectedRecord, index: usize) -> TimelineEntrySource {
-    entry_source_with_key(record, timeline_entry_key(&record.raw, index))
-}
-
-fn entry_source_with_key(record: &ProjectedRecord, key: String) -> TimelineEntrySource {
-    TimelineEntrySource {
-        key,
-        raw: record.raw.clone(),
-    }
-}
-
-pub(crate) fn timeline_entry_key(record: &Value, index: usize) -> String {
-    if let Some(seq) = record.get("chain_seq").and_then(Value::as_u64) {
-        return format!("chain_seq:{seq}");
-    }
-    for field in ["event_id", "id"] {
-        if let Some(value) = record
-            .get(field)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        {
-            return format!("{field}:{value}");
-        }
-    }
-    let event_type = record
-        .get("event_type")
-        .and_then(Value::as_str)
-        .unwrap_or("event");
-    let thread = record
-        .get("thread_id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    format!("{event_type}:{thread}:index:{index}")
-}
-
-fn line_entry(record: ProjectedRecord) -> RyeOsTimelineEntryVm {
-    RyeOsTimelineEntryVm::Line {
-        primary: record.primary,
-        meta: record.meta,
-        tone: tone_from_name(record.tone.as_deref()),
-        intent: None,
-        secondary_intent: None,
-    }
-}
-
-/// The braid event types the feed gives special treatment. Parsed once from
-/// the raw `event_type` string — the only place the wire spelling lives — so
-/// the rest of the feed matches a closed enum, never scattered string
-/// literals. Anything not listed (`parse` → `None`) falls through to the
-/// role/projection rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FeedEventType {
-    CognitionIn,
-    CognitionOut,
-    ThreadCompleted,
-    ThreadFailed,
-    ThreadCancelled,
-    ThreadKilled,
-    ThreadTimedOut,
-    ChildThreadSpawned,
-    ThreadUsage,
-    ThreadCreated,
-    ThreadStarted,
-    ThreadContinued,
-    GraphFollowSuspended,
-    StreamOpened,
-    StreamClosed,
-    StreamSnapshot,
-    CognitionReasoning,
-    GraphForeachIteration,
-    GraphStarted,
-    GraphCompleted,
-    GraphStepStarted,
-    GraphStepCompleted,
-    GraphBranchTaken,
-    GraphNodeRetry,
-    ToolCallStart,
-    ToolCallResult,
-    ArtifactPublished,
-    ProviderRetry,
-    CostUntracked,
-}
-
-impl FeedEventType {
-    fn parse(event_type: &str) -> Option<Self> {
-        Some(match event_type {
-            "cognition_in" => Self::CognitionIn,
-            "cognition_out" => Self::CognitionOut,
-            "thread_completed" => Self::ThreadCompleted,
-            "thread_failed" => Self::ThreadFailed,
-            "thread_cancelled" => Self::ThreadCancelled,
-            "thread_killed" => Self::ThreadKilled,
-            "thread_timed_out" => Self::ThreadTimedOut,
-            "child_thread_spawned" => Self::ChildThreadSpawned,
-            "thread_usage" => Self::ThreadUsage,
-            "thread_created" => Self::ThreadCreated,
-            "thread_started" => Self::ThreadStarted,
-            "thread_continued" => Self::ThreadContinued,
-            "graph_follow_suspended" => Self::GraphFollowSuspended,
-            "stream_opened" => Self::StreamOpened,
-            "stream_closed" => Self::StreamClosed,
-            "stream_snapshot" => Self::StreamSnapshot,
-            "cognition_reasoning" => Self::CognitionReasoning,
-            "graph_foreach_iteration" => Self::GraphForeachIteration,
-            "graph_started" => Self::GraphStarted,
-            "graph_completed" => Self::GraphCompleted,
-            "graph_step_started" => Self::GraphStepStarted,
-            "graph_step_completed" => Self::GraphStepCompleted,
-            "graph_branch_taken" => Self::GraphBranchTaken,
-            "graph_node_retry" => Self::GraphNodeRetry,
-            "tool_call_start" => Self::ToolCallStart,
-            "tool_call_result" => Self::ToolCallResult,
-            "artifact_published" => Self::ArtifactPublished,
-            "provider_retry" => Self::ProviderRetry,
-            "cost_untracked" => Self::CostUntracked,
-            _ => return None,
-        })
-    }
-
-    /// Substrate bookkeeping that is noise in the braid view: thread/
-    /// stream lifecycle and ephemeral progress. Dropped from the feed entirely
-    /// — the outcome (completed/failed/cancelled), usage, cognition, and tool
-    /// calls carry the meaning. Mirrors the live tail's ignored set in
-    /// `apply_thread_tail`, so replay and live agree on what's hidden.
-    fn is_plumbing(self) -> bool {
-        matches!(
-            self,
-            Self::ThreadCreated
-                | Self::ThreadStarted
-                | Self::ThreadContinued
-                | Self::StreamOpened
-                | Self::StreamClosed
-                | Self::StreamSnapshot
-                | Self::CognitionReasoning
-                | Self::GraphForeachIteration
-        )
-    }
-}
-
-/// The recognized feed event type of a record, if any.
-fn feed_event_type(record: &ProjectedRecord) -> Option<FeedEventType> {
-    record
-        .raw
-        .get("event_type")
-        .and_then(Value::as_str)
-        .and_then(FeedEventType::parse)
-}
-
-fn is_plumbing_event(record: &ProjectedRecord) -> bool {
-    // A follow-resume `thread_continued` is the ONE continued edge that is NOT
-    // plumbing: it marks where a suspended parent resumed with its child's
-    // result, so it renders as a braid boundary. Every other `thread_continued`
-    // (segment cut, operator follow-up) stays plumbing and is dropped.
-    if is_follow_resume_continuation(record) {
-        return false;
-    }
-    feed_event_type(record).is_some_and(FeedEventType::is_plumbing)
-}
-
-/// The daemon-written `reason` marking a `thread_continued` as a graph follow
-/// resume — a suspended parent resuming with its followed child's result. Mirrors
-/// `ryeos_state::queries::ContinuationReasonMarker::GraphFollowResume`; carried as
-/// a literal because this renderer-neutral base crate does not depend on the
-/// state crate.
-const GRAPH_FOLLOW_RESUME_REASON: &str = "graph_follow_resume";
-
-/// Whether a record is a `thread_continued` whose payload `reason` marks it a
-/// graph follow resume. The discriminator that un-plumbs the resume boundary from
-/// the ordinary (dropped) continuation edges and selects its `execution_entry`
-/// arm.
-fn is_follow_resume_continuation(record: &ProjectedRecord) -> bool {
-    feed_event_type(record) == Some(FeedEventType::ThreadContinued)
-        && record
-            .raw
-            .get("payload")
-            .and_then(|payload| payload.get("reason"))
-            .and_then(Value::as_str)
-            == Some(GRAPH_FOLLOW_RESUME_REASON)
-}
-
-/// Whether a record is a `cognition_out` sealed by a live interrupt — a
-/// cognition cut mid-flight. The event type is matched via the `FeedEventType`
-/// enum, and the payload is deserialized into the typed [`CognitionOutPayload`]
-/// rather than read by raw JSON key.
-fn is_interrupted_cognition_out(record: &ProjectedRecord) -> bool {
-    if feed_event_type(record) != Some(FeedEventType::CognitionOut) {
-        return false;
-    }
-    record
-        .raw
-        .get("payload")
-        .and_then(|payload| serde_json::from_value::<CognitionOutPayload>(payload.clone()).ok())
-        .is_some_and(|payload| payload.interrupted)
-}
-
-/// Build a legible entry for thread-execution milestone events (lifecycle,
-/// usage, forks, graph-run milestones, retries, untracked cost) straight from
-/// the raw event. These otherwise fall through to the default projection and
-/// render as bare `event_type` lines; here they read as an execution — toned
-/// and labeled (the renderer's tone glyph then distinguishes them: ✓ done,
-/// ✗ failed, ! warned, › forked). Returns `None` for every other event so the
-/// paired-exchange and role-based handling still apply. Best-effort on
-/// payload fields — never panics on a missing/odd shape.
-fn execution_entry(
-    record: &ProjectedRecord,
-    stimulus: &std::collections::BTreeMap<String, String>,
-) -> Option<RyeOsTimelineEntryVm> {
-    let payload = record.raw.get("payload");
-    let event = feed_event_type(record)?;
-    let (primary, meta, tone) = match event {
-        FeedEventType::ThreadCompleted => ("completed".to_string(), None, RyeOsTone::Good),
-        FeedEventType::ThreadFailed => {
-            (terminal_reason("failed", payload), None, RyeOsTone::Danger)
-        }
-        FeedEventType::ThreadCancelled => ("cancelled".to_string(), None, RyeOsTone::Warn),
-        FeedEventType::ThreadKilled => {
-            (terminal_reason("killed", payload), None, RyeOsTone::Danger)
-        }
-        FeedEventType::ThreadTimedOut => {
-            (terminal_reason("timed out", payload), None, RyeOsTone::Warn)
-        }
-        // A dispatch fork: the parent stepped into a child execution (a
-        // directive/sub-graph node running as a child thread). Name the node
-        // being stepped into (`↘ study`) so the entry reads as a call into a
-        // named cognition, not an anonymous fork. Falls back to "forked
-        // subthread" when the producer carries no `node`. The child id (meta)
-        // is the drill target the `DrillThread` intent below steps into.
-        FeedEventType::ChildThreadSpawned => (
-            payload
-                .and_then(|p| payload_text(p, "node"))
-                .map(|node| format!("↘ {node}"))
-                .unwrap_or_else(|| "forked subthread".to_string()),
-            payload.and_then(child_thread_ref),
-            RyeOsTone::Accent,
-        ),
-        // A graph `follow:` node suspended the run (`continued`) to await its
-        // child chain. Renders as a boundary milestone — the follow node in the
-        // meta — but carries NO drill-in intent: the suspend event names only
-        // the local follow node, never the child chain (it is dispatched after
-        // the checkpoint), so there is no child ref to aim at. The child braid is
-        // reached from the thread row's `watch child` affordance, which reads the
-        // waiter-sourced `follow.child_chain_root_id` off the projection.
-        FeedEventType::GraphFollowSuspended => (
-            "suspended · following child".to_string(),
-            payload.and_then(follow_suspend_node),
-            RyeOsTone::Accent,
-        ),
-        // The mirror of the suspend boundary: a `thread_continued` whose
-        // `reason == graph_follow_resume` marks where the suspended parent picked
-        // its child's result back up and continued. Un-plumbed by
-        // `is_plumbing_event` so it reaches here; ordinary continuations stay
-        // plumbing and never do. Carries NO drill-in — the child braid is reached
-        // from the row's `watch child` affordance, not this boundary.
-        FeedEventType::ThreadContinued if is_follow_resume_continuation(record) => (
-            "resumed with child result".to_string(),
-            None,
-            RyeOsTone::Accent,
-        ),
-        FeedEventType::ThreadUsage => (usage_summary(payload?)?, None, RyeOsTone::Neutral),
-        // Graph-run milestones and runtime economics, read from stable payload
-        // fields for the same reason as the lifecycle arms above: their events
-        // carry no authored projection and would degrade to bare `event_type`
-        // lines. The paired exchanges (steps, tool calls) are handled by
-        // `apply_paired_runtime_entry` instead — they need the coalescer state.
-        FeedEventType::GraphStarted => (
-            "graph started".to_string(),
-            payload.and_then(graph_ref_meta),
-            RyeOsTone::Accent,
-        ),
-        FeedEventType::GraphCompleted => {
-            let status = payload
-                .and_then(|p| p.get("status"))
-                .and_then(Value::as_str);
-            (
-                match status {
-                    Some(status) => format!("graph {status}"),
-                    None => "graph completed".to_string(),
-                },
-                payload.and_then(graph_ref_meta),
-                status_tone(status),
-            )
-        }
-        FeedEventType::GraphBranchTaken => {
-            let target = payload
-                .and_then(|p| p.get("target"))
-                .and_then(Value::as_str);
-            (
-                match target {
-                    Some(target) => format!("branch → {target}"),
-                    None => "branch resolved".to_string(),
-                },
-                payload.and_then(node_step_meta),
-                RyeOsTone::Neutral,
-            )
-        }
-        FeedEventType::GraphNodeRetry => (
-            payload
-                .and_then(|p| payload_text(p, "node"))
-                .map(|node| format!("retrying {node}"))
-                .unwrap_or_else(|| "retrying node".to_string()),
-            payload.and_then(retry_meta),
-            RyeOsTone::Warn,
-        ),
-        FeedEventType::ProviderRetry => (
-            "provider retry".to_string(),
-            payload.and_then(retry_meta),
-            RyeOsTone::Warn,
-        ),
-        FeedEventType::CostUntracked => (
-            "cost untracked".to_string(),
-            payload.and_then(cost_untracked_meta),
-            RyeOsTone::Warn,
-        ),
-        FeedEventType::ArtifactPublished => (
-            payload.map_or_else(|| "artifact published".to_string(), artifact_summary),
-            payload.and_then(artifact_meta),
-            RyeOsTone::Good,
-        ),
-        _ => return None,
-    };
-    // What activating this entry does, and its command-overlay secondary affordance:
-    // - a forked subthread is a step-in (Enter drills into the child braid,
-    //   pushing a return frame so Backspace walks back up);
-    // - an error-like terminal (failed / timed out / killed) is inspectable
-    //   (Enter opens its full structured error), and a *recoverable* failed
-    //   turn additionally offers retry — re-submitting its own stimulus as a
-    //   continuation. timed_out / killed are inspectable but NOT retryable:
-    //   the daemon refuses continuation for those settled statuses (v1).
-    let (intent, secondary_intent) = match event {
-        // Step INTO the spawned child (the dispatch edge): a child is a fresh
-        // root, so its chain_root equals its own id. DrillThread pushes a return
-        // frame, so Backspace walks back to this parent braid.
-        FeedEventType::ChildThreadSpawned => (
-            meta.clone().map(|id| RyeOsUiIntent::DrillThread {
-                thread_id: id.clone(),
-                chain_root_id: id,
-                label: payload.and_then(|p| payload_text(p, "node")),
-            }),
-            None,
-        ),
-        FeedEventType::ThreadFailed => (
-            Some(inspect_intent(&primary, record)),
-            retry_intent(record, stimulus),
-        ),
-        FeedEventType::ThreadKilled | FeedEventType::ThreadTimedOut => {
-            (Some(inspect_intent(&primary, record)), None)
-        }
-        _ => (None, None),
-    };
-    Some(RyeOsTimelineEntryVm::Line {
-        primary,
-        meta,
-        tone,
-        intent,
-        secondary_intent,
+    let buf = core.data.live_delta.as_ref()?;
+    (!buf.text.is_empty() && buf.thread == head).then(|| RyeOsTimelineEntryVm::Block {
+        text: format!("{}▍", buf.text),
+        tone: RyeOsTone::Accent,
     })
-}
-
-/// A terminal-status line label carrying the failure cause when the daemon
-/// attached one. The cause is surfaced for every error-like terminal (the
-/// daemon writes `error` onto failed / timed-out / killed payloads alike), not
-/// just `thread_failed`, so an interleaved chain reads *why* each turn settled.
-fn terminal_reason(status: &str, payload: Option<&Value>) -> String {
-    match failure_reason(payload) {
-        Some(reason) => format!("{status} — {reason}"),
-        None => status.to_string(),
-    }
-}
-
-/// The inspect intent for an error terminal: the title is the visible line
-/// (carrying `failed — <reason>`), the detail is the FULL raw event —
-/// `{ event_type, thread_id, chain_root_id, chain_seq, payload, … }` — not
-/// just the payload, so inspecting a failure in an interleaved chain shows
-/// which turn (and sequence) it was.
-fn inspect_intent(title: &str, record: &ProjectedRecord) -> RyeOsUiIntent {
-    RyeOsUiIntent::InspectSummary {
-        title: title.to_string(),
-        detail: record.raw.clone(),
-    }
-}
-
-/// The retry intent for a recoverable failed turn: re-submit that thread's own
-/// stimulus as a continuation, retargeted at the selected failed thread.
-/// `None` unless BOTH the thread's chain coordinates and its stimulus text are
-/// known — a marker-only turn (`cognition_in` with no `content`) yields no
-/// retry input, and correlation is keyed by `thread_id` so interleaved chains
-/// never cross-attribute.
-fn retry_intent(
-    record: &ProjectedRecord,
-    stimulus: &std::collections::BTreeMap<String, String>,
-) -> Option<RyeOsUiIntent> {
-    let thread_id = record.raw.get("thread_id").and_then(Value::as_str)?;
-    let chain_root_id = record.raw.get("chain_root_id").and_then(Value::as_str)?;
-    let input = stimulus.get(thread_id)?.clone();
-    Some(RyeOsUiIntent::PrefillRetryTurn {
-        thread_id: thread_id.to_string(),
-        chain_root_id: chain_root_id.to_string(),
-        input,
-    })
-}
-
-/// Map each thread's turn-opening stimulus text, keyed by `thread_id`. Only a
-/// `cognition_in` carrying `content` (the operator's stimulus, not a bare turn
-/// marker) contributes — the safe, correlated source for retry input (thread
-/// records / launch metadata are deliberately NOT used: they can hold
-/// arbitrary sensitive parameters).
-#[derive(Debug, Default)]
-struct StimulusIndex {
-    by_thread: std::collections::BTreeMap<String, String>,
-    by_record: std::collections::BTreeMap<String, String>,
-}
-
-#[derive(Debug)]
-struct UiPendingCognitionIn {
-    content_hash: String,
-    chunk_count: u64,
-    next_chunk_index: u64,
-    content: String,
-}
-
-#[derive(Debug, Default)]
-struct UiCognitionInAssembler {
-    pending: Option<UiPendingCognitionIn>,
-}
-
-enum UiCognitionInAssembly {
-    Marker,
-    Pending,
-    Complete(String),
-}
-
-impl UiCognitionInAssembler {
-    fn push(&mut self, payload: &Value) -> Result<UiCognitionInAssembly, ()> {
-        let Some(content_chunk) = payload.get("content_chunk") else {
-            if self.pending.is_some() {
-                return Err(());
-            }
-            return match payload.get("content").and_then(Value::as_str) {
-                Some(content) => Ok(UiCognitionInAssembly::Complete(content.to_string())),
-                None => Ok(UiCognitionInAssembly::Marker),
-            };
-        };
-        let content_chunk = content_chunk.as_str().ok_or(())?;
-        let schema_version = payload
-            .get("schema_version")
-            .and_then(Value::as_u64)
-            .ok_or(())?;
-        let content_hash = payload
-            .get("content_hash")
-            .and_then(Value::as_str)
-            .ok_or(())?;
-        let chunk_index = payload
-            .get("chunk_index")
-            .and_then(Value::as_u64)
-            .ok_or(())?;
-        let chunk_count = payload
-            .get("chunk_count")
-            .and_then(Value::as_u64)
-            .ok_or(())?;
-        if schema_version != 1
-            || content_hash.len() != 64
-            || !(2..=64).contains(&chunk_count)
-            || chunk_index >= chunk_count
-            || content_chunk.is_empty()
-        {
-            return Err(());
-        }
-        if chunk_index == 0 {
-            if self.pending.is_some() {
-                return Err(());
-            }
-            self.pending = Some(UiPendingCognitionIn {
-                content_hash: content_hash.to_string(),
-                chunk_count,
-                next_chunk_index: 0,
-                content: String::new(),
-            });
-        }
-        let pending = self.pending.as_mut().ok_or(())?;
-        if content_hash != pending.content_hash
-            || chunk_count != pending.chunk_count
-            || chunk_index != pending.next_chunk_index
-        {
-            return Err(());
-        }
-        pending.content.push_str(content_chunk);
-        if pending.content.len() > 4 * 1024 * 1024 {
-            return Err(());
-        }
-        pending.next_chunk_index += 1;
-        if pending.next_chunk_index == pending.chunk_count {
-            return Ok(UiCognitionInAssembly::Complete(
-                self.pending.take().ok_or(())?.content,
-            ));
-        }
-        Ok(UiCognitionInAssembly::Pending)
-    }
-}
-
-/// Assemble inline and multipart stimuli once for rendering and retry. A
-/// multipart stimulus is attributed only to its completing event, so the TUI
-/// renders one input line rather than one line per storage chunk.
-fn stimulus_index(records: &[ProjectedRecord]) -> StimulusIndex {
-    let mut index = StimulusIndex::default();
-    let mut assemblers = std::collections::BTreeMap::<String, UiCognitionInAssembler>::new();
-    for (record_index, record) in records.iter().enumerate() {
-        if feed_event_type(record) != Some(FeedEventType::CognitionIn) {
-            continue;
-        }
-        let Some(payload) = record.raw.get("payload") else {
-            continue;
-        };
-        let Some(thread_id) = record.raw.get("thread_id").and_then(Value::as_str) else {
-            if let Some(content) = payload
-                .get("content")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|content| !content.is_empty())
-            {
-                index.by_record.insert(
-                    timeline_entry_key(&record.raw, record_index),
-                    content.to_string(),
-                );
-            }
-            continue;
-        };
-        let assembler = assemblers.entry(thread_id.to_string()).or_default();
-        match assembler.push(payload) {
-            Ok(UiCognitionInAssembly::Complete(content)) => {
-                let content = content.trim();
-                if content.is_empty() {
-                    continue;
-                }
-                index
-                    .by_thread
-                    .insert(thread_id.to_string(), content.to_string());
-                index.by_record.insert(
-                    timeline_entry_key(&record.raw, record_index),
-                    content.to_string(),
-                );
-            }
-            Ok(UiCognitionInAssembly::Marker | UiCognitionInAssembly::Pending) => {}
-            Err(_) => {
-                // The execution runtime fails closed on a malformed transcript.
-                // The UI is a read model: omit the unusable retry/render input
-                // and let the raw event remain inspectable.
-                assemblers.remove(thread_id);
-            }
-        }
-    }
-    index
-}
-
-/// A compact settlement summary from a `thread_usage` payload (the serialized
-/// `ThreadUsage`): `↑in ↓out · $spend · Nt`. Each part is optional so a
-/// partial payload still renders what it has.
-fn usage_summary(payload: &Value) -> Option<String> {
-    let input = payload.get("input_tokens").and_then(Value::as_u64);
-    let output = payload.get("output_tokens").and_then(Value::as_u64);
-    // `spend_usd` is the exact canonical decimal string from `ThreadUsage`;
-    // parsed to a float only for this one-way display rendering.
-    let spend = payload
-        .get("spend_usd")
-        .and_then(Value::as_str)
-        .and_then(|s| s.parse::<f64>().ok());
-    let turns = payload.get("completed_turns").and_then(Value::as_u64);
-    let mut parts = Vec::new();
-    if let (Some(i), Some(o)) = (input, output) {
-        parts.push(format!("↑{} ↓{}", compact_count(i), compact_count(o)));
-    }
-    if let Some(s) = spend {
-        parts.push(format!("${s:.4}"));
-    }
-    if let Some(t) = turns {
-        parts.push(format!("{t}t"));
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-fn compact_count(n: u64) -> String {
-    if n < 1000 {
-        n.to_string()
-    } else {
-        format!("{:.1}k", n as f64 / 1000.0)
-    }
-}
-
-/// The follow node id from a `graph_follow_suspended` payload (the graph node
-/// that issued the `follow:`); shown as the milestone meta.
-fn follow_suspend_node(payload: &Value) -> Option<String> {
-    payload
-        .get("node")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-/// Best-effort child thread id from a `child_thread_spawned` payload, across
-/// the plausible field names.
-fn child_thread_ref(payload: &Value) -> Option<String> {
-    ["child_thread_id", "thread_id", "child", "chain_root_id"]
-        .iter()
-        .find_map(|k| payload.get(*k).and_then(Value::as_str))
-        .map(str::to_string)
-}
-
-/// Pull a human reason from a `thread_failed` payload across the shapes
-/// finalizers use: `error: { message }`, `error: "…"`, `message`, or the
-/// stable `outcome_code` fallback.
-fn failure_reason(payload: Option<&Value>) -> Option<String> {
-    let p = payload?;
-    p.get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(Value::as_str)
-        // The structured error envelope (StructuredErrorPayload) carries its
-        // human message in `error.error` (e.g. "missing required secret …") —
-        // surface it rather than falling through to the terse outcome_code.
-        .or_else(|| {
-            p.get("error")
-                .and_then(|e| e.get("error"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| p.get("error").and_then(Value::as_str))
-        .or_else(|| p.get("message").and_then(Value::as_str))
-        .or_else(|| p.get("outcome_code").and_then(Value::as_str))
-        .map(str::to_string)
-}
-
-/// The runtime exchanges rendered as start/settle pairs — graph steps and
-/// tool calls. These need the coalescer's pending-pair state, so they are
-/// folded by `apply_paired_runtime_entry` in `timeline_entries` rather than
-/// by `execution_entry`.
-fn paired_runtime_kind(record: &ProjectedRecord) -> Option<FeedEventType> {
-    match feed_event_type(record)? {
-        kind @ (FeedEventType::GraphStepStarted
-        | FeedEventType::GraphStepCompleted
-        | FeedEventType::ToolCallStart
-        | FeedEventType::ToolCallResult) => Some(kind),
-        _ => None,
-    }
-}
-
-/// Fold one paired runtime exchange event into the entries. A `…start` opens
-/// a pending Pair keyed by the exchange's stable identity; the matching
-/// settle event closes it in place (meta and tone updated, pending cleared).
-/// An unmatched settle (a replay window opened mid-exchange) degrades to a
-/// settled Line rather than being dropped. Keys are namespaced (`step:` /
-/// `tool:`) so they can never collide with projection-authored pair keys in
-/// the shared map.
-fn apply_paired_runtime_entry(
-    kind: FeedEventType,
-    record: ProjectedRecord,
-    entries: &mut Vec<RyeOsTimelineEntryVm>,
-    sources: &mut Vec<Option<TimelineEntrySource>>,
-    pending_pairs: &mut std::collections::BTreeMap<String, usize>,
-) {
-    let payload = record.raw.get("payload").unwrap_or(&Value::Null);
-    match kind {
-        FeedEventType::GraphStepStarted => {
-            let key = format!("step:{}", graph_step_key(payload));
-            let index = entries.len();
-            push_entry(
-                entries,
-                sources,
-                RyeOsTimelineEntryVm::Pair {
-                    summary: graph_step_summary(payload),
-                    meta: graph_step_meta(payload),
-                    tone: RyeOsTone::Accent,
-                    pending: true,
-                },
-                Some(&record),
-            );
-            if let Some(source) = sources.get_mut(index) {
-                *source = Some(entry_source_with_key(&record, key.clone()));
-            }
-            pending_pairs.insert(key, index);
-        }
-        FeedEventType::GraphStepCompleted => {
-            let key = format!("step:{}", graph_step_key(payload));
-            let meta = graph_step_result_meta(payload);
-            let tone = status_tone(payload.get("status").and_then(Value::as_str));
-            if let Some(index) = pending_pairs.remove(&key) {
-                if let Some(RyeOsTimelineEntryVm::Pair {
-                    meta: existing_meta,
-                    tone: existing_tone,
-                    pending,
-                    ..
-                }) = entries.get_mut(index)
-                {
-                    *existing_meta = meta;
-                    *existing_tone = tone;
-                    *pending = false;
-                }
-                if let Some(source) = sources.get_mut(index) {
-                    *source = Some(entry_source_with_key(&record, key));
-                }
-            } else {
-                push_entry(
-                    entries,
-                    sources,
-                    RyeOsTimelineEntryVm::Line {
-                        primary: graph_step_summary(payload),
-                        meta,
-                        tone,
-                        intent: None,
-                        secondary_intent: None,
-                    },
-                    Some(&record),
-                );
-            }
-        }
-        FeedEventType::ToolCallStart => {
-            let key = format!("tool:{}", tool_call_key(payload));
-            let index = entries.len();
-            push_entry(
-                entries,
-                sources,
-                RyeOsTimelineEntryVm::Pair {
-                    summary: tool_call_summary(payload, &record),
-                    meta: tool_call_start_meta(payload, &record),
-                    tone: RyeOsTone::Accent,
-                    pending: true,
-                },
-                Some(&record),
-            );
-            if let Some(source) = sources.get_mut(index) {
-                *source = Some(entry_source_with_key(&record, key.clone()));
-            }
-            pending_pairs.insert(key, index);
-        }
-        FeedEventType::ToolCallResult => {
-            let key = format!("tool:{}", tool_call_key(payload));
-            let meta = tool_call_result_meta(payload, &record);
-            let tone = tool_result_tone(payload, &record);
-            if let Some(index) = pending_pairs.remove(&key) {
-                if let Some(RyeOsTimelineEntryVm::Pair {
-                    meta: existing_meta,
-                    tone: existing_tone,
-                    pending,
-                    ..
-                }) = entries.get_mut(index)
-                {
-                    *existing_meta = meta;
-                    *existing_tone = tone;
-                    *pending = false;
-                }
-                if let Some(source) = sources.get_mut(index) {
-                    *source = Some(entry_source_with_key(&record, key));
-                }
-            } else {
-                push_entry(
-                    entries,
-                    sources,
-                    RyeOsTimelineEntryVm::Line {
-                        primary: tool_call_summary(payload, &record),
-                        meta,
-                        tone,
-                        intent: None,
-                        secondary_intent: None,
-                    },
-                    Some(&record),
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-fn payload_text(payload: &Value, key: &str) -> Option<String> {
-    payload.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-fn payload_u64_text(payload: &Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_u64)
-        .map(|n| n.to_string())
-}
-
-/// The stable identity of one graph step execution, shared by its started and
-/// completed events.
-fn graph_step_key(payload: &Value) -> String {
-    ["graph_run_id", "step", "node"]
-        .iter()
-        .filter_map(|key| payload_text(payload, key).or_else(|| payload_u64_text(payload, key)))
-        .collect::<Vec<_>>()
-        .join(":")
-}
-
-fn graph_step_summary(payload: &Value) -> String {
-    payload_text(payload, "node")
-        .map(|node| format!("step {node}"))
-        .unwrap_or_else(|| "graph step".to_string())
-}
-
-fn graph_step_meta(payload: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(step) = payload_u64_text(payload, "step") {
-        parts.push(format!("#{step}"));
-    }
-    if let Some(item) = payload_text(payload, "node_ref") {
-        parts.push(item);
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-fn graph_step_result_meta(payload: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(status) = payload_text(payload, "status") {
-        parts.push(status);
-    }
-    if let Some(error) = payload_text(payload, "error") {
-        parts.push(error);
-    }
-    if parts.is_empty() {
-        graph_step_meta(payload)
-    } else {
-        Some(parts.join(" · "))
-    }
-}
-
-/// The stable identity of one tool exchange: the directive runtime keys by
-/// `call_id`; graph intent nodes carry none, so their identity is composed
-/// from the run coordinates.
-fn tool_call_key(payload: &Value) -> String {
-    payload_text(payload, "call_id").unwrap_or_else(|| {
-        ["graph_run_id", "step", "node", "item_id", "tool"]
-            .iter()
-            .filter_map(|key| payload_text(payload, key).or_else(|| payload_u64_text(payload, key)))
-            .collect::<Vec<_>>()
-            .join(":")
-    })
-}
-
-fn tool_call_summary(payload: &Value, record: &ProjectedRecord) -> String {
-    payload_text(payload, "tool")
-        .or_else(|| payload_text(payload, "item_id"))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| record.primary.clone())
-}
-
-fn tool_call_start_meta(payload: &Value, record: &ProjectedRecord) -> Option<String> {
-    record
-        .meta
-        .clone()
-        .or_else(|| payload_text(payload, "call_id"))
-        .or_else(|| node_step_meta(payload))
-}
-
-fn tool_call_result_meta(payload: &Value, record: &ProjectedRecord) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(status) = payload_text(payload, "status") {
-        parts.push(status);
-    }
-    if let Some(size) = payload.get("result_size_bytes").and_then(Value::as_u64) {
-        parts.push(format_bytes(size));
-    }
-    if let Some(reason) = payload_text(payload, "truncated_reason") {
-        parts.push(reason);
-    }
-    if parts.is_empty() {
-        record.meta.clone().or_else(|| node_step_meta(payload))
-    } else {
-        Some(parts.join(" · "))
-    }
-}
-
-fn tool_result_tone(payload: &Value, record: &ProjectedRecord) -> RyeOsTone {
-    if let Some(reason) = payload.get("truncated_reason").and_then(Value::as_str) {
-        return match reason {
-            "error_envelope" => RyeOsTone::Danger,
-            _ => RyeOsTone::Warn,
-        };
-    }
-    if let Some(status) = payload.get("status").and_then(Value::as_str) {
-        return status_tone(Some(status));
-    }
-    tone_from_name(record.tone.as_deref())
-}
-
-fn artifact_summary(payload: &Value) -> String {
-    payload_text(payload, "artifact_type")
-        .map(|kind| format!("artifact {kind}"))
-        .unwrap_or_else(|| "artifact published".to_string())
-}
-
-fn artifact_meta(payload: &Value) -> Option<String> {
-    payload_text(payload, "uri").or_else(|| payload_text(payload, "content_hash"))
-}
-
-fn graph_ref_meta(payload: &Value) -> Option<String> {
-    payload_text(payload, "definition_ref").or_else(|| payload_text(payload, "graph_run_id"))
-}
-
-fn node_step_meta(payload: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(node) = payload_text(payload, "node") {
-        parts.push(node);
-    }
-    if let Some(step) = payload_u64_text(payload, "step") {
-        parts.push(format!("#{step}"));
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-/// The retry-context meta shared by `graph_node_retry` (`attempts` /
-/// `delay_ms`) and `provider_retry` (`max_retries` / `backoff_ms`): which
-/// attempt out of how many, the backoff, and the error being retried.
-fn retry_meta(payload: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    let attempt = payload.get("attempt").and_then(Value::as_u64);
-    let total = payload
-        .get("attempts")
-        .or_else(|| payload.get("max_retries"))
-        .and_then(Value::as_u64);
-    match (attempt, total) {
-        (Some(attempt), Some(total)) => parts.push(format!("attempt {attempt}/{total}")),
-        (Some(attempt), None) => parts.push(format!("attempt {attempt}")),
-        _ => {}
-    }
-    if let Some(ms) = payload
-        .get("delay_ms")
-        .or_else(|| payload.get("backoff_ms"))
-        .and_then(Value::as_u64)
-    {
-        parts.push(format!("{ms}ms backoff"));
-    }
-    if let Some(error) = payload_text(payload, "error") {
-        parts.push(error);
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-/// The untracked-spend meta from a `cost_untracked` payload: the model whose
-/// pricing was missing, the token volume that went unpriced, and the reason.
-fn cost_untracked_meta(payload: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(model) = payload_text(payload, "model") {
-        parts.push(model);
-    }
-    let input = payload.get("input_tokens").and_then(Value::as_u64);
-    let output = payload.get("output_tokens").and_then(Value::as_u64);
-    if let (Some(input), Some(output)) = (input, output) {
-        parts.push(format!(
-            "↑{} ↓{}",
-            compact_count(input),
-            compact_count(output)
-        ));
-    }
-    if let Some(reason) = payload_text(payload, "reason") {
-        parts.push(reason);
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-fn status_tone(status: Option<&str>) -> RyeOsTone {
-    match status {
-        Some("completed" | "success" | "succeeded" | "ok") => RyeOsTone::Good,
-        Some("error" | "failed" | "failure") => RyeOsTone::Danger,
-        Some("cancelled" | "timeout" | "timed_out") => RyeOsTone::Warn,
-        Some(_) => RyeOsTone::Neutral,
-        None => RyeOsTone::Good,
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    }
 }
 
 impl RyeOsCore {
-    /// Apply one frame from the head thread's live tail. Ryeos event
-    /// semantics live here (not in any client) so the terminal SSE loop and
-    /// the web `EventSource` share one code path. The directive runtime
-    /// streams cognition text as `cognition_out` carrying a `delta`; the
-    /// settled turn arrives as `cognition_out` with `content` (durable, in
-    /// the braid snapshot). So: deltas accumulate into the live buffer
-    /// (cheap repaint, no refetch); every durable milestone supersedes the
-    /// buffer and refetches the snapshot.
+    /// Apply one frame from the head thread's live tail. The semantics live
+    /// here (not in any client) so the terminal SSE loop and the web
+    /// `EventSource` share one code path. A frame carrying streamed text
+    /// accumulates into the live buffer (cheap repaint, no refetch). Any
+    /// other frame means the durable timeline may have changed: the live
+    /// buffer is dropped and the sources that declare the `thread` refresh
+    /// hint are refetched — the client never folds frames itself.
     pub(crate) fn apply_thread_tail(
         &mut self,
         thread_id: &str,
-        event_type: &str,
         payload: &Value,
     ) -> Vec<RyeOsEffect> {
-        let event_payload = event_payload(payload);
-        let live_text = match event_type {
-            "cognition_out" => live_cognition_out_text(event_payload),
-            "token_delta" => event_payload
-                .get("delta")
-                .or_else(|| event_payload.get("text"))
-                .and_then(|t| t.as_str()),
-            // Ephemeral, non-text progress: nothing durable changed.
-            "cognition_reasoning"
-            | "stream_snapshot"
-            | "stream_opened"
-            | "stream_closed"
-            | "graph_foreach_iteration" => return Vec::new(),
-            // Everything else is a durable milestone (handled below).
-            _ => None,
-        };
-        if let Some(text) = live_text {
+        if let Some(text) = live_text(event_payload(payload)) {
             if !text.is_empty() {
                 self.ingest_live_text(thread_id, text);
                 self.bump_activity_pulse(0.18);
@@ -1704,8 +1345,6 @@ impl RyeOsCore {
             }
             return Vec::new();
         }
-        // Durable milestone (settled turn, tool boundary, lifecycle): the
-        // braid snapshot now carries it — drop the live buffer and refetch.
         self.clear_live_delta();
         self.bump_activity_pulse(0.2);
         self.effects_for_hint("thread")
@@ -1726,14 +1365,14 @@ impl RyeOsCore {
         }
     }
 
-    /// Drop the live buffer — called once a durable snapshot refetch
-    /// supersedes the accumulated deltas.
+    /// Drop the live buffer — called once a durable refetch supersedes the
+    /// accumulated deltas.
     fn clear_live_delta(&mut self) {
         self.data.live_delta = None;
     }
 }
 
-fn live_cognition_out_text(payload: &Value) -> Option<&str> {
+fn live_text(payload: &Value) -> Option<&str> {
     payload.get("delta").and_then(Value::as_str).or_else(|| {
         payload
             .get("tool_use_partial")
@@ -1746,953 +1385,1735 @@ fn event_payload(frame_payload: &Value) -> &Value {
     frame_payload.get("payload").unwrap_or(frame_payload)
 }
 
+/// What the keymap needs to know about the focused view's timeline point.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TimelineKeyState {
+    pub entry: bool,
+    pub foldable: bool,
+    pub source_failed: bool,
+    /// The dock's first ask offers at least one enabled action with a key.
+    pub dock_answer: bool,
+}
+
+/// The timeline entry under the point in the focused view.
+struct TimelineFocus {
+    instance: crate::ids::RyeOsViewInstanceKey,
+    view_ref: String,
+    label: String,
+    /// The service item behind the entry, when it has one.
+    item: Option<Value>,
+    /// The foldable section under the point and whether it is folded now.
+    fold: Option<(usize, bool)>,
+}
+
+/// A raw-events fetch the operator asked for, awaiting its response.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PendingTimelineRaw {
+    pub source_key: String,
+    pub action: RyeOsTimelineEntryAction,
+}
+
+const RAW_ROLE: &str = "timeline_raw";
+
+impl RyeOsCore {
+    /// The point of the focused timeline, read from the same view model the
+    /// renderers draw, so a key acts on exactly what is highlighted.
+    fn focused_timeline(&self) -> Option<TimelineFocus> {
+        let instance = self.focused_view_instance_key()?;
+        let view_ref = self.mounted_view_ref(&instance)?.to_string();
+        let super::view_model::RyeOsViewVm::Timeline {
+            entries,
+            entry_ids,
+            selected,
+            fold_section,
+            ..
+        } = super::view_model::view_vm_for_instance(self, &instance)?
+        else {
+            return None;
+        };
+        let selected = selected?;
+        let label = entries.get(selected)?.label();
+        let binding = self.binding_for_instance(&instance, &view_ref)?;
+        let channel = binding.primary_source()?.0;
+        let source_key =
+            super::source_key::RyeOsSourceInstanceKey::named(instance.clone(), channel).encode();
+        let item = entry_ids
+            .get(selected)
+            .and_then(|id| id.strip_prefix("timeline-entry:"))
+            .and_then(|key| {
+                let find = |layout: &TimelineLayout| {
+                    layout
+                        .sources
+                        .iter()
+                        .flatten()
+                        .find(|source| source.key == key)
+                        .map(|source| source.raw.clone())
+                };
+                match self.data.timeline_sources.get(&source_key) {
+                    Some(cache) => find(&cache.layout),
+                    None => find(&timeline_layout_for(
+                        binding,
+                        self.data.sources.get(&source_key)?,
+                        &instance,
+                        &view_ref,
+                    )),
+                }
+            });
+        let fold = fold_section.and_then(|section| {
+            let (key, default_collapsed) = self.timeline_section_fold(&instance, section)?;
+            let folded = match self.mounted_local_state(&instance) {
+                Some(crate::view_set::ViewLocalState::GenericList { timeline_folds, .. }) => {
+                    timeline_folds
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(default_collapsed)
+                }
+                _ => default_collapsed,
+            };
+            Some((section, folded))
+        });
+        Some(TimelineFocus {
+            instance,
+            view_ref,
+            label,
+            item,
+            fold,
+        })
+    }
+
+    /// The stable fold key of a timeline section in a mounted view and whether
+    /// that section starts folded. `None` when the view is not a timeline or
+    /// the section is not foldable.
+    pub(crate) fn timeline_section_fold(
+        &self,
+        instance: &crate::ids::RyeOsViewInstanceKey,
+        section: usize,
+    ) -> Option<(String, bool)> {
+        let view_ref = self.mounted_view_ref(instance)?.to_string();
+        let binding = self.binding_for_instance(instance, &view_ref)?;
+        if binding.widget != "timeline" {
+            return None;
+        }
+        let channel = binding.primary_source()?.0;
+        let source_key =
+            super::source_key::RyeOsSourceInstanceKey::named(instance.clone(), channel).encode();
+        let fold_of = |layout: &TimelineLayout| {
+            let key = layout.section_keys.get(section)?.clone()?;
+            Some((key, layout.starts_collapsed.contains(&section)))
+        };
+        match self.data.timeline_sources.get(&source_key) {
+            Some(cache) => fold_of(&cache.layout),
+            None => fold_of(&timeline_layout_for(
+                binding,
+                self.data.sources.get(&source_key)?,
+                instance,
+                &view_ref,
+            )),
+        }
+    }
+
+    pub(crate) fn focused_timeline_key_state(&self) -> TimelineKeyState {
+        let Some(instance) = self.focused_view_instance_key() else {
+            return TimelineKeyState::default();
+        };
+        let Some(vm) = super::view_model::view_vm_for_instance(self, &instance) else {
+            return TimelineKeyState::default();
+        };
+        use super::view_model::RyeOsViewVm;
+        let status = match &vm {
+            RyeOsViewVm::Rows { source_status, .. }
+            | RyeOsViewVm::Timeline { source_status, .. }
+            | RyeOsViewVm::Table { source_status, .. }
+            | RyeOsViewVm::Document { source_status, .. } => source_status.as_ref(),
+            _ => None,
+        };
+        let source_failed = status.is_some_and(|status| status.state == "failed");
+        match vm {
+            RyeOsViewVm::Timeline {
+                selected,
+                fold_section,
+                dock,
+                ..
+            } => TimelineKeyState {
+                entry: selected.is_some(),
+                foldable: fold_section.is_some(),
+                source_failed,
+                dock_answer: dock.first().is_some_and(|ask| {
+                    ask.actions
+                        .iter()
+                        .any(|action| action.key.is_some() && action.intent.is_some())
+                }),
+            },
+            _ => TimelineKeyState {
+                source_failed,
+                ..TimelineKeyState::default()
+            },
+        }
+    }
+
+    /// Answer the focused timeline's first pending ask with the action whose
+    /// key cap is `ch`. Only the first ask's actions carry key caps, so a
+    /// key never answers a card further down the dock.
+    pub(crate) fn answer_dock_ask(&mut self, ch: char) -> Vec<RyeOsEffect> {
+        let Some(instance) = self.focused_view_instance_key() else {
+            return Vec::new();
+        };
+        let Some(super::view_model::RyeOsViewVm::Timeline { dock, .. }) =
+            super::view_model::view_vm_for_instance(self, &instance)
+        else {
+            return Vec::new();
+        };
+        let intent = dock.first().and_then(|ask| {
+            ask.actions.iter().find_map(|action| {
+                let key = action.key.as_deref()?;
+                let mut chars = key.chars();
+                let first = chars.next()?;
+                (chars.next().is_none() && first.to_uppercase().eq(ch.to_uppercase()))
+                    .then(|| action.intent.clone())
+                    .flatten()
+            })
+        });
+        intent.map_or_else(Vec::new, |intent| self.dispatch_intent(intent))
+    }
+
+    /// Fold or unfold the cluster under the point in the focused timeline.
+    pub(crate) fn toggle_timeline_fold(&mut self) -> Vec<RyeOsEffect> {
+        let Some(TimelineFocus {
+            instance,
+            fold: Some((section, folded)),
+            ..
+        }) = self.focused_timeline()
+        else {
+            return Vec::new();
+        };
+        if self.set_view_fold(&instance, section, !folded) {
+            self.bump_generation();
+        }
+        Vec::new()
+    }
+
+    /// Act on the entry under the point: copy its text, or fetch the raw
+    /// events behind it to copy or inspect.
+    pub(crate) fn timeline_entry_action(
+        &mut self,
+        action: RyeOsTimelineEntryAction,
+    ) -> Vec<RyeOsEffect> {
+        let Some(focus) = self.focused_timeline() else {
+            return Vec::new();
+        };
+        if action == RyeOsTimelineEntryAction::CopyText {
+            return vec![
+                self.emit(super::effect::RyeOsEffectKind::CopyToClipboard { text: focus.label }),
+            ];
+        }
+        let Some((from, to)) = focus.item.as_ref().and_then(item_seq_range) else {
+            self.notice("This entry has no raw events.", RyeOsTone::Warn);
+            return Vec::new();
+        };
+        let Some(chain_root) = self.route_for_instance(&focus.instance).chain_root else {
+            self.notice("No chain is bound to this view.", RyeOsTone::Warn);
+            return Vec::new();
+        };
+        let params = serde_json::json!({
+            "chain_root_id": chain_root,
+            "from_chain_seq": from.to_string(),
+            "to_chain_seq": to.to_string(),
+        });
+        let Some(fetch) =
+            self.fetch_view_source_role(focus.instance.clone(), &focus.view_ref, RAW_ROLE, params)
+        else {
+            self.notice("Raw events are not available here.", RyeOsTone::Warn);
+            return Vec::new();
+        };
+        if let super::effect::RyeOsEffectKind::FetchSource { tile_id, .. } = &fetch.kind {
+            self.data.pending_timeline_raw = Some(PendingTimelineRaw {
+                source_key: tile_id.clone(),
+                action,
+            });
+        }
+        vec![fetch]
+    }
+
+    /// A source response landed under `source_key`: when it is the raw-events
+    /// fetch the operator asked for, hand it to the action that wanted it.
+    pub(crate) fn settle_timeline_raw(
+        &mut self,
+        source_key: &str,
+        data: &Value,
+    ) -> Vec<RyeOsEffect> {
+        if self
+            .data
+            .pending_timeline_raw
+            .as_ref()
+            .is_none_or(|pending| pending.source_key != source_key)
+        {
+            return Vec::new();
+        }
+        let Some(pending) = self.data.pending_timeline_raw.take() else {
+            return Vec::new();
+        };
+        let events = data.get("events").cloned().unwrap_or(Value::Null);
+        let seq = |name: &str| data.get(name).and_then(Value::as_i64).unwrap_or(0);
+        if data.get("truncated").and_then(Value::as_bool) == Some(true) {
+            self.notice(
+                "The range holds more events than one fetch returns; showing the first part.",
+                RyeOsTone::Warn,
+            );
+        }
+        match pending.action {
+            RyeOsTimelineEntryAction::CopyRaw => {
+                let text = serde_json::to_string_pretty(&events).unwrap_or_default();
+                vec![self.emit(super::effect::RyeOsEffectKind::CopyToClipboard { text })]
+            }
+            RyeOsTimelineEntryAction::InspectRaw => self.apply_ui_affordance(
+                super::seat::KEY_SELECTION.to_string(),
+                Some(serde_json::json!({ "summary": {
+                    "title": format!(
+                        "Raw events {}–{}",
+                        seq("from_chain_seq"),
+                        seq("to_chain_seq")
+                    ),
+                    "detail": events,
+                } })),
+                None,
+                None,
+                false,
+            ),
+            RyeOsTimelineEntryAction::CopyText => Vec::new(),
+        }
+    }
+}
+
+/// One timeline line drawn as plain text: the entry's accessible label, its
+/// nesting depth and its tone. A terminal, a screen reader and a copy all read
+/// the same text because they all read [`RyeOsTimelineEntryVm::label`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineTextLine {
+    /// Stable identity of the line across responses: the item id behind it.
+    pub id: String,
+    /// Nesting depth; a cluster's or recap's members sit one level below it.
+    pub indent: u8,
+    pub text: String,
+    pub tone: RyeOsTone,
+    /// What the line is: its entry type, or `cluster` / `recap` for the line
+    /// that heads a group (the lead lines are `summary` and `older`).
+    pub role: String,
+    /// The entry's text is carried by the live event stream (the item's
+    /// `text_streamed` flag); false for lines that are not entries.
+    pub text_streamed: bool,
+}
+
+/// A timeline response drawn as plain text.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TimelineText {
+    /// The chain header (status, usage) and the "N older" line, when present.
+    pub lead: Vec<TimelineTextLine>,
+    /// One line per entry; clusters and recaps head their members.
+    pub lines: Vec<TimelineTextLine>,
+}
+
+impl RyeOsTimelineEntryVm {
+    /// The entry's tone; a separator is neutral.
+    pub fn tone(&self) -> RyeOsTone {
+        match self {
+            Self::Block { tone, .. } | Self::Line { tone, .. } | Self::Pair { tone, .. } => *tone,
+            Self::Separator { .. } => RyeOsTone::Neutral,
+        }
+    }
+}
+
+/// Draw a service response (a whole window, or one merged with
+/// [`merge_timeline_window`]) as plain text lines.
+pub fn timeline_text(response: &Value) -> TimelineText {
+    let line =
+        |id: &str, entry: &RyeOsTimelineEntryVm, indent: u8, role: String, text_streamed: bool| {
+            TimelineTextLine {
+                id: id.to_string(),
+                indent,
+                text: entry.label(),
+                tone: entry.tone(),
+                role,
+                text_streamed,
+            }
+        };
+    let mut lead = Vec::new();
+    if let Some(usage) = usage_text(response) {
+        let entry = RyeOsTimelineEntryVm::Line {
+            primary: usage,
+            meta: None,
+            tone: RyeOsTone::Neutral,
+            intent: None,
+            secondary_intent: None,
+            state: None,
+        };
+        lead.push(line("summary", &entry, 0, "summary".to_string(), false));
+    }
+    let older = response.get("older").and_then(Value::as_u64).unwrap_or(0);
+    if older > 0 {
+        lead.push(line(
+            "older",
+            &older_entry(older, None),
+            0,
+            "older".to_string(),
+            false,
+        ));
+    }
+    let items = response
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let chain_root_id = response
+        .get("chain_root_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let layout = timeline_layout(items, chain_root_id, Vec::new());
+    let mut lines = Vec::with_capacity(layout.entries.len());
+    for (index, entry) in layout.entries.iter().enumerate() {
+        let key = layout.sources[index]
+            .as_ref()
+            .map_or_else(|| format!("line:{index}"), |source| source.key.clone());
+        // An item without an id still needs a distinct identity.
+        let id = if key == "item:" {
+            format!("item:#{index}")
+        } else {
+            key
+        };
+        let role = layout.sources[index]
+            .as_ref()
+            .map_or_else(|| "entry".to_string(), |source| item_role(&source.raw));
+        let text_streamed = layout.sources[index].as_ref().is_some_and(|source| {
+            source
+                .raw
+                .get("text_streamed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        lines.push(line(&id, entry, layout.indents[index], role, text_streamed));
+    }
+    TimelineText { lead, lines }
+}
+
+/// Bring a held window current from a service response. A response carrying
+/// `order` is an incremental update upserted into `stored`; `None` means the
+/// update cannot be applied and the whole window must be refetched. A response
+/// without `order` is itself a whole window.
+pub fn merge_timeline_window(stored: Option<&Value>, update: Value) -> Option<Value> {
+    merge_window(stored, update)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::effect::RyeOsEffectKind;
+    use crate::ui::event::RyeOsEvent;
+    use crate::ui::reducer::test_support::{core as test_core, session_with_surface};
     use serde_json::json;
 
-    fn raw_record(raw: serde_json::Value) -> ProjectedRecord {
-        ProjectedRecord {
-            primary: String::new(),
-            meta: None,
-            tone: None,
-            role: TimelineRole::Line,
-            pair_key: None,
-            raw,
-        }
+    fn entry(id: &str, kind: &str, slots: Value) -> Value {
+        json!({
+            "item": "entry", "id": id, "type": kind, "state": null, "tone": null,
+            "thread": "T-1", "parent": null, "exchange": null, "counts_as": null,
+            "slots": slots, "seq": [1, 1], "ts": ["t", "t"]
+        })
     }
 
-    /// `execution_entry` with no correlated stimulus — the common case for the
-    /// per-event label/tone assertions (retry correlation is exercised
-    /// separately with a populated stimulus map).
-    fn exec(raw: serde_json::Value) -> Option<RyeOsTimelineEntryVm> {
-        execution_entry(&raw_record(raw), &std::collections::BTreeMap::new())
+    fn with(mut value: Value, key: &str, field: Value) -> Value {
+        value[key] = field;
+        value
     }
 
-    #[test]
-    fn execution_entry_labels_terminal_status() {
-        let entry = exec(json!({ "event_type": "thread_completed" }));
-        let Some(RyeOsTimelineEntryVm::Line { primary, tone, .. }) = entry else {
-            panic!("expected a status line");
+    fn layout(items: Vec<Value>, older: u64) -> TimelineLayout {
+        let lead = if older > 0 {
+            vec![older_entry(older, None)]
+        } else {
+            Vec::new()
         };
-        assert_eq!(primary, "completed");
-        assert!(matches!(tone, RyeOsTone::Good));
+        timeline_layout(&items, "R-1", lead)
     }
 
+    /// A call the tool presented draws its headline (the page address) with
+    /// the tool's name and detail beside it; one it did not present draws the
+    /// tool's name as the headline, as before. The body is reached by
+    /// expanding the entry.
     #[test]
-    fn interrupted_cognition_out_renders_partial_then_a_seam() {
-        // A cognition cut by a live interrupt: its partial content renders as a
-        // block, then an `interrupted` seam marks where it was cut.
-        let mut rec = raw_record(json!({
-            "event_type": "cognition_out",
-            "payload": { "content": "starting to read the", "interrupted": true }
-        }));
-        rec.primary = "starting to read the".to_string();
-        rec.role = TimelineRole::Flow;
-
-        let entries = timeline_entries(vec![rec]);
-        assert_eq!(entries.len(), 2, "partial block + seam");
-        assert!(
-            matches!(&entries[0], RyeOsTimelineEntryVm::Block { text, .. } if text == "starting to read the"),
-            "partial content renders as a block"
-        );
-        assert!(
-            matches!(&entries[1], RyeOsTimelineEntryVm::Separator { label } if label == "interrupted"),
-            "a seam separator marks the cut"
-        );
-    }
-
-    #[test]
-    fn interrupted_cognition_out_with_no_content_is_just_a_seam() {
-        // Cut before any text streamed → no block, just the seam.
-        let rec = raw_record(json!({
-            "event_type": "cognition_out",
-            "payload": { "interrupted": true }
-        }));
-        let entries = timeline_entries(vec![rec]);
-        assert_eq!(entries.len(), 1);
-        assert!(
-            matches!(&entries[0], RyeOsTimelineEntryVm::Separator { label } if label == "interrupted")
-        );
-    }
-
-    #[test]
-    fn completed_cognition_out_has_no_seam() {
-        // A normal (uninterrupted) cognition_out folds to a flow block, never a seam.
-        let mut rec = raw_record(json!({
-            "event_type": "cognition_out",
-            "payload": { "content": "done" }
-        }));
-        rec.primary = "done".to_string();
-        rec.role = TimelineRole::Flow;
-
-        let entries = timeline_entries(vec![rec]);
-        assert!(
-            !entries.iter().any(
-                |e| matches!(e, RyeOsTimelineEntryVm::Separator { label } if label == "interrupted")
-            ),
-            "no seam for a completed cognition"
-        );
-    }
-
-    #[test]
-    fn execution_entry_carries_failure_message() {
-        // Real shape: state_store surfaces the reason under `error` in the
-        // thread_failed event payload (+ a stable outcome_code).
-        let entry = exec(json!({
-            "event_type": "thread_failed",
-            "payload": { "error": { "message": "boom" }, "outcome_code": "launch_augmentation_failed" }
-        }));
-        let Some(RyeOsTimelineEntryVm::Line { primary, tone, .. }) = entry else {
-            panic!("expected a failure line");
-        };
-        assert_eq!(primary, "failed — boom");
-        assert!(matches!(tone, RyeOsTone::Danger));
-    }
-
-    #[test]
-    fn execution_entry_surfaces_structured_error_envelope_message() {
-        // The structured error envelope (StructuredErrorPayload) carries its
-        // human message in `error.error`, not `error.message`. Surface that
-        // (e.g. which secret is missing) instead of the terse outcome_code.
-        let entry = exec(json!({
-            "event_type": "thread_failed",
-            "payload": {
-                "outcome_code": "required_secret_missing",
-                "error": {
-                    "code": "required_secret_missing",
-                    "error": "missing required secret `ZEN_API_KEY` for `directive:ryeos/ops/base`",
-                    "env_var": "ZEN_API_KEY"
-                }
-            }
-        }));
-        assert!(matches!(
-            entry,
-            Some(RyeOsTimelineEntryVm::Line { primary, .. })
-                if primary == "failed — missing required secret `ZEN_API_KEY` for `directive:ryeos/ops/base`"
-        ));
-    }
-
-    #[test]
-    fn execution_entry_failure_falls_back_to_outcome_code_then_plain() {
-        let coded = exec(json!({
-            "event_type": "thread_failed",
-            "payload": { "outcome_code": "timed_out" }
-        }));
-        assert!(matches!(
-            coded,
-            Some(RyeOsTimelineEntryVm::Line { primary, .. }) if primary == "failed — timed_out"
-        ));
-
-        let bare = exec(json!({ "event_type": "thread_failed" }));
-        assert!(matches!(
-            bare,
-            Some(RyeOsTimelineEntryVm::Line { primary, .. }) if primary == "failed"
-        ));
-    }
-
-    #[test]
-    fn execution_entry_composes_usage_summary() {
-        let entry = exec(json!({
-            "event_type": "thread_usage",
-            "payload": {
-                "input_tokens": 1200, "output_tokens": 3400,
-                "spend_usd": "0.0123", "completed_turns": 3
-            }
-        }));
-        let Some(RyeOsTimelineEntryVm::Line { primary, tone, .. }) = entry else {
-            panic!("expected a usage line");
-        };
-        assert_eq!(primary, "↑1.2k ↓3.4k · $0.0123 · 3t");
-        assert!(matches!(tone, RyeOsTone::Neutral));
-    }
-
-    #[test]
-    fn execution_entry_ignores_non_milestone_and_untyped_records() {
-        // A cognition event is handled by the role path, not here.
-        assert!(exec(json!({ "event_type": "cognition_out" })).is_none());
-        // A record with no event_type (e.g. the test `record` helper shape).
-        assert!(exec(json!({ "primary": "x" })).is_none());
-    }
-
-    #[test]
-    fn timeline_entries_drop_plumbing_lifecycle_events() {
-        // The feed reads as a conversation: thread/stream bookkeeping is
-        // dropped, but the outcome (completed/failed) still renders.
-        let entries = timeline_entries(vec![
-            raw_record(json!({ "event_type": "thread_created" })),
-            raw_record(json!({ "event_type": "thread_started" })),
-            raw_record(json!({ "event_type": "thread_continued", "payload": {} })),
-            raw_record(json!({ "event_type": "stream_opened" })),
-            raw_record(json!({ "event_type": "stream_closed" })),
-            raw_record(json!({ "event_type": "thread_completed" })),
-        ]);
-        assert!(
-            matches!(
-                entries.as_slice(),
-                [RyeOsTimelineEntryVm::Line { primary, .. }] if primary == "completed"
-            ),
-            "only the completion outcome survives; lifecycle plumbing is dropped: {entries:?}"
-        );
-    }
-
-    fn block(text: &str) -> RyeOsTimelineEntryVm {
-        RyeOsTimelineEntryVm::Block {
-            text: text.to_string(),
-            tone: RyeOsTone::Neutral,
-        }
-    }
-
-    fn separator(label: &str) -> RyeOsTimelineEntryVm {
-        RyeOsTimelineEntryVm::Separator {
-            label: label.to_string(),
-        }
-    }
-
-    #[test]
-    fn sections_increment_at_separators() {
-        let entries = vec![
-            block("pre"),        // section 0, no separator header
-            separator("turn 1"), // opens section 1
-            block("a"),
-            separator("turn 2"), // opens section 2
-            block("b"),
-        ];
-        assert_eq!(timeline_sections(&entries), vec![0, 1, 1, 2, 2]);
-    }
-
-    #[test]
-    fn fold_timeline_collapses_a_turn_to_its_marked_header() {
-        let full = vec![
-            separator("turn 1"), // section 0, header
-            block("hi"),
-            separator("turn 2"), // section 1, header
-            block("bye"),
-        ];
-        // Both turns are headed by separators → both foldable.
-        let mut collapsed = std::collections::BTreeSet::new();
-        collapsed.insert(1);
-        let folded = fold_timeline(full, Vec::new(), Vec::new(), &collapsed);
-
-        assert!(folded.collapsible.contains(&0) && folded.collapsible.contains(&1));
-        // turn 1 stays open (header + body); turn 2 keeps only its marked header.
-        assert_eq!(folded.entries.len(), 3, "turn 2 body is hidden");
-        assert!(matches!(
-            &folded.entries[2],
-            RyeOsTimelineEntryVm::Separator { label } if label.contains("turn 2") && label.contains('▸')
-        ));
-        assert_eq!(folded.sections, vec![0, 0, 1]);
-    }
-
-    #[test]
-    fn fold_timeline_will_not_collapse_a_headerless_section() {
-        // Section 0 has no separator header → not foldable, never hidden.
-        let full = vec![block("a"), block("b")];
-        let mut collapsed = std::collections::BTreeSet::new();
-        collapsed.insert(0);
-        let folded = fold_timeline(full, Vec::new(), Vec::new(), &collapsed);
-        assert!(folded.collapsible.is_empty());
-        assert_eq!(
-            folded.entries.len(),
-            2,
-            "headerless content is never folded away"
-        );
-    }
-
-    #[test]
-    fn child_thread_entry_steps_into_the_child_braid() {
-        // A dispatch fork is a step-in feed entry: it names the node being
-        // stepped into and activating it drills into the child (DrillThread),
-        // pushing a return frame. A child is a fresh root, so both route
-        // coordinates are the child id.
-        let entry = exec(json!({
-            "event_type": "child_thread_spawned",
-            "payload": { "child_thread_id": "T-child", "node": "study" }
-        }));
-        let Some(RyeOsTimelineEntryVm::Line {
-            primary,
-            meta,
-            intent,
-            ..
-        }) = entry
-        else {
-            panic!("expected a forked-subthread line");
-        };
-        assert_eq!(primary, "↘ study", "the entry names the node stepped into");
-        assert_eq!(meta.as_deref(), Some("T-child"));
-        assert!(
-            matches!(
-                intent,
-                Some(RyeOsUiIntent::DrillThread { thread_id, chain_root_id, label })
-                    if thread_id == "T-child" && chain_root_id == "T-child"
-                        && label.as_deref() == Some("study")
-            ),
-            "the entry steps into the child braid, labelled by its node"
-        );
-    }
-
-    #[test]
-    fn child_thread_entry_without_a_node_falls_back() {
-        // No `node` in the payload → the generic label, but still drillable.
-        let entry = exec(json!({
-            "event_type": "child_thread_spawned",
-            "payload": { "child_thread_id": "T-child" }
-        }));
-        let Some(RyeOsTimelineEntryVm::Line {
-            primary, intent, ..
-        }) = entry
-        else {
-            panic!("expected a forked-subthread line");
-        };
-        assert_eq!(primary, "forked subthread");
-        assert!(matches!(intent, Some(RyeOsUiIntent::DrillThread { .. })));
-    }
-
-    #[test]
-    fn nesting_indents_tool_calls_under_their_graph_node() {
-        // A graph braid reads as a call tree: a tool call between a node's start
-        // and completed nests one level under that node; sibling nodes stay at
-        // the root. The indent vector stays parallel to the coalesced entries.
-        let (entries, indents, _) = timeline_entries_indented(vec![
-            raw_record(json!({ "event_type": "graph_step_started",
-                "payload": { "graph_run_id": "g1", "step": 1, "node": "study" } })),
-            raw_record(json!({ "event_type": "tool_call_start",
-                "payload": { "tool": "explore", "call_id": "c1" } })),
-            raw_record(json!({ "event_type": "tool_call_result",
-                "payload": { "tool": "explore", "call_id": "c1" } })),
-            raw_record(json!({ "event_type": "graph_step_completed",
-                "payload": { "graph_run_id": "g1", "step": 1, "node": "study" } })),
-            raw_record(json!({ "event_type": "graph_step_started",
-                "payload": { "graph_run_id": "g1", "step": 2, "node": "options" } })),
-            raw_record(json!({ "event_type": "graph_step_completed",
-                "payload": { "graph_run_id": "g1", "step": 2, "node": "options" } })),
-        ]);
-        assert_eq!(
-            entries.len(),
-            3,
-            "study + explore + options, pairs coalesced"
-        );
-        assert_eq!(indents.len(), entries.len(), "indents parallel to entries");
-        assert_eq!(
-            indents,
-            vec![0, 1, 0],
-            "explore nests under study (depth 1); the two nodes sit at the root"
-        );
-    }
-
-    #[test]
-    fn graph_follow_suspend_renders_a_boundary_milestone_without_a_drill_in() {
-        // The suspend event names only the local follow node (the child chain is
-        // dispatched after the checkpoint), so it renders as an accent milestone
-        // with the follow node in the meta and NO intent — there is no child ref
-        // to aim at (drill-in to the child is the row's `watch child` affordance).
-        let entry = exec(json!({
-            "event_type": "graph_follow_suspended",
-            "payload": { "node": "fetch", "item_id": "root", "step": 3 }
-        }));
-        let Some(RyeOsTimelineEntryVm::Line {
-            primary,
-            meta,
-            tone,
-            intent,
-            ..
-        }) = entry
-        else {
-            panic!("expected a suspend milestone line");
-        };
-        assert_eq!(primary, "suspended · following child");
-        assert_eq!(meta.as_deref(), Some("fetch"));
-        assert!(matches!(tone, RyeOsTone::Accent));
-        assert!(
-            intent.is_none(),
-            "the suspend event carries no child ref to drill into"
-        );
-    }
-
-    #[test]
-    fn graph_follow_resume_renders_a_boundary_and_ordinary_continued_is_dropped() {
-        // A `thread_continued` marked `graph_follow_resume` is un-plumbed and
-        // renders as an accent boundary ("resumed with child result") with no
-        // drill-in; an ordinary continued (segment cut / operator follow-up)
-        // stays plumbing and is dropped. Both flow through `timeline_entries`.
-        let entries = timeline_entries(vec![
-            raw_record(json!({
-                "event_type": "thread_continued",
-                "payload": { "reason": "turn_limit", "successor_thread_id": "T-seg" }
-            })),
-            raw_record(json!({
-                "event_type": "thread_continued",
-                "payload": { "reason": "graph_follow_resume", "successor_thread_id": "T-succ" }
-            })),
-        ]);
-        assert!(
-            matches!(
-                entries.as_slice(),
-                [RyeOsTimelineEntryVm::Line { primary, tone, intent, .. }]
-                    if primary == "resumed with child result"
-                        && matches!(tone, RyeOsTone::Accent)
-                        && intent.is_none()
-            ),
-            "only the follow-resume boundary survives; the segment-cut continued is dropped: {entries:?}"
-        );
-    }
-
-    #[test]
-    fn ordinary_milestone_entries_carry_no_action() {
-        let entry = exec(json!({ "event_type": "thread_completed" }));
-        assert!(matches!(
-            entry,
-            Some(RyeOsTimelineEntryVm::Line {
-                intent: None,
-                secondary_intent: None,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn error_terminals_are_inspectable_but_completed_and_cancelled_are_not() {
-        // failed / timed_out / killed each carry an inspect (Enter) intent whose
-        // title is the visible line and whose detail is the FULL raw event.
-        for event_type in ["thread_failed", "thread_timed_out", "thread_killed"] {
-            let raw = json!({
-                "event_type": event_type,
-                "thread_id": "T-1",
-                "chain_root_id": "R-1",
-                "chain_seq": 7,
-                "payload": { "error": { "message": "boom" } }
-            });
-            let entry = exec(raw.clone());
-            let Some(RyeOsTimelineEntryVm::Line {
-                primary, intent, ..
-            }) = entry
-            else {
-                panic!("expected a terminal line for {event_type}");
-            };
-            match intent {
-                Some(RyeOsUiIntent::InspectSummary { title, detail }) => {
-                    assert_eq!(title, primary, "inspect title is the visible line");
-                    assert_eq!(detail, raw, "inspect detail is the full raw event");
-                }
-                other => panic!("{event_type} should be inspectable, got {other:?}"),
-            }
-        }
-        // completed / cancelled are NOT errors — no inspect, no retry.
-        for event_type in ["thread_completed", "thread_cancelled"] {
-            let entry = exec(json!({ "event_type": event_type }));
-            assert!(
-                matches!(
-                    entry,
-                    Some(RyeOsTimelineEntryVm::Line {
-                        intent: None,
-                        secondary_intent: None,
-                        ..
-                    })
+    fn a_presented_call_draws_its_headline_and_keeps_the_tool_beside_it() {
+        let presented = layout(
+            vec![with(
+                entry(
+                    "a",
+                    "activity",
+                    json!({"headline": "https://example.com/a", "tool": "web_fetch",
+                           "detail": "text", "body": "Example Domain", "badge": "80 B"}),
                 ),
-                "{event_type} carries neither inspect nor retry"
-            );
-        }
-    }
-
-    #[test]
-    fn only_failed_offers_retry_and_only_when_the_stimulus_is_known() {
-        let mut stimulus = std::collections::BTreeMap::new();
-        stimulus.insert("T-1".to_string(), "run the thing".to_string());
-
-        let failed = json!({
-            "event_type": "thread_failed",
-            "thread_id": "T-1",
-            "chain_root_id": "R-1",
-            "payload": { "error": { "message": "boom" } }
-        });
-        // failed + known stimulus → retry pre-fills that turn's own input,
-        // retargeted at the selected failed thread.
-        let Some(RyeOsTimelineEntryVm::Line {
-            secondary_intent, ..
-        }) = execution_entry(&raw_record(failed.clone()), &stimulus)
-        else {
-            panic!("expected a failed line");
-        };
-        assert!(
-            matches!(
-                secondary_intent,
-                Some(RyeOsUiIntent::PrefillRetryTurn { thread_id, chain_root_id, input })
-                    if thread_id == "T-1" && chain_root_id == "R-1" && input == "run the thing"
-            ),
-            "retry recovers the failed thread's own stimulus"
+                "state",
+                json!("done"),
+            )],
+            0,
         );
-
-        // failed but stimulus unknown (marker-only turn / missing) → inspect
-        // only, no retry input to offer.
-        let Some(RyeOsTimelineEntryVm::Line {
-            intent,
-            secondary_intent,
-            ..
-        }) = execution_entry(&raw_record(failed), &std::collections::BTreeMap::new())
-        else {
-            panic!("expected a failed line");
-        };
-        assert!(matches!(intent, Some(RyeOsUiIntent::InspectSummary { .. })));
-        assert!(secondary_intent.is_none(), "no stimulus → no retry");
-
-        // timed_out / killed are inspectable but NOT retryable even with a known
-        // stimulus — the daemon refuses continuation for those statuses (v1).
-        for event_type in ["thread_timed_out", "thread_killed"] {
-            let raw = json!({
-                "event_type": event_type,
-                "thread_id": "T-1",
-                "chain_root_id": "R-1",
-                "payload": {}
-            });
-            let Some(RyeOsTimelineEntryVm::Line {
-                intent,
-                secondary_intent,
-                ..
-            }) = execution_entry(&raw_record(raw), &stimulus)
-            else {
-                panic!("expected a terminal line for {event_type}");
-            };
-            assert!(matches!(intent, Some(RyeOsUiIntent::InspectSummary { .. })));
-            assert!(
-                secondary_intent.is_none(),
-                "{event_type} is inspectable but not retryable"
-            );
+        match &presented.entries[0] {
+            RyeOsTimelineEntryVm::Pair { summary, meta, .. } => {
+                assert_eq!(summary, "https://example.com/a");
+                assert_eq!(meta.as_deref(), Some("web_fetch · text · 80 B"));
+            }
+            other => panic!("expected a pair, got {other:?}"),
+        }
+        let plain = layout(
+            vec![with(
+                entry(
+                    "a",
+                    "activity",
+                    json!({"headline": "web_fetch", "detail": "{\"url\":\"u\"}"}),
+                ),
+                "state",
+                json!("done"),
+            )],
+            0,
+        );
+        match &plain.entries[0] {
+            RyeOsTimelineEntryVm::Pair { summary, meta, .. } => {
+                assert_eq!(summary, "web_fetch");
+                assert_eq!(meta.as_deref(), Some("{\"url\":\"u\"}"));
+            }
+            other => panic!("expected a pair, got {other:?}"),
         }
     }
 
+    fn instance() -> crate::ids::RyeOsViewInstanceKey {
+        timeline_core()
+            .mounted_instances()
+            .next()
+            .expect("the timeline view is mounted")
+    }
+
     #[test]
-    fn retry_stimulus_is_keyed_by_thread_so_interleaved_chains_dont_cross_attribute() {
-        // Two turns interleaved: T-1's stimulus and T-2's stimulus, then T-1
-        // fails. The retry input must be T-1's own stimulus, never T-2's.
-        let records = vec![
-            raw_record(json!({
-                "event_type": "cognition_in",
-                "thread_id": "T-1",
-                "payload": { "content": "first turn" }
-            })),
-            raw_record(json!({
-                "event_type": "cognition_in",
-                "thread_id": "T-2",
-                "payload": { "content": "second turn" }
-            })),
-            raw_record(json!({
-                "event_type": "thread_failed",
-                "thread_id": "T-1",
-                "chain_root_id": "R-1",
-                "payload": { "error": { "message": "boom" } }
-            })),
+    fn entry_types_map_onto_the_renderer_variants() {
+        let items = vec![
+            with(
+                entry("m", "message", json!({"body": "do the thing\nplease"})),
+                "exchange",
+                json!("x1"),
+            ),
+            with(
+                entry("p", "prose", json!({"body": "answer"})),
+                "exchange",
+                json!("x1"),
+            ),
+            with(
+                entry("t", "thought", json!({"body": "hmm"})),
+                "exchange",
+                json!("x1"),
+            ),
+            with(
+                with(
+                    entry(
+                        "a",
+                        "activity",
+                        json!({"headline": "read", "badge": "42 B"}),
+                    ),
+                    "state",
+                    json!("done"),
+                ),
+                "exchange",
+                json!("x1"),
+            ),
+            with(
+                with(
+                    entry("r", "activity", json!({"tool": "tool:demo"})),
+                    "state",
+                    json!("running"),
+                ),
+                "exchange",
+                json!("x1"),
+            ),
+            with(
+                entry("k", "marker", json!({"headline": "continued: limit"})),
+                "exchange",
+                json!("x1"),
+            ),
         ];
-        let entries = timeline_entries(records);
-        let retry = entries.iter().find_map(|entry| match entry {
+        let built = layout(items, 0).entries;
+        assert_eq!(
+            built[0],
+            RyeOsTimelineEntryVm::Separator {
+                label: "do the thing\nplease".into()
+            }
+        );
+        assert_eq!(
+            built[1],
+            RyeOsTimelineEntryVm::Block {
+                text: "answer".into(),
+                tone: RyeOsTone::Neutral
+            }
+        );
+        assert!(matches!(
+            &built[2],
+            RyeOsTimelineEntryVm::Line { primary, meta: None, state: None, .. }
+                if primary == "Thought"
+        ));
+        assert_eq!(
+            built[3],
+            RyeOsTimelineEntryVm::Pair {
+                summary: "read".into(),
+                meta: Some("42 B".into()),
+                tone: RyeOsTone::Neutral,
+                pending: false,
+                state: Some("done".into()),
+            }
+        );
+        assert!(matches!(
+            &built[4],
+            RyeOsTimelineEntryVm::Pair { summary, tone: RyeOsTone::Accent, pending: true, .. }
+                if summary == "tool:demo"
+        ));
+        assert!(matches!(
+            &built[5],
+            RyeOsTimelineEntryVm::Line { primary, intent: None, .. } if primary == "continued: limit"
+        ));
+    }
+
+    #[test]
+    fn service_tone_wins_and_outcome_with_a_reason_is_inspectable() {
+        let failed = with(
+            with(
+                with(
+                    entry(
+                        "o",
+                        "outcome",
+                        json!({"headline": "boom_code", "reason": "boom"}),
+                    ),
+                    "state",
+                    json!("failed"),
+                ),
+                "tone",
+                json!("danger"),
+            ),
+            "exchange",
+            Value::Null,
+        );
+        let built = layout(vec![failed.clone()], 0).entries;
+        match &built[0] {
             RyeOsTimelineEntryVm::Line {
-                secondary_intent:
-                    Some(RyeOsUiIntent::PrefillRetryTurn {
-                        input, thread_id, ..
-                    }),
+                primary,
+                meta,
+                tone,
+                intent,
+                state,
                 ..
-            } => Some((thread_id.clone(), input.clone())),
-            _ => None,
+            } => {
+                assert_eq!(primary, "boom");
+                assert_eq!(state.as_deref(), Some("failed"));
+                assert_eq!(meta.as_deref(), Some("boom_code"));
+                assert_eq!(*tone, RyeOsTone::Danger);
+                assert!(matches!(
+                    intent,
+                    Some(RyeOsUiIntent::InspectSummary { title, detail })
+                        if title == "failed — boom" && *detail == failed
+                ));
+            }
+            other => panic!("expected a line, got {other:?}"),
+        }
+        let done = with(
+            entry("o2", "outcome", json!({"headline": "ok"})),
+            "state",
+            json!("completed"),
+        );
+        assert!(matches!(
+            &layout(vec![done], 0).entries[0],
+            RyeOsTimelineEntryVm::Line { primary, intent: None, .. } if primary == "completed"
+        ));
+    }
+
+    #[test]
+    fn a_long_message_is_kept_whole_for_the_bubble_to_wrap() {
+        let body = ["Keep the tiling behaviour as it is."; 8].join(" ");
+        let built = layout(vec![entry("m", "message", json!({ "body": body }))], 0).entries;
+        assert_eq!(built[0], RyeOsTimelineEntryVm::Separator { label: body });
+    }
+
+    #[test]
+    fn a_settled_link_puts_its_badge_after_the_state_word() {
+        let link = with(
+            with(
+                entry(
+                    "l",
+                    "link",
+                    json!({"headline": "review", "target": "T-1", "badge": "$0.21"}),
+                ),
+                "state",
+                json!("done"),
+            ),
+            "exchange",
+            Value::Null,
+        );
+        assert!(matches!(
+            &layout(vec![link], 0).entries[0],
+            RyeOsTimelineEntryVm::Line { state: Some(state), .. } if state == "done · $0.21"
+        ));
+    }
+
+    #[test]
+    fn a_link_steps_into_its_child_thread() {
+        let link = entry(
+            "l",
+            "link",
+            json!({"headline": "study", "target": "T-child"}),
+        );
+        assert_eq!(
+            layout(vec![link], 0).entries[0],
+            RyeOsTimelineEntryVm::Line {
+                primary: "↘ study".into(),
+                meta: Some("child thread T-child".into()),
+                tone: RyeOsTone::Neutral,
+                intent: Some(RyeOsUiIntent::DrillThread {
+                    thread_id: "T-child".into(),
+                    chain_root_id: "T-child".into(),
+                    label: Some("study".into()),
+                }),
+                secondary_intent: None,
+                state: None,
+            }
+        );
+    }
+
+    #[test]
+    fn nested_entries_indent_under_their_parent() {
+        let items = vec![
+            entry("a1", "activity", json!({"headline": "step"})),
+            with(
+                entry("l1", "link", json!({"headline": "child", "target": "T-2"})),
+                "parent",
+                json!("a1"),
+            ),
+            with(
+                entry("a2", "activity", json!({"headline": "inner"})),
+                "parent",
+                json!("l1"),
+            ),
+            entry("a3", "activity", json!({"headline": "sibling"})),
+        ];
+        assert_eq!(layout(items, 0).indents, vec![0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn a_cluster_is_a_foldable_group_with_indented_members() {
+        let cluster = json!({
+            "item": "cluster", "id": "c1", "headline": "3 operations",
+            "members": [
+                with(entry("a", "activity", json!({"headline": "one"})), "exchange", json!("x1")),
+                with(entry("b", "activity", json!({"headline": "two"})), "exchange", json!("x1")),
+            ]
+        });
+        let items = vec![
+            with(
+                entry("m", "message", json!({"body": "go"})),
+                "exchange",
+                json!("x1"),
+            ),
+            cluster,
+            with(
+                entry("p", "prose", json!({"body": "done"})),
+                "exchange",
+                json!("x1"),
+            ),
+        ];
+        let built = layout(items, 0);
+        assert_eq!(built.entries.len(), 5);
+        assert!(matches!(
+            &built.entries[1],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "3 operations"
+        ));
+        assert_eq!(built.indents, vec![0, 0, 1, 1, 0]);
+        // Exchange section 1 heads at the message; the cluster is its own
+        // foldable section nested inside it.
+        assert_eq!(built.sections, vec![1, 2, 2, 2, 1]);
+        assert_eq!(built.section_parent[2], Some(1));
+        assert!(built.collapsible.contains(&1) && built.collapsible.contains(&2));
+
+        // A cluster starts folded: its headline stays, marked, and its
+        // members are hidden.
+        let folded = fold_timeline_window(&built, None, &BTreeMap::new(), 0, 50).folded;
+        assert_eq!(folded.entries.len(), 3);
+        assert!(matches!(
+            &folded.entries[1],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "3 operations ▸"
+        ));
+        // Opening the cluster shows its members.
+        let opened = BTreeMap::from([("item:c1".to_string(), false)]);
+        let folded = fold_timeline_window(&built, None, &opened, 0, 50).folded;
+        assert_eq!(folded.entries.len(), 5);
+        assert!(matches!(
+            &folded.entries[1],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "3 operations"
+        ));
+        // Folding the exchange hides everything but its header, cluster too.
+        let shut = BTreeMap::from([("exchange:x1".to_string(), true)]);
+        let folded = fold_timeline_window(&built, None, &shut, 0, 50).folded;
+        assert_eq!(folded.entries.len(), 1);
+        assert!(matches!(
+            &folded.entries[0],
+            RyeOsTimelineEntryVm::Separator { label } if label == "go ▸"
+        ));
+    }
+
+    fn text_response(items: Vec<Value>) -> Value {
+        json!({
+            "chain_root_id": "T-1", "older": 0,
+            "summary": {"status": "running", "input_tokens": 1, "output_tokens": 2,
+                        "spend_usd": 0.5, "turns": 3},
+            "items": items,
+        })
+    }
+
+    #[test]
+    fn text_lines_carry_the_entry_label_indent_and_tone() {
+        let failed = with(
+            with(
+                entry(
+                    "f",
+                    "activity",
+                    json!({"headline": "fetch", "detail": "404"}),
+                ),
+                "state",
+                json!("failed"),
+            ),
+            "tone",
+            json!("danger"),
+        );
+        let text = timeline_text(&text_response(vec![failed]));
+        assert_eq!(text.lead.len(), 1, "the chain header leads");
+        assert_eq!(text.lines.len(), 1);
+        let line = &text.lines[0];
+        assert_eq!(line.id, "item:f");
+        assert_eq!(line.role, "activity");
+        assert_eq!(line.indent, 0);
+        assert_eq!(line.tone, RyeOsTone::Danger);
+        // The same string the accessible label gives.
+        assert_eq!(line.text, "fetch, failed: 404");
+    }
+
+    #[test]
+    fn text_lines_for_a_cluster_and_a_recap_head_their_members() {
+        let at = |id: &str, headline: &str| {
+            with(
+                entry(id, "activity", json!({"headline": headline})),
+                "exchange",
+                json!("x1"),
+            )
+        };
+        let items = vec![
+            json!({"item": "cluster", "id": "c1", "headline": "2 operations",
+                   "members": [at("a", "one"), at("b", "two")]}),
+            json!({"item": "recap", "id": "r1", "exchange": "x1", "work": 2, "duration_s": 12,
+                   "members": [at("c", "three")]}),
+        ];
+        let text = timeline_text(&text_response(items));
+        let shape: Vec<(u8, &str)> = text
+            .lines
+            .iter()
+            .map(|line| (line.indent, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0, "2 operations"),
+                (1, "one"),
+                (1, "two"),
+                (0, "Worked for 12s, 2 steps"),
+                (1, "three"),
+            ]
+        );
+        assert_eq!(text.lines[0].id, "item:c1");
+        assert_eq!(text.lines[0].role, "cluster");
+        assert_eq!(text.lines[3].role, "recap");
+        assert_eq!(text.lines[1].id, "item:a");
+    }
+
+    #[test]
+    fn an_older_window_adds_a_lead_line() {
+        let mut response = text_response(Vec::new());
+        response["older"] = json!(7);
+        let text = timeline_text(&response);
+        assert_eq!(text.lead.last().map(|l| l.text.as_str()), Some("7 older"));
+    }
+
+    #[test]
+    fn a_recap_is_a_foldable_group_with_a_duration_header() {
+        let recap = json!({
+            "item": "recap", "id": "r1", "exchange": "x1", "work": 3, "duration_s": 75,
+            "members": [
+                with(entry("a", "activity", json!({"headline": "one"})), "exchange", json!("x1")),
+                {"item": "cluster", "id": "c1", "headline": "2 operations", "members": [
+                    with(entry("b", "activity", json!({"headline": "two"})), "exchange", json!("x1")),
+                    with(entry("c", "activity", json!({"headline": "three"})), "exchange", json!("x1")),
+                ]},
+            ]
+        });
+        let items = vec![
+            with(
+                entry("m", "message", json!({"body": "go"})),
+                "exchange",
+                json!("x1"),
+            ),
+            recap,
+            with(
+                entry("p", "prose", json!({"body": "done"})),
+                "exchange",
+                json!("x1"),
+            ),
+        ];
+        let built = layout(items, 0);
+        assert!(matches!(
+            &built.entries[1],
+            RyeOsTimelineEntryVm::Line { primary, meta, .. }
+                if primary == "Worked for 1m15s" && meta.as_deref() == Some("3 steps")
+        ));
+        assert_eq!(built.indents, vec![0, 0, 1, 1, 2, 2, 0]);
+        assert_eq!(built.sections, vec![1, 2, 2, 3, 3, 3, 1]);
+        assert_eq!(built.section_parent[3], Some(2));
+        // Folding the recap hides its work, the cluster included, and keeps
+        // the message and the answer.
+        let folded = fold_timeline_window(&built, None, &BTreeMap::new(), 0, 50).folded;
+        assert_eq!(folded.entries.len(), 3);
+    }
+
+    #[test]
+    fn older_items_open_the_timeline_with_a_count_line() {
+        let built = layout(vec![entry("p", "prose", json!({"body": "x"}))], 37);
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { primary, intent: None, .. } if primary == "37 older"
+        ));
+        assert!(built.sources[0].is_none());
+        assert_eq!(built.entries.len(), 2);
+        assert_eq!(layout(Vec::new(), 0).entries.len(), 0);
+    }
+
+    #[test]
+    fn the_response_collection_and_older_count_drive_the_layout() {
+        let binding: super::super::content::ViewBinding = serde_json::from_value(json!({
+            "widget": "timeline",
+            "sources": { "default": {
+                "ref": "service:ui/ryeos-ui/timeline/thread", "collection": "items"
+            } }
+        }))
+        .unwrap();
+        let response = json!({
+            "older": 2,
+            "items": [entry("p", "prose", json!({"body": "x"}))]
+        });
+        let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+        assert_eq!(built.entries.len(), 2);
+        assert_eq!(built.sources[1].as_ref().unwrap().key, "item:p");
+    }
+
+    fn window_binding(activate: Option<&str>) -> super::super::content::ViewBinding {
+        let mut value = json!({
+            "widget": "timeline",
+            "sources": { "default": {
+                "ref": "service:ui/ryeos-ui/timeline/thread", "collection": "items"
+            } },
+            "affordances": [{
+                "id": "older",
+                "invoke": {
+                    "plane": "ui", "facet": "timeline.window",
+                    "value": { "limit": "{record.next_limit}" }
+                }
+            }]
+        });
+        if let Some(activate) = activate {
+            value["selection"] = json!({ "activate": activate });
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_older_line_widens_the_window_through_the_views_affordance() {
+        let response = json!({
+            "older": 40, "next_limit": 400,
+            "items": [entry("p", "prose", json!({"body": "x"}))]
+        });
+        let built = timeline_layout_for(
+            &window_binding(Some("older")),
+            &response,
+            &instance(),
+            "view:t",
+        );
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line {
+                primary,
+                intent: Some(RyeOsUiIntent::InvokeAffordance {
+                    view_ref, affordance_id, record, ..
+                }),
+                ..
+            } if primary == "40 older"
+                && view_ref == "view:t"
+                && affordance_id == "older"
+                && *record == json!({"older": 40, "next_limit": 400})
+        ));
+
+        // No wider window on offer, or no affordance named: the line is a count.
+        let capped = json!({ "older": 40, "items": [] });
+        let built = timeline_layout_for(
+            &window_binding(Some("older")),
+            &capped,
+            &instance(),
+            "view:t",
+        );
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { intent: None, .. }
+        ));
+        let built = timeline_layout_for(&window_binding(None), &response, &instance(), "view:t");
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { intent: None, .. }
+        ));
+    }
+
+    #[test]
+    fn the_summary_is_a_usage_line_and_not_a_feed_entry() {
+        let binding = window_binding(None);
+        let response = json!({
+            "older": 0,
+            "summary": {
+                "status": "running", "input_tokens": 184220, "output_tokens": 21840,
+                "spend_usd": 1.62, "turns": 7
+            },
+            "items": [entry("p", "prose", json!({"body": "x"}))]
         });
         assert_eq!(
-            retry,
-            Some(("T-1".to_string(), "first turn".to_string())),
-            "retry recovers T-1's own stimulus, not the interleaved T-2's"
+            usage_text(&response).as_deref(),
+            Some("184K in · 21K out · $1.62 · 7 turns")
+        );
+        let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+        assert_eq!(built.entries.len(), 1, "the feed holds no header line");
+        assert!(built.sources[0].is_some());
+
+        let small = json!({"summary": {"input_tokens": 900, "output_tokens": 2500000,
+            "spend_usd": 0.004, "turns": 1}});
+        assert_eq!(
+            usage_text(&small).as_deref(),
+            Some("900 in · 2.5M out · $0.00 · 1 turn")
+        );
+        assert_eq!(usage_text(&json!({"items": []})), None);
+
+        // The "N older" line still opens the window.
+        let older = json!({ "older": 5, "summary": response["summary"], "items": [] });
+        let built = timeline_layout_for(&binding, &older, &instance(), "view:t");
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "5 older"
+        ));
+        let bare = json!({ "items": [] });
+        assert!(
+            timeline_layout_for(&binding, &bare, &instance(), "view:t")
+                .entries
+                .is_empty()
         );
     }
 
+    fn ask_entry(id: &str, state: &str) -> Value {
+        with(
+            with(
+                entry(id, "ask", json!({"headline": "approval requested: write"})),
+                "state",
+                json!(state),
+            ),
+            "tone",
+            json!("warn"),
+        )
+    }
+
     #[test]
-    fn marker_only_cognition_in_yields_no_retry_input() {
-        // A bare turn marker (no `content`) contributes no stimulus, so a
-        // failure on that thread is inspectable but not retryable.
-        let records = vec![
-            raw_record(json!({
-                "event_type": "cognition_in",
-                "thread_id": "T-1",
-                "payload": { "turn": 2 }
-            })),
-            raw_record(json!({
-                "event_type": "thread_failed",
-                "thread_id": "T-1",
-                "chain_root_id": "R-1",
-                "payload": {}
-            })),
+    fn asks_whose_latest_state_is_pending_are_docked_and_leave_the_feed() {
+        let binding = window_binding(None);
+        let cluster = json!({
+            "item": "cluster", "id": "cl", "headline": "2 pages",
+            "members": [ask_entry("ask:in-cluster", "pending")]
+        });
+        let items = vec![
+            ask_entry("ask:1", "pending"),
+            ask_entry("ask:2", "approved"),
+            entry("p", "prose", json!({"body": "x"})),
+            cluster,
         ];
-        let entries = timeline_entries(records);
-        assert!(
-            entries.iter().all(|entry| !matches!(
-                entry,
-                RyeOsTimelineEntryVm::Line {
-                    secondary_intent: Some(_),
-                    ..
-                }
-            )),
-            "a marker-only turn offers no retry"
+        let docked = pending_asks(&binding, &json!({}), &items, &instance(), "view:t");
+        assert_eq!(
+            docked.iter().map(|ask| ask.id.as_str()).collect::<Vec<_>>(),
+            ["ask:1", "ask:in-cluster"]
         );
-    }
-
-    #[test]
-    fn chunked_cognition_in_renders_once_and_supplies_exact_retry_input() {
-        let content = "ARC evidence part one\nARC evidence part two\n";
-        let content_hash = "a".repeat(64);
-        let mut records = ["ARC evidence part one\n", "ARC evidence part two\n"]
-            .into_iter()
-            .enumerate()
-            .map(|(index, content_chunk)| {
-                raw_record(json!({
-                    "event_type": "cognition_in",
-                    "thread_id": "T-1",
-                    "chain_root_id": "R-1",
-                    "chain_seq": index + 1,
-                    "payload": {
-                        "schema_version": 1,
-                        "content_hash": content_hash,
-                        "chunk_index": index,
-                        "chunk_count": 2,
-                        "content_chunk": content_chunk,
-                    },
-                }))
-            })
-            .collect::<Vec<_>>();
-        records.push(raw_record(json!({
-            "event_type": "thread_failed",
-            "thread_id": "T-1",
-            "chain_root_id": "R-1",
-            "chain_seq": records.len() + 1,
-            "payload": {}
-        })));
-
-        let entries = timeline_entries(records);
-        let rendered_inputs = entries
+        assert!(matches!(
+            &docked[0].entry,
+            RyeOsTimelineEntryVm::Line { primary, tone: RyeOsTone::Warn, .. }
+                if primary == "approval requested: write"
+        ));
+        // A docked ask is not also a row in the feed; an answered one is.
+        let response = json!({ "items": items });
+        let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+        let keys: Vec<&str> = built
+            .sources
             .iter()
-            .filter(|entry| {
-                matches!(
-                    entry,
-                    RyeOsTimelineEntryVm::Line { primary, .. } if primary == content.trim()
-                )
-            })
-            .count();
-        assert_eq!(rendered_inputs, 1);
-        assert!(entries.iter().any(|entry| matches!(
-            entry,
-            RyeOsTimelineEntryVm::Line {
-                secondary_intent: Some(RyeOsUiIntent::PrefillRetryTurn { input, .. }),
+            .flatten()
+            .map(|source| source.key.as_str())
+            .collect();
+        assert!(!keys.contains(&"item:ask:1"));
+        assert!(!keys.contains(&"item:ask:in-cluster"));
+        assert!(keys.contains(&"item:ask:2"));
+        assert!(
+            pending_asks(
+                &binding,
+                &json!({}),
+                &[ask_entry("ask:2", "denied")],
+                &instance(),
+                "view:t"
+            )
+            .is_empty()
+        );
+    }
+
+    fn answering_binding(admitted: bool) -> super::super::content::ViewBinding {
+        let mut affordances = vec![json!({
+            "id": "older", "label": "Load older",
+            "invoke": {"plane": "ui", "facet": "timeline.window", "value": {"limit": "{record.next_limit}"}}
+        })];
+        if admitted {
+            let invoke = |accept: bool| {
+                json!({
+                    "plane": "rye", "ref": "service:worker-executions/resolve-approval",
+                    "args": {
+                        "chain_root_id": "{record.chain_root_id}",
+                        "approval_id": "{record.approval_id}",
+                        "request_digest": "{record.request_digest}",
+                        "accept": accept
+                    }
+                })
+            };
+            let when = json!({"all": [
+                {"field": "type", "equals": "ask"}, {"field": "state", "equals": "pending"}
+            ]});
+            affordances.push(json!({
+                "id": "accept", "label": "Approve", "producer": "selection",
+                "invoke": invoke(true),
+                "visible_when": {"all": [
+                    {"field": "type", "equals": "ask"}, {"field": "state", "equals": "pending"},
+                    {"field": "accept_allowed", "equals": true}
+                ]}
+            }));
+            affordances.push(json!({
+                "id": "decline", "label": "Decline", "producer": "selection",
+                "visible_when": when, "invoke": invoke(false)
+            }));
+        }
+        serde_json::from_value(json!({
+            "widget": "timeline",
+            "sources": { "default": {
+                "ref": "service:ui/ryeos-ui/timeline/thread", "collection": "items"
+            } },
+            "selection": { "activate": "older" },
+            "affordances": affordances
+        }))
+        .unwrap()
+    }
+
+    fn fenced_ask(accept_allowed: &str) -> Value {
+        with(
+            entry(
+                "ask:ap-1",
+                "ask",
+                json!({"headline": "approval requested: write", "approval_id": "ap-1",
+                       "request_digest": "dg-1", "accept_allowed": accept_allowed}),
+            ),
+            "state",
+            json!("pending"),
+        )
+    }
+
+    #[test]
+    fn a_docked_ask_offers_the_actions_the_view_admits_with_only_the_fence() {
+        let response = json!({"chain_root_id": "C-1"});
+        let docked = pending_asks(
+            &answering_binding(true),
+            &response,
+            &[fenced_ask("true")],
+            &instance(),
+            "view:t",
+        );
+        let actions = &docked[0].actions;
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Approve", "Decline"]
+        );
+        match &actions[0].intent {
+            Some(RyeOsUiIntent::InvokeAffordance {
+                view_ref,
+                affordance_id,
+                record,
                 ..
-            } if input == content.trim()
-        )));
+            }) => {
+                assert_eq!(view_ref, "view:t");
+                assert_eq!(affordance_id, "accept");
+                assert_eq!(record["chain_root_id"], "C-1");
+                assert_eq!(record["approval_id"], "ap-1");
+                assert_eq!(record["request_digest"], "dg-1");
+            }
+            other => panic!("expected an affordance invocation, got {other:?}"),
+        }
+
+        // A request that does not allow accepting is not offered Approve;
+        // Decline is all that is left.
+        let refused = pending_asks(
+            &answering_binding(true),
+            &response,
+            &[fenced_ask("false")],
+            &instance(),
+            "view:t",
+        );
+        let actions = &refused[0].actions;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].label, "Decline");
+        assert!(actions[0].intent.is_some());
     }
 
     #[test]
-    fn cognition_in_content_renders_as_the_stimulus_line() {
-        // The run-opening stimulus ({content}) is the operator's message —
-        // render it as an accent line, never a turn boundary and never raw JSON
-        // (the binding only projects {turn}, so this is read from the raw event).
-        let entries = timeline_entries(vec![raw_record(json!({
-            "event_type": "cognition_in",
-            "payload": { "content": "hello there" }
-        }))]);
+    fn a_pending_ask_is_docked_and_absent_from_the_feed_until_it_is_answered() {
+        let response = json!({"chain_root_id": "C-1"});
+        let pending = [
+            entry("msg:1", "message", json!({"body": "go"})),
+            fenced_ask("true"),
+        ];
+        let feed = |items: &[Value]| {
+            timeline_layout_for(
+                &answering_binding(true),
+                &json!({"chain_root_id": "C-1", "items": items}),
+                &instance(),
+                "view:t",
+            )
+        };
+        let layout = feed(&pending);
+        assert_eq!(layout.entries.len(), 1, "only the message is in the feed");
+        assert_eq!(layout.sources.len(), layout.entries.len());
+        assert_eq!(
+            pending_asks(
+                &answering_binding(true),
+                &response,
+                &pending,
+                &instance(),
+                "view:t"
+            )
+            .len(),
+            1
+        );
+        // Answered: one line in the feed, nothing in the dock.
+        let answered = [
+            entry("msg:1", "message", json!({"body": "go"})),
+            with(fenced_ask("true"), "state", json!("approved")),
+        ];
+        assert_eq!(feed(&answered).entries.len(), 2);
         assert!(
-            matches!(
-                entries.as_slice(),
-                [RyeOsTimelineEntryVm::Line { primary, tone, .. }]
-                    if primary == "hello there" && matches!(tone, RyeOsTone::Accent)
-            ),
-            "stimulus content renders as an accent line: {entries:?}"
+            pending_asks(
+                &answering_binding(true),
+                &response,
+                &answered,
+                &instance(),
+                "view:t"
+            )
+            .is_empty()
         );
     }
 
-    /// End-to-end coalescer contract: the SHIPPED chain/timeline projection
-    /// (cognition_out→flow on `payload.content`, cognition_in→boundary,
-    /// tool_call_start/result→pair on `payload.call_id`) folded through
-    /// `project_records` + `timeline_entries`, asserting the three settled
-    /// shapes — a coalesced Block, a Separator, and a closed Pair — all appear.
-    /// This is the regression that links the view item's projection to the
-    /// coalescer; the per-piece tests above don't exercise the binding.
     #[test]
-    fn chain_replay_projection_coalesces_into_block_separator_pair() {
-        use super::super::content::{ViewBinding, project_records};
+    fn an_ask_has_no_actions_where_the_surface_does_not_admit_them_or_without_the_fence() {
+        let response = json!({"chain_root_id": "C-1"});
+        // Observation-only surfaces carry a binding with no answering affordance.
+        let observed = pending_asks(
+            &answering_binding(false),
+            &response,
+            &[fenced_ask("true")],
+            &instance(),
+            "view:t",
+        );
+        assert_eq!(observed.len(), 1);
+        assert!(observed[0].actions.is_empty());
+        // An ask with no digest slot cannot be answered.
+        let unfenced = pending_asks(
+            &answering_binding(true),
+            &response,
+            &[ask_entry("ask:2", "pending")],
+            &instance(),
+            "view:t",
+        );
+        assert!(unfenced[0].actions.is_empty());
+    }
 
-        // Mirrors bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml.
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "cognition_out": { "primary": "payload.content", "role": "flow" },
-                    "cognition_in": { "primary": "payload.turn", "meta": "event_type", "role": "boundary" },
-                    "tool_call_start": {
-                        "primary": "payload.tool", "meta": "payload.call_id",
-                        "role": "pair_open", "pair_key": "payload.call_id"
-                    },
-                    "tool_call_result": {
-                        "primary": "payload.tool", "meta": "payload.result_size_bytes",
-                        "role": "pair_close", "pair_key": "payload.call_id",
-                        "tone": {
-                            "field": "payload.truncated_reason", "missing": "good",
-                            "map": { "error_envelope": "danger" }, "default": "good"
-                        }
-                    }
-                },
-                "default": { "primary": "event_type", "meta": "ts" }
-            }
-        }))
-        .unwrap();
+    #[test]
+    fn the_lane_takes_its_label_from_the_response_and_its_tone_from_the_entry() {
+        let items = vec![with(
+            entry("act:1", "activity", json!({})),
+            "state",
+            json!("retrying"),
+        )];
+        let response = json!({"lane": {"label": "Retrying", "entry": "act:1"}});
+        let lane = timeline_lane(&response, &items).expect("a lane");
+        assert_eq!(lane.label, "Retrying");
+        assert_eq!(lane.tone, RyeOsTone::Warn);
+        // An entry outside the window still names the lane; it is drawn
+        // accented.
+        let lane = timeline_lane(&json!({"lane": {"label": "Working", "entry": "gone"}}), &[]);
+        assert_eq!(lane.map(|lane| lane.tone), Some(RyeOsTone::Accent));
+        // A status row names no entry; the lane still draws, accented.
+        let lane = timeline_lane(
+            &json!({"lane": {"label": "Working", "entry": null}}),
+            &items,
+        );
+        assert_eq!(
+            lane,
+            Some(RyeOsTimelineLaneVm {
+                label: "Working".to_string(),
+                tone: RyeOsTone::Accent
+            })
+        );
+        assert_eq!(timeline_lane(&json!({"lane": null}), &items), None);
+        assert_eq!(timeline_lane(&json!({}), &items), None);
+    }
 
-        let response = json!({ "events": [
-            { "event_type": "cognition_in", "payload": { "turn": "turn 1" } },
-            { "event_type": "cognition_out", "payload": { "content": "Hello " } },
-            { "event_type": "cognition_out", "payload": { "content": "world" } },
-            { "event_type": "tool_call_start", "payload": { "tool": "read_file", "call_id": "c1" } },
-            { "event_type": "tool_call_result",
-              "payload": { "tool": "read_file", "call_id": "c1", "result_size_bytes": 128 } }
+    fn undeclared_response(undeclared: Value) -> Value {
+        json!({
+            "undeclared": undeclared,
+            "notice_noun": {"key": "system_event", "one": "system event", "many": "system events"},
+            "items": [entry("p", "prose", json!({"body": "x"}))]
+        })
+    }
+
+    #[test]
+    fn undeclared_events_draw_one_folded_notice_listing_each_type_and_count() {
+        let binding = window_binding(None);
+        let response = undeclared_response(json!({"vendor.alpha": 2, "vendor.beta": 1}));
+        let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+        // The notice, its two types, then the transcript.
+        assert_eq!(built.entries.len(), 4);
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "3 system events"
+        ));
+        assert!(matches!(
+            &built.entries[1],
+            RyeOsTimelineEntryVm::Line { primary, meta, .. }
+                if primary == "vendor.alpha" && meta.as_deref() == Some("2")
+        ));
+        assert!(matches!(
+            &built.entries[2],
+            RyeOsTimelineEntryVm::Line { primary, meta, .. }
+                if primary == "vendor.beta" && meta.as_deref() == Some("1")
+        ));
+        assert_eq!(built.indents, vec![0, 1, 1, 0]);
+        // It starts folded: the header shows, the list does not, and the
+        // transcript after it is untouched.
+        let notice = built.sections[0];
+        assert!(built.collapsible.contains(&notice));
+        assert!(built.section_folded(notice, &BTreeMap::new()));
+        let folded = fold_timeline_window(&built, None, &BTreeMap::new(), 0, 50).folded;
+        assert_eq!(folded.entries.len(), 2);
+        // Opening it by its key shows the list.
+        let open = BTreeMap::from([(SYSTEM_EVENTS_KEY.to_string(), false)]);
+        let opened = fold_timeline_window(&built, None, &open, 0, 50).folded;
+        assert_eq!(opened.entries.len(), 4);
+    }
+
+    #[test]
+    fn a_single_undeclared_event_uses_the_singular_noun() {
+        let built = timeline_layout_for(
+            &window_binding(None),
+            &undeclared_response(json!({"vendor.alpha": 1})),
+            &instance(),
+            "view:t",
+        );
+        assert!(matches!(
+            &built.entries[0],
+            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "1 system event"
+        ));
+    }
+
+    #[test]
+    fn no_undeclared_events_or_no_noun_draws_no_notice() {
+        let binding = window_binding(None);
+        for response in [
+            undeclared_response(json!({})),
+            undeclared_response(json!({"vendor.alpha": 0})),
+            json!({
+                "undeclared": {"vendor.alpha": 2},
+                "items": [entry("p", "prose", json!({"body": "x"}))]
+            }),
+        ] {
+            let built = timeline_layout_for(&binding, &response, &instance(), "view:t");
+            assert_eq!(built.entries.len(), 1, "{response}");
+        }
+    }
+
+    #[test]
+    fn only_an_entry_with_a_retry_input_offers_retry_within_the_response_chain() {
+        let failed = |slots: Value| {
+            with(
+                with(entry("o", "outcome", slots), "state", json!("failed")),
+                "thread",
+                json!("T-1"),
+            )
+        };
+        let secondary =
+            |items: Vec<Value>, chain: &str| match &timeline_layout(&items, chain, Vec::new())
+                .entries[0]
+            {
+                RyeOsTimelineEntryVm::Line {
+                    secondary_intent, ..
+                } => secondary_intent.clone(),
+                other => panic!("expected a line, got {other:?}"),
+            };
+
+        // A projected input is offered back, retargeted at the entry's thread
+        // in the response's chain.
+        assert_eq!(
+            secondary(
+                vec![failed(
+                    json!({"reason": "boom", "retry_input": "run the thing"})
+                )],
+                "R-1"
+            ),
+            Some(RyeOsUiIntent::PrefillRetryTurn {
+                thread_id: "T-1".into(),
+                chain_root_id: "R-1".into(),
+                input: "run the thing".into(),
+            })
+        );
+        // No input projected (unknown stimulus, or a status the definition does
+        // not make retryable): inspectable, not retryable.
+        assert_eq!(
+            secondary(vec![failed(json!({"reason": "boom"}))], "R-1"),
+            None
+        );
+        // Without a chain there is nothing to continue.
+        assert_eq!(
+            secondary(vec![failed(json!({"retry_input": "x"}))], ""),
+            None
+        );
+    }
+
+    #[test]
+    fn merge_upserts_by_id_in_the_updates_order_and_drops_what_it_omits() {
+        let stored = json!({"highest_chain_seq": 3, "items": [
+            {"id": "a", "v": 1}, {"id": "b", "v": 1}, {"id": "c", "v": 1}
         ]});
-
-        let entries = timeline_entries(project_records(&binding, &response));
-
-        // The boundary became a Separator.
-        assert!(
-            entries.iter().any(|e| matches!(
-                e, RyeOsTimelineEntryVm::Separator { label } if label == "turn 1"
-            )),
-            "cognition_in must fold to a Separator: {entries:?}"
-        );
-        // The two flow deltas coalesced into one settled Block.
-        assert!(
-            entries.iter().any(|e| matches!(
-                e, RyeOsTimelineEntryVm::Block { text, .. } if text == "Hello world"
-            )),
-            "consecutive cognition_out content must coalesce to one Block: {entries:?}"
-        );
-        // The tool call open+result settled into one closed Pair (good tone:
-        // truncated_reason absent → the `missing: good` branch).
-        assert!(
-            entries.iter().any(|e| matches!(
-                e,
-                RyeOsTimelineEntryVm::Pair { summary, pending: false, tone, .. }
-                    if summary == "read_file" && matches!(tone, RyeOsTone::Good)
-            )),
-            "tool_call_start/result must settle into one closed Pair: {entries:?}"
+        let update = json!({"highest_chain_seq": 6, "older": 1,
+            "order": ["b", "c", "d"],
+            "items": [{"id": "c", "v": 2}, {"id": "d", "v": 1}]});
+        let merged = merge_window(Some(&stored), update).unwrap();
+        assert_eq!(
+            merged,
+            json!({"highest_chain_seq": 6, "older": 1, "items": [
+                {"id": "b", "v": 1}, {"id": "c", "v": 2}, {"id": "d", "v": 1}
+            ]})
         );
     }
 
     #[test]
-    fn graph_runtime_events_render_payload_details_not_bare_event_types() {
-        use super::super::content::{ViewBinding, project_records};
+    fn merge_refuses_an_id_neither_side_holds_and_passes_a_whole_window_through() {
+        let stored = json!({"items": [{"id": "a"}]});
+        let update = json!({"order": ["a", "z"], "items": []});
+        assert!(merge_window(Some(&stored), update.clone()).is_none());
+        assert!(merge_window(None, update).is_none());
+        let whole = json!({"highest_chain_seq": 1, "items": [{"id": "q"}]});
+        assert_eq!(merge_window(Some(&stored), whole.clone()), Some(whole));
+    }
 
-        // This intentionally keeps the shipped tool projection shape
-        // (`tool/call_id`) while feeding graph intent events (`item_id/node/step`)
-        // to prove the coalescer repairs the fallback from raw event_type lines.
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "tool_call_start": {
-                        "primary": "payload.tool", "meta": "payload.call_id",
-                        "role": "pair_open", "pair_key": "payload.call_id"
-                    },
-                    "tool_call_result": {
-                        "primary": "payload.tool", "meta": "payload.result_size_bytes",
-                        "role": "pair_close", "pair_key": "payload.call_id",
-                        "tone": { "field": "payload.truncated_reason", "missing": "good" }
-                    }
-                },
-                "default": { "primary": "event_type", "meta": "ts" }
+    fn timeline_core() -> RyeOsCore {
+        test_core(session_with_surface(json!({
+            "name": "t",
+            "tiles": ["view:test/timeline"],
+            "views": {
+                "view:test/timeline": {
+                    "widget": "timeline",
+                    "sources": { "default": {
+                        "ref": "service:ui/ryeos-ui/timeline/thread",
+                        "params": { "chain_root_id": "C-1" },
+                        "collection": "items"
+                    } },
+                    "refresh": { "on_hint": "thread" }
+                }
             }
-        }))
-        .unwrap();
+        })))
+    }
 
-        let response = json!({ "events": [
-            { "event_type": "graph_step_started", "payload": {
-                "graph_run_id": "gr-1", "node": "fetch", "node_ref": "graph:test#node:fetch", "step": 7
-            } },
-            { "event_type": "tool_call_start", "payload": {
-                "graph_run_id": "gr-1", "node": "fetch", "step": 7, "item_id": "tool:test/fetch"
-            } },
-            { "event_type": "tool_call_result", "payload": {
-                "graph_run_id": "gr-1", "node": "fetch", "step": 7, "item_id": "tool:test/fetch", "status": "success"
-            } },
-            { "event_type": "artifact_published", "payload": {
-                "artifact_type": "json", "uri": "artifact://result"
-            } },
-            { "event_type": "graph_step_completed", "payload": {
-                "graph_run_id": "gr-1", "node": "fetch", "node_ref": "graph:test#node:fetch", "step": 7, "status": "success"
-            } }
-        ]});
-
-        let entries = timeline_entries(project_records(&binding, &response));
-
-        assert!(
-            entries.iter().any(|e| matches!(
-                e,
-                RyeOsTimelineEntryVm::Pair { summary, meta, pending: false, tone }
-                    if summary == "step fetch"
-                        && meta.as_deref() == Some("success")
-                        && matches!(tone, RyeOsTone::Good)
-            )),
-            "graph step start/completed should settle into a payload-labeled pair: {entries:?}"
-        );
-        assert!(
-            entries.iter().any(|e| matches!(
-                e,
-                RyeOsTimelineEntryVm::Pair { summary, meta, pending: false, tone }
-                    if summary == "tool:test/fetch"
-                        && meta.as_deref() == Some("success")
-                        && matches!(tone, RyeOsTone::Good)
-            )),
-            "graph tool call start/result should use item_id/status, not event_type: {entries:?}"
-        );
-        assert!(
-            entries.iter().any(|e| matches!(
-                e,
-                RyeOsTimelineEntryVm::Line { primary, meta, tone, .. }
-                    if primary == "artifact json"
-                        && meta.as_deref() == Some("artifact://result")
-                        && matches!(tone, RyeOsTone::Good)
-            )),
-            "artifact_published should show artifact details: {entries:?}"
-        );
-        assert!(
-            entries.iter().all(|e| !matches!(
-                e,
-                RyeOsTimelineEntryVm::Line { primary, .. }
-                    if matches!(
-                        primary.as_str(),
-                        "graph_step_started" | "tool_call_start" | "tool_call_result"
-                            | "artifact_published" | "graph_step_completed"
-                    )
-            )),
-            "runtime entries should not degrade to bare event_type lines: {entries:?}"
+    #[test]
+    fn streamed_text_accumulates_without_a_refetch() {
+        let mut core = timeline_core();
+        let effects = core.apply_thread_tail("T-1", &json!({"delta": "Hel"}));
+        assert!(effects.is_empty());
+        core.apply_thread_tail("T-1", &json!({"delta": "lo"}));
+        assert_eq!(
+            core.data.live_delta.as_ref().map(|d| d.text.as_str()),
+            Some("Hello")
         );
     }
 
     #[test]
-    fn graph_lifecycle_and_branch_render_from_payload() {
-        let started = exec(json!({
-            "event_type": "graph_started",
-            "payload": { "definition_ref": "graph:test/pipeline", "graph_run_id": "gr-1" }
-        }));
+    fn any_other_tail_frame_refetches_the_timeline_and_drops_the_live_text() {
+        let mut core = timeline_core();
+        core.apply_thread_tail("T-1", &json!({"delta": "Hel"}));
+        let effects = core.dispatch(RyeOsEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "opaque".to_string(),
+            payload: json!({"payload": {"anything": 1}}),
+        });
+        assert!(core.data.live_delta.is_none());
         assert!(
-            matches!(
-                started,
-                Some(RyeOsTimelineEntryVm::Line { primary, meta, tone, .. })
-                    if primary == "graph started"
-                        && meta.as_deref() == Some("graph:test/pipeline")
-                        && matches!(tone, RyeOsTone::Accent)
-            ),
-            "graph_started carries its definition ref"
-        );
-
-        let completed = exec(json!({
-            "event_type": "graph_completed",
-            "payload": { "definition_ref": "graph:test/pipeline", "status": "failed" }
-        }));
-        assert!(
-            matches!(
-                completed,
-                Some(RyeOsTimelineEntryVm::Line { primary, tone, .. })
-                    if primary == "graph failed" && matches!(tone, RyeOsTone::Danger)
-            ),
-            "graph_completed carries its status with a status-derived tone"
-        );
-
-        let branch = exec(json!({
-            "event_type": "graph_branch_taken",
-            "payload": { "target": "publish", "node": "gate", "step": 4 }
-        }));
-        assert!(
-            matches!(
-                branch,
-                Some(RyeOsTimelineEntryVm::Line { primary, meta, tone, .. })
-                    if primary == "branch → publish"
-                        && meta.as_deref() == Some("gate · #4")
-                        && matches!(tone, RyeOsTone::Neutral)
-            ),
-            "graph_branch_taken names its target and origin"
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchSource { .. })),
+            "a durable tail frame must refetch the timeline source; got {effects:?}"
         );
     }
 
     #[test]
-    fn graph_node_retry_renders_attempt_backoff_and_error() {
-        // Shape mirrors the walker's graph_node_retry emission.
-        let entry = exec(json!({
-            "event_type": "graph_node_retry",
-            "payload": {
-                "graph_run_id": "gr-1", "node": "fetch", "step": 7,
-                "attempt": 1, "attempts": 3, "delay_ms": 1500, "error": "boom"
-            }
-        }));
-        assert!(
-            matches!(
-                entry,
-                Some(RyeOsTimelineEntryVm::Line { primary, meta, tone, .. })
-                    if primary == "retrying fetch"
-                        && meta.as_deref() == Some("attempt 1/3 · 1500ms backoff · boom")
-                        && matches!(tone, RyeOsTone::Warn)
+    fn every_entry_kind_has_a_non_empty_label_and_a_role() {
+        // Even with no slots at all, an entry is named by its shape, and its
+        // role is the entry type.
+        let kinds = [
+            "message",
+            "prose",
+            "thought",
+            "activity",
+            "link",
+            "marker",
+            "outcome",
+            "ask",
+            "future-kind",
+        ];
+        let items: Vec<Value> = kinds
+            .iter()
+            .map(|kind| entry(kind, kind, json!({})))
+            .collect();
+        let built = layout(items.clone(), 0);
+        for (item, vm) in items.iter().zip(&built.entries) {
+            assert!(!vm.label().is_empty(), "{item} has an empty label");
+            assert_eq!(item_role(item), item["type"].as_str().unwrap());
+        }
+        let cluster = json!({
+            "item": "cluster", "id": "c", "headline": "", "members": []
+        });
+        let recap = json!({
+            "item": "recap", "id": "r", "exchange": "x", "work": 0, "duration_s": null
+        });
+        let built = layout(
+            vec![
+                cluster.clone(),
+                recap.clone(),
+                entry("a", "activity", json!({})),
+            ],
+            3,
+        );
+        assert_eq!(built.entries.len(), 4, "older line, cluster, recap, entry");
+        for vm in &built.entries {
+            assert!(!vm.label().is_empty());
+        }
+        assert_eq!(item_role(&cluster), "cluster");
+        assert_eq!(item_role(&recap), "recap");
+    }
+
+    #[test]
+    fn labels_flatten_the_visible_text_without_drawing_decorations() {
+        let pair = RyeOsTimelineEntryVm::Pair {
+            summary: "tool fetch".into(),
+            meta: Some("3.2 KiB".into()),
+            tone: RyeOsTone::Neutral,
+            pending: true,
+            state: None,
+        };
+        assert_eq!(pair.label(), "tool fetch, running: 3.2 KiB");
+        let link = layout(
+            vec![entry(
+                "l",
+                "link",
+                json!({"headline": "study", "target": "T-child"}),
+            )],
+            0,
+        );
+        assert_eq!(link.entries[0].label(), "study, child thread T-child");
+        let thought = layout(vec![entry("t", "thought", json!({"body": "hmm"}))], 0);
+        assert_eq!(thought.entries[0].label(), "Thought");
+    }
+
+    #[test]
+    fn groups_start_collapsed_and_exchanges_stay_open() {
+        let items = vec![
+            with(
+                entry("m", "message", json!({"body": "go"})),
+                "exchange",
+                json!("x1"),
             ),
-            "graph_node_retry reads as a warn milestone with retry context"
+            json!({
+                "item": "cluster", "id": "c1", "headline": "2 operations",
+                "members": [
+                    with(entry("a", "activity", json!({"headline": "one"})), "exchange", json!("x1")),
+                    with(entry("b", "activity", json!({"headline": "two"})), "exchange", json!("x1")),
+                ]
+            }),
+            json!({
+                "item": "recap", "id": "r1", "exchange": "x1", "work": 2, "duration_s": 9,
+                "members": [
+                    with(entry("c", "activity", json!({"headline": "three"})), "exchange", json!("x1")),
+                ]
+            }),
+            with(
+                entry("p", "prose", json!({"body": "done"})),
+                "exchange",
+                json!("x1"),
+            ),
+        ];
+        let built = layout(items, 0);
+        let none = BTreeMap::new();
+        // Section 1 is the exchange, 2 the cluster, 3 the recap.
+        assert!(!built.section_folded(1, &none), "the exchange stays open");
+        assert!(built.section_folded(2, &none), "a cluster starts folded");
+        assert!(built.section_folded(3, &none), "a recap starts folded");
+        let visible = fold_timeline_window(&built, None, &none, 0, 50).folded;
+        let texts: Vec<String> = visible.entries.iter().map(|entry| entry.label()).collect();
+        assert_eq!(
+            texts,
+            vec!["go", "2 operations", "Worked for 9s, 2 steps", "done"]
+        );
+        // An escaped entry sits in the exchange itself and stays visible.
+        assert!(visible.entries.iter().any(|entry| entry.label() == "done"));
+    }
+
+    #[test]
+    fn an_operator_fold_choice_follows_the_item_id_across_a_relayout() {
+        let cluster = json!({
+            "item": "cluster", "id": "c1", "headline": "2 operations",
+            "members": [
+                with(entry("a", "activity", json!({"headline": "one"})), "exchange", json!("x1")),
+                with(entry("b", "activity", json!({"headline": "two"})), "exchange", json!("x1")),
+            ]
+        });
+        let message = with(
+            entry("m", "message", json!({"body": "go"})),
+            "exchange",
+            json!("x1"),
+        );
+        let before = layout(vec![message.clone(), cluster.clone()], 0);
+        let key = before.section_keys[2].clone().expect("a cluster has a key");
+        assert_eq!(key, "item:c1");
+        // The operator opens the cluster; only the departure is stored.
+        let opened = BTreeMap::from([(key, false)]);
+        assert!(!before.section_folded(2, &opened));
+
+        // A live upsert inserts another group above it, shifting section ids.
+        let earlier = json!({
+            "item": "cluster", "id": "c0", "headline": "1 operation",
+            "members": [
+                with(entry("z", "activity", json!({"headline": "zero"})), "exchange", json!("x1")),
+            ]
+        });
+        let after = layout(vec![message, earlier, cluster], 0);
+        let shifted = after
+            .section_keys
+            .iter()
+            .position(|key| key.as_deref() == Some("item:c1"))
+            .expect("the cluster is still laid out");
+        assert_ne!(shifted, 2, "the section id moved");
+        assert!(!after.section_folded(shifted, &opened), "still open");
+        let inserted = after
+            .section_keys
+            .iter()
+            .position(|key| key.as_deref() == Some("item:c0"))
+            .expect("the new group is laid out");
+        assert!(
+            after.section_folded(inserted, &opened),
+            "the new group is folded"
         );
     }
 
     #[test]
-    fn provider_retry_and_cost_untracked_render_as_warn_milestones() {
-        // Shapes mirror the directive runner's emissions.
-        let retry = exec(json!({
-            "event_type": "provider_retry",
-            "payload": {
-                "turn": 1, "attempt": 1, "max_retries": 2, "backoff_ms": 1000,
-                "send_connect_phase": true, "error": "streaming request failed"
-            }
-        }));
-        assert!(
-            matches!(
-                retry,
-                Some(RyeOsTimelineEntryVm::Line { primary, meta, tone, .. })
-                    if primary == "provider retry"
-                        && meta.as_deref() == Some("attempt 1/2 · 1000ms backoff · streaming request failed")
-                        && matches!(tone, RyeOsTone::Warn)
-            ),
-            "provider_retry reads as a warn milestone with retry context"
+    fn labels_carry_the_state_in_plain_words() {
+        let failed = layout(
+            vec![with(
+                with(
+                    entry(
+                        "a",
+                        "activity",
+                        json!({"headline": "fetch", "detail": "404"}),
+                    ),
+                    "state",
+                    json!("failed"),
+                ),
+                "tone",
+                json!("danger"),
+            )],
+            0,
         );
-
-        let cost = exec(json!({
-            "event_type": "cost_untracked",
-            "payload": {
-                "turn": 3, "model": "m-large", "input_tokens": 1200,
-                "output_tokens": 400, "reason": "pricing_missing"
-            }
-        }));
-        assert!(
-            matches!(
-                cost,
-                Some(RyeOsTimelineEntryVm::Line { primary, meta, tone, .. })
-                    if primary == "cost untracked"
-                        && meta.as_deref() == Some("m-large · ↑1.2k ↓400 · pricing_missing")
-                        && matches!(tone, RyeOsTone::Warn)
-            ),
-            "cost_untracked names the unpriced model and token volume"
+        assert_eq!(failed.entries[0].label(), "fetch, failed: 404");
+        let timed_out = layout(
+            vec![with(
+                entry("a", "activity", json!({"headline": "build"})),
+                "state",
+                json!("timed_out"),
+            )],
+            0,
         );
+        assert_eq!(timed_out.entries[0].label(), "build, timed out");
+        let marker = layout(
+            vec![with(
+                entry("k", "marker", json!({"headline": "gate"})),
+                "state",
+                json!("waiting"),
+            )],
+            0,
+        );
+        assert_eq!(marker.entries[0].label(), "gate, waiting");
+        let plain = layout(vec![entry("k", "marker", json!({"headline": "gate"}))], 0);
+        assert_eq!(plain.entries[0].label(), "gate");
     }
 
     #[test]
-    fn tool_result_truncation_reason_drives_tone() {
-        // An unmatched result (replay window opened mid-exchange) degrades to a
-        // Line; the truncation reason still drives the tone and shows in meta.
-        let entries = timeline_entries(vec![raw_record(json!({
-            "event_type": "tool_call_result",
-            "payload": {
-                "tool": "fetch_page", "call_id": "c9",
-                "result_size_bytes": 2048, "truncated_reason": "error_envelope"
-            }
-        }))]);
-        assert!(
-            matches!(
-                entries.as_slice(),
-                [RyeOsTimelineEntryVm::Line { primary, meta, tone, .. }]
-                    if primary == "fetch_page"
-                        && meta.as_deref() == Some("2.0 KiB · error_envelope")
-                        && matches!(tone, RyeOsTone::Danger)
-            ),
-            "an error-enveloped tool result reads danger with its size and reason: {entries:?}"
-        );
+    fn seq_range_is_an_entrys_own_or_a_clusters_span_and_a_recap_has_none() {
+        let one = with(entry("a", "activity", json!({})), "seq", json!([4, 6]));
+        assert_eq!(item_seq_range(&one), Some((4, 6)));
+        let cluster = json!({
+            "item": "cluster", "id": "c", "headline": "2 operations",
+            "members": [
+                with(entry("a", "activity", json!({})), "seq", json!([7, 8])),
+                with(entry("b", "activity", json!({})), "seq", json!([9, 12])),
+            ]
+        });
+        assert_eq!(item_seq_range(&cluster), Some((7, 12)));
+        let recap = json!({"item": "recap", "id": "r", "exchange": "x", "work": 1});
+        assert_eq!(item_seq_range(&recap), None);
+    }
+
+    #[test]
+    fn only_the_contract_version_this_client_speaks_is_accepted() {
+        let current = json!({ "timeline_contract": TIMELINE_CONTRACT_VERSION });
+        assert_eq!(require_timeline_contract(&current), Ok(()));
+        let older = json!({ "timeline_contract": "ryeos.timeline.v0" });
+        let refusal = require_timeline_contract(&older).unwrap_err();
+        assert!(refusal.contains("'ryeos.timeline.v0'"));
+        assert!(refusal.contains(TIMELINE_CONTRACT_VERSION));
+        let unnamed = json!({ "items": [] });
+        let refusal = require_timeline_contract(&unnamed).unwrap_err();
+        assert!(refusal.contains("names no contract version"));
+        let wrong_type = json!({ "timeline_contract": 1 });
+        assert!(require_timeline_contract(&wrong_type).is_err());
+    }
+
+    fn upsert_of(digest: &str) -> Value {
+        json!({"definition_digest": digest, "order": ["a"], "items": []})
+    }
+
+    #[test]
+    fn an_upsert_merges_only_into_a_window_of_the_same_definition() {
+        let held = json!({"definition_digest": "d1", "items": [{"id": "a"}]});
+        assert!(merge_window(Some(&held), upsert_of("d1")).is_some());
+        assert!(merge_window(Some(&held), upsert_of("d2")).is_none());
     }
 }

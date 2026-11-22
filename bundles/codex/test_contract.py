@@ -1,18 +1,23 @@
-# ryeos:signed:2026-09-22T12:09:24Z:d317b33aca75ec495dd0db802f5b631e40898975ebeb05d529255f8ae363f162:zu17wOGTO6SmAaRLHj4QTJ57GV3c4gkieim4yZChyUagfYmxt7jF+GapyPd3fKvEfGobGxs+12OrsMOYX3h7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-11-17T03:46:31Z:39cefb4af0f8ac99b2681daf0d75efe4a543440850352810928df17797de4883:gtVvSPeHqpmCAh952qY9nmMQqcp3FWDB8bi/uWTKmPEYYRv1gTao39t50kKeGH2ZQbvrZ74DEjiAZi232MvyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
 import stat
+import sys
 import tomllib
 import unittest
 
 import yaml
+
+sys.dont_write_bytecode = True
 
 
 BUNDLE = Path(__file__).resolve().parent
@@ -20,6 +25,8 @@ SOURCE = BUNDLE / ".ai/workers/codex/lib/hosted"
 PROFILE_PATH = SOURCE / "structured-session.profile.json"
 WORKER_PATH = BUNDLE / ".ai/workers/codex/hosted.yaml"
 TRUSTED_WORKER_PATH = BUNDLE / ".ai/workers/codex/trusted-hosted.yaml"
+PRODUCT_CONTRACT_DIR = BUNDLE / ".ai/tools/codex/qualification/lib/product-contract"
+MERGE_DIR = BUNDLE / ".ai/tools/codex/qualification/lib/consumer-context-merge"
 ACTIVATION_PATH = BUNDLE / ".ai/config/codex/activation.yaml"
 TRUSTED_ACTIVATION_PATH = BUNDLE / ".ai/config/codex/trusted-activation.yaml"
 ENVIRONMENT_ACTIVATION_PATH = (
@@ -36,7 +43,12 @@ WORKER_EXECUTION_PATHS = (
     BUNDLE / ".ai/worker-executions/codex/session.yaml",
     BUNDLE / ".ai/worker-executions/codex/bounded-turn.yaml",
     BUNDLE / ".ai/worker-executions/codex/bounded-turn-recovery.yaml",
+    BUNDLE / ".ai/worker-executions/codex/external-bounded-turn.yaml",
 )
+# A remote lease admits a session only when its deadline plus the node's turn-end margin ends before the
+# lease; an external binding's lease is at most 3600 s and the margin is 600 s.
+EXTERNAL_LEASE_MAX_SECONDS = 3600
+TURN_END_MARGIN_SECONDS = 600
 
 
 def source_manifest_digest() -> str:
@@ -71,6 +83,23 @@ def source_manifest_digest() -> str:
         manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def load_path(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def policy_path_for(ref: str) -> Path:
+    kind, _, name = ref.partition(":")
+    assert kind == "config", ref
+    for root in sorted(BUNDLE.parent.glob("*/.ai/config")):
+        candidate = root / (name + ".yaml")
+        if candidate.is_file():
+            return candidate
+    raise AssertionError("policy ref resolves to no bundle config: " + ref)
 
 
 class CodexContractTests(unittest.TestCase):
@@ -154,6 +183,184 @@ class CodexContractTests(unittest.TestCase):
             worker = yaml.safe_load(path.read_text())
             self.assertEqual(worker["external_product_slots"], [], path)
 
+    def assert_unqualified_or_populated(self, qualification: dict) -> None:
+        """Either no policy yet (before a derivation) or a populated one."""
+        if qualification == {"policy_ref": None, "required_claims": []}:
+            return
+        self.assertEqual(sorted(qualification), ["policy_ref", "required_claims"])
+        self.assertTrue(qualification["required_claims"])
+        merge = load_path("consumer_context_merge", MERGE_DIR / "merge.py")
+        policy = yaml.safe_load(
+            merge.strip_header(policy_path_for(qualification["policy_ref"]).read_text())
+        )["product_qualification_policy"]
+        parameters = policy["verifier_parameters"]
+        merge.validate_schema(parameters, merge.verifier_config_schema(), "verifier_parameters")
+        self.assertLessEqual(set(qualification["required_claims"]), set(policy["allowed_claims"]))
+        self.assertIn(parameters["controller"]["scenario_id"], policy["producer_scenarios"])
+        self.assertIn("consumer_execution_context", policy)
+
+    def test_merge_tool_output_is_the_populated_state(self) -> None:
+        merge = load_path("consumer_context_merge", MERGE_DIR / "merge.py")
+        fixtures = load_path("consumer_context_merge_tests", MERGE_DIR / "tests/test_merge.py")
+        policy = {"product_qualification_policy": copy.deepcopy(
+            fixtures.TEMPLATE["product_qualification_policy"])}
+        merge.merge(policy, merge.parse_emitted(copy.deepcopy(fixtures.EMITTED)), False,
+                    merge.verifier_config_schema())
+        section = policy["product_qualification_policy"]
+        parameters = section["verifier_parameters"]
+        merge.validate_schema(parameters, merge.verifier_config_schema(), "verifier_parameters")
+        self.assertEqual(
+            parameters["external_candidate_qualification_context"],
+            fixtures.EMITTED["verifier_parameters"]["external_candidate_qualification_context"],
+        )
+        self.assertEqual(
+            section["consumer_execution_context"],
+            fixtures.EMITTED["consumer_execution_context"],
+        )
+        self.assertIn(parameters["controller"]["scenario_id"], section["producer_scenarios"])
+
+    def test_checker_runtime_and_code_are_declared_and_selected(self) -> None:
+        verifier = yaml.safe_load(
+            (BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml").read_text()
+        )
+        runtime = next(item for item in verifier["external_content"] if item["id"] == "checker-runtime")
+        self.assertEqual(runtime, {
+            "id": "checker-runtime",
+            "kind": "tree",
+            "mode": "pinned",
+            "digest": "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf",
+            "mount_root": "execution_runtime",
+            "mount": "checker-runtime",
+        })
+        slot = next(item for item in verifier["external_product_slots"] if item["id"] == "checker-code")
+        self.assertEqual(slot, {
+            "id": "checker-code",
+            "relationship_ref": "config:codex/semantic-checker-code-products",
+            "relationship": "checker_code_to_consumer_verifier",
+            "kind": "tree",
+            "mount_root": "execution_runtime",
+            "mount": "checker-code",
+        })
+        products = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/semantic-checker-code-products.yaml").read_text()
+        )
+        edge = next(
+            item for item in products["product_relationships"]["relationships"]
+            if item["name"] == slot["relationship"]
+        )
+        self.assertEqual(edge["consumer"], {
+            "canonical_ref": "tool:codex/qualification/consumer-runtime-verifier",
+            "declaration_id": slot["id"],
+        })
+        self.assertEqual(edge["producer"]["product_name"], "semantic_checker_code")
+        self.assertEqual(edge["qualification"], {"policy_ref": None, "required_claims": []})
+        activation = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/checker-runtime-activation.yaml").read_text()
+        )
+        self.assertEqual(activation["consumer_ref"], "tool:codex/qualification/consumer-runtime-verifier")
+        self.assertEqual([c["id"] for c in activation["components"]], ["checker-runtime"])
+
+        args = verifier["config"]["args"]
+        self.assertEqual(args[:2], ["--consumer-controller", "--product-contract"])
+        self.assertEqual(len(args), 3)
+        literal = args[2]
+        self.assertLessEqual(len(literal.encode()), 8192)
+        contract = json.loads(literal)
+        self.assertEqual(literal, json.dumps(contract, sort_keys=True, separators=(",", ":")))
+        policy = yaml.safe_load(
+            (BUNDLE / ".ai/config/codex/consumer-qualification-policy.yaml").read_text()
+        )
+        contexts = []
+        def collect(node):
+            if isinstance(node, dict):
+                if "external_candidate_qualification_context" in node:
+                    contexts.append(node["external_candidate_qualification_context"])
+                for value in node.values():
+                    collect(value)
+            elif isinstance(node, list):
+                for value in node:
+                    collect(value)
+        collect(policy)
+        self.assertEqual(len(contexts), 1)
+        # The verifier refuses a contract that differs from its Worker's admitted content.
+        for key in ("profile_hash", "source_binding_hash", "source_content_manifest_hash"):
+            self.assertEqual(contract["target"][key], contexts[0][key], key)
+        checker = contract["semantic_checker"]
+        self.assertEqual(checker["runtime"]["id"], "checker-runtime")
+        self.assertEqual(checker["runtime"]["manifest_hash"], runtime["digest"])
+        self.assertEqual(checker["code"]["id"], slot["id"])
+        expected = products["build_products"]["products"][0]["expected_manifest_hash"]
+        placeholder = checker["code"]["manifest_hash"] == "@@CODE_MANIFEST_HASH@@"
+        if expected is None:
+            self.assertTrue(placeholder)
+        else:
+            self.assertEqual(checker["code"]["manifest_hash"], expected)
+        script = (BUNDLE / ".ai/tools/codex/qualification/lib/semantic-checker/checker.py").read_bytes()
+        self.assertEqual(checker["code"]["script"], {
+            "path": "checker.py",
+            "bytes": len(script),
+            "sha256": hashlib.sha256(script).hexdigest(),
+        })
+        for name in ("profile_hash", "source_binding_hash", "source_content_manifest_hash"):
+            value = contract["target"][name]
+            self.assertTrue(value == "@@%s@@" % name.upper() or re.fullmatch(r"[0-9a-f]{64}", value), name)
+        worker = yaml.safe_load(
+            (BUNDLE / ".ai/workers/codex/external-hosted-authoring.yaml").read_text()
+        )
+        self.assertEqual(
+            contract["helpers"],
+            {item["id"]: item["digest"] for item in worker["external_content"]},
+        )
+
+    def test_product_contract_builder_refuses_and_round_trips(self) -> None:
+        import tempfile
+
+        build = load_path("product_contract_build", PRODUCT_CONTRACT_DIR / "build.py")
+        good = {
+            "code_manifest_hash": "a" * 64,
+            "profile_hash": "b" * 64,
+            "source_binding_hash": "c" * 64,
+            "source_content_manifest_hash": "d" * 64,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            captured = Path(directory) / "captured.json"
+
+            def refused(values: dict) -> None:
+                captured.write_text(json.dumps(values))
+                with self.assertRaises(build.Refusal):
+                    build.load_captured(captured)
+
+            for name in good:
+                refused({k: v for k, v in good.items() if k != name})
+                refused({**good, name: "A" * 64})
+                refused({**good, name: "a" * 63})
+            refused({**good, "extra": "a" * 64})
+            captured.write_text(json.dumps(good))
+            literal = build.generate(build.load_captured(captured), False)
+            contract = json.loads(literal)
+            self.assertEqual(contract["semantic_checker"]["code"]["manifest_hash"], "a" * 64)
+            self.assertEqual(contract["target"]["profile_hash"], "b" * 64)
+            self.assertEqual(literal, build.canonical(contract))
+            oversized = json.loads(literal)
+            oversized["padding"] = "x" * 8192
+            with self.assertRaises(build.Refusal):
+                build.canonical(oversized)
+
+            source = BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml"
+            tool = Path(directory) / "tool.yaml"
+            tool.write_text(source.read_text())
+            header = tool.read_text().splitlines()[0]
+            build.write_tool(tool, literal)
+            self.assertEqual(tool.read_text().splitlines()[0], header)
+            self.assertEqual(yaml.safe_load(build.strip_header(tool.read_text()))["config"]["args"][2], literal)
+            placeholders = build.generate(None, True, tool=tool)
+            self.assertIn("@@PROFILE_HASH@@", placeholders)
+            self.assertEqual(source.read_text().splitlines()[0], header)
+            live = yaml.safe_load(build.strip_header(source.read_text()))["config"]["args"][2]
+            self.assertEqual(live, build.canonical(json.loads(live)))
+            if "@@" in live:
+                self.assertEqual(live, build.generate(None, True))
+
     def test_external_authoring_profile_is_distinct_and_fail_closed(self) -> None:
         worker = yaml.safe_load(
             (BUNDLE / ".ai/workers/codex/external-hosted-authoring.yaml").read_text()
@@ -168,17 +375,37 @@ class CodexContractTests(unittest.TestCase):
             (BUNDLE / ".ai/config/codex/guest-runtime-products.yaml").read_text()
         )
         profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
-        relationship = product["product_relationships"]["relationships"][0]
-        self.assertEqual(worker["execution_protocol"], "protocol:ryeos/core/trusted_structured_session")
+        relationship = next(
+            item for item in product["product_relationships"]["relationships"]
+            if item["name"] == "runtime_to_external_authoring_worker"
+        )
+        self.assertEqual(worker["execution_protocols"], [
+            "protocol:ryeos/core/contained_structured_session",
+            "protocol:ryeos/core/trusted_structured_session",
+        ])
         self.assertEqual(worker["external_product_slots"][0]["id"], "guest-runtime")
         self.assertEqual(relationship["consumer"], {
             "canonical_ref": "worker:codex/external-hosted-authoring",
             "declaration_id": "guest-runtime",
         })
-        self.assertEqual(relationship["qualification"], {
-            "policy_ref": None,
-            "required_claims": [],
+        self.assert_unqualified_or_populated(relationship["qualification"])
+        verifier = yaml.safe_load(
+            (BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml").read_text()
+        )
+        slot = verifier["external_product_slots"][0]
+        verifier_relationship = next(
+            item for item in product["product_relationships"]["relationships"]
+            if item["name"] == slot["relationship"]
+        )
+        self.assertEqual(slot["id"], "subject")
+        self.assertEqual(slot["relationship_ref"], "config:codex/guest-runtime-products")
+        self.assertEqual(verifier_relationship["consumer"], {
+            "canonical_ref": "tool:codex/qualification/consumer-runtime-verifier",
+            "declaration_id": slot["id"],
         })
+        self.assert_unqualified_or_populated(verifier_relationship["qualification"])
+        self.assertEqual(verifier_relationship["producer"], relationship["producer"])
+        self.assertEqual(verifier_relationship["required_product"], relationship["required_product"])
         self.assertEqual(environment["worker_ref"], "worker:codex/external-hosted-authoring")
         self.assertIsNone(environment["workload_client"])
         bounded_turn = yaml.safe_load(
@@ -197,6 +424,11 @@ class CodexContractTests(unittest.TestCase):
             "external Codex must use the already-produced closed authoring runtime",
         )
         self.assertEqual(profile["external_candidate"]["execution_route"], "connector_only")
+        self.assertEqual(profile["external_candidate"]["schema"], 7)
+        self.assertEqual(
+            profile["external_candidate"]["runtime_authority"], "captured_product",
+            "the existing signed product slot must not implicitly switch authority lanes",
+        )
         self.assertEqual(profile["external_candidate"]["runtime_product_declaration_id"], "guest-runtime")
         session_start = next(route for route in profile["routes"] if route["id"] == "session.start")
         self.assertEqual(session_start["fixed_params"]["environments"], [{
@@ -218,8 +450,48 @@ class CodexContractTests(unittest.TestCase):
             activation = yaml.safe_load((BUNDLE / f".ai/config/codex/{name}.yaml").read_text())
             self.assertEqual(activation["consumer_ref"], consumer)
 
+    def test_lease_and_guest_requirements_have_producers(self) -> None:
+        # A requirement entry may exist only if some producer can fail to provide it. The lease names a
+        # profile may require are the closed set the shared lease code derives from a provider spec; the
+        # guest names are what a guest can report. No guest fact is reported today, so that vocabulary is
+        # empty and `requires.guest` must be too.
+        facts = (
+            BUNDLE.parent.parent
+            / "crates/host-adapters/remote-lease-core/src/facts.rs"
+        ).read_text()
+        lease_core_names = set(
+            re.findall(
+                r'^pub const (?:LEASE|GUEST)_[A-Z_]+: &str = "([^"]+)";', facts, re.M
+            )
+        )
+        self.assertTrue(lease_core_names, "no lease-core names parsed from facts.rs")
+        guest_report_vocabulary: set[str] = set()
+
+        def names(entries) -> set[str]:
+            found: set[str] = set()
+            for entry in entries:
+                if isinstance(entry, str):
+                    found.add(entry)
+                elif "name" in entry:
+                    found.add(entry["name"])
+                else:
+                    found.update(entry["any_of"])
+            return found
+
+        checked = 0
+        for path in sorted(BUNDLE.parent.glob("*/.ai/workers/*/lib/hosted/*.profile.json")):
+            requires = json.loads(path.read_text()).get("requires")
+            if requires is None:
+                continue
+            checked += 1
+            with self.subTest(profile=str(path.relative_to(BUNDLE.parent))):
+                self.assertLessEqual(names(requires.get("lease", [])), lease_core_names)
+                self.assertLessEqual(names(requires.get("guest", [])), guest_report_vocabulary)
+        self.assertGreater(checked, 0)
+
     def test_controller_side_extensions_are_closed_in_config_and_immutable_argv(self) -> None:
-        for name in ("structured-session.profile.json", "authoring.profile.json"):
+        for name in ("structured-session.profile.json", "authoring.profile.json",
+                     "external-authoring.profile.json"):
             profile = json.loads((SOURCE / name).read_text())
             baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
             overrides = {}
@@ -236,6 +508,11 @@ class CodexContractTests(unittest.TestCase):
                     "skills": {"enabled": False}, "mcp": {"enabled": False}})
                 for feature in ("plugins", "remote_plugin", "hooks", "skill_mcp_dependency_install"):
                     self.assertIs(config["features"][feature], False, (name, feature))
+                if name == "external-authoring.profile.json":
+                    # These pinned handlers can create controller effects
+                    # independently of the remote command environment.
+                    for feature in ("image_generation", "goals"):
+                        self.assertIs(config["features"][feature], False, (name, feature))
             start = next(route for route in profile["routes"] if route["id"] == "session.start")
             self.assertIn("selectedCapabilityRoots", start["forbidden_fields"])
             # Selected executor roots can contribute MCP independently of the
@@ -290,7 +567,7 @@ class CodexContractTests(unittest.TestCase):
                     ]
                 )
             else:
-                self.assertEqual(baseline["default_permissions"], "danger-full-access")
+                self.assertEqual(baseline["default_permissions"], ":danger-full-access")
                 self.assertEqual(baseline["approval_policy"], "never")
                 self.assertFalse(
                     any(
@@ -303,7 +580,7 @@ class CodexContractTests(unittest.TestCase):
                     predicates = routes[route_id]["response_predicates"]
                     self.assertIn({
                         "pointer": "/response/result/activePermissionProfile/id",
-                        "equals": "danger-full-access",
+                        "equals": ":danger-full-access",
                     }, predicates)
                     self.assertIn({
                         "pointer": "/response/result/approvalPolicy",
@@ -493,17 +770,21 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(manifest_digest, "f1f39917086d223da68135108afa401fe75d47e2b102ea3f81c699595256bfe5")
         self.assertIn(f"    digest: {manifest_digest}", environment)
         self.assertIn("    - realization_id: command-tools", environment)
-        self.assertIn("schema: ryeos.worker_environment.v6", environment)
+        self.assertIn("schema: ryeos.worker_environment.v7", environment)
         self.assertIn("external_product_slots: []", environment)
         self.assertIn("  process_environment: {}", environment)
         self.assertIn("      relative_directory: bin", environment)
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 10)
+        self.assertEqual(self.profile["schema_version"], 13)
         self.assertIsNone(self.profile["external_candidate"])
         self.assertEqual(self.profile["auxiliary_configs"], [])
         self.assertEqual(self.profile["runtime_configs"], [])
+        self.assertEqual(self.profile["configuration_absence"], {
+            "absolute_paths": [], "startup_ancestor_paths": [],
+            "route_ancestor_paths": [],
+        })
         self.assertEqual(self.profile["transport"], "stdio_jsonrpc")
         self.assertIsNone(self.profile["workload_client"])
         immutable_args = "\n".join(self.profile["workload_args"])
@@ -637,7 +918,7 @@ class CodexContractTests(unittest.TestCase):
             with self.subTest(profile=path.stem):
                 execution = yaml.safe_load(path.read_text(encoding="utf-8"))
                 config = execution["config"]
-                bounded = path.stem.startswith("bounded-turn")
+                bounded = "bounded-turn" in path.stem
                 self.assertEqual(
                     config["mode"]["kind"], "bounded_turn" if bounded else "session"
                 )
@@ -660,6 +941,19 @@ class CodexContractTests(unittest.TestCase):
                         ),
                         path.stem == "bounded-turn-recovery",
                     )
+
+    def test_external_authoring_turn_fits_a_remote_lease(self) -> None:
+        execution = yaml.safe_load(
+            (BUNDLE / ".ai/worker-executions/codex/external-bounded-turn.yaml").read_text(encoding="utf-8")
+        )
+        self.assertLessEqual(
+            execution["config"]["max_lifetime_seconds"] + TURN_END_MARGIN_SECONDS,
+            EXTERNAL_LEASE_MAX_SECONDS,
+        )
+        self.assertIn(
+            "worker_execution_ref: worker_execution:codex/external-bounded-turn",
+            (BUNDLE / ".ai/config/codex/consumer-qualification-policy.yaml").read_text(encoding="utf-8"),
+        )
 
     def test_every_mapped_codex_file_reconstructs_its_worker_manifest_pin(self) -> None:
         activations = [
@@ -864,7 +1158,7 @@ class CodexContractTests(unittest.TestCase):
         for request in self.profile["server_requests"]:
             self.assertNotIn("response_style", request)
             self.assertEqual(
-                set(request["responses"]), {"accept", "cancel", "decline", "expire"}
+                set(request["responses"]), {"accept", "decline", "expire"}
             )
             self.assertEqual(
                 set(request["correlation"]),
@@ -900,6 +1194,245 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(selectors[".tmp/**"]["class"], "rebuildable_cache")
         self.assertEqual(selectors["tmp/**"]["class"], "rebuildable_cache")
 
+    def test_every_pinned_server_notification_is_classified_by_every_profile(self) -> None:
+        # The bridge ends a session on any notification its profile neither
+        # handles nor ignores, so each notification the pinned app-server can
+        # send is classified on purpose: handled, ignored under its schema, or
+        # refused because the profile's own configuration rules it out.
+        server = json.loads(
+            (BUNDLE / "schema/app-server-0.147.0/ServerNotification.json").read_text())
+        pinned = {variant["properties"]["method"]["enum"][0] for variant in server["oneOf"]}
+        # Raw response events are experimental, sent because initialization
+        # opts into the experimental API; they are not in the stable union.
+        pinned |= {"rawResponseItem/completed", "rawResponse/completed"}
+        ruled_out = {
+            # Apps, MCP, hooks and goals are disabled; approvals are reviewed by
+            # the user, never auto-reviewed; realtime, archive, deletion, file
+            # watches, fuzzy search, client processes and Windows sandboxes
+            # are client features the bridge never requests.
+            "app/list/updated", "command/exec/outputDelta",
+            "externalAgentConfig/import/completed", "externalAgentConfig/import/progress",
+            "fs/changed", "fuzzyFileSearch/sessionCompleted", "fuzzyFileSearch/sessionUpdated",
+            "hook/completed", "hook/started",
+            "item/autoApprovalReview/completed", "item/autoApprovalReview/started",
+            "item/mcpToolCall/progress", "mcpServer/oauthLogin/completed",
+            "mcpServer/startupStatus/updated", "process/exited", "process/outputDelta",
+            "thread/archived", "thread/deleted", "thread/unarchived",
+            "thread/realtime/closed", "thread/realtime/error", "thread/realtime/itemAdded",
+            "thread/realtime/outputAudio/delta", "thread/realtime/sdp",
+            "thread/realtime/started", "thread/realtime/transcript/delta",
+            "thread/realtime/transcript/done",
+            "windows/worldWritableWarning", "windowsSandbox/setupCompleted",
+        }
+        goals_disabled = {"external-authoring"}
+        # Without the experimental API opt-in no raw response event is sent.
+        experimental_closed = {"structured-session"}
+        classified_verbatim = {
+            "thread/environment/connected", "thread/environment/disconnected",
+            "thread/compacted", "guardianWarning", "turn/moderationMetadata",
+            "model/safetyBuffering/updated", "item/commandExecution/terminalInteraction",
+            "thread/goal/updated",
+        }
+        for name in ("external-authoring", "authoring", "structured-session"):
+            with self.subTest(profile=name):
+                profile = json.loads((SOURCE / f"{name}.profile.json").read_text())
+                refused = ruled_out | ({"thread/goal/updated"} if name in goals_disabled else set())
+                if name in experimental_closed:
+                    refused |= {"rawResponseItem/completed", "rawResponse/completed"}
+                handled = {rule["method"]: rule["schema"] for rule in profile["notifications"]}
+                ignored = profile["ignored_notifications"]
+                self.assertFalse(set(handled) & set(ignored))
+                self.assertFalse((set(handled) | set(ignored)) & refused)
+                self.assertEqual(set(handled) | set(ignored) | refused, pinned)
+                # Schemas classified here are the pinned schemas verbatim; a
+                # deliberately narrowed schema has its own test.
+                for method in classified_verbatim & (set(handled) | set(ignored)):
+                    schema = handled.get(method) or ignored[method]
+                    self.assertEqual(
+                        (SOURCE / schema).read_bytes(),
+                        (BUNDLE / "schema/app-server-0.147.0/v2" / Path(schema).name).read_bytes(),
+                        schema)
+        external = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        self.assertIn("turn/moderationMetadata", external["ignored_notifications"])
+        rules = {rule["method"]: rule for rule in external["notifications"]}
+        for method in ("thread/environment/connected", "thread/environment/disconnected"):
+            self.assertTrue(rules[method]["durable"])
+
+    def test_external_profile_retains_bounded_actual_notification_family(self) -> None:
+        profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        # This is an explicit projection family, not a claim that ignored
+        # notifications or original JSON wire formatting have been retained.
+        family = {
+            "thread/started", "thread/status/changed", "turn/started", "turn/completed",
+            "item/agentMessage/delta", "item/commandExecution/outputDelta",
+            "item/fileChange/outputDelta", "item/fileChange/patchUpdated",
+            "item/started", "item/completed",
+            "rawResponseItem/completed", "rawResponse/completed",
+        }
+        rules = {rule["method"]: rule for rule in profile["notifications"]}
+        projected = {
+            method for method, rule in rules.items()
+            if "notification_json" in rule["payload"].get("fields", {})
+        }
+        self.assertEqual(projected, family)
+        for method in family:
+            with self.subTest(method=method):
+                rule = rules[method]
+                self.assertTrue(rule["durable"])
+                self.assertNotIn(method, profile["ignored_notifications"])
+                self.assertEqual(rule["payload"]["fields"]["notification_json"], {
+                    "op": "json_string", "pointer": "/message", "max_bytes": 65536,
+                })
+                self.assertTrue((SOURCE / rule["schema"]).is_file())
+        for method in ("item/started", "item/completed",
+                       "rawResponseItem/completed", "rawResponse/completed"):
+            self.assertEqual(rules[method]["upstream_session_pointer"],
+                             "/message/params/threadId")
+            self.assertEqual(rules[method]["observations"], [])
+        for name in ("RawResponseItemCompletedNotification.json",
+                     "RawResponseCompletedNotification.json"):
+            self.assertEqual((SOURCE / "schema" / name).read_bytes(),
+                             (BUNDLE / "schema/app-server-0.147.0/v2" / name).read_bytes())
+        setup = next(route for route in profile["routes"] if route["id"] == "session.start")
+        self.assertNotIn("experimentalRawEvents", setup["fixed_params"])
+
+    def test_external_original_config_initialization_uses_pinned_rpc_shapes(self) -> None:
+        profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        self.assertEqual(profile["schema_version"], 13)
+        self.assertEqual(profile["configuration_absence"], {
+            "absolute_paths": ["/etc/codex/config.toml", "/etc/codex/managed_config.toml",
+                               "/etc/codex/requirements.toml"],
+            "startup_ancestor_paths": [".codex/config.toml"],
+            "route_ancestor_paths": [".codex/config.toml"],
+        })
+        for name in ("structured-session.profile.json", "authoring.profile.json"):
+            ordinary = json.loads((SOURCE / name).read_text())
+            self.assertEqual(ordinary["schema_version"], 13)
+            self.assertEqual(ordinary["configuration_absence"], {
+                "absolute_paths": [], "startup_ancestor_paths": [], "route_ancestor_paths": [],
+            })
+        self.assertEqual(profile["initialization"][2:], [
+            {"method": "configRequirements/read", "effect_class": "pure_read",
+             "params": None, "response_schema": "schema/QNoManagedRequirements.json",
+             "notification": None},
+            {"method": "config/read", "effect_class": "pure_read",
+             "params": {"cwd": "/workspace", "includeLayers": True},
+             "response_schema": "schema/QOriginalConfigGate.json", "notification": None},
+        ])
+        routes = {route["id"]: route for route in profile["routes"]}
+        for route_id in ("session.start", "session.resume"):
+            self.assertTrue({"permissions", "runtimeWorkspaceRoots", "config"}.issubset(
+                routes[route_id]["forbidden_non_null_fields"]))
+        session_methods = {routes[route_id]["method"]
+                           for route_id in profile["route_sets"]["session"]}
+        self.assertTrue(session_methods.isdisjoint({
+            "config/value/write", "config/batchWrite", "experimentalFeatures/enablement/set",
+            "account/login/start", "account/logout", "account/login/cancel",
+        }))
+        self.assertNotIn("--config-file", profile["workload_args"])
+        self.assertEqual(profile["external_candidate"]["provider_configuration_destination"],
+                         "environments.toml")
+
+    def test_external_original_config_schemas_join_signed_baseline_and_argv(self) -> None:
+        # Schema integrity only: behavioral validation of the response cases
+        # belongs to the existing bridge JSON-schema validator, without adding
+        # a Python dependency or a second policy implementation here.
+        profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
+        baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
+        argv = profile["workload_args"]
+        flags = {}
+        for index, argument in enumerate(argv):
+            if argument == "-c":
+                override = tomllib.loads(argv[index + 1])
+                self.assertTrue(flags.keys().isdisjoint(override))
+                flags.update(override)
+        gate = json.loads((SOURCE / "schema/QOriginalConfigGate.json").read_text())
+        definitions = gate["definitions"]
+        self.assertEqual(definitions["RawSessionFlags"], {"const": flags})
+        raw_user = definitions["RawUserConfig"]
+        self.assertFalse(raw_user["additionalProperties"])
+        self.assertEqual(set(raw_user["required"]), set(baseline))
+        self.assertEqual({name: rule["const"] for name, rule in raw_user["properties"].items()
+                          if name != "projects"}, baseline)
+        trust = raw_user["properties"]["projects"]["additionalProperties"]
+        self.assertEqual(trust["properties"], {"trust_level": {"const": "trusted"}})
+        self.assertFalse(trust["additionalProperties"])
+        merged = definitions["MergedConfig"]
+        self.assertFalse(merged["additionalProperties"])
+        actual_features = merged["properties"]["features"]["const"]
+        expected_features = dict(baseline["features"])
+        # config_processor.rs:52-110 overwrites exactly these seven flags;
+        # values below come from pinned defaults and the signed CLI overrides.
+        expected_features.update({
+            "auth_elicitation": True, "mcp_2026_07_28": False,
+            "memories": False, "mentions_v2": True, "remote_control": False,
+            "remote_plugin": False, "tool_suggest": True,
+        })
+        self.assertEqual(actual_features, expected_features)
+        # This false value is a DEFAULT. Pinned model metadata may still select
+        # CodeMode, so source-family proof must cover its nested handlers.
+        self.assertEqual(actual_features["code_mode"], {"enabled": False})
+        self.assertEqual(actual_features["code_mode_host"], True)
+        shell = merged["properties"]["shell_environment_policy"]["const"]
+        self.assertEqual(shell["filters"], {
+            key.lower(): value for key, value in baseline["shell_environment_policy"]["filters"].items()
+        })
+        for key in ("exclude", "set", "include_only", "experimental_use_profile"):
+            self.assertIsNone(shell[key])
+        for name in ("profile", "tools", "experimental_thread_config_endpoint"):
+            self.assertIn(name, merged["required"])
+            self.assertEqual(merged["properties"][name], {"const": None})
+        requirements = json.loads((SOURCE / "schema/QNoManagedRequirements.json").read_text())
+        self.assertEqual(requirements["required"], ["requirements"])
+        self.assertEqual(requirements["properties"], {"requirements": {"const": None}})
+        self.assertFalse(requirements["additionalProperties"])
+
+    def test_external_original_config_response_fixture_provenance(self) -> None:
+        # Source-derived serializer cases, never an assertion that a launched
+        # process loaded these values or that the inventory/claims gate passed.
+        document = json.loads((BUNDLE / "fixtures/external-original-config-responses.json").read_text())
+        self.assertEqual(document["upstream_revision"],
+                         "be6e8eac029b183056b7e4402879f15d2c85f61b")
+        cases = {case["id"]: case for case in document["cases"]}
+        self.assertEqual(len(cases), len(document["cases"]))
+        self.assertEqual({name for name, case in cases.items() if case["accept"]}, {
+            "pinned_baseline", "trust_only_home_mutation", "disabled_empty_project_layer",
+            "empty_cloud_layer", "requirements_absent_policy",
+        })
+        self.assertTrue({
+            "requirements_missing", "requirements_empty_object", "requirements_feature_constraint",
+            "inherited_mcp", "raw_inherited_mcp", "disabled_nonempty_project", "remote_thread_loader",
+            "legacy_profile", "profile_user_layer", "image_feature_changed", "new_feature",
+            "missing_injected_flag", "wrong_injected_default", "lossy_tools_projection",
+            "raw_hidden_tools_field", "provider_input_in_session_flags", "trust_mutation_extra_authority",
+            "missing_layers", "null_disabled_reason", "missing_user_profile_null",
+            "unknown_layer_kind", "layers_overflow", "unmerged_uppercase_filters",
+            "missing_required_option", "unknown_top_level_config",
+        }.issubset(cases))
+        for case in document["cases"]:
+            self.assertTrue((SOURCE / "schema" / case["schema"]).is_file())
+            if not case["accept"]:
+                self.assertTrue(case["reason"])
+                continue
+            if case["schema"] != "QOriginalConfigGate.json":
+                continue
+            response = case["response"]
+            for layer in response["layers"]:
+                # fingerprint.rs:44 hashes sorted compact UTF-8 JSON.
+                canonical = json.dumps(layer["config"], sort_keys=True,
+                                       ensure_ascii=False, separators=(",", ":")).encode()
+                self.assertEqual(layer["version"], "sha256:" + hashlib.sha256(canonical).hexdigest())
+                if layer["name"]["type"] == "user":
+                    self.assertIn("profile", layer["name"])
+                    self.assertIsNone(layer["name"]["profile"])
+            self.assertIsNone(response["config"]["tools"])
+            self.assertIsNone(response["config"]["profile"])
+            self.assertEqual(response["config"]["history"], {"persistence": "save-all", "max_bytes": None})
+        positive = cases["pinned_baseline"]["response"]
+        self.assertNotIn("auth_elicitation", positive["layers"][0]["config"]["features"])
+        self.assertIn("auth_elicitation", positive["config"]["features"])
+        self.assertNotIn("environments", positive["layers"][0]["config"])
+
     def test_worker_source_digest_covers_the_complete_profile_closure(self) -> None:
         for path in (
             WORKER_PATH,
@@ -911,6 +1444,168 @@ class CodexContractTests(unittest.TestCase):
             source = yaml.safe_load(path.read_text(encoding="utf-8"))["source"]
             self.assertRegex(source["digest"], r"^[0-9a-f]{64}$")
             self.assertEqual(source["digest"], source_manifest_digest())
+
+
+    def test_one_qualification_whose_holding_the_node_selects_from_listed_protocols(self) -> None:
+        config = BUNDLE / ".ai/config/codex"
+        core_protocols = BUNDLE.parent / "core/.ai/protocols/ryeos/core"
+        self.assertFalse((config / "qualification-variants.yaml").exists())
+        for name in (
+            "consumer-qualification-policy-trusted-lane.yaml",
+            "external-authoring-trusted-lane-activation.yaml",
+            "checker-runtime-activation-trusted-lane.yaml",
+            "environments/external-authoring-trusted-lane.yaml",
+        ):
+            self.assertFalse((config / name).exists(), name)
+        self.assertFalse((BUNDLE / ".ai/workers/codex/external-hosted-authoring-trusted-lane.yaml").exists())
+        self.assertFalse(
+            (BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier-trusted-lane.yaml").exists()
+        )
+
+        policy_document = yaml.safe_load((config / "consumer-qualification-policy.yaml").read_text())
+        policy = policy_document["product_qualification_policy"]
+        # The holding is the node's selection, so the policy states neither a
+        # guarantee list nor a settlement minimum.
+        self.assertNotIn("requires_guarantees", policy)
+        self.assertNotIn("minimum_verifier_process_settlement", policy)
+        self.assertNotIn("isolation_lane", policy)
+        self.assertEqual(policy["verifier_ref"], "tool:codex/qualification/consumer-runtime-verifier")
+        self.assertEqual(policy["consumer_execution_context"]["worker_ref"], "worker:codex/external-hosted-authoring")
+        self.assertEqual(
+            policy["consumer_execution_context"]["environment_ref"], "config:codex/environments/external-authoring"
+        )
+
+        worker = yaml.safe_load((BUNDLE / ".ai/workers/codex/external-hosted-authoring.yaml").read_text())
+        verifier = yaml.safe_load(
+            (BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml").read_text()
+        )
+        # The protocol list replaces the scalar protocol and the Worker or Tool
+        # filesystem authority: the selected descriptor owns both.
+        worker_protocols = [
+            "protocol:ryeos/core/contained_structured_session",
+            "protocol:ryeos/core/trusted_structured_session",
+        ]
+        verifier_protocols = [
+            "protocol:ryeos/core/qualification_consumer_callback_contained",
+            "protocol:ryeos/core/qualification_consumer_callback_trusted",
+        ]
+        self.assertEqual(worker["execution_protocols"], worker_protocols)
+        self.assertEqual(verifier["execution_protocols"], verifier_protocols)
+        for item in (worker, verifier):
+            self.assertNotIn("execution_protocol", item)
+            self.assertNotIn("filesystem_authority", item)
+        self.assertEqual(verifier["project_lane"], "pinned_snapshot")
+
+        # Each listed protocol declares its holding, and a session protocol's
+        # holding agrees with its own session block.
+        settlement_by_cleanup = {
+            "descendant_containment": "containment_empty",
+            "trusted_process_group": "trusted_process_group_absent",
+        }
+        authority_by_workspace = {
+            "ephemeral_scratch": "captured_execution",
+            "runtime_workspace": "node_policy",
+        }
+        holdings = {}
+        for ref in worker_protocols + verifier_protocols:
+            descriptor = yaml.safe_load(
+                (core_protocols / (ref.removeprefix("protocol:ryeos/core/") + ".yaml")).read_text()
+            )
+            holding = descriptor["holding"]
+            self.assertEqual(
+                sorted(holding), ["filesystem_authority", "requires_guarantees", "root_settlement"], ref
+            )
+            self.assertTrue(holding["requires_guarantees"], ref)
+            if "session" in descriptor:
+                session = descriptor["session"]
+                self.assertEqual(
+                    holding["root_settlement"], settlement_by_cleanup[session["cleanup_authority"]], ref
+                )
+                self.assertEqual(
+                    holding["filesystem_authority"], authority_by_workspace[session["workspace_authority"]], ref
+                )
+            holdings[ref] = holding
+        # The Worker's and the verifier's protocols pair up holding for holding,
+        # so one node selection gives the verifier the Worker's settlement.
+        for worker_ref, verifier_ref in zip(worker_protocols, verifier_protocols):
+            self.assertEqual(holdings[worker_ref], holdings[verifier_ref])
+        # No node can hold both: the two requirement lists share no accepted state.
+        self.assertNotEqual(
+            holdings[worker_protocols[0]]["requires_guarantees"],
+            holdings[worker_protocols[1]]["requires_guarantees"],
+        )
+
+        # A top-level key the tool kind does not know refuses the plan build.
+        tool_runtime = yaml.safe_load((
+            BUNDLE.parent / "core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml"
+        ).read_text())["runtime"]
+        known = set(tool_runtime["ignored_keys"]) | {handler["type"] for handler in tool_runtime["handlers"]}
+        self.assertEqual(sorted(set(verifier) - known), [])
+        tool_kind = yaml.safe_load((
+            BUNDLE.parent / "core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml"
+        ).read_text())
+        allowed = tool_kind["execution"]["terminator"]["protocol"]["allowed"]
+        for ref in verifier_protocols:
+            self.assertIn(ref, allowed)
+        worker_kind = yaml.safe_load((
+            BUNDLE.parent / "core/.ai/node/engine/kinds/worker/worker.kind-schema.yaml"
+        ).read_text())
+        for ref in worker_protocols:
+            self.assertIn(ref, worker_kind["execution"]["terminator"]["protocol"]["allowed"])
+
+        # Exactly one relationship pairs the Worker with this policy; one more
+        # gives the verifier the guest product, and one the checker code.
+        products = yaml.safe_load((config / "guest-runtime-products.yaml").read_text())
+        relationships = {
+            item["name"]: item for item in products["product_relationships"]["relationships"]
+        }
+        self.assertEqual(
+            sorted(relationships),
+            ["runtime_to_external_authoring_worker", "runtime_to_qualification_verifier"],
+        )
+        worker_relationships = [
+            item for item in relationships.values()
+            if item["consumer"]["canonical_ref"] == policy["consumer_execution_context"]["worker_ref"]
+            and item["qualification"]["policy_ref"] == "config:codex/consumer-qualification-policy"
+        ]
+        self.assertEqual(
+            [item["name"] for item in worker_relationships], ["runtime_to_external_authoring_worker"]
+        )
+        self.assertEqual(
+            worker["external_product_slots"][0]["relationship"], "runtime_to_external_authoring_worker"
+        )
+        checker = yaml.safe_load((config / "semantic-checker-code-products.yaml").read_text())
+        checker_relationships = {
+            item["name"]: item for item in checker["product_relationships"]["relationships"]
+        }
+        self.assertEqual(sorted(checker_relationships), ["checker_code_to_consumer_verifier"])
+        known_relationships = {**relationships, **checker_relationships}
+        for slot in verifier["external_product_slots"]:
+            self.assertEqual(
+                known_relationships[slot["relationship"]]["consumer"]["canonical_ref"],
+                "tool:codex/qualification/consumer-runtime-verifier",
+            )
+        environment_doc = yaml.safe_load((config / "environments/external-authoring.yaml").read_text())
+        self.assertEqual(environment_doc["worker_ref"], "worker:codex/external-hosted-authoring")
+
+    def test_verifier_literal_is_what_the_builder_emits(self) -> None:
+        build = load_path("product_contract_build_single", PRODUCT_CONTRACT_DIR / "build.py")
+        self.assertFalse(hasattr(build, "VARIANTS"))
+        self.assertFalse(hasattr(build, "SETTLEMENT_BY_WORKER"))
+        tool = BUNDLE / ".ai/tools/codex/qualification/consumer-runtime-verifier.yaml"
+        literal = yaml.safe_load(tool.read_text())["config"]["args"][2]
+        contract = json.loads(literal)
+        # The contract pins the Worker, not a settlement: the Worker's selected
+        # holding decides how its session settles.
+        self.assertEqual(contract["target"]["worker_ref"], "worker:codex/external-hosted-authoring")
+        self.assertNotIn("required_root_settlement", contract["semantic_checker"])
+        captured = {
+            "code_manifest_hash": contract["semantic_checker"]["code"]["manifest_hash"],
+            "profile_hash": contract["target"]["profile_hash"],
+            "source_binding_hash": contract["target"]["source_binding_hash"],
+            "source_content_manifest_hash": contract["target"]["source_content_manifest_hash"],
+        }
+        self.assertEqual(literal, build.generate(captured, False, tool=tool))
 
 
 if __name__ == "__main__":

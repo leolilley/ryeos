@@ -6,18 +6,40 @@ use ryeos_app::state::AppState;
 
 #[cfg(test)]
 pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
+    dispatch_on(request, state, None, super::SocketSurface::Operator).await
+}
+
+#[cfg(test)]
+pub(crate) async fn dispatch_on(
+    request: RpcRequest,
+    state: &AppState,
+    peer: Option<&super::AuthenticatedUnixPeer>,
+    surface: super::SocketSurface,
+) -> RpcResponse {
     let lifecycle = super::ready_lifecycle_response(state);
-    dispatch_with_state(request, Some(state), &lifecycle, None).await
+    dispatch_with_state(request, Some(state), None, &lifecycle, peer, surface).await
 }
 
 pub(super) async fn dispatch_dynamic(
     request: RpcRequest,
     state: &super::DynamicServerState,
     peer: Option<&super::AuthenticatedUnixPeer>,
+    surface: super::SocketSurface,
 ) -> RpcResponse {
     let lifecycle = state.lifecycle();
     let application = state.application();
-    let response = dispatch_with_state(request, application.as_deref(), &lifecycle, peer).await;
+    let app = application
+        .as_ref()
+        .map(|publication| publication.app().as_ref());
+    let response = dispatch_with_state(
+        request,
+        app,
+        application.as_deref(),
+        &lifecycle,
+        peer,
+        surface,
+    )
+    .await;
     drop(application);
     response
 }
@@ -25,12 +47,20 @@ pub(super) async fn dispatch_dynamic(
 async fn dispatch_with_state(
     request: RpcRequest,
     state: Option<&AppState>,
+    publication: Option<&ryeos_executor::SelectedApplicationPublication>,
     lifecycle: &ryeos_node::LifecycleResponse,
     peer: Option<&super::AuthenticatedUnixPeer>,
+    surface: super::SocketSurface,
 ) -> RpcResponse {
+    // The surface gate precedes routing for both sockets. A refused method is
+    // answered exactly like an unknown one, so the callback-only socket does
+    // not confirm which unauthenticated methods the control socket serves.
+    if !surface.admits(&request.method) {
+        return unknown_method(request.request_id, &request.method);
+    }
     match request.method.as_str() {
         // Local lifecycle control has no public HTTP surface.
-        "lifecycle.status" => lifecycle_status(request.request_id, lifecycle),
+        "lifecycle.status" => lifecycle_status(request.request_id, lifecycle, state),
 
         // The UDS-only health read remains available to ready clients, but it
         // is not a bootstrap alias for lifecycle.status. Before Ready,
@@ -51,7 +81,14 @@ async fn dispatch_with_state(
                 match state {
                     Some(state) => rpc_result(
                         request.request_id,
-                        super::dispatch_runtime_method(other, &request.params, state, peer).await,
+                        super::dispatch_runtime_method_with_publication(
+                            other,
+                            &request.params,
+                            state,
+                            peer,
+                            publication,
+                        )
+                        .await,
                     ),
                     None => application_unavailable(request.request_id, lifecycle),
                 }
@@ -105,8 +142,48 @@ fn system_health(
     )
 }
 
-fn lifecycle_status(request_id: u64, lifecycle: &ryeos_node::LifecycleResponse) -> RpcResponse {
+fn lifecycle_status(
+    request_id: u64,
+    lifecycle: &ryeos_node::LifecycleResponse,
+    state: Option<&AppState>,
+) -> RpcResponse {
+    let window = (lifecycle.status == ryeos_node::LifecycleWireState::Running)
+        .then(|| state.and_then(live_service_window))
+        .flatten();
+    if window.is_none() {
+        return RpcResponse::ok(request_id, json!(lifecycle));
+    }
+    let mut lifecycle = lifecycle.clone();
+    lifecycle.service_window = window;
     RpcResponse::ok(request_id, json!(lifecycle))
+}
+
+/// The running incarnation's headroom before its planned rollover, read live
+/// from the same reader admission uses. A node without a native service has
+/// none; a factory that already refuses service is past its window, so it
+/// reports none either.
+fn live_service_window(state: &AppState) -> Option<ryeos_node::ServiceWindow> {
+    let reader = state
+        .extensions
+        .get::<ryeos_app::native_headroom::NativeServiceHeadroomReader>()?;
+    let headroom = reader.current().ok()?;
+    Some(service_window_at(
+        headroom,
+        u64::try_from(lillux::time::timestamp_millis()).unwrap_or(0) / 1_000,
+    ))
+}
+
+fn service_window_at(
+    headroom: ryeos_app::native_headroom::NativeServiceHeadroom,
+    now_unix_secs: u64,
+) -> ryeos_node::ServiceWindow {
+    ryeos_node::ServiceWindow {
+        seconds_until_rollover: headroom.service_seconds,
+        work_steps_until_rollover: headroom.work_steps,
+        rolls_at: lillux::time::iso8601_from_unix_secs(
+            now_unix_secs.saturating_add(headroom.service_seconds),
+        ),
+    }
 }
 
 fn unknown_method(request_id: u64, method: &str) -> RpcResponse {
@@ -165,6 +242,50 @@ fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse
                     json!({ "code": dispatch.code() }),
                 );
             }
+            if let Some(refusal) =
+                err.downcast_ref::<ryeos_app::runtime_item_author_service::AuthorItemRefusal>()
+            {
+                return RpcResponse::classified_err(
+                    request_id,
+                    refusal.code(),
+                    refusal.to_string(),
+                    false,
+                    json!({ "code": refusal.code() }),
+                );
+            }
+            if let Some(refusal) =
+                err.downcast_ref::<ryeos_app::event_store_service::AttachmentRefusal>()
+            {
+                return RpcResponse::classified_err(
+                    request_id,
+                    refusal.code(),
+                    refusal.to_string(),
+                    false,
+                    json!({ "code": refusal.code() }),
+                );
+            }
+            if let Some(refusal) =
+                ryeos_app::native_headroom::NativeHeadroomInsufficient::find(&err)
+            {
+                let mut details = refusal.details();
+                details["code"] = json!(refusal.code());
+                return RpcResponse::classified_err(
+                    request_id,
+                    refusal.code(),
+                    refusal.to_string(),
+                    false,
+                    details,
+                );
+            }
+            if let Some(refusal) = ryeos_app::accounting_db::ProviderOutcomeUnknown::find(&err) {
+                return RpcResponse::classified_err(
+                    request_id,
+                    refusal.code(),
+                    refusal.to_string(),
+                    false,
+                    json!({ "code": refusal.code() }),
+                );
+            }
             RpcResponse::err(request_id, "request_failed", format!("{err:#}"))
         }
     }
@@ -184,6 +305,28 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_provider_outcome_keeps_its_typed_code_through_the_rpc_layer() {
+        let error = anyhow::Error::new(ryeos_app::accounting_db::ProviderOutcomeUnknown {
+            thread_id: "T-1".to_string(),
+            turn: 3,
+            attempt_number: 1,
+            predecessor_generation: "G-1".to_string(),
+            detail: "settled".to_string(),
+        })
+        .context("handler context");
+        let response = rpc_result(7, Err(error));
+        let error = response.error.expect("typed refusal");
+        assert_eq!(error.code, "provider_attempt_outcome_unknown");
+        assert!(
+            error
+                .message
+                .contains("Resuming after a restart is not supported"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
     fn runtime_failure_preserves_full_error_chain() {
         let error = anyhow::anyhow!("root cause").context("handler context");
         let response = rpc_result(42, Err(error));
@@ -191,5 +334,71 @@ mod tests {
         let error = response.error.expect("request failure");
         assert_eq!(error.code, "request_failed");
         assert_eq!(error.message, "handler context: root cause");
+    }
+
+    #[test]
+    fn service_window_reports_the_headroom_and_its_wall_clock_point() {
+        let window = service_window_at(
+            ryeos_app::native_headroom::NativeServiceHeadroom {
+                work_steps: 61_000_000,
+                service_seconds: 3_600,
+            },
+            0,
+        );
+        assert_eq!(window.seconds_until_rollover, 3_600);
+        assert_eq!(window.work_steps_until_rollover, 61_000_000);
+        assert_eq!(window.rolls_at, "1970-01-01T01:00:00Z");
+    }
+
+    #[test]
+    fn native_headroom_refusal_keeps_its_typed_code_and_fields() {
+        let error = anyhow::Error::new(ryeos_app::native_headroom::NativeHeadroomInsufficient {
+            what: "external qualification start".to_owned(),
+            dimension: ryeos_app::native_headroom::NativeHeadroomDimension::WorkSteps,
+            declared: 9,
+            remaining: 4,
+        })
+        .context("start the qualification");
+        let response = rpc_result(44, Err(error));
+        let error = response.error.expect("headroom refusal");
+        assert_eq!(error.code, "native_headroom_insufficient");
+        assert!(
+            error.message.contains("before its planned rollover"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn author_item_refusal_keeps_its_typed_code() {
+        let error = anyhow::Error::from(
+            ryeos_app::runtime_item_author_service::AuthorItemRefusal::UpsertOverUnauthoredItem {
+                item_ref: "knowledge:notes/x".to_string(),
+                path: "/p/.ai/knowledge/notes/x.md".to_string(),
+            },
+        );
+        let response = rpc_result(43, Err(error));
+        let error = response.error.expect("author_item refusal");
+        assert_eq!(error.code, "author_item_expected_digest_required");
+        assert!(
+            error.message.contains("knowledge:notes/x"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn authored_capability_refusal_keeps_its_typed_code() {
+        let error = anyhow::Error::from(
+            ryeos_app::runtime_item_author_service::AuthorItemRefusal::AuthoredCapabilityNotCovered {
+                capability: "ryeos.execute.tool.x".to_string(),
+                item_ref: "directive:a/b".to_string(),
+                thread_id: "T-1".to_string(),
+            },
+        )
+        .context("runtime.author_item");
+        let response = rpc_result(44, Err(error));
+        let error = response.error.expect("authored capability refusal");
+        assert_eq!(error.code, "authored_capability_not_covered");
     }
 }

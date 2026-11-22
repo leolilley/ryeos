@@ -1,14 +1,13 @@
-<!-- ryeos:signed:2026-06-21T02:55:23Z:2f8e53a599ba722ba1e544c71761df1f23beb0d3eb5c6b4fc32c97ceff3b1c83:XF+843hoXmrrzyVhzH3+lZuEknIcOpGEorsQ8tmfMNC3lcs5AQIXHN4VMSS7QN6G6Seqxpp0ElM0lPMQ9/prDg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
-<!-- rye:signed:2026-06-03T03:31:14Z:83b615045b2b8b868eea1e9f1fdfae1262ce7ed0566b139fdd720a1e60c080d6:mxfdvN-ApQCYLttwgrL3jMDqm7QJd59IADtIpukJ2zvQ_-sESWc7_kbZHR_NkUST_RecYDgRJQUvdI4tS-4yDw:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:14151d8874ebae2a87688e7df1fb35151b19e33bac1416b2627ca9294eca7b74:ZWeoW/AqBdGBiAZgudrctlpmquhS7Jaz2LXphJgx1wZdLYEPn4ft8Nx4pkxp9+3jjIwjck1jpFlroXLfVkqSAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future/creative-code-spaces
 name: world-protocol-endgame
 title: World Protocol Endgame for RyeOS Digital Spaces
 entry_type: concept-note
-version: "0.2.0"
+version: "0.2.1"
 author: amp
 created_at: 2026-05-28T00:00:00Z
-updated_at: 2026-06-03T00:00:00Z
+updated_at: 2026-10-06T00:00:00Z
 description: Far-future vision for RyeOS as a protocol for many signed worlds, portals, dimensions, hosted presence, and cockpit-native digital spaces rather than one central metaverse.
 tags:
   - creative-code-spaces
@@ -22,6 +21,17 @@ tags:
 ```
 
 # World Protocol Endgame for RyeOS Digital Spaces
+
+## Place in the platform direction
+
+This is a deferred application-family proposal under the
+[platform direction and delivery](../platform-direction-and-delivery.md).
+Its examples, object names and sequencing are prospective domain designs, not
+new core kinds, current API guarantees or the project-wide delivery order.
+Choose a concrete creative application before scheduling this branch; begin
+with one persisted object, an admitted action, a view and a reusable application
+edit. Richer simulation, open frame authoring and federation follow their own
+requirements. Re-audit the historical baseline below against current owners.
 
 ## Purpose
 
@@ -98,9 +108,11 @@ Git repo
 
 than to a traditional file.
 
-## Portals, not apps
+## Portals as an application interaction style
 
-The user-facing pattern changes from:
+A world application may offer the following interaction style. Other RyeOS applications retain the controls and views appropriate to their work. This is a proposed experience within the platform, not a replacement platform identity.
+
+The familiar pattern is:
 
 ```text
 open app
@@ -108,7 +120,7 @@ use interface
 save file
 ```
 
-to:
+A world application could instead offer:
 
 ```text
 open Cockpit

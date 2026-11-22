@@ -1,6 +1,7 @@
 //! `scheduler.explain` — explain a schedule's current planning state.
 //!
-//! Ownership check: callers can only explain schedules they own.
+//! Ownership check: callers can only explain schedules they own; the
+//! configured local operator may also explain node-owned schedules.
 
 use std::sync::Arc;
 
@@ -25,32 +26,52 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let _read_guard = scheduler
+        .acquire_read()
+        .await
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let db = scheduler.scheduler_db();
+    ryeos_scheduler_contract::validate_schedule_id(&req.schedule_id)
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
-    let spec = state
-        .scheduler_db
+    let spec = db
         .get_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
-    ctx.require_owner(Some(spec.execution.principal_id()))?;
+    // The configured local operator may also read node-owned schedules;
+    // everyone else only their own. Mutation handlers keep their owner check.
+    let sees_node_owned = super::scheduler_list::operator_sees_node_owned(state.as_ref(), &ctx);
+    if sees_node_owned
+        && super::scheduler_list::visible_to(&spec.execution.authority, &ctx.fingerprint, true)
+    {
+        // visible
+    } else {
+        ctx.require_owner(Some(spec.execution.principal_id()))?;
+    }
 
-    let last_fire = state
-        .scheduler_db
+    let last_fire = db
         .get_last_fire(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    let total_fires = state
-        .scheduler_db
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let total_fires = db
         .count_fires(&req.schedule_id, None)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    let cursor = state
-        .scheduler_db
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let cursor = db
         .get_cursor(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .filter(|cursor| cursor.spec_hash == spec.spec_hash);
     let now = lillux::time::timestamp_millis();
     let plan = planning::plan_schedule(&spec, last_fire.as_ref(), now);
+    let paused_reason = if spec.enabled {
+        None
+    } else {
+        super::scheduler_register::schedule_paused_reason(&scheduler, &spec)
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
+    };
+    let lifetime_last_boundary = planning::lifetime_horizon(&spec).map(|(last, _)| last);
+    let authority = schedule_authority_view(state.as_ref(), &spec.execution);
 
     let last_fire_json = last_fire.as_ref().map(|f| {
         serde_json::json!({
@@ -99,7 +120,97 @@ pub async fn handle(
         "decision": plan.decision,
         "decision_reason": plan.decision_reason,
         "total_fires": total_fires,
+        "paused_reason": paused_reason,
+        "lifetime": {
+            "max_fires": spec.execution.max_fires,
+            "expires_at": spec.execution.expires_at,
+            "last_admitted_boundary": lifetime_last_boundary,
+            "exhausted": plan.lifetime_exhausted,
+        },
+        "limits": spec.execution.limits,
+        "authority": authority,
     }))
+}
+
+/// Whether the schedule's retained authority would admit a fire now, by the
+/// same revalidation every fire runs, read-only.
+pub(crate) fn schedule_authority_view(
+    state: &AppState,
+    execution: &ryeos_scheduler_contract::ScheduleExecution,
+) -> Value {
+    let mut view = schedule_authority_verdict(state, execution);
+    if let Value::Object(fields) = &mut view {
+        fields.insert(
+            "expires_at".to_owned(),
+            authority_expires_at(state, execution).map_or(Value::Null, Value::String),
+        );
+    }
+    view
+}
+
+/// The earlier of the pinned principal grant's expiry and the schedule's own
+/// `expires_at`: when the schedule stops firing for lifetime reasons. `None`
+/// when neither is bounded. A grant that cannot be read contributes nothing
+/// (the verdict already reports why).
+fn authority_expires_at(
+    state: &AppState,
+    execution: &ryeos_scheduler_contract::ScheduleExecution,
+) -> Option<String> {
+    use ryeos_node_runtime::identity::GrantExpiry;
+    let grant_secs = match &execution.authority {
+        ryeos_scheduler_contract::ScheduleExecutionAuthority::Authenticated {
+            principal_id,
+            ..
+        } => principal_id
+            .strip_prefix("fp:")
+            .and_then(|fingerprint| {
+                ryeos_node_runtime::identity::load_verified_authorized_key_unjudged(
+                    fingerprint,
+                    &state.config.authorized_keys_dir,
+                    &state.identity,
+                )
+                .ok()
+                .flatten()
+            })
+            .and_then(|grant| match grant.expires_at {
+                GrantExpiry::At(secs) => Some(secs),
+                GrantExpiry::Never => None,
+            }),
+        ryeos_scheduler_contract::ScheduleExecutionAuthority::Node { .. } => None,
+    };
+    let schedule_secs = execution
+        .expires_at
+        .as_deref()
+        .and_then(lillux::time::unix_secs_from_iso8601);
+    [grant_secs, schedule_secs]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(lillux::time::iso8601_from_unix_secs)
+}
+
+fn schedule_authority_verdict(
+    state: &AppState,
+    execution: &ryeos_scheduler_contract::ScheduleExecution,
+) -> Value {
+    match ryeos_app::scheduled_execution_authority::revalidate_scheduled_execution(state, execution)
+    {
+        Ok(_) => serde_json::json!({"valid": true, "refusal": null}),
+        Err(error) => match ryeos_scheduler_contract::ScheduledAuthorityRefusal::find(&error) {
+            Some(refusal) => serde_json::json!({
+                "valid": false,
+                "refusal": refusal.kind,
+                "outcome": refusal.kind.fire_outcome(),
+                "detail": refusal.detail,
+            }),
+            // Not a typed refusal: the grants could not be read or verified.
+            None => serde_json::json!({
+                "valid": false,
+                "refusal": null,
+                "error": format!("{error:#}"),
+            }),
+        },
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

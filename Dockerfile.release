@@ -2,12 +2,148 @@
 #
 # One release solve owns compilation and official bundle publication. The
 # native archive and every runtime image below derive from that exact published
-# generation; final stages copy only their declared deployable bundle set.
+# generation. Node binaries additionally select the native scheduler composition
+# appropriate to the final stage's declared bundle set.
 
-# Only contained qualification targets may select the development publication.
-# Official images and archives always depend on the checked published stage.
+# Only qualification builds may select the development publication.
+# Official archives always depend on the checked published stage, and an
+# official image build leaves PUBLICATION_STAGE at its published default.
 ARG CONTAINED_PUBLICATION_STAGE=published
-FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS compiled-publication
+# The composition images select their publication the same way: `published` for official images,
+# `development-publication` for candidate builds signed with a development key.
+ARG PUBLICATION_STAGE=published
+# Third-party dependency compilation, persisted across CI runs. The stages
+# below see only the dependency recipe (manifests, lockfile, toolchain pin and
+# the vendored sqlite patch), never workspace sources, so their layers are
+# keyed by the dependency closure alone and a bake's registry cache restores
+# them on a fresh runner. Workspace crates are deliberately not compiled here:
+# their build scripts embed RYEOS_VCS_REF, RYEOS_BUILD_DATE and
+# RYEOS_EXACT_BUILD_PROVENANCE, so every workspace artifact in a shipped binary
+# is produced by the real stages below from the committed source. The cooking
+# tool removes the placeholder workspace artifacts it compiled, so only
+# third-party compilation survives into the layer.
+#
+# BuildKit does not export cache mounts, so the compiled dependencies live in
+# this stage's filesystem and seed the real stages' cache mounts through
+# `from=dependency-build`, which applies only when a mount is first created.
+#
+# cargo-chef is pinned by exact version under --locked, on the digest-pinned
+# toolchain image used by every compile stage. Each `cargo chef cook` below
+# mirrors one real `cargo build` invocation (same packages, features, target
+# and RUSTFLAGS) because Cargo unifies third-party features per invocation;
+# a mismatched invocation would only miss the cache, never change a binary.
+# SOURCE_DATE_EPOCH and the RYEOS_* build coordinates are deliberately not
+# set here: they change every commit and would defeat the layer.
+FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS dependency-toolchain
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
+        libcap-dev binutils python3 python3-yaml python3-cryptography && \
+    rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked --version 0.1.71
+
+FROM dependency-toolchain AS dependency-recipe
+WORKDIR /build
+COPY . .
+RUN cargo chef prepare --recipe-path /recipe.json
+
+FROM dependency-toolchain AS dependency-build
+WORKDIR /build
+COPY rust-toolchain.toml ./
+COPY vendor vendor
+COPY --from=dependency-recipe /recipe.json recipe.json
+ENV CARGO_TARGET_DIR=/build/target-cache
+# 1. scripts/populate-bundles.sh --bundle-set release-artifacts: the host
+#    packages with that set's native features, then the static worker packages.
+# 2. The contained OCI hook and the static workload client.
+# 3. Every node and CLI pair: the scheduler-free substrate and the core,
+#    workflow, knowledge and controller pairs (no features), the scheduling
+#    pair, and the standard pair; then the controller's core tools.
+RUN mkdir -p /usr/local/cargo/git && \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+      --package lillux \
+      --package ryeosd \
+      --package ryeos-directive-runtime \
+      --package ryeos-graph-runtime \
+      --package ryeos-knowledge-runtime \
+      --package ryeos-handler-bins \
+      --package ryeos-parser-bins \
+      --package ryeos-cli \
+      --package ryeos-core-tools \
+      --package ryeos-web-tools \
+      --package ryeos-browser-tools \
+      --package ryeos-client-terminal \
+      --package ryeos-client-web \
+      --features ryeosd/model-provider-setup,ryeosd/scheduling,ryeos-cli/model-provider-setup,ryeos-cli/scheduling && \
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+    cargo chef cook --release --locked --recipe-path recipe.json --target x86_64-unknown-linux-gnu \
+      --package ryeos-session-exec \
+      --package ryeos-structured-session \
+      --package ryeos-lillux-isolation-adapter \
+      --package ryeos-external-candidate-connector \
+      --package ryeos-codex-external-configuration \
+      --package ryeos-external-guest-occurrence-owner \
+      --package ryeos-external-guest-runtime-producer \
+      --package ryeos-codex-guest-runtime-producer \
+      --package ryeos-codex-runtime-verifier \
+      --package ryeos-external-candidate-launcher \
+      --package ryeos-external-candidate-supervisor \
+      --package ryeos-guest-wire-verifier \
+      --package ryeos-external-guest-restoration-verifier \
+      --package ryeos-render-sandbox-lifecycle-adapter \
+      --package modal-guest-launcher \
+      --package ryeos-modal-sandbox-lifecycle-adapter \
+      --package ryeos-claude-code-adapter && \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+      --package lillux --package ryeos-lillux-oci-hook && \
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+    cargo chef cook --release --locked --recipe-path recipe.json --target x86_64-unknown-linux-gnu \
+      --package ryeos-workload-client && \
+    for package in ryeosd ryeos-cli; do \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" && \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" --features scheduling && \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" --features model-provider-setup,scheduling || exit 1; \
+    done && \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+      --package ryeos-core-tools
+
+# Placeholder workspace artifacts must never be reusable by the real build: the
+# sources copied later carry checkout mtimes older than these outputs, so Cargo
+# could otherwise treat an empty placeholder binary as fresh. Remove every
+# workspace member's artifacts, derived from the manifests, and fail if any remain.
+RUN python3 - <<'PY'
+import json, os, re, shutil, subprocess, sys
+meta = json.loads(subprocess.check_output(
+    ["cargo", "metadata", "--no-deps", "--locked", "--offline", "--format-version", "1"]))
+names = set()
+for package in meta["packages"]:
+    names.add(package["name"])
+    names.update(target["name"] for target in package["targets"])
+names |= {n.replace("-", "_") for n in names}
+member = re.compile(r"^(?:lib)?(?:%s)(?:-[0-9a-f]{16}(?:\..*)?)?$" % "|".join(map(re.escape, sorted(names))))
+targets = ["/build/target-cache/release", "/build/target-cache/x86_64-unknown-linux-gnu/release"]
+def hits():
+    found = []
+    for root in targets:
+        for sub in (".fingerprint", "deps", "build", "."):
+            directory = os.path.join(root, sub)
+            if not os.path.isdir(directory):
+                continue
+            for entry in os.listdir(directory):
+                if sub == "." and entry.removesuffix(".d") in names or sub != "." and member.match(entry):
+                    found.append(os.path.join(directory, entry))
+    return found
+for path in hits():
+    shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.remove(path)
+left = hits()
+if left:
+    sys.exit("workspace artifacts remain: %s" % left)
+PY
+
+FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS compiled-publication
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
@@ -37,9 +173,9 @@ ENV SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH
 # coordinate as a standalone external realization. It is not staged into a
 # bundle and no runtime image filesystem is later mined for it.
 RUN --mount=type=secret,id=publisher-key,required=true \
-    --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     cp -a bundles .bundles-writable && \
     rm -rf bundles && \
@@ -88,17 +224,295 @@ RUN --mount=type=secret,id=publisher-key,required=true \
 
 FROM compiled-publication AS published
 # Never bypass official signer admission for distributable release artifacts.
-RUN --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+# The packaging script runs the real `ryeos init` durable-root gate on its
+# verification app roots, and that gate refuses the build container's overlay
+# filesystem. A cache mount is a separate mount of the builder's own disk, so
+# the verification roots live on one; the script removes what it creates.
+RUN --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    --mount=type=cache,id=ryeos-release-verify-root,target=/verify-root,sharing=locked \
     ./scripts/release/package-bundle-artifact.sh \
       --version "$VERSION" \
       --source /build/bundles \
       --output "/out/ryeos-bundles-${VERSION}-x86_64.tar.gz" \
       --source-date-epoch "$SOURCE_DATE_EPOCH" \
+      --verify-root /verify-root \
       --ryeos-bin /build/target/release/ryeos
 
 FROM compiled-publication AS development-publication
 # Local qualification must not masquerade as official publication.
 RUN python3 -c 'import tomllib; from pathlib import Path; actual=tomllib.loads(Path("bundles/.ai/PUBLISHER_TRUST.toml").read_text()); expected=tomllib.loads(Path(".dev-keys/PUBLISHER_DEV_TRUST.toml").read_text()); assert actual["fingerprint"] == expected["fingerprint"]; assert actual["owner"] != "ryeos-official"'
+
+# Every runtime image takes its binaries and bundles from the selected
+# publication. Only the distributable archives below name `published`, the one
+# stage that runs the official-only packaging gate.
+# Composition images compile their node pair from the selected publication
+# with exactly the native features their bundle set selects, so an image never
+# carries a scheduler or provider-setup implementation its bundles omit.
+FROM ${PUBLICATION_STAGE} AS composition-publication
+
+# The bundle-source substrate omits the workflow bundles. Compile its node pair explicitly
+# from the same source and lockfile; copying the full publication's node pair
+# would retain the scheduler implementation despite omitting its bundle.
+FROM composition-publication AS scheduler-free-publication
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair scheduler-free-publication && \
+    mkdir -p /build/target/scheduler-free && \
+    cp /build/target-cache/release/ryeosd /build/target/scheduler-free/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/scheduler-free/ryeos
+
+# Core: no optional native features.
+FROM composition-publication AS core-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features core "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair core-pair && \
+    mkdir -p /build/target/core && \
+    cp /build/target-cache/release/ryeosd /build/target/core/ryeosd && \
+    ryeos_assert_compiled_features core-pair /build/target/core/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/core/ryeos
+
+# Core with the scheduling bundle: the scheduler, no provider setup.
+FROM composition-publication AS core-scheduling-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features core-scheduling "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair core-scheduling-pair && \
+    mkdir -p /build/target/core-scheduling && \
+    cp /build/target-cache/release/ryeosd /build/target/core-scheduling/ryeosd && \
+    ryeos_assert_compiled_features core-scheduling-pair /build/target/core-scheduling/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/core-scheduling/ryeos
+
+# Core with the graph bundle: graph workflows, no scheduler or provider setup.
+FROM composition-publication AS core-workflow-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features core-workflow "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair core-workflow-pair && \
+    mkdir -p /build/target/core-workflow && \
+    cp /build/target-cache/release/ryeosd /build/target/core-workflow/ryeosd && \
+    ryeos_assert_compiled_features core-workflow-pair /build/target/core-workflow/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/core-workflow/ryeos
+
+# Core with the knowledge bundle: no scheduler or provider setup.
+FROM composition-publication AS core-knowledge-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features core-knowledge "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair core-knowledge-pair && \
+    mkdir -p /build/target/core-knowledge && \
+    cp /build/target-cache/release/ryeosd /build/target/core-knowledge/ryeosd && \
+    ryeos_assert_compiled_features core-knowledge-pair /build/target/core-knowledge/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/core-knowledge/ryeos
+
+# Remote-authoring controller: graph and knowledge only, no scheduler or
+# directive runtime.
+FROM composition-publication AS controller-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features hosted-controller "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair hosted-controller-pair && \
+    mkdir -p /build/target/hosted-controller && \
+    cp /build/target-cache/release/ryeosd /build/target/hosted-controller/ryeosd && \
+    ryeos_assert_compiled_features hosted-controller-pair /build/target/hosted-controller/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/hosted-controller/ryeos
+
+# Standard: the scheduler (scheduling) and provider setup (directive) its bundles select.
+FROM composition-publication AS standard-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features standard "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair standard-pair && \
+    mkdir -p /build/target/standard && \
+    cp /build/target-cache/release/ryeosd /build/target/standard/ryeosd && \
+    ryeos_assert_compiled_features standard-pair /build/target/standard/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/standard/ryeos
+
+FROM composition-publication AS central-host-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features central-host "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair central-host-pair && \
+    mkdir -p /build/target/central-host && \
+    cp /build/target-cache/release/ryeosd /build/target/central-host/ryeosd && \
+    ryeos_assert_compiled_features central-host-pair /build/target/central-host/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/central-host/ryeos
+
+FROM composition-publication AS local-inference-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features local-inference "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair local-inference-pair && \
+    mkdir -p /build/target/local-inference && \
+    cp /build/target-cache/release/ryeosd /build/target/local-inference/ryeosd && \
+    ryeos_assert_compiled_features local-inference-pair /build/target/local-inference/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/local-inference/ryeos
+
+FROM composition-publication AS hosted-workflow-pair
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features hosted-workflow "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair hosted-workflow-pair && \
+    mkdir -p /build/target/hosted-workflow && \
+    cp /build/target-cache/release/ryeosd /build/target/hosted-workflow/ryeosd && \
+    ryeos_assert_compiled_features hosted-workflow-pair /build/target/hosted-workflow/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/hosted-workflow/ryeos
 
 FROM ${CONTAINED_PUBLICATION_STAGE} AS contained-publication
 
@@ -107,6 +521,49 @@ COPY --from=published /out/ /
 
 FROM scratch AS workload-client-artifact
 COPY --from=published /workload-out/ /
+
+# The node pair exactly as the standard image installs it, packaged for hosts
+# that have neither Docker nor Rust. `ryeos-core-tools` is not included: it
+# travels in the bundles archive under core/.ai/bin, which is where a node
+# resolves it. The archive is produced from the same compiled pair that
+# the standard image copies, never from a second build.
+FROM standard-pair AS node-binaries-package
+ARG VERSION
+ARG SOURCE_DATE_EPOCH
+ARG VCS_REF=unknown
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN test -n "$VERSION" && \
+    test -n "$SOURCE_DATE_EPOCH" && \
+    test "$(/build/target/standard/ryeosd build-info --revision)" = "$VCS_REF" && \
+    /build/target/standard/ryeos --version >/dev/null && \
+    name="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu" && \
+    mkdir -p "/node-stage/$name/bin" /node-out && \
+    install -m 0755 /build/target/standard/ryeosd "/node-stage/$name/bin/ryeosd" && \
+    install -m 0755 /build/target/standard/ryeos "/node-stage/$name/bin/ryeos" && \
+    install -m 0644 /build/LICENSE "/node-stage/$name/LICENSE" && \
+    tar -C /node-stage --sort=name --mtime="@${SOURCE_DATE_EPOCH}" \
+      --owner=0 --group=0 --numeric-owner -cf - "$name" \
+      | gzip -n -9 > "/node-out/${name}.tar.gz" && \
+    (cd /node-out && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+
+# The archive is published for plain hosts, so prove it on the oldest base it
+# claims: a stock bookworm image with none of the build's development
+# libraries. The packaged binaries must start there (glibc 2.36 and the
+# runtime shared libraries a fresh host has), or the release fails here
+# instead of shipping an archive that cannot run.
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS node-binaries-verify
+ARG VERSION
+ARG VCS_REF=unknown
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+COPY --from=node-binaries-package /node-out/ /node-out/
+RUN name="ryeos-node-${VERSION}-x86_64-unknown-linux-gnu" && \
+    (cd /node-out && sha256sum --check "${name}.tar.gz.sha256") && \
+    mkdir /verify && tar -C /verify -xzf "/node-out/${name}.tar.gz" && \
+    test "$("/verify/$name/bin/ryeosd" build-info --revision)" = "$VCS_REF" && \
+    "/verify/$name/bin/ryeos" --version >/dev/null
+
+FROM scratch AS node-binaries-artifact
+COPY --from=node-binaries-verify /node-out/ /
 
 FROM scratch AS contained-oci-hook-artifact
 COPY --from=contained-publication /contained-hook-out/ /
@@ -119,21 +576,55 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 python3-venv python3-pip tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 COPY --from=node-runtime /usr/local/ /usr/local/
 WORKDIR /app
 
+# Node account. The daemon, `ryeos init` and every operator command in this
+# image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
+# root as the recorded actor of `ryeos node allow-restart` and
+# `ryeos node capacity reissue`, so a node running as root could never have
+# its restart inhibition cleared from inside its own container. The
+# entrypoint script is pid 1 and starts as root only to hand /data (a
+# platform volume, mounted root-owned) to this account, then replaces itself
+# with tini running as ryeos, so the init and the daemon share one uid and
+# the init needs no capability to forward the stop signal. The script runs
+# again under tini before any ryeos command.
+RUN groupadd --gid 10000 ryeos && \
+    useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
+      --shell /bin/bash ryeos && \
+    install -d -o ryeos -g ryeos -m 0750 /data /data/app
+
+# Platform shells (Render's SSH and dashboard shell) attach as root, after
+# checking that the service's running user has a login shell: the entrypoint
+# drops root to the node account before the daemon starts, so that account
+# carries bash above (a nologin shell makes the gateway close every session
+# right after it authenticates the operator). The shell grants the account
+# nothing: no password, no_new_privs, and ownership of the app root only.
+# Root keeps a ~/.ssh directory with mode 0700 and a set, random, discarded
+# password; the base image ships root locked, which the gateway refuses.
+RUN install -d -m 0700 /root/.ssh && \
+    usermod -p "$(openssl rand -base64 48 | openssl passwd -6 -stdin)" root
+
 FROM workflow-runtime AS ryeos-standard
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
-COPY --from=published /build/bundles/core         /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
-COPY --from=published /build/bundles/standard     /opt/ryeos/standard
+COPY --from=standard-pair /build/target/standard/ryeosd /usr/local/bin/ryeosd
+COPY --from=standard-pair /build/target/standard/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai          /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core         /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=composition-publication /build/bundles/ryeos-ui /opt/ryeos/ryeos-ui
+COPY --from=composition-publication /build/bundles/codex /opt/ryeos/codex
+COPY --from=composition-publication /build/bundles/opencode /opt/ryeos/opencode
+COPY --from=composition-publication /build/bundles/web /opt/ryeos/web
+COPY --from=composition-publication /build/bundles/browser /opt/ryeos/browser
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
-ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 ENV RYEOS_INIT_NODE_PROFILE=standard
 EXPOSE 8000
@@ -146,24 +637,28 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="standard"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM workflow-runtime AS ryeos-local-inference
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai             /opt/ryeos/.ai
-COPY --from=published /build/bundles/core            /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth    /opt/ryeos/central-auth
-COPY --from=published /build/bundles/standard        /opt/ryeos/standard
-COPY --from=published /build/bundles/local-inference /opt/ryeos/local-inference
+COPY --from=local-inference-pair /build/target/local-inference/ryeosd /usr/local/bin/ryeosd
+COPY --from=local-inference-pair /build/target/local-inference/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai             /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core            /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=composition-publication /build/bundles/local-inference /opt/ryeos/local-inference
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
-ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 ENV RYEOS_INIT_NODE_PROFILE=local-inference
 EXPOSE 8000
@@ -176,25 +671,29 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="local-inference"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM workflow-runtime AS ryeos-central-host
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai                   /opt/ryeos/.ai
-COPY --from=published /build/bundles/core                  /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth          /opt/ryeos/central-auth
-COPY --from=published /build/bundles/standard              /opt/ryeos/standard
-COPY --from=published /build/bundles/web                   /opt/ryeos/web
-COPY --from=published /build/bundles/tv-tracker-authoring  /opt/ryeos/tv-tracker-authoring
+COPY --from=central-host-pair /build/target/central-host/ryeosd /usr/local/bin/ryeosd
+COPY --from=central-host-pair /build/target/central-host/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai                   /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core                  /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=composition-publication /build/bundles/central-auth          /opt/ryeos/central-auth
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=composition-publication /build/bundles/web                   /opt/ryeos/web
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
-ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 ENV RYEOS_INIT_NODE_PROFILE=central-host
 EXPOSE 8000
@@ -207,11 +706,13 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="central-host"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Hard-contained worker packaging only. An external installed Lillux adapter
 # prepares /data/app and the protected authority. This target never initializes
@@ -233,11 +734,12 @@ COPY --from=contained-publication /build/target/release/ryeos-core-tools /usr/lo
 COPY --from=contained-publication /build/target/release/lillux     /usr/local/bin/lillux
 COPY --from=contained-publication /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=contained-publication /build/bundles/core         /opt/ryeos/core
-COPY --from=contained-publication /build/bundles/central-auth /opt/ryeos/central-auth
-COPY --from=contained-publication /build/bundles/standard     /opt/ryeos/standard
-COPY --from=contained-publication /build/bundles/hosted-node  /opt/ryeos/hosted-node
+COPY --from=contained-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=contained-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=contained-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=contained-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=contained-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
 COPY --from=contained-publication /build/bundles/codex        /opt/ryeos/codex
-COPY --from=contained-publication /build/bundles/render-sandbox /opt/ryeos/render-sandbox
 COPY --from=contained-publication /build/bundles/opencode     /opt/ryeos/opencode
 COPY images/contained-workflow/entrypoint.sh /usr/local/bin/contained-workflow-entrypoint
 RUN chmod 0555 /usr/local/bin/contained-workflow-entrypoint && \
@@ -270,24 +772,49 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates python3 tini && \
     rm -rf /var/lib/apt/lists/*
 RUN test -x /usr/bin/tini
+RUN test -x /usr/bin/setpriv
 RUN test -x /usr/bin/python3
 WORKDIR /app
+
+# Node account. The daemon, `ryeos init` and every operator command in this
+# image run as ryeos (uid 10000, gid 10000), never as root: lillux refuses
+# root as the recorded actor of `ryeos node allow-restart` and
+# `ryeos node capacity reissue`, so a node running as root could never have
+# its restart inhibition cleared from inside its own container. The
+# entrypoint script is pid 1 and starts as root only to hand /data (a
+# platform volume, mounted root-owned) to this account, then replaces itself
+# with tini running as ryeos, so the init and the daemon share one uid and
+# the init needs no capability to forward the stop signal. The script runs
+# again under tini before any ryeos command.
+RUN groupadd --gid 10000 ryeos && \
+    useradd --uid 10000 --gid 10000 --home-dir /data/app --no-create-home \
+      --shell /bin/bash ryeos && \
+    install -d -o ryeos -g ryeos -m 0750 /data /data/app
+
+# Platform shells (Render's SSH and dashboard shell) attach as root, after
+# checking that the service's running user has a login shell: the entrypoint
+# drops root to the node account before the daemon starts, so that account
+# carries bash above (a nologin shell makes the gateway close every session
+# right after it authenticates the operator). The shell grants the account
+# nothing: no password, no_new_privs, and ownership of the app root only.
+# Root keeps a ~/.ssh directory with mode 0700 and a set, random, discarded
+# password; the base image ships root locked, which the gateway refuses.
+RUN install -d -m 0700 /root/.ssh && \
+    usermod -p "$(openssl rand -base64 48 | openssl passwd -6 -stdin)" root
 
 # Stable substrate for native bundle publication. This image contains only the
 # bootstrap set required to run a bundle-source node. Subsequent bundle
 # releases advance CAS/catalog and node-selection coordinates; they do not
 # rebuild this image or replace its seed on restart.
 FROM hosted-runtime AS ryeos-substrate
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai           /opt/ryeos/.ai
-COPY --from=published /build/bundles/core          /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth  /opt/ryeos/central-auth
-COPY --from=published /build/bundles/bundle-source /opt/ryeos/bundle-source
+COPY --from=scheduler-free-publication /build/target/scheduler-free/ryeosd /usr/local/bin/ryeosd
+COPY --from=scheduler-free-publication /build/target/scheduler-free/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai           /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core          /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/bundle-source /opt/ryeos/bundle-source
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
-ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 ENV RYEOS_INIT_NODE_PROFILE=bundle-source
 EXPOSE 8000
@@ -300,28 +827,30 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="substrate"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.bundle-seed-mode="first-boot-only"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD ["ryeos", "node", "status"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 FROM hosted-runtime AS ryeos-hosted-workflow
-COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
-COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
-COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
-COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
-COPY --from=published /build/bundles/core         /opt/ryeos/core
-COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
-COPY --from=published /build/bundles/standard     /opt/ryeos/standard
-COPY --from=published /build/bundles/hosted-node  /opt/ryeos/hosted-node
-COPY --from=published /build/bundles/codex        /opt/ryeos/codex
-COPY --from=published /build/bundles/render-sandbox /opt/ryeos/render-sandbox
-COPY --from=published /build/bundles/opencode     /opt/ryeos/opencode
+COPY --from=hosted-workflow-pair /build/target/hosted-workflow/ryeosd /usr/local/bin/ryeosd
+COPY --from=hosted-workflow-pair /build/target/hosted-workflow/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai          /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core         /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=composition-publication /build/bundles/codex        /opt/ryeos/codex
+COPY --from=composition-publication /build/bundles/opencode     /opt/ryeos/opencode
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
-ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 ENV RYEOS_INIT_NODE_PROFILE=hosted-workflow
 EXPOSE 8000
@@ -334,8 +863,266 @@ LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="hosted-workflow"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
 LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Composition images. Each is one bundle set with its exact native features;
+# the capability floor the node holds is selected at first boot from the
+# profile's signed host classes by RYEOS_INIT_HOST_CLASS, which the deployment
+# sets and the image never does.
+FROM hosted-runtime AS ryeos-core
+COPY --from=core-pair /build/target/core/ryeosd /usr/local/bin/ryeosd
+COPY --from=core-pair /build/target/core/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=core
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="core"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+FROM hosted-runtime AS ryeos-core-scheduling
+COPY --from=core-scheduling-pair /build/target/core-scheduling/ryeosd /usr/local/bin/ryeosd
+COPY --from=core-scheduling-pair /build/target/core-scheduling/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/scheduling /opt/ryeos/scheduling
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=core-scheduling
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="core-scheduling"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+FROM hosted-runtime AS ryeos-core-workflow
+COPY --from=core-workflow-pair /build/target/core-workflow/ryeosd /usr/local/bin/ryeosd
+COPY --from=core-workflow-pair /build/target/core-workflow/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=core-workflow
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="core-workflow"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+FROM hosted-runtime AS ryeos-core-knowledge
+COPY --from=core-knowledge-pair /build/target/core-knowledge/ryeosd /usr/local/bin/ryeosd
+COPY --from=core-knowledge-pair /build/target/core-knowledge/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=core-knowledge
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="core-knowledge"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# The remote-authoring controller runs Codex workers, so it uses the workflow
+# runtime with Node.js beside Python.
+FROM workflow-runtime AS ryeos-hosted-controller
+COPY --from=controller-pair /build/target/hosted-controller/ryeosd /usr/local/bin/ryeosd
+COPY --from=controller-pair /build/target/hosted-controller/ryeos  /usr/local/bin/ryeos
+COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
+COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
+COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
+COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledge
+COPY --from=composition-publication /build/bundles/codex /opt/ryeos/codex
+COPY --from=composition-publication /build/bundles/render-sandbox /opt/ryeos/render-sandbox
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=hosted-controller
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="hosted-controller"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# The remote-authoring controller built from the already-published, officially
+# signed release bundles. The build context `released-bundles` is a directory
+# laid out as `.ai` plus one directory per controller bundle. This stage chain
+# never runs the publication step and holds no publisher key: only the node
+# binaries are compiled here, from the tagged source and lockfile, with the
+# controller's exact native features. The bundles are the released bytes.
+FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS controller-release-binaries
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils \
+        libcap-dev binutils python3 python3-yaml python3-cryptography && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+ARG VERSION
+ARG SOURCE_DATE_EPOCH
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
+ENV RYEOS_VCS_REF=$VCS_REF
+ENV RYEOS_BUILD_DATE=$BUILD_DATE
+ENV RYEOS_BUILD_VERSION=$VERSION
+ENV SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH
+
+RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
+    --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
+    --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    test -n "$VERSION" && \
+    test -n "$SOURCE_DATE_EPOCH" && \
+    source scripts/pkg/bundle-sets.sh && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
+    for package in ryeosd ryeos-cli; do \
+      selected="$(ryeos_bundle_set_cargo_features hosted-controller "$package")" || exit 1; \
+      if [ -n "$selected" ]; then features+=("$selected"); fi; \
+    done && \
+    case "$BUNDLE_BUILD_PROFILE" in \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
+      *) exit 2 ;; \
+    esac && \
+    ryeos_build_daemon_pair hosted-controller-pair && \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+    cargo build --release --locked -p ryeos-core-tools && \
+    mkdir -p /build/target/hosted-controller && \
+    cp /build/target-cache/release/ryeosd /build/target/hosted-controller/ryeosd && \
+    ryeos_assert_compiled_features hosted-controller-pair /build/target/hosted-controller/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/hosted-controller/ryeos && \
+    cp /build/target-cache/release/ryeos-core-tools /build/target/hosted-controller/ryeos-core-tools
+
+FROM workflow-runtime AS ryeos-hosted-controller-released
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeosd /usr/local/bin/ryeosd
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeos /usr/local/bin/ryeos
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=released-bundles / /opt/ryeos/
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=hosted-controller
+EXPOSE 8000
+ARG VERSION
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+# Every trust document under the bundle tree must name the official publisher;
+# the image carries no other signer and no private key material.
+ARG OFFICIAL_PUBLISHER_FP
+RUN set -eu; \
+    test -n "$VERSION"; \
+    case "$OFFICIAL_PUBLISHER_FP" in \
+      *[!0-9a-f]*|"") echo "OFFICIAL_PUBLISHER_FP must be 64 lowercase hex digits" >&2; exit 1 ;; \
+    esac; \
+    test "${#OFFICIAL_PUBLISHER_FP}" -eq 64; \
+    test -f /opt/ryeos/.ai/PUBLISHER_TRUST.toml; \
+    for bundle in core graph knowledge codex render-sandbox; do \
+      test -d "/opt/ryeos/$bundle/.ai"; \
+    done; \
+    find /opt/ryeos -name PUBLISHER_TRUST.toml | while read -r doc; do \
+      fingerprint="$(sed -n 's/^[[:space:]]*fingerprint[[:space:]]*=[[:space:]]*"\([0-9A-Fa-f]\{64\}\)"[[:space:]]*$/\1/p' "$doc" | tr 'A-F' 'a-f')"; \
+      owner="$(sed -n 's/^[[:space:]]*owner[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$doc")"; \
+      test "$fingerprint" = "$OFFICIAL_PUBLISHER_FP" || { echo "non-official fingerprint in $doc" >&2; exit 1; }; \
+      test "$owner" = ryeos-official || { echo "non-official owner in $doc" >&2; exit 1; }; \
+    done; \
+    test -z "$(find /opt/ryeos -type f \( -iname '*.pem' -o -iname '*.key' \) -print -quit)"
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="hosted-controller"
+LABEL io.ryeos.node-uid="10000"
+LABEL io.ryeos.node-gid="10000"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+LABEL io.ryeos.bundle-source="release:v$VERSION"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8000')+'/_ryeos/ready',timeout=3).read()"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

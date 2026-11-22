@@ -1,0 +1,15 @@
+# ryeos:signed:2026-10-22T22:14:21Z:edcd2907a8cdb0306ef9236fa78246b532b5ed7629626931928da0bf342fb853:wsxO82ewG9QE1aBtvgjCKoH3GMslCDF0dPzZ4pA/Y4Uy54kABKDXW+NRlYiKVeqcaZ/AMN+vxHWwv+IRo9AnBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: external-content/accept-qualification-testimony
+path: /external-content/accept-qualification-testimony
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 600000
+  concurrent_max: 16
+response:
+  mode: json
+  source: service:external-content/accept-qualification-testimony

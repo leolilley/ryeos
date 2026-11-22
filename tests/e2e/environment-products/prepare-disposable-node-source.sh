@@ -27,8 +27,8 @@ destination=$2
   exit 73
 }
 
-policy=$populated_repository/bundles/standard/.ai/config/test/runtime-qualification.yaml
-verifier=$populated_repository/bundles/standard/.ai/tools/test/verify-runtime.yaml
+policy=$populated_repository/bundles/environment-qualification/.ai/config/test/runtime-qualification.yaml
+verifier=$populated_repository/bundles/environment-qualification/.ai/tools/test/verify-runtime.yaml
 worker=$populated_repository/bundles/codex/.ai/workers/fixture/hosted.yaml
 enrollment_worker=$populated_repository/bundles/codex/.ai/workers/fixture/enrollment.yaml
 login=$populated_repository/bundles/codex/.ai/worker-executions/fixture/login.yaml
@@ -36,8 +36,8 @@ session=$populated_repository/bundles/codex/.ai/worker-executions/fixture/sessio
 # Do not silently retain predecessor copies in another Bundle: that would
 # create competing canonical definitions and preserve the invalid binary edge.
 for relative in workers/fixture worker-executions/fixture; do
-  [[ ! -e $populated_repository/bundles/standard/.ai/$relative ]] || {
-    printf 'stale fixed-fixture definition remains in standard: %s\n' "$relative" >&2
+  [[ ! -e $populated_repository/bundles/environment-qualification/.ai/$relative ]] || {
+    printf 'stale fixed-fixture definition remains in environment-qualification: %s\n' "$relative" >&2
     exit 65
   }
 done
@@ -63,7 +63,7 @@ source "$populated_repository/scripts/pkg/bundle-sets.sh"
 while IFS= read -r bundle_name; do
   bundle=$populated_repository/bundles/$bundle_name
   [[ -d $bundle/.ai ]] || {
-    printf 'populated full-set Bundle is missing: %s\n' "$bundle" >&2
+    printf 'populated development-set Bundle is missing: %s\n' "$bundle" >&2
     exit 66
   }
   /usr/bin/mkdir -p -- "$destination/$bundle_name"
@@ -72,8 +72,8 @@ while IFS= read -r bundle_name; do
     /usr/bin/cp -a -- "$bundle/PUBLISHER_TRUST.toml" \
       "$destination/$bundle_name/PUBLISHER_TRUST.toml"
   fi
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_bundle_set_names development)
 
 printf '%s\n' \
-  "prepared closed full node source for the enforced development profile at $destination" \
+  "prepared closed development node source for the enforced development profile at $destination" \
   'node initialization, trust admission, project signing and node start were not run'

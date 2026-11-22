@@ -1,8 +1,8 @@
 //! Controller-owned staging of one retained guest-owner product for provider installation.
 //!
 //! This operation does not contact a provider or qualify a snapshot. It keeps
-//! the product witness, controller root and exact re-observed bytes together
-//! while producing a fresh private tree for a later descriptor-bound transfer.
+//! the product witness and exact re-observed bytes together while producing a
+//! fresh private tree for a later descriptor-bound transfer.
 
 use std::ffi::OsStr;
 
@@ -10,8 +10,9 @@ use anyhow::{Result, ensure};
 use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
 pub use ryeos_external_execution::guest_runtime_product::GuestOwnerSnapshotUpload;
 use ryeos_external_execution::guest_runtime_product::{
-    GuestOwnerRuntimeManifestIdentity, derive_guest_owner_runtime_manifest_identity,
-    seal_guest_owner_snapshot_upload,
+    GuestOwnerRuntimeManifestIdentity, GuestOwnerRuntimeProduct,
+    derive_guest_owner_runtime_manifest_identity,
+    produce_guest_owner_runtime_from_admitted_payload, seal_guest_owner_snapshot_upload,
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::external_content::products::{ProductShape, ProductStorage};
@@ -58,7 +59,7 @@ impl StagedGuestOwnerRuntimeProduct {
         Ok(())
     }
 
-    /// Package exactly the admitted four-entry tree as an application/x-tar
+    /// Package exactly the admitted three-entry tree as an application/x-tar
     /// directory upload. Content is read through pinned Lillux descriptors,
     /// never through a reconstructed CAS or ambient project path.
     pub fn sealed_snapshot_upload(&self) -> Result<GuestOwnerSnapshotUpload> {
@@ -69,6 +70,185 @@ impl StagedGuestOwnerRuntimeProduct {
             self.maximum_bytes,
         )
     }
+}
+
+/// A fresh private tree reconstructed only from a current, node-signed
+/// materialization head and its exact retained CAS bytes. The source head is
+/// not an execution-capture witness or a runtime qualification.
+pub struct StagedGuestOwnerRuntimeMaterialization {
+    root: lillux::PinnedDirectory,
+    root_identity: lillux::PinnedDirectoryIdentity,
+    binding_id: String,
+    coordinate_digest: String,
+    attestation_hash: String,
+    identity: GuestOwnerRuntimeManifestIdentity,
+    maximum_bytes: u64,
+}
+
+impl StagedGuestOwnerRuntimeMaterialization {
+    pub fn root(&self) -> &lillux::PinnedDirectory {
+        &self.root
+    }
+
+    pub fn attestation_hash(&self) -> &str {
+        &self.attestation_hash
+    }
+
+    pub fn identity(&self) -> &GuestOwnerRuntimeManifestIdentity {
+        &self.identity
+    }
+
+    pub fn ensure_current(&self) -> Result<()> {
+        ensure!(
+            self.root.identity()? == self.root_identity
+                && ObservedGuestRuntime::observe(&self.root)?.manifest_hash()
+                    == self.identity.manifest_hash,
+            "staged materialized guest runtime drifted before provider transfer"
+        );
+        Ok(())
+    }
+
+    pub fn ensure_current_authority(
+        &self,
+        state: &ryeos_app::state::AppState,
+        context: &ryeos_app::handler_context::HandlerContext,
+    ) -> Result<()> {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let current = ryeos_app::operator_guest_runtime_materialization::load_current_guest_owner_materialization(
+            state,
+            context,
+            &self.binding_id,
+            &self.coordinate_digest,
+            &self.attestation_hash,
+            &authority,
+            &guard,
+        )?;
+        ensure!(
+            current.identity == self.identity,
+            "staged materialization authority changed after private reconstruction"
+        );
+        Ok(())
+    }
+
+    pub fn sealed_snapshot_upload(
+        &self,
+        state: &ryeos_app::state::AppState,
+        context: &ryeos_app::handler_context::HandlerContext,
+    ) -> Result<GuestOwnerSnapshotUpload> {
+        self.ensure_current_authority(state, context)?;
+        self.ensure_current()?;
+        seal_guest_owner_snapshot_upload(
+            &self.root,
+            &self.identity.manifest_hash,
+            self.maximum_bytes,
+        )
+    }
+}
+
+/// Stage a retained materialization without consulting the live Bundle path
+/// for bytes. Current grant/binding/generation checks occur at head lookup;
+/// snapshot production must repeat admission before provider contact.
+pub fn stage_current_guest_owner_runtime_materialization(
+    state: &ryeos_app::state::AppState,
+    context: &ryeos_app::handler_context::HandlerContext,
+    materialization_binding_id: &str,
+    coordinate_digest: &str,
+    attestation_hash: &str,
+    maximum_bytes: u64,
+    private_parent: &lillux::PinnedDirectory,
+    child_name: &OsStr,
+) -> Result<StagedGuestOwnerRuntimeMaterialization> {
+    private_parent.require_owner_private_directory()?;
+    ensure!(
+        (1..=MAX_OWNER_SNAPSHOT_UPLOAD_BYTES).contains(&maximum_bytes),
+        "guest runtime staging exceeds its fixed upload byte bound"
+    );
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let current = ryeos_app::operator_guest_runtime_materialization::load_current_guest_owner_materialization(
+        state,
+        context,
+        materialization_binding_id,
+        coordinate_digest,
+        attestation_hash,
+        &authority,
+        &guard,
+    )?;
+    let cas = authority.cas_store()?;
+    let source = &current.source;
+    let product = produce_retained_guest_owner_tree(
+        &cas,
+        &source.owner_executable_sha256,
+        &source.profile_digest,
+        source.maximum_owner_bytes,
+        maximum_bytes,
+        &current.identity,
+        private_parent,
+        child_name,
+    )?;
+    let root = product.root().try_clone()?;
+    Ok(StagedGuestOwnerRuntimeMaterialization {
+        root_identity: root.identity()?,
+        root,
+        binding_id: materialization_binding_id.to_owned(),
+        coordinate_digest: coordinate_digest.to_owned(),
+        attestation_hash: current.attestation_hash,
+        identity: current.identity,
+        maximum_bytes,
+    })
+}
+
+fn produce_retained_guest_owner_tree(
+    cas: &lillux::CasStore,
+    owner_hash: &str,
+    profile_hash: &str,
+    maximum_owner_bytes: u64,
+    maximum_staged_bytes: u64,
+    expected: &GuestOwnerRuntimeManifestIdentity,
+    private_parent: &lillux::PinnedDirectory,
+    child_name: &OsStr,
+) -> Result<GuestOwnerRuntimeProduct> {
+    let owner = cas
+        .get_blob_bounded(owner_hash, maximum_owner_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("materialization owner payload is missing from CAS"))?;
+    ensure!(
+        !owner.is_empty() && owner.len() as u64 <= maximum_staged_bytes,
+        "materialization owner exceeds snapshot staging ceiling"
+    );
+    let profile_bytes = cas
+        .get_blob_bounded(profile_hash, 4 * 1024)?
+        .ok_or_else(|| anyhow::anyhow!("materialization profile is missing from CAS"))?;
+    let profile: ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile =
+        serde_json::from_slice(&profile_bytes)?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&profile)? == profile_bytes,
+        "retained materialization profile is not canonical"
+    );
+    ensure!(
+        (owner.len() as u64)
+            .checked_add(profile_bytes.len() as u64)
+            .is_some_and(|total| total <= maximum_staged_bytes),
+        "materialization tree exceeds snapshot staging ceiling"
+    );
+    let sealed =
+        lillux::sealed_memfd(c"ryeos-retained-guest-owner", &owner).map_err(anyhow::Error::msg)?;
+    let product = produce_guest_owner_runtime_from_admitted_payload(
+        private_parent,
+        child_name,
+        &sealed,
+        owner.len() as u64,
+        owner_hash,
+        &profile,
+    )?;
+    let root = product.root().try_clone()?;
+    let observed = ObservedGuestRuntime::observe(&root)?;
+    ensure!(
+        observed.manifest_hash() == expected.manifest_hash
+            && product.manifest_hash() == expected.manifest_hash,
+        "staged materialized runtime differs from signed retained output"
+    );
+    Ok(product)
 }
 
 /// Resolve a current, operator-owned product and copy its exact ordinary CAS
@@ -92,7 +272,7 @@ pub fn stage_current_guest_owner_runtime_product(
     );
     let limits = state
         .node_policy
-        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
         .closure_limits()?;
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
@@ -118,8 +298,7 @@ pub fn stage_current_guest_owner_runtime_product(
         &witness.evidence.manifest_hash,
         limits.max_object_bytes,
     )?;
-    let identity =
-        derive_guest_owner_runtime_manifest_identity(&manifest, state.identity.verifying_key())?;
+    let identity = derive_guest_owner_runtime_manifest_identity(&manifest)?;
     ensure!(
         identity.manifest_hash == witness.evidence.manifest_hash,
         "guest runtime product manifest contradicts its retained witness"
@@ -133,6 +312,7 @@ pub fn stage_current_guest_owner_runtime_product(
         &identity.manifest_hash,
         ProductStorage::Content,
         &PrivateMaterializationBudget::new(maximum_bytes),
+        Some(&state.state_store),
     )?;
     let observed = ObservedGuestRuntime::observe(&root)?;
     ensure!(
@@ -148,12 +328,54 @@ pub fn stage_current_guest_owner_runtime_product(
     })
 }
 
+fn require_requested_manifest(staged: &str, requested: &str) -> Result<()> {
+    ensure!(
+        staged == requested,
+        "staged guest runtime is not the runtime the placement contract names"
+    );
+    Ok(())
+}
+
+/// Produces a provider's guest runtime upload from the retained product the
+/// node qualified, for activations that stage the runtime themselves.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutorGuestRuntimeUploadSource;
+
+impl ryeos_app::guest_runtime_upload::GuestRuntimeUploadSource
+    for ExecutorGuestRuntimeUploadSource
+{
+    fn produce(
+        &self,
+        state: &ryeos_app::state::AppState,
+        context: &ryeos_app::handler_context::HandlerContext,
+        request: &ryeos_app::guest_runtime_upload::GuestRuntimeUploadRequest<'_>,
+    ) -> Result<GuestOwnerSnapshotUpload> {
+        let staged = stage_current_guest_owner_runtime_product(
+            state,
+            context,
+            request.witness_hash,
+            request.witness_source,
+            request.maximum_bytes,
+            request.stage.root(),
+            request.stage.product_name(),
+        )?;
+        require_requested_manifest(&staged.identity().manifest_hash, request.manifest_hash)?;
+        staged.sealed_snapshot_upload()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::SigningKey;
     use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn a_staged_runtime_must_be_the_requested_manifest() {
+        let manifest = "a".repeat(64);
+        require_requested_manifest(&manifest, &manifest).unwrap();
+        assert!(require_requested_manifest(&manifest, &"b".repeat(64)).is_err());
+    }
 
     #[test]
     fn staged_source_refuses_drift_before_provider_transfer() {
@@ -175,28 +397,59 @@ mod tests {
             .inherited_descriptor_authority()
             .unwrap();
         let output = lillux::PinnedDirectory::open(&output).unwrap().unwrap();
-        let root_key = SigningKey::from_bytes(&[43; 32]).verifying_key();
+        let profile = GuestOwnerRuntimeProfile {
+            schema: 2,
+            account: lillux::GuestRuntimeAccount::Unix {
+                uid: 65534,
+                gid: 65534,
+            },
+            private_source_max_bytes: 32 * 1024 * 1024,
+            private_source_max_inodes: 1024,
+            owner_timeout_seconds: 600,
+        };
         let product = ryeos_external_execution::guest_runtime_product::produce_guest_owner_runtime(
             &output,
             OsStr::new("runtime"),
             &owner,
             owner_bytes.len() as u64,
             &lillux::sha256_hex(owner_bytes),
-            &root_key,
-            &GuestOwnerRuntimeProfile {
-                schema: 1,
-                private_source_max_bytes: 32 * 1024 * 1024,
-                private_source_max_inodes: 1024,
-                owner_timeout_seconds: 600,
-            },
+            &profile,
         )
         .unwrap();
         let manifest = ryeos_state::observe_external_content_tree_exact(product.root()).unwrap();
-        let identity = derive_guest_owner_runtime_manifest_identity(
-            &serde_json::to_value(manifest).unwrap(),
-            &root_key,
+        let identity =
+            derive_guest_owner_runtime_manifest_identity(&serde_json::to_value(manifest).unwrap())
+                .unwrap();
+        let cas = lillux::CasStore::new(fixture.path().join("cas"));
+        let owner_hash = cas.store_blob(owner_bytes).unwrap();
+        let profile_bytes = ryeos_external_execution_contract::canonical_json(&profile).unwrap();
+        let profile_hash = cas.store_blob(&profile_bytes).unwrap();
+        let retained = produce_retained_guest_owner_tree(
+            &cas,
+            &owner_hash,
+            &profile_hash,
+            32 * 1024 * 1024,
+            1024 * 1024,
+            &identity,
+            &output,
+            OsStr::new("retained"),
         )
         .unwrap();
+        assert_eq!(retained.manifest_hash(), identity.manifest_hash);
+        let wrong_profile = "f".repeat(64);
+        assert!(
+            produce_retained_guest_owner_tree(
+                &cas,
+                &owner_hash,
+                &wrong_profile,
+                32 * 1024 * 1024,
+                1024 * 1024,
+                &identity,
+                &output,
+                OsStr::new("unavailable"),
+            )
+            .is_err()
+        );
         let staged = StagedGuestOwnerRuntimeProduct {
             root: product.root().try_clone().unwrap(),
             root_identity: product.root().identity().unwrap(),
@@ -226,7 +479,6 @@ mod tests {
             [
                 "bin/",
                 "bin/ryeos-external-guest-occurrence-owner",
-                "controller-root.hex",
                 "guest-owner-profile.json",
             ]
         );

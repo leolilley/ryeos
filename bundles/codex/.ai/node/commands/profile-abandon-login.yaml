@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-13T02:52:55Z:65e1d895f496324af7de2eb5e6ef7b946331985eb873071ecad4ec20bdd11cb2:aPtyMyZzL0PgZJYSHhZA8sx6/YcCXSi0ufYJ1qxT8bX6gDBGmXXWPcawSS41l/DxEuunFUirFg7xFEvcRFhgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, profile, abandon-login]
+description: "Clear an expired, unlocked Codex login so a new login can begin"
+help:
+  usage: "ryeos codex profile abandon-login <profile-id> <login-epoch>"
+  examples:
+    - "ryeos codex profile abandon-login personal 2"
+forms:
+  - slots:
+      - field: profile_id
+      - field: login_epoch
+dispatch:
+  kind: execute_ref
+  execute: service:credential-profiles/abandon-login
+  availability: daemon

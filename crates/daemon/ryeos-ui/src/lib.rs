@@ -3,19 +3,33 @@
 //! Browser sessions, `/ui` service handlers, and UI-specific route invokers
 //! live here so `ryeos-api` can remain generic HTTP/route substrate.
 
+#[cfg(test)]
+extern crate self as ryeos_ui;
+pub mod art;
 pub mod assets;
 pub mod browser_session;
 pub mod compiled_binding;
 pub mod handlers;
 pub mod invokers;
+mod phase_timing;
 pub mod seat_auth;
+pub mod seat_read_policy;
+mod seat_stream_policy;
+pub mod session_authority;
 pub mod session_bus;
 pub mod state;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod thread_authorization;
+pub mod thread_hints;
+pub mod transfer_store;
 
-pub use browser_session::{BrowserSession, BrowserSessionStore, LaunchContext};
+pub use browser_session::{
+    BrowserSession, BrowserSessionStore, LaunchContext, SessionSummary, SessionTiming,
+};
 pub use session_bus::SessionBus;
 pub use state::UiState;
+pub use thread_hints::ThreadHintFanout;
 
 /// Exact signed UI binding contract served by this daemon build.
 ///
@@ -49,6 +63,10 @@ pub fn register_extensions(
         ),
     );
     response_modes.register_event_stream_source(
+        "ui_seat_history",
+        std::sync::Arc::new(invokers::seat_history_invocation::SeatHistorySourceFactory),
+    );
+    response_modes.register_event_stream_source(
         "browser_chain_tail",
         std::sync::Arc::new(
             invokers::browser_chain_tail_invocation::BrowserChainTailSourceFactory {
@@ -60,4 +78,7 @@ pub fn register_extensions(
         "embedded_asset",
         std::sync::Arc::new(assets::WebAssetProvider),
     );
+    // The signed-picture route: bytes only from verified bundle content, only
+    // for hashes the calling session's bindings (or grant set) name.
+    response_modes.register(std::sync::Arc::new(art::ArtMode { ui }));
 }

@@ -135,6 +135,18 @@ impl ProtocolRegistry {
         }
     }
 
+    /// Build a registry from already-verified entries (for testing).
+    #[cfg(test)]
+    pub(crate) fn from_verified(protocols: Vec<VerifiedProtocol>) -> Self {
+        Self {
+            entries: protocols
+                .into_iter()
+                .map(|protocol| (protocol.canonical_ref.clone(), protocol))
+                .collect(),
+            fingerprint: "test".to_owned(),
+        }
+    }
+
     /// Look up a protocol by canonical ref.
     pub fn get(&self, canonical_ref: &str) -> Option<&VerifiedProtocol> {
         self.entries.get(canonical_ref)
@@ -363,12 +375,12 @@ fn validate_protocol_descriptor(
 
     // 8. callback channel ↔ callback-source injection symmetry
     match desc.callback_channel {
-        CallbackChannel::Http => {
+        CallbackChannel::RuntimeSocket => {
             if !has_callback_socket_injection || !has_callback_token_injection {
                 return Err(ProtocolError::Vocabulary {
                     name: desc.name.clone(),
                     source:
-                        crate::protocol_vocabulary::VocabularyError::HttpIncompleteCallbackTransport,
+                        crate::protocol_vocabulary::VocabularyError::RuntimeSocketIncompleteCallbackTransport,
                 });
             }
         }
@@ -393,6 +405,13 @@ fn validate_protocol_descriptor(
         )?;
     }
 
+    crate::protocols::descriptor::validate_protocol_holding(desc).map_err(|detail| {
+        ProtocolError::MalformedYaml {
+            path: path.to_owned(),
+            detail,
+        }
+    })?;
+
     if let Some(projector) = &desc.execution_evidence {
         crate::execution_evidence::validate_execution_evidence_projector_declaration(projector)
             .map_err(|detail| ProtocolError::MalformedYaml {
@@ -400,18 +419,49 @@ fn validate_protocol_descriptor(
                 detail,
             })?;
     }
-    if desc.requires_qualification_purpose
-        && (desc.callback_channel != CallbackChannel::Http
+    if desc.capabilities.pushed_head_requires_declaration && !desc.capabilities.allows_pushed_head {
+        return Err(ProtocolError::MalformedYaml {
+            path: path.to_owned(),
+            detail: "pushed_head_requires_declaration requires allows_pushed_head".to_owned(),
+        });
+    }
+    // A qualification verifier runs against the exact pinned snapshot its subject was captured from, which the
+    // dispatcher classifies as a pushed head. That capability is open only on the condition that the launched
+    // item declares the pinned-snapshot project source; remote and detached dispatch stay closed.
+    if desc.qualification_callback.is_some()
+        && (desc.callback_channel != CallbackChannel::RuntimeSocket
             || desc.execution_evidence.is_none()
             || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
-            || desc.capabilities.allows_pushed_head
             || desc.capabilities.allows_target_site
-            || desc.capabilities.allows_detached)
+            || desc.capabilities.allows_detached
+            || desc.capabilities.allows_pushed_head
+                != desc.capabilities.pushed_head_requires_declaration)
     {
         return Err(ProtocolError::MalformedYaml {
             path: path.to_owned(),
-            detail: "qualification-only protocol requires managed HTTP callbacks, a projector and no dispatch capabilities".to_owned(),
+            detail: "qualification-only protocol requires managed HTTP callbacks, a projector and no remote or detached dispatch capability, and a pushed head only on declaration".to_owned(),
         });
+    }
+
+    if let Some(class) = &desc.captured_compatible_callback {
+        let evidence_bounded = desc.execution_evidence.as_ref().is_some_and(|projector| {
+            projector.validate().is_ok() && projector.limits.max_calls == 1
+        });
+        if desc.qualification_callback
+            != Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer)
+            || desc.callback_channel != CallbackChannel::RuntimeSocket
+            || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
+            || desc.capabilities.allows_target_site
+            || desc.capabilities.allows_detached
+            || desc.session.is_some()
+            || !evidence_bounded
+            || !lillux::valid_hash(&class.surface_digest)
+        {
+            return Err(ProtocolError::MalformedYaml {
+                path: path.to_owned(),
+                detail: "captured-compatible callback requires the remote-consumer qualification callback with a closed surface digest, managed HTTP callbacks, a bounded single-call evidence projector, no session, and no remote or detached dispatch capability".to_owned(),
+            });
+        }
     }
 
     Ok(())
@@ -450,6 +500,25 @@ mod tests {
     }
 
     #[test]
+    fn load_validation_refuses_an_empty_holding_guarantee_list() {
+        let mut descriptor = descriptor("none", "  - { name: TEST_VAR, source: thread_id }\n");
+        descriptor.holding = Some(
+            serde_json::from_value(serde_json::json!({
+                "requires_guarantees": [],
+                "filesystem_authority": "node_policy",
+                "root_settlement": "trusted_process_group_absent",
+            }))
+            .unwrap(),
+        );
+        let error = validate_protocol_descriptor(Path::new("test.yaml"), &descriptor)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("holding"), "{error}");
+        descriptor.holding = None;
+        validate_protocol_descriptor(Path::new("test.yaml"), &descriptor).unwrap();
+    }
+
+    #[test]
     fn empty_registry_has_fingerprint() {
         let reg = ProtocolRegistry::empty();
         assert_eq!(reg.fingerprint(), "empty");
@@ -468,17 +537,17 @@ mod tests {
     }
 
     #[test]
-    fn http_requires_socket_and_token_sources() {
+    fn runtime_socket_requires_socket_and_token_sources() {
         for env_injections in [
             "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n",
             "  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
         ] {
-            let desc = descriptor("http", env_injections);
+            let desc = descriptor("runtime_socket", env_injections);
             assert!(matches!(
                 validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc),
                 Err(ProtocolError::Vocabulary {
                     source:
-                        crate::protocol_vocabulary::VocabularyError::HttpIncompleteCallbackTransport,
+                        crate::protocol_vocabulary::VocabularyError::RuntimeSocketIncompleteCallbackTransport,
                     ..
                 })
             ));
@@ -504,10 +573,11 @@ mod tests {
     #[test]
     fn qualification_only_protocol_requires_closed_managed_callback_contract() {
         let mut desc = descriptor(
-            "http",
+            "runtime_socket",
             "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
         );
-        desc.requires_qualification_purpose = true;
+        desc.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::ScopedProducer);
         assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
         desc.lifecycle.mode = crate::protocol_vocabulary::LifecycleMode::Managed;
         desc.capabilities.allows_detached = false;
@@ -518,7 +588,89 @@ mod tests {
             .unwrap(),
         );
         validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).unwrap();
+        desc.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer);
+        validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).unwrap();
+        // the pinned lane's snapshot project is a pushed head; a qualification protocol may allow it
+        // an open pushed head without the declaration requirement is refused
+        desc.capabilities.allows_pushed_head = true;
+        assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
+        desc.capabilities.pushed_head_requires_declaration = true;
+        validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).unwrap();
+        desc.capabilities.allows_detached = true;
+        assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
+        desc.capabilities.allows_detached = false;
         desc.capabilities.allows_target_site = true;
         assert!(validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc).is_err());
+    }
+
+    #[test]
+    fn captured_compatible_callback_requires_closed_bounded_qualification_contract() {
+        let mut desc = descriptor(
+            "runtime_socket",
+            "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
+        );
+        desc.lifecycle.mode = crate::protocol_vocabulary::LifecycleMode::Managed;
+        desc.capabilities.allows_detached = false;
+        desc.execution_evidence = Some(
+            serde_yaml::from_str(
+                "handler: handler:ryeos/core/scoped-qualification-execution-evidence\nconfig: {}\nlimits:\n  max_request_bytes: 2097152\n  max_response_bytes: 2097152\n  max_events: 128\n  max_event_bytes: 65536\n  max_calls: 1\n  max_call_bytes: 65536\n",
+            )
+            .unwrap(),
+        );
+        let class = crate::protocols::CapturedCompatibleCallback {
+            surface_digest: "a".repeat(64),
+        };
+        let check = |desc: &ProtocolDescriptor| {
+            validate_protocol_descriptor(Path::new("/tmp/test.yaml"), desc)
+        };
+
+        // The class without a qualification callback authority is refused.
+        desc.captured_compatible_callback = Some(class.clone());
+        assert!(check(&desc).is_err());
+
+        desc.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer);
+        check(&desc).unwrap();
+
+        // A surface identity that is not a SHA-256 digest does not name a closed surface.
+        let mut bad = desc.clone();
+        bad.captured_compatible_callback = Some(crate::protocols::CapturedCompatibleCallback {
+            surface_digest: "remote_consumer".into(),
+        });
+        assert!(check(&bad).is_err());
+
+        // Remote or detached dispatch, sessions and unbounded evidence are refused.
+        let mut bad = desc.clone();
+        bad.capabilities.allows_detached = true;
+        assert!(check(&bad).is_err());
+        let mut bad = desc.clone();
+        bad.capabilities.allows_target_site = true;
+        assert!(check(&bad).is_err());
+        let mut bad = desc.clone();
+        bad.execution_evidence = None;
+        assert!(check(&bad).is_err());
+        let mut bad = desc.clone();
+        bad.execution_evidence.as_mut().unwrap().limits.max_calls = 2;
+        assert!(check(&bad).is_err());
+
+        // The scoped-producer authority drives a daemon-owned process and never joins the class.
+        let mut bad = desc.clone();
+        bad.qualification_callback =
+            Some(crate::protocols::QualificationCallbackAuthority::ScopedProducer);
+        assert!(check(&bad).is_err());
+
+        // Ordinary tool callbacks cannot declare the class.
+        let mut bad = desc.clone();
+        bad.qualification_callback = None;
+        assert!(check(&bad).is_err());
+
+        // Unknown fields inside the class are rejected at parse time.
+        assert!(
+            serde_yaml::from_str::<crate::protocols::CapturedCompatibleCallback>(
+                "surface_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nmethods: []\n"
+            )
+            .is_err()
+        );
     }
 }

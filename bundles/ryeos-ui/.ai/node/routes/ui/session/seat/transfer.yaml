@@ -1,0 +1,8 @@
+# ryeos:signed:2026-10-20T14:59:00Z:ea32a362e941f23d25ab7a30786f6f215333a66ffa75d743738cccf058515108:xLOyRcQVpIQ9FkzBU/M5C7kCxV1Mgy5vOoHVLo3AC3u05ziIlBDWavX1Vl1esrNf8am5VfN/xdT+6/XPTqRXDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/session/seat/transfer
+path: /ui/api/session/seat/transfer
+methods: [POST]
+auth: browser_session
+limits: { body_bytes_max: 65536, timeout_ms: 10000, concurrent_max: 32 }
+request: { body: json }
+response: { mode: json, source: "service:ui/seat/transfer" }

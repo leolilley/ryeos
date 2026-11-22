@@ -414,10 +414,7 @@ impl ScopedProducerProcessRegistry {
             });
         }
         if let Err(error) = child.authority.workspace().ensure_path_binding() {
-            return Err(ScopedProducerInsertError {
-                error: error.into(),
-                child,
-            });
+            return Err(ScopedProducerInsertError { error, child });
         }
         if let Some(channel) = child.ingress_handoff.as_ref()
             && let Err(error) = channel.ensure_peer_live_and_quiet()
@@ -540,14 +537,14 @@ mod tests {
             ScopedProducerProcessKey::new(format!("scoped-{}", "a".repeat(64)), owner.clone())
                 .unwrap();
         let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
-            "version": 4, "control_timeout": {"secs": 1, "nanos": 0},
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
             "configuration": {"version": 3, "backend": {
                 "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
             }},
             "backend": {"implementation": "linux_cgroup_v2",
                 "boot_id": "00000000-0000-4000-8000-000000000000",
-                "parent": {"containing_device": 1, "inode": 2},
-                "directory": {"containing_device": 1, "inode": 3},
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3},
                 "name": "producer-one"}
         }))
         .unwrap();

@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 
 use crate::evaluation::validate_runtime_shape;
-use crate::model::ErrorRecord;
 use ryeos_runtime::checkpoint::CheckpointWriter;
+use ryeos_runtime::graph_result::ErrorRecord;
 
 use super::{EXPRESSION_LANGUAGE, GRAPH_CHECKPOINT_SCHEMA_VERSION, Walker, follow_keys};
 

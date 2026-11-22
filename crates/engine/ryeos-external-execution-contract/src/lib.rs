@@ -6,11 +6,28 @@
 //! ambient path; its exact bounded contents are supplied out of band by the
 //! controller that admitted the adapter.
 
+pub mod clock_skew;
 pub mod guest_import_authorization;
+pub mod guest_owner_report;
 pub mod guest_supervisor_descriptors;
+pub mod lease_ready_inputs;
+pub mod length_prefixed;
+pub mod provider_configuration;
+pub mod provider_inventory;
+pub use provider_configuration::{
+    PROVIDER_CONFIGURATION_RESPONSE_PROTOCOL, PROVIDER_CONFIGURATION_RESPONSE_SCHEMA,
+    ProviderCommandEnvironmentProjection, ProviderCommandEnvironmentTransport,
+    ProviderConfigurationLaunchInput, ProviderConfigurationResponse,
+};
+pub mod qualification_fixture;
+pub mod qualification_request_binding;
+pub mod relay_file;
 pub mod restored_runtime_measurement;
 pub mod runtime_snapshot;
+pub mod runtime_snapshot_bootstrap;
 pub mod staging_package;
+pub mod uncertainty_reason;
+pub use uncertainty_reason::{MAX_UNCERTAINTY_DETAIL_BYTES, UncertaintyClass, UncertaintyReason};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -22,13 +39,63 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroize as _;
 
-pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v2";
+/// Where the guest occurrence owner creates one private root per occurrence.
+/// A relay mailbox lives inside its occurrence's root, so a relay binding's
+/// private mailbox parent is exactly this path.
+pub const GUEST_OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
+
+/// The target-local resolver and hosts files a binding's controller transport
+/// captures, and the byte bound on each. One definition: composing a binding
+/// and building a qualification under the same shape both take these values,
+/// so the two cannot drift apart silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorNetworkInputSources {
+    pub resolver_source: &'static str,
+    pub resolver_max_bytes: u64,
+    /// A launch without a resolver cannot resolve names, so it is refused.
+    pub resolver_required: bool,
+    pub hosts_source: &'static str,
+    pub hosts_max_bytes: u64,
+    /// Some provider sandboxes carry no hosts file; names resolve through the
+    /// captured resolver alone, so a missing one is recorded as absent.
+    pub hosts_required: bool,
+}
+
+/// The network inputs an operator binding captures from the sandbox it runs in.
+pub const fn operator_network_inputs() -> OperatorNetworkInputSources {
+    OperatorNetworkInputSources {
+        resolver_source: "/etc/resolv.conf",
+        resolver_max_bytes: 64 * 1024,
+        resolver_required: true,
+        hosts_source: "/etc/hosts",
+        hosts_max_bytes: 64 * 1024,
+        hosts_required: false,
+    }
+}
+
+pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v3";
+pub const PROVIDER_DECLARATION_PROTOCOL: &str = "ryeos.external-execution.provider-declaration.v2";
 pub const PROVIDER_CONFIGURATION_PROTOCOL: &str =
     "ryeos.external-execution.provider-configuration.v1";
 pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 256 * 1024;
 pub const MAX_LIFECYCLE_PROVIDER_SPEC_BYTES: u64 = 256 * 1024;
 pub const MAX_GUEST_INPUT_PROJECTION_BYTES: usize = 192 * 1024;
-pub const EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA: u32 = 4;
+pub const EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA: u32 = 5;
+/// Schema version of the candidate launcher spec the launcher accepts and the
+/// supervisor-to-launcher exchange speaks. Writers and checkers of the spec
+/// both use this one constant, so a pinned claim about launcher version four
+/// cannot drift from the bytes actually produced.
+pub const EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA: u32 = 4;
+/// Core mechanism claims a signed guest product relationship may require. The
+/// controller refuses ordinary external execution unless the selected
+/// qualification names them and a current attestation carries them. These
+/// identifiers alone are not admission or runtime evidence, and no shipped
+/// qualification verifier emits any of them yet.
+pub const GUEST_WIRE_SUPPORT_CLAIM: &str = "external_guest_inputs_v5_launcher_v4";
+pub const DIRECT_PROGRAM_SUPPORT_CLAIM: &str = "external_direct_program_v3";
+pub const CAPTURED_INPUTS_SUPPORT_CLAIM: &str = "external_direct_captured_inputs_v1";
+pub const TARGET_LIMITS_SUPPORT_CLAIM: &str = "external_direct_target_limits_v1";
+
 pub const MAX_GUEST_SOURCE_RECORD_BYTES: u64 = 1024 * 1024;
 pub const MAX_GUEST_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_LIFECYCLE_RESPONSE_BYTES: usize = 64 * 1024;
@@ -46,6 +113,10 @@ pub const LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV: &str = "RYEOS_LIFECYCLE_SIGNED_ASS
 pub const LIFECYCLE_GUEST_PACKAGE_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_PACKAGE_FD";
 pub const LIFECYCLE_SUPERVISOR_FD_ENV: &str = "RYEOS_LIFECYCLE_SUPERVISOR_FD";
 pub const LIFECYCLE_LAUNCHER_FD_ENV: &str = "RYEOS_LIFECYCLE_LAUNCHER_FD";
+/// Sealed tar of the guest runtime the controller stages for a provider whose
+/// activation uploads that runtime itself. Delivered exactly with the guest
+/// package on one activation contact, and measured by the activation intent.
+pub const LIFECYCLE_GUEST_RUNTIME_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_RUNTIME_FD";
 pub const LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV: &str = "RYEOS_LIFECYCLE_ADAPTER_EXECUTABLE_FD";
 pub const LIFECYCLE_PROVIDER_SPEC_FD_ENV: &str = "RYEOS_LIFECYCLE_PROVIDER_SPEC_FD";
 pub const LIFECYCLE_PROVIDER_SPEC_SHA256_ENV: &str = "RYEOS_LIFECYCLE_PROVIDER_SPEC_SHA256";
@@ -53,20 +124,63 @@ pub const LIFECYCLE_RESOLVER_FD_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_FD";
 pub const LIFECYCLE_HOSTS_FD_ENV: &str = "RYEOS_LIFECYCLE_HOSTS_FD";
 pub const LIFECYCLE_RESOLVER_SHA256_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_SHA256";
 pub const LIFECYCLE_HOSTS_SHA256_ENV: &str = "RYEOS_LIFECYCLE_HOSTS_SHA256";
+/// "1" when the resolver (hosts) file existed on the controller when captured,
+/// "0" when it was absent. An absent input is delivered as empty bytes with
+/// the digest of empty bytes; this tells it apart from a present empty file.
+pub const LIFECYCLE_RESOLVER_PRESENT_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_PRESENT";
+pub const LIFECYCLE_HOSTS_PRESENT_ENV: &str = "RYEOS_LIFECYCLE_HOSTS_PRESENT";
+
+/// Read the presence spelling of [`LIFECYCLE_RESOLVER_PRESENT_ENV`] and
+/// [`LIFECYCLE_HOSTS_PRESENT_ENV`]: exactly "1" or "0".
+pub fn parse_lifecycle_input_presence(value: &str) -> anyhow::Result<bool> {
+    match value {
+        "1" => Ok(true),
+        "0" => Ok(false),
+        _ => anyhow::bail!("captured network input presence is neither 1 nor 0"),
+    }
+}
+
 pub const LIFECYCLE_NETWORK_POLICY_SHA256_ENV: &str = "RYEOS_LIFECYCLE_NETWORK_POLICY_SHA256";
 pub const LIFECYCLE_REMAINING_TIMEOUT_MS_ENV: &str = "RYEOS_LIFECYCLE_REMAINING_TIMEOUT_MS";
+/// Sealed descriptor carrying the exact canonical request bytes the adapter
+/// itself admitted before spend for the placement an `operate` contact
+/// serves. The controller retains them opaquely and hands them back on every
+/// `operate` contact for that placement; an operation that receives none
+/// serves no admitted request.
+pub const LEASE_ADMISSION_FD_ENV: &str = "RYEOS_LIFECYCLE_LEASE_ADMISSION_FD";
+/// Bound on the admitted request bytes the controller retains and returns.
+pub const MAX_LEASE_ADMISSION_BYTES: usize = 64 * 1024;
+/// Bound on the budget weight a signed lease provider spec declares: how many
+/// node lease-budget seconds one second of its lease costs. A weight of 1
+/// costs a lease-second as one budget second; a costlier provider (a GPU
+/// lease, say) declares a larger weight so the same node budget admits fewer
+/// of its seconds. Zero would make a lease free and is never admitted.
+pub const MAX_LEASE_BUDGET_WEIGHT: u32 = 1000;
+
+/// Whether `weight` is a budget weight a provider spec may declare.
+pub fn valid_lease_budget_weight(weight: u32) -> bool {
+    (1..=MAX_LEASE_BUDGET_WEIGHT).contains(&weight)
+}
+/// Inherited bidirectional byte-stream descriptor over which the controller
+/// relays one occurrence's channel frames to the adapter and the adapter's
+/// replies back, each one message framed by `length_prefixed`.
+pub const LIFECYCLE_GUEST_FRAMES_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_FRAMES_FD";
+/// Bound on one message on the guest-frames descriptor.
+pub const MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_GUEST_INPUTS: usize = 64;
 pub const MAX_GUEST_ENVIRONMENT_ENTRIES: usize = 256;
 pub const MAX_GUEST_EXECUTABLE_SEARCH_ENTRIES: usize = 64;
 
 /// The admitted command protocol, not a choice the executable may change.
-/// Direct commands have no structured-session stdin or candidate export lane.
+/// Qualification sessions have structured protocol traffic without candidate
+/// export authority. Direct commands have neither lane.
 /// Raw stream ceilings do not reserve authenticated journal space: the channel
 /// independently bounds encoded frames and may refuse before either raw cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExternalExecutionMode {
     StructuredSession {},
+    QualificationStructuredSession {},
     DirectCommand {
         stdout_max_bytes: u64,
         stderr_max_bytes: u64,
@@ -102,7 +216,9 @@ impl ExternalExecutionMode {
                 ExternalCommandOutputStream::Stdout => *stdout_max_bytes,
                 ExternalCommandOutputStream::Stderr => *stderr_max_bytes,
             }),
-            Self::StructuredSession {} => bail!("session mode has no direct command output"),
+            Self::StructuredSession {} | Self::QualificationStructuredSession {} => {
+                bail!("session mode has no direct command output")
+            }
         }
     }
 }
@@ -204,6 +320,14 @@ impl ExternalCommandTermination {
     }
 }
 
+/// Target-visible workspace; snapshot identity remains custody authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum GuestWorkspaceView {
+    FullSnapshot,
+    CapturedInputs,
+}
+
 /// Complete descriptor-bound environment delivered to one external guest.
 ///
 /// Descriptor coordinates are launch transport only. `identity_digest()`
@@ -214,6 +338,7 @@ impl ExternalCommandTermination {
 #[serde(deny_unknown_fields)]
 pub struct ExternalGuestInputProjection {
     pub schema: u32,
+    pub workspace_view: GuestWorkspaceView,
     pub base_snapshot: GuestBaseSnapshotInput,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub workspace_outputs: Option<GuestWorkspaceOutputAuthorityInput>,
@@ -419,6 +544,7 @@ pub struct GuestMountInput {
 #[derive(Serialize)]
 struct GuestInputSemanticIdentity<'a> {
     domain: &'static str,
+    workspace_view: GuestWorkspaceView,
     base_snapshot_hash: &'a str,
     base_snapshot_closure_digest: &'a str,
     base_snapshot_object_count: u64,
@@ -474,6 +600,21 @@ impl ExternalGuestInputProjection {
             self.schema == EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             "unsupported external guest input schema"
         );
+        if self.workspace_view == GuestWorkspaceView::CapturedInputs {
+            ensure!(
+                self.workspace_outputs.is_none()
+                    && self.inputs.iter().all(|input| {
+                        input.access == GuestMountAccess::ReadOnly
+                            && matches!(
+                                input.role,
+                                GuestMountRole::Product
+                                    | GuestMountRole::Source
+                                    | GuestMountRole::Configuration
+                            )
+                    }),
+                "captured inputs workspace cannot expose writable inputs or output authority"
+            );
+        }
         digest(
             &self.base_snapshot.snapshot_hash,
             "external guest base snapshot",
@@ -685,7 +826,8 @@ impl ExternalGuestInputProjection {
             })
             .collect();
         let bytes = canonical_json(&GuestInputSemanticIdentity {
-            domain: "ryeos.external-guest-inputs.v4",
+            domain: "ryeos.external-guest-inputs.v5",
+            workspace_view: self.workspace_view,
             base_snapshot_hash: &self.base_snapshot.snapshot_hash,
             base_snapshot_closure_digest: &self.base_snapshot.closure_digest,
             base_snapshot_object_count: self.base_snapshot.object_count,
@@ -723,7 +865,7 @@ pub enum LifecycleCapability {
     /// occurrence. Admission must require this before allocating one.
     SupervisorActivation,
     /// The adapter requires an independently admitted exact guest-runtime
-    /// product and successful offline probe before startup authority.
+    /// product before startup authority.
     IndependentGuestRuntimeAdmission,
     ExactAllocationReconciliation,
     /// Exact evidence that this allocation request created no occurrence.
@@ -734,6 +876,10 @@ pub enum LifecycleCapability {
     ExactActivationReconciliation,
     IdempotentTermination,
     ExactTerminalObservation,
+    /// The adapter implements the journal-claimed occurrence file relay
+    /// operation, so a binding may select the controller file relay transport.
+    /// Admission must require this before relaying through the adapter.
+    ControllerFileRelay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -764,19 +910,28 @@ pub struct ExternalProviderDeclaration {
     pub protocol: String,
     pub targets: Vec<String>,
     pub connector: String,
-    pub connector_process_group: ExternalProviderConnectorProcessGroup,
+    pub connector_descendants: ExternalProviderConnectorDescendants,
     pub configuration_adapter: String,
     pub configuration_destination: String,
+    /// Explicit opt-in on this same captured adapter, not a second executable.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub qualification_request_binding_protocol: Option<String>,
 }
 
-/// Process-control behavior of the signed provider's command environment.
-/// The controller must retain authority over every connector descendant;
-/// this is not a request to weaken its host isolation policy.
+/// Containment guarantee the signed provider's connector requires of the
+/// node for the processes it may leave behind. This is a declared need, not a
+/// host mode: the node reports which guarantees it can provide and admission
+/// compares the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExternalProviderConnectorProcessGroup {
-    Inherited,
-    New,
+pub enum ExternalProviderConnectorDescendants {
+    /// Every descendant stays in the connector's process group; the
+    /// controller's group authority is sufficient.
+    InProcessGroup,
+    /// Descendants may leave the process group (new session, double fork,
+    /// nested PID namespace). The node must contain and provably settle every
+    /// one of them regardless.
+    Contained,
 }
 
 /// Signed bundle declaration for one external occurrence lifecycle adapter.
@@ -799,6 +954,11 @@ pub struct ExternalLifecycleAdapterDeclaration {
     pub snapshot_production_spec: Option<LifecycleProviderSpecIdentity>,
     pub settings_schema_digest: String,
     pub capabilities: BTreeSet<LifecycleCapability>,
+    /// The adapter-settings key whose string value must equal the relay
+    /// selection's workspace scope. Present exactly when the adapter declares
+    /// `controller_file_relay`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_scope_setting: Option<String>,
 }
 
 /// Bundle-relative identity of the closed provider behavior specification
@@ -812,12 +972,28 @@ pub struct LifecycleProviderSpecIdentity {
 }
 
 impl ExternalProviderDeclaration {
+    pub fn require_qualification_request_binding(&self) -> Result<()> {
+        self.validate()?;
+        ensure!(
+            self.qualification_request_binding_protocol.as_deref()
+                == Some(qualification_request_binding::QUALIFICATION_REQUEST_BINDING_PROTOCOL),
+            "selected provider declaration does not admit qualification request binding"
+        );
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         bounded_identifier(&self.id, 128, "external provider declaration id")?;
         ensure!(
-            self.protocol == PROVIDER_CONFIGURATION_PROTOCOL,
+            self.protocol == PROVIDER_DECLARATION_PROTOCOL,
             "external provider declaration has an unsupported protocol"
         );
+        if let Some(protocol) = &self.qualification_request_binding_protocol {
+            ensure!(
+                protocol == qualification_request_binding::QUALIFICATION_REQUEST_BINDING_PROTOCOL,
+                "external provider declaration has an unsupported qualification binder"
+            );
+        }
         validate_targets(&self.targets)?;
         validate_executable_name(&self.connector, "external provider connector")?;
         validate_executable_name(
@@ -870,6 +1046,22 @@ impl ExternalLifecycleAdapterDeclaration {
             !self.capabilities.is_empty(),
             "external lifecycle adapter declares no capabilities"
         );
+        match &self.relay_scope_setting {
+            Some(key) => {
+                bounded_identifier(key, 64, "external lifecycle relay scope setting")?;
+                ensure!(
+                    self.capabilities
+                        .contains(&LifecycleCapability::ControllerFileRelay),
+                    "a relay scope setting needs the controller file relay capability"
+                );
+            }
+            None => ensure!(
+                !self
+                    .capabilities
+                    .contains(&LifecycleCapability::ControllerFileRelay),
+                "the controller file relay capability needs a relay scope setting"
+            ),
+        }
         Ok(())
     }
 }
@@ -889,6 +1081,10 @@ pub struct ProviderConfigurationRequest {
     pub placement_thread_id: String,
     pub execution_binding_hash: String,
     pub connector_capability: String,
+    /// How long the workload may wait for the connector's first reply. The
+    /// reply can cross a relay whose round trips are far slower than a local
+    /// process, so a workload's default for a local peer does not apply.
+    pub connector_handshake_timeout_seconds: u64,
 }
 
 /// Controller-selected delivery of the already admitted connector image.
@@ -936,6 +1132,10 @@ impl ProviderConfigurationRequest {
                 && self.connector_capability.len() <= 16 * 1024
                 && !self.connector_capability.chars().any(char::is_control),
             "provider connector capability is invalid"
+        );
+        ensure!(
+            (1..=3600).contains(&self.connector_handshake_timeout_seconds),
+            "provider connector handshake timeout is invalid"
         );
         Ok(())
     }
@@ -987,49 +1187,9 @@ pub struct LifecycleAdapterInspectionResponse {
     pub observed_provider_spec_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_snapshot_production_spec_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_bootstrap_profile_digest: Option<String>,
     pub artifacts: BTreeMap<LifecycleArtifactRole, LifecycleArtifactInspection>,
-}
-
-/// Credential-free interpretation input for a product witness already
-/// authenticated by the controller. No provider request is authorized here.
-/// The exact settings are supplied by a separate sealed descriptor and must
-/// hash to `settings_digest` before the adapter interprets the probe.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LifecycleRuntimeProbeRequest {
-    pub schema: u32,
-    pub protocol: String,
-    pub adapter_id: String,
-    pub adapter_artifact_hash: String,
-    pub settings_digest: String,
-    pub binding_hash: String,
-    pub qualification_attestation_hash: String,
-    pub product_witness_hash: String,
-    pub account: String,
-    pub source: LifecycleRuntimeProbeSource,
-    pub probe_evidence: Value,
-}
-
-/// These values come from the authenticated product manifest and controller
-/// public key, never from the provider's probe JSON.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LifecycleRuntimeProbeSource {
-    pub manifest_hash: String,
-    pub owner_executable_sha256: String,
-    pub controller_root_blob_sha256: String,
-    pub controller_public_root: String,
-}
-
-/// A signed adapter's positive offline interpretation of exactly one sealed
-/// request. Absence, nonzero exit, deadline, or changed request is refusal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LifecycleRuntimeProbeResponse {
-    pub schema: u32,
-    pub protocol: String,
-    pub adapter_id: String,
-    pub request_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1112,6 +1272,13 @@ pub struct SupervisorActivationIntent {
     pub activation_request_digest: String,
     pub supervisor_runtime_hash: String,
     pub launcher_artifact_hash: String,
+    /// Sha256 of the sealed guest runtime tar delivered under
+    /// `LIFECYCLE_GUEST_RUNTIME_FD_ENV`; present exactly when the bytes are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_runtime_artifact_hash: Option<String>,
+    /// Byte length of that same tar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_runtime_artifact_bytes: Option<u64>,
     pub attachment_deadline_ms: i64,
     pub execution_timeout_seconds: u32,
     pub post_execution_timeout_seconds: u32,
@@ -1138,7 +1305,7 @@ impl LifecycleGuestPackageDelivery {
         ensure!(
             self.descriptor > 2
                 && self.regular_bytes > 0
-                && self.framed_bytes >= self.regular_bytes.saturating_add(20)
+                && self.framed_bytes > 20
                 && self.framed_bytes <= 4 * 1024 * 1024 * 1024,
             "guest package delivery coordinate is invalid"
         );
@@ -1168,10 +1335,15 @@ pub enum LifecycleAdapterResponse {
         /// field name, the evidence may be a local pre-request transport fact
         /// rather than a response from the provider.
         provider_observation_digest: String,
+        /// Short diagnostic code. Compile-time words and status numbers only,
+        /// never provider text, credentials, URLs or settings.
+        reason: String,
     },
     AllocationPending {
         operation_id: String,
         request_digest: String,
+        /// Short diagnostic code; the same rule as on no-occurrence.
+        reason: String,
     },
     SupervisorStarted {
         operation_id: String,
@@ -1186,6 +1358,15 @@ pub enum LifecycleAdapterResponse {
     SupervisorPending {
         operation_id: String,
         activation_request_digest: String,
+        /// What first activation saw of the guest owner, when the adapter
+        /// reads its run stream. Reconciliation never carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest_owner: Option<guest_owner_report::GuestOwnerActivationReport>,
+        /// Why first activation came back before the owner reported, when a
+        /// step failed before or while its run stream was read: the step and
+        /// a bounded reason in fixed words. Reconciliation never carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contact_failure: Option<UncertaintyReason>,
     },
     OccurrenceTerminal {
         operation_id: String,
@@ -1247,6 +1428,9 @@ impl LifecycleAdapterInspectionResponse {
             &self.target,
         )?;
         bounded_identifier(&self.adapter_build, 256, "lifecycle adapter build")?;
+        if let Some(profile) = &self.observed_bootstrap_profile_digest {
+            digest(profile, "source bootstrap profile")?;
+        }
         ensure!(
             self.adapter_id == request.adapter_id
                 && self.observed_adapter_artifact_hash == request.adapter_artifact_hash
@@ -1263,91 +1447,6 @@ impl LifecycleAdapterInspectionResponse {
                     .is_subset(&request.declared_capabilities)
                 && self.artifacts == request.artifacts,
             "lifecycle adapter inspection contradicts its declaration"
-        );
-        Ok(())
-    }
-}
-
-impl LifecycleRuntimeProbeSource {
-    pub fn validate(&self) -> Result<()> {
-        for (label, value) in [
-            ("runtime probe product manifest", &self.manifest_hash),
-            (
-                "runtime probe owner executable",
-                &self.owner_executable_sha256,
-            ),
-            (
-                "runtime probe controller-root file",
-                &self.controller_root_blob_sha256,
-            ),
-        ] {
-            digest(value, label)?;
-        }
-        ensure!(
-            self.controller_public_root.starts_with("ed25519:")
-                && self.controller_public_root.len() <= 128,
-            "runtime probe controller public root is invalid"
-        );
-        Ok(())
-    }
-}
-
-impl LifecycleRuntimeProbeRequest {
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.schema == 1 && self.protocol == LIFECYCLE_ADAPTER_PROTOCOL,
-            "unsupported lifecycle runtime probe protocol"
-        );
-        bounded_identifier(&self.adapter_id, 128, "runtime probe adapter")?;
-        bounded_identifier(&self.account, 128, "runtime probe account")?;
-        for (label, value) in [
-            (
-                "runtime probe adapter artifact",
-                &self.adapter_artifact_hash,
-            ),
-            ("runtime probe settings", &self.settings_digest),
-            ("runtime probe binding", &self.binding_hash),
-            (
-                "runtime probe qualification",
-                &self.qualification_attestation_hash,
-            ),
-            ("runtime probe product witness", &self.product_witness_hash),
-        ] {
-            digest(value, label)?;
-        }
-        self.source.validate()?;
-        ensure!(
-            self.probe_evidence.is_object()
-                && canonical_json(&self.probe_evidence)?.len() <= 8 * 1024,
-            "lifecycle runtime probe evidence is not a bounded object"
-        );
-        Ok(())
-    }
-
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
-        self.validate()?;
-        let bytes = canonical_json(self)?;
-        ensure!(
-            bytes.len() <= MAX_LIFECYCLE_REQUEST_BYTES,
-            "lifecycle runtime probe request exceeds its byte bound"
-        );
-        Ok(bytes)
-    }
-
-    pub fn digest(&self) -> Result<String> {
-        Ok(hex::encode(Sha256::digest(self.canonical_bytes()?)))
-    }
-}
-
-impl LifecycleRuntimeProbeResponse {
-    pub fn validate_for(&self, request: &LifecycleRuntimeProbeRequest) -> Result<()> {
-        request.validate()?;
-        ensure!(
-            self.schema == 1
-                && self.protocol == LIFECYCLE_ADAPTER_PROTOCOL
-                && self.adapter_id == request.adapter_id
-                && self.request_digest == request.digest()?,
-            "lifecycle runtime probe response contradicts its sealed request"
         );
         Ok(())
     }
@@ -1461,6 +1560,19 @@ impl LifecycleAdapterRequest {
     }
 }
 
+/// A diagnostic code is a short token, so it cannot carry a provider body.
+pub(crate) fn diagnostic_reason(reason: &str) -> Result<()> {
+    ensure!(
+        !reason.is_empty()
+            && reason.len() <= 64
+            && reason
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'-')),
+        "allocation response carries an invalid diagnostic reason"
+    );
+    Ok(())
+}
+
 impl LifecycleAdapterResponse {
     pub fn validate_for(&self, request: &LifecycleAdapterRequest) -> Result<()> {
         request.validate()?;
@@ -1496,6 +1608,7 @@ impl LifecycleAdapterResponse {
                 Self::AllocationNoOccurrence {
                     request_digest,
                     provider_observation_digest,
+                    reason,
                     ..
                 },
             ) => {
@@ -1503,6 +1616,7 @@ impl LifecycleAdapterResponse {
                     request_digest == &reservation.request_digest,
                     "allocation response changed its request identity"
                 );
+                diagnostic_reason(reason)?;
                 digest(
                     provider_observation_digest,
                     "provider no-occurrence observation",
@@ -1511,13 +1625,17 @@ impl LifecycleAdapterResponse {
             (
                 LifecycleAdapterRequest::Allocate { reservation, .. }
                 | LifecycleAdapterRequest::ReconcileAllocation { reservation, .. },
-                Self::AllocationPending { request_digest, .. },
+                Self::AllocationPending {
+                    request_digest,
+                    reason,
+                    ..
+                },
             ) => {
                 ensure!(
                     request_digest == &reservation.request_digest,
                     "allocation response changed its request identity"
                 );
-                Ok(())
+                diagnostic_reason(reason)
             }
             (
                 LifecycleAdapterRequest::ActivateSupervisor { activation, .. }
@@ -1547,12 +1665,25 @@ impl LifecycleAdapterResponse {
                 | LifecycleAdapterRequest::ReconcileSupervisorActivation { activation, .. },
                 Self::SupervisorPending {
                     activation_request_digest,
+                    guest_owner,
+                    contact_failure,
                     ..
                 },
             ) => {
                 ensure!(
                     activation_request_digest == &activation.activation_request_digest,
                     "activation response changed its request identity"
+                );
+                ensure!(
+                    contact_failure
+                        .as_ref()
+                        .is_none_or(|failure| failure.detail.len() <= MAX_UNCERTAINTY_DETAIL_BYTES),
+                    "activation contact failure exceeds its detail bound"
+                );
+                ensure!(
+                    guest_owner.is_none()
+                        || matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }),
+                    "activation reconciliation carried a guest owner report"
                 );
                 Ok(())
             }
@@ -1657,6 +1788,20 @@ impl SupervisorActivationIntent {
                 && (1..=64 * 1024 * 1024).contains(&self.channel_max_bytes),
             "supervisor activation bounds are invalid"
         );
+        match (
+            &self.guest_runtime_artifact_hash,
+            self.guest_runtime_artifact_bytes,
+        ) {
+            (None, None) => {}
+            (Some(hash), Some(bytes)) => {
+                digest(hash, "guest runtime artifact")?;
+                ensure!(
+                    (1..=MAX_GUEST_SOURCE_BYTES).contains(&bytes),
+                    "guest runtime artifact bytes are invalid"
+                );
+            }
+            _ => bail!("guest runtime artifact hash and bytes must be declared together"),
+        }
         Ok(())
     }
 }
@@ -1682,8 +1827,13 @@ pub fn from_json_slice_strict<T: DeserializeOwned>(input: &[u8], maximum: usize)
     serde_json::from_value(value).context("decode lifecycle message")
 }
 
+/// The RyeOS canonical JSON bytes of `value`: Lillux's sole canonical encoding
+/// (object keys sorted, non-ASCII as lowercase `\u` escapes), so bytes hashed,
+/// signed, persisted or compared here agree with every other RyeOS producer.
+/// Typed values are encoded through their JSON value, never in struct field
+/// declaration order.
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(value)?)
+    lillux::canonical_json_bytes_bounded(value, usize::MAX)
 }
 
 fn validate_inspection_common(
@@ -1742,7 +1892,8 @@ fn validate_executable_name(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_absolute_normalized_path(value: &str, label: &str) -> Result<()> {
+/// Validate a namespace destination without resolving a host filesystem path.
+pub fn validate_absolute_normalized_path(value: &str, label: &str) -> Result<()> {
     let path = Path::new(value);
     ensure!(
         path.is_absolute()
@@ -1915,59 +2066,6 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn runtime_probe_reply_is_bound_to_one_credential_free_request() {
-        let request = LifecycleRuntimeProbeRequest {
-            schema: 1,
-            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
-            adapter_id: "render-sandbox-early-access".into(),
-            adapter_artifact_hash: "a".repeat(64),
-            settings_digest: "b".repeat(64),
-            binding_hash: "c".repeat(64),
-            qualification_attestation_hash: "d".repeat(64),
-            product_witness_hash: "e".repeat(64),
-            account: "render-account".into(),
-            source: LifecycleRuntimeProbeSource {
-                manifest_hash: "f".repeat(64),
-                owner_executable_sha256: "1".repeat(64),
-                controller_root_blob_sha256: "2".repeat(64),
-                controller_public_root: "ed25519:controller-root".into(),
-            },
-            probe_evidence: serde_json::json!({"schema": 1}),
-        };
-        let encoded = request.canonical_bytes().unwrap();
-        assert_eq!(
-            from_json_slice_strict::<LifecycleRuntimeProbeRequest>(
-                &encoded,
-                MAX_LIFECYCLE_REQUEST_BYTES
-            )
-            .unwrap(),
-            request
-        );
-        let response = LifecycleRuntimeProbeResponse {
-            schema: 1,
-            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
-            adapter_id: request.adapter_id.clone(),
-            request_digest: request.digest().unwrap(),
-        };
-        response.validate_for(&request).unwrap();
-        let mut changed = request.clone();
-        changed.source.owner_executable_sha256 = "3".repeat(64);
-        assert!(response.validate_for(&changed).is_err());
-        changed = request.clone();
-        changed.probe_evidence = serde_json::json!({"schema": 2});
-        assert!(response.validate_for(&changed).is_err());
-        let mut malformed = serde_json::to_value(&request).unwrap();
-        malformed["credential"] = serde_json::json!("ambient");
-        assert!(
-            from_json_slice_strict::<LifecycleRuntimeProbeRequest>(
-                &canonical_json(&malformed).unwrap(),
-                MAX_LIFECYCLE_REQUEST_BYTES,
-            )
-            .is_err()
-        );
-    }
-
     fn direct_mode() -> ExternalExecutionMode {
         ExternalExecutionMode::DirectCommand {
             stdout_max_bytes: 8,
@@ -2016,6 +2114,27 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<ExternalExecutionMode>(value).is_err());
         }
+    }
+
+    #[test]
+    fn qualification_session_mode_has_distinct_closed_wire_identity() {
+        let mode = ExternalExecutionMode::QualificationStructuredSession {};
+        mode.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(mode).unwrap(),
+            serde_json::json!({"kind":"qualification_structured_session"})
+        );
+        assert_ne!(mode, ExternalExecutionMode::StructuredSession {});
+        assert!(
+            mode.output_limit(ExternalCommandOutputStream::Stdout)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ExternalExecutionMode>(
+                serde_json::json!({"kind":"qualification_structured_session","candidate_export_max_bytes":1})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2081,6 +2200,7 @@ mod tests {
 
     fn guest_projection() -> ExternalGuestInputProjection {
         ExternalGuestInputProjection {
+            workspace_view: GuestWorkspaceView::FullSnapshot,
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: GuestBaseSnapshotInput {
                 descriptor: 10,
@@ -2447,6 +2567,29 @@ mod tests {
     }
 
     #[test]
+    fn workspace_view_is_required_identity_bound_and_read_only() {
+        let projection = source_projection();
+        let full_identity = projection.identity_digest().unwrap();
+        let mut captured = projection.clone();
+        captured.workspace_view = GuestWorkspaceView::CapturedInputs;
+        captured.validate().unwrap();
+        assert_ne!(full_identity, captured.identity_digest().unwrap());
+        assert_eq!(captured.base_snapshot, projection.base_snapshot);
+        let mut wire = serde_json::to_value(&captured).unwrap();
+        wire.as_object_mut().unwrap().remove("workspace_view");
+        assert!(serde_json::from_value::<ExternalGuestInputProjection>(wire).is_err());
+        let mut wire = serde_json::to_value(&captured).unwrap();
+        wire["workspace_view"] = serde_json::json!("host");
+        assert!(serde_json::from_value::<ExternalGuestInputProjection>(wire).is_err());
+        let mut writable = captured.clone();
+        writable.inputs[0].access = GuestMountAccess::PrivateWritable;
+        assert!(writable.validate().is_err());
+        let mut predecessor = captured;
+        predecessor.schema = 4;
+        assert!(predecessor.validate().is_err());
+    }
+
+    #[test]
     fn source_identity_ignores_fd_relocation_but_commits_each_record() {
         let projection = source_projection();
         let identity = projection.identity_digest().unwrap();
@@ -2505,14 +2648,32 @@ mod tests {
     fn signed_declarations_bind_a_closed_bundle_relative_provider_spec() {
         let provider = ExternalProviderDeclaration {
             id: "codex-hosted".into(),
-            protocol: PROVIDER_CONFIGURATION_PROTOCOL.into(),
+            protocol: PROVIDER_DECLARATION_PROTOCOL.into(),
             targets: vec!["x86_64-unknown-linux-gnu".into()],
             connector: "ryeos-external-candidate-connector".into(),
-            connector_process_group: ExternalProviderConnectorProcessGroup::New,
+            connector_descendants: ExternalProviderConnectorDescendants::Contained,
             configuration_adapter: "ryeos-codex-external-configuration".into(),
             configuration_destination: "environments.toml".into(),
+            qualification_request_binding_protocol: None,
         };
         provider.validate().unwrap();
+        let mut missing = serde_json::to_value(&provider).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("qualification_request_binding_protocol");
+        assert!(serde_json::from_value::<ExternalProviderDeclaration>(missing).is_err());
+        let mut old = provider.clone();
+        old.protocol = PROVIDER_CONFIGURATION_PROTOCOL.into();
+        assert!(old.validate().is_err());
+        let mut capable = provider.clone();
+        capable.qualification_request_binding_protocol =
+            Some(qualification_request_binding::QUALIFICATION_REQUEST_BINDING_PROTOCOL.into());
+        capable.validate().unwrap();
+        capable.require_qualification_request_binding().unwrap();
+        assert!(provider.require_qualification_request_binding().is_err());
+        capable.qualification_request_binding_protocol = Some("arbitrary".into());
+        assert!(capable.validate().is_err());
 
         let lifecycle = ExternalLifecycleAdapterDeclaration {
             id: "synthetic".into(),
@@ -2535,8 +2696,24 @@ mod tests {
                 LifecycleCapability::ExactAllocationReconciliation,
                 LifecycleCapability::AuthoritativeNoOccurrence,
             ]),
+            relay_scope_setting: None,
         };
         lifecycle.validate().unwrap();
+        let mut relaying = lifecycle.clone();
+        relaying
+            .capabilities
+            .insert(LifecycleCapability::ControllerFileRelay);
+        assert!(relaying.validate().is_err(), "relay needs a scope setting");
+        relaying.relay_scope_setting = Some("workspace_id".into());
+        relaying.validate().unwrap();
+        let mut stray = lifecycle.clone();
+        stray.relay_scope_setting = Some("workspace_id".into());
+        assert!(
+            stray.validate().is_err(),
+            "scope setting needs the capability"
+        );
+        relaying.relay_scope_setting = Some("a b".into());
+        assert!(relaying.validate().is_err());
         let mut with_verifier = lifecycle.clone();
         with_verifier.restoration_verifier =
             Some("ryeos-external-guest-restoration-verifier".into());
@@ -2592,6 +2769,7 @@ mod tests {
         let wrong = LifecycleAdapterResponse::AllocationPending {
             operation_id: "allocation-1".into(),
             request_digest: "e".repeat(64),
+            reason: "create_no_response".into(),
         };
         assert!(wrong.validate_for(&request).is_err());
         let unknown = br#"{"operation":"allocate","common":{},"reservation":{},"extra":true}"#;
@@ -2609,6 +2787,8 @@ mod tests {
             activation_request_digest: digest('a'),
             supervisor_runtime_hash: digest('b'),
             launcher_artifact_hash: digest('c'),
+            guest_runtime_artifact_hash: None,
+            guest_runtime_artifact_bytes: None,
             attachment_deadline_ms: 1,
             execution_timeout_seconds: 1,
             post_execution_timeout_seconds: 1,
@@ -2657,6 +2837,17 @@ mod tests {
         let decoded: LifecycleAdapterRequest =
             from_json_slice_strict(&encoded, encoded.len()).unwrap();
         assert_eq!(decoded, request);
+        let mut runtime_hash_alone = serde_json::to_value(&request).unwrap();
+        runtime_hash_alone["activation"]["guest_runtime_artifact_hash"] =
+            serde_json::json!(digest('8'));
+        let alone: LifecycleAdapterRequest = serde_json::from_value(runtime_hash_alone).unwrap();
+        assert!(alone.validate().is_err());
+        let mut runtime_declared = serde_json::to_value(&request).unwrap();
+        runtime_declared["activation"]["guest_runtime_artifact_hash"] =
+            serde_json::json!(digest('8'));
+        runtime_declared["activation"]["guest_runtime_artifact_bytes"] = serde_json::json!(4096);
+        let declared: LifecycleAdapterRequest = serde_json::from_value(runtime_declared).unwrap();
+        declared.validate().unwrap();
         let mut missing_projection = serde_json::to_value(&request).unwrap();
         missing_projection
             .as_object_mut()

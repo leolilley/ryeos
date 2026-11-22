@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-24T17:47:02Z:f19b734bb06596fa59de7bad77c9f35839c41b6e888b916d3a775dc03e9e71e0:xfuv2colvnyoZHGyppobSvTNlEoFuA9yXXXMRw5SQHMYaj/KxVhV2Ega4MpxfX//Heu9PUUX2D9Q1G3HdDiDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T23:17:05Z:82d42cb49cdc9edceef815a2390de875ebeabe6ef794d966a63b14bd8712240c:6K6bvhkFYHsWr/MOE9kEzfqmByB3Ewkk2I9ma48EmQLOR23oxOwQiY5x54+XWjnqR1ZCB4xNAsYZPqD1HKb0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -8,6 +8,7 @@ provides_kinds:
 - node
 - parser
 - protocol
+- revision
 - runtime
 - service
 - tool
@@ -21,9 +22,43 @@ runtime_authority:
   - log
   - show
   - create
+owns_namespaces:
+- ryeos/core
+sync_include:
+- kind: tool
+- kind: parser
+- kind: handler
+- kind: protocol
+- kind: revision
+- root: .ai/manifest.source.yaml
+  shape: file
+- root: .ai/manifest.yaml
+  shape: file
+- root: .ai/directives
+  shape: directory
+- root: .ai/graphs
+  shape: directory
+- root: .ai/knowledge
+  shape: directory
+- root: .ai/node/engine/kinds
+  shape: directory
+- root: .ai/node/commands
+  shape: directory
+- root: .ai/config/agent
+  shape: directory
+- root: .ai/config/execution
+  shape: directory
+- root: .ai/config/directive-runtime
+  shape: directory
+- root: .ai/config/ryeos-runtime
+  shape: directory
+- root: .ai/config/development
+  shape: directory
+- root: .ai/config/schedules
+  shape: directory
 isolation_backends:
 - id: linux-lillux
-  protocol: ryeos.isolation-adapter/v12
+  protocol: ryeos.isolation-adapter/v16
   targets:
   - x86_64-unknown-linux-gnu
   - aarch64-unknown-linux-gnu
@@ -46,6 +81,9 @@ isolation_backends:
   - network.isolated
   - process.isolated_pid_namespace
   - process.target_pid_reporting
+  - process.original_namespace_terminal_reporting
   - lifecycle.shared_process_group
   - process.nested_sandbox
+  - process.target_limits
   - ipc.target_unix_stream
+  - ipc.target_sealed_payload

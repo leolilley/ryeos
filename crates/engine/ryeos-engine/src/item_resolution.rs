@@ -43,6 +43,148 @@ pub fn read_item_source_no_follow(path: &std::path::Path) -> Result<String, Engi
 pub struct RegisteredBundleRoot {
     pub name: String,
     pub canonical_root: PathBuf,
+    /// Namespaces this bundle's signed manifest declares it owns. Empty for a
+    /// bundle that owns none. A project item inside an owned namespace is
+    /// refused at resolution rather than shadowing the bundle.
+    pub owned_namespaces: Vec<String>,
+}
+
+/// One namespace claimed by one installed bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedNamespace {
+    pub bundle: String,
+    pub namespace: String,
+}
+
+/// Validate a manifest's `owns_namespaces` list: each entry is a canonical
+/// slash-separated run of segments (alphanumerics, `-`, `_`, `.`), with no
+/// wildcards, no empty or dot segments, and no entry equal to or inside
+/// another entry of the same list.
+pub fn validate_owned_namespaces(namespaces: &[String]) -> Result<(), String> {
+    for namespace in namespaces {
+        if namespace.is_empty() {
+            return Err("owned namespace is empty".to_owned());
+        }
+        for segment in namespace.split('/') {
+            if segment.is_empty() || segment == "." || segment == ".." {
+                return Err(format!(
+                    "owned namespace `{namespace}` has an empty or relative segment"
+                ));
+            }
+            if !segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            {
+                return Err(format!(
+                    "owned namespace `{namespace}` must be literal segments of letters, digits, `-`, `_` and `.`; wildcards are not allowed"
+                ));
+            }
+        }
+    }
+    for (index, left) in namespaces.iter().enumerate() {
+        for right in &namespaces[index + 1..] {
+            if owned_namespaces_overlap(left, right) {
+                return Err(format!(
+                    "owned namespaces `{left}` and `{right}` overlap; declare each namespace once"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse two different bundles claiming overlapping namespaces. Each entry
+/// is one bundle's name and its declared claims. Two entries with the same
+/// bundle name are one bundle seen twice (a replacement) and never conflict.
+pub fn check_owned_namespace_claims(claims: &[(String, Vec<String>)]) -> Result<(), String> {
+    for (index, (left_bundle, left_namespaces)) in claims.iter().enumerate() {
+        for (right_bundle, right_namespaces) in &claims[index + 1..] {
+            if left_bundle == right_bundle {
+                continue;
+            }
+            for left in left_namespaces {
+                for right in right_namespaces {
+                    if owned_namespaces_overlap(left, right) {
+                        return Err(format!(
+                            "bundle `{left_bundle}` claims namespace `{left}` and bundle `{right_bundle}` claims `{right}`; two bundles cannot own overlapping namespaces"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `bare_id` is the namespace itself or sits inside it.
+pub fn namespace_contains(namespace: &str, bare_id: &str) -> bool {
+    bare_id == namespace
+        || bare_id
+            .strip_prefix(namespace)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether two namespaces are equal or one sits inside the other.
+pub fn owned_namespaces_overlap(left: &str, right: &str) -> bool {
+    namespace_contains(left, right) || namespace_contains(right, left)
+}
+
+/// How a derived resolution generation uses one named registered bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisteredBundleSelection {
+    /// Search only the named bundle; every other registered bundle is absent
+    /// from the derived generation.
+    ///
+    /// No selection that reorders the full registered list exists: a derived
+    /// generation in which one bundle's copies outrank the others would let
+    /// that bundle govern every later resolution of a run.
+    Only,
+}
+
+/// Why a named registered bundle could not be selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisteredBundleSelectionRefusal {
+    /// No registered bundle carries the name.
+    NotRegistered,
+    /// More than one registered bundle carries the name.
+    RegisteredMoreThanOnce,
+}
+
+impl std::fmt::Display for RegisteredBundleSelectionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotRegistered => "no registered bundle has this name",
+            Self::RegisteredMoreThanOnce => "more than one registered bundle has this name",
+        })
+    }
+}
+
+/// Derive the registered bundle list for one named-bundle selection.
+///
+/// The name must identify exactly one registered bundle. Each entry keeps its
+/// typed identity and canonical root, so items resolved through the derived
+/// list carry the same source identity and trust as through the full list.
+pub fn select_registered_bundle(
+    registered: &[RegisteredBundleRoot],
+    name: &str,
+    selection: RegisteredBundleSelection,
+) -> Result<Vec<RegisteredBundleRoot>, EngineError> {
+    let mut named = registered.iter().filter(|bundle| bundle.name == name);
+    let refused = |refusal| EngineError::RegisteredBundleSelectionRefused {
+        name: name.to_owned(),
+        refusal,
+    };
+    let selected = named
+        .next()
+        .ok_or_else(|| refused(RegisteredBundleSelectionRefusal::NotRegistered))?;
+    if named.next().is_some() {
+        return Err(refused(
+            RegisteredBundleSelectionRefusal::RegisteredMoreThanOnce,
+        ));
+    }
+    match selection {
+        RegisteredBundleSelection::Only => Ok(vec![selected.clone()]),
+    }
 }
 
 /// A single labeled search root.
@@ -71,9 +213,41 @@ pub struct ResolutionRoot {
 pub struct ResolutionRoots {
     /// Search roots in resolution priority order (first match wins)
     pub ordered: Vec<ResolutionRoot>,
+    /// Namespaces installed bundles own, including each installed bundle's
+    /// own name. A project candidate inside one is refused; only bundle space
+    /// can supply it.
+    pub owned_namespaces: Vec<OwnedNamespace>,
+    /// The logical project of the project root, when it differs from the
+    /// root's own path (a pinned or COW checkout). Signer project scopes
+    /// are judged against [`ResolutionRoots::signer_project_root`].
+    pub logical_project_root: Option<PathBuf>,
 }
 
 impl ResolutionRoots {
+    /// Attach the logical project of this resolution.
+    pub fn with_logical_project_root(mut self, logical_project_root: Option<PathBuf>) -> Self {
+        self.logical_project_root = logical_project_root;
+        self
+    }
+
+    /// The project root a signer's project scope is matched against: the
+    /// logical project when one was stated, otherwise the project root
+    /// itself (a live project is its own logical root).
+    pub fn signer_project_root(&self) -> Option<&Path> {
+        self.logical_project_root
+            .as_deref()
+            .or_else(|| self.project_root())
+    }
+
+    /// Root directory of the project (the parent of its `.ai` root), when a
+    /// project root participates in this resolution.
+    pub fn project_root(&self) -> Option<&Path> {
+        self.ordered
+            .iter()
+            .find(|root| root.space == ItemSpace::Project)
+            .and_then(|root| root.ai_root.parent())
+    }
+
     /// Build from already-normalized `.ai` roots.
     /// The project `.ai` root is ordered first, then bundle `.ai` roots.
     pub fn from_flat(project_ai_root: Option<PathBuf>, bundle_ai_roots: Vec<PathBuf>) -> Self {
@@ -103,7 +277,18 @@ impl ResolutionRoots {
             });
         }
 
-        Self { ordered }
+        Self {
+            ordered,
+            owned_namespaces: Vec::new(),
+            logical_project_root: None,
+        }
+    }
+
+    /// The installed bundle owning the namespace that contains `bare_id`.
+    pub fn owner_of(&self, bare_id: &str) -> Option<&OwnedNamespace> {
+        self.owned_namespaces
+            .iter()
+            .find(|owned| namespace_contains(&owned.namespace, bare_id))
     }
 
     /// Build from canonical source roots. Unlike [`Self::from_flat`], these
@@ -132,7 +317,30 @@ impl ResolutionRoots {
             ai_root: bundle.canonical_root.join(crate::AI_DIR),
             content_root: Some(bundle.canonical_root.clone()),
         }));
-        Self { ordered }
+        // A bundle's name is reserved alongside its declared namespaces: the
+        // first segment of an item ref names the bundle that owns its runtime
+        // authority, so a project item under an installed bundle's name would
+        // read as that bundle.
+        let owned_namespaces = bundles
+            .iter()
+            .flat_map(|bundle| {
+                std::iter::once(OwnedNamespace {
+                    bundle: bundle.name.clone(),
+                    namespace: bundle.name.clone(),
+                })
+                .chain(bundle.owned_namespaces.iter().map(|namespace| {
+                    OwnedNamespace {
+                        bundle: bundle.name.clone(),
+                        namespace: namespace.clone(),
+                    }
+                }))
+            })
+            .collect();
+        Self {
+            ordered,
+            owned_namespaces,
+            logical_project_root: None,
+        }
     }
 
     /// Resolve one authority-bearing source identity to its exact registered
@@ -328,20 +536,29 @@ fn resolve_item_full_inner(
     }
     let mut winner: Option<(PathBuf, ItemSpace, ItemSourceRoot, String, String, PathBuf)> = None;
     let mut shadowed = Vec::new();
+    // The first admitted bundle candidate found behind a project winner.
+    let mut bundle_behind_project: Option<(String, PathBuf)> = None;
     let mut probed_absent = Vec::new();
     let mut searched_spaces = Vec::new();
 
     for root in &roots.ordered {
-        let space_label = root.space.as_str().to_owned();
-        if !searched_spaces.contains(&space_label) {
-            searched_spaces.push(space_label);
+        // A kind that names the spaces allowed to supply it never takes a
+        // candidate from another space. A file there is reported, so a
+        // planted item is visible, but it can neither win nor shadow.
+        let space_admitted = kind_schema
+            .launch_trust
+            .as_ref()
+            .is_none_or(|launch_trust| launch_trust.admits_space(root.space));
+        if space_admitted {
+            let space_label = root.space.as_str().to_owned();
+            if !searched_spaces.contains(&space_label) {
+                searched_spaces.push(space_label);
+            }
         }
 
         let kind_dir = root.ai_root.join(&kind_schema.directory);
-        for ext_spec in &kind_schema.extensions {
-            let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
-            tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
-            let is_file = match (root.space, project_authority) {
+        let candidate_exists = |path: &Path| -> Result<bool, EngineError> {
+            match (root.space, project_authority) {
                 (ItemSpace::Project, Some((project_root, content))) => {
                     if root.ai_root != project_root.join(crate::AI_DIR) {
                         return Err(EngineError::Internal(format!(
@@ -357,23 +574,83 @@ fn resolve_item_full_inner(
                             project_root.display()
                         ))
                     })?;
-                    !content.validates_absence(relative)?
+                    Ok(!content.validates_absence(relative)?)
                 }
-                _ => match lillux::inspect_optional_entry_no_follow(&path) {
-                    Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => true,
-                    Ok(None) => false,
-                    Ok(Some(_)) => false,
-                    Err(error) => {
-                        return Err(EngineError::ItemResolutionUnavailable {
-                            canonical_ref: ref_.to_string(),
-                            path,
-                            source: std::io::Error::other(error.to_string()),
-                        });
-                    }
+                _ => match lillux::inspect_optional_entry_no_follow(path) {
+                    Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => Ok(true),
+                    Ok(None) | Ok(Some(_)) => Ok(false),
+                    Err(error) => Err(EngineError::ItemResolutionUnavailable {
+                        canonical_ref: ref_.to_string(),
+                        path: path.to_path_buf(),
+                        source: std::io::Error::other(format!("{error:#}")),
+                    }),
                 },
-            };
+            }
+        };
+        for (ext_index, ext_spec) in kind_schema.extensions.iter().enumerate() {
+            let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
+            tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
+            let is_file = candidate_exists(&path)?;
+            if is_file && !space_admitted {
+                tracing::warn!(
+                    item_ref = %ref_,
+                    ignored = %path.display(),
+                    space = root.space.as_str(),
+                    "ignoring a candidate from a space this kind does not admit"
+                );
+                shadowed.push(ShadowedCandidate {
+                    label: root.label.clone(),
+                    space: root.space,
+                    path,
+                });
+                break;
+            }
+            if !space_admitted {
+                // Nothing in this space can change the winner, so its
+                // absences are not dependencies of the resolution.
+                continue;
+            }
+            if is_file
+                && root.space == ItemSpace::Project
+                && let Some(owned) = roots.owner_of(&ref_.bare_id)
+            {
+                return Err(EngineError::ReservedNamespaceShadow {
+                    canonical_ref: ref_.to_string(),
+                    namespace: owned.namespace.clone(),
+                    bundle: owned.bundle.clone(),
+                    project_path: path,
+                });
+            }
             if is_file {
                 if winner.is_none() {
+                    // One name, one item: a second format of the same name in
+                    // the winning folder is refused rather than silently
+                    // ranked, and each later format's absence is a dependency
+                    // so a collision appearing later is never served from a
+                    // stale resolution.
+                    let relative = |extension: &str| {
+                        PathBuf::from(format!(
+                            "{}/{}/{}{}",
+                            crate::AI_DIR,
+                            kind_schema.directory,
+                            ref_.bare_id,
+                            extension
+                        ))
+                    };
+                    for later in &kind_schema.extensions[ext_index + 1..] {
+                        let sibling = kind_dir.join(format!("{}{}", ref_.bare_id, later.ext));
+                        if candidate_exists(&sibling)? {
+                            return Err(EngineError::AmbiguousResolution {
+                                canonical_ref: ref_.to_string(),
+                                space: format!("{} ({})", root.space.as_str(), root.label),
+                                candidates: vec![relative(&ext_spec.ext), relative(&later.ext)],
+                            });
+                        }
+                        probed_absent.push(ProbedAbsence {
+                            space: root.space,
+                            path: sibling,
+                        });
+                    }
                     winner = Some((
                         path,
                         root.space,
@@ -383,24 +660,50 @@ fn resolve_item_full_inner(
                         root.ai_root.clone(),
                     ));
                 } else {
+                    if bundle_behind_project.is_none()
+                        && let Some((_, ItemSpace::Project, ..)) = &winner
+                        && root.space == ItemSpace::Bundle
+                    {
+                        let bundle = match &root.identity {
+                            ItemSourceRoot::Bundle { name } => name.clone(),
+                            _ => root.label.clone(),
+                        };
+                        bundle_behind_project = Some((bundle, path.clone()));
+                    }
                     shadowed.push(ShadowedCandidate {
                         label: root.label.clone(),
                         space: root.space,
                         path,
                     });
                 }
-                break; // Only match one extension per root (first ext wins)
+                break; // A root supplies at most one candidate.
             } else if winner.is_none() {
                 // Absent at a precedence >= the (not-yet-found) winner: a
                 // negative dependency. If this exact path (or an earlier
-                // sibling) appears, it becomes the new winner. Absences after
-                // the winner is found cannot change the winner, so skip them.
+                // sibling) appears, it becomes the new winner.
                 probed_absent.push(ProbedAbsence {
                     space: root.space,
                     path,
                 });
             }
         }
+    }
+
+    // A kind may declare that a project item never replaces a bundle item.
+    // The refusal is decided here, on file presence alone, so it holds for
+    // every consumer of resolution, for every member of an extends chain, and
+    // before any signature is read: a trusted signer changes nothing.
+    if kind_schema.project_shadowing == crate::kind_registry::ProjectShadowing::Refuse
+        && let Some((project_path, ItemSpace::Project, ..)) = &winner
+        && let Some((bundle, bundle_path)) = bundle_behind_project
+    {
+        return Err(EngineError::ProjectShadowsBundleItem {
+            canonical_ref: ref_.to_string(),
+            kind: ref_.kind.clone(),
+            bundle,
+            project_path: project_path.clone(),
+            bundle_path,
+        });
     }
 
     match winner {
@@ -508,7 +811,18 @@ pub fn enumerate_kind_refs(
     kind_schema: &KindSchema,
     kind: &str,
 ) -> Vec<CanonicalRef> {
-    enumerate_kind_refs_inner(roots, kind_schema, kind, None).unwrap_or_default()
+    try_enumerate_kind_refs(roots, kind_schema, kind).unwrap_or_default()
+}
+
+/// Discover candidates while preserving traversal/budget failures for callers
+/// that report inventory coverage. This is a bounded live filesystem read, not
+/// an authenticated or atomic snapshot of the installed corpus.
+pub fn try_enumerate_kind_refs(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    kind: &str,
+) -> Result<Vec<CanonicalRef>, EngineError> {
+    enumerate_kind_refs_inner(roots, kind_schema, kind, None)
 }
 
 /// Enumerate the installed item corpus whose signed kind schemas select one
@@ -563,6 +877,14 @@ fn enumerate_kind_refs_inner(
     let mut seen = HashSet::new();
     let mut refs = Vec::new();
     for root in &roots.ordered {
+        // Enumeration lists only what resolution could select.
+        if kind_schema
+            .launch_trust
+            .as_ref()
+            .is_some_and(|launch_trust| !launch_trust.admits_space(root.space))
+        {
+            continue;
+        }
         let kind_dir = root.ai_root.join(&kind_schema.directory);
         let mut relative_files = Vec::new();
         match (root.space, project_authority) {
@@ -724,15 +1046,35 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn signer_project_root_prefers_the_logical_project_over_the_checkout() {
+        let checkout = ResolutionRoots::from_flat(
+            Some(PathBuf::from("/cache/pinned/ab12/project/.ai")),
+            Vec::new(),
+        );
+        assert_eq!(
+            checkout.signer_project_root(),
+            Some(Path::new("/cache/pinned/ab12/project"))
+        );
+        let logical =
+            checkout.with_logical_project_root(Some(PathBuf::from("/srv/projects/alpha")));
+        assert_eq!(
+            logical.signer_project_root(),
+            Some(Path::new("/srv/projects/alpha"))
+        );
+    }
+
+    #[test]
     fn authoritative_roots_select_typed_identity_not_nested_path_prefix() {
         let roots = ResolutionRoots::from_registered(
             Some(PathBuf::from("/projects/demo")),
             &[
                 RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
                     name: "outer".to_owned(),
                     canonical_root: PathBuf::from("/bundles/root"),
                 },
                 RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
                     name: "inner".to_owned(),
                     canonical_root: PathBuf::from("/bundles/root/nested"),
                 },
@@ -770,6 +1112,8 @@ mod tests {
         assert!(loose.authoritative_bundle_roots().is_err());
 
         let duplicate = ResolutionRoots {
+            logical_project_root: None,
+            owned_namespaces: Vec::new(),
             ordered: vec![
                 ResolutionRoot {
                     space: ItemSpace::Bundle,
@@ -806,10 +1150,13 @@ mod tests {
                 effect_class_ceiling: None,
                 workspace_access: None,
                 network_authority_ceiling: None,
+                pushed_head_declaration: None,
                 filesystem_authority_ceiling: None,
+                host_authority: None,
                 target: None,
                 endpoint: None,
                 resource_authority_ceiling: None,
+                subprocess_limits: None,
                 aliases: std::collections::HashMap::new(),
                 alias_max_depth: 8,
                 terminator: None,
@@ -839,6 +1186,7 @@ mod tests {
                     },
                 })
                 .collect(),
+            thread_profile: None,
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),
             composer: "handler:ryeos/core/identity".to_owned(),
             composer_config: serde_json::Value::Null,
@@ -846,6 +1194,9 @@ mod tests {
             inventory_kinds: Vec::new(),
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
+            launch_trust: None,
+            project_shadowing: Default::default(),
+            runtime_authoring: Default::default(),
         }
     }
 
@@ -872,6 +1223,23 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(&file_path, content).unwrap();
+    }
+
+    #[test]
+    fn fallible_enumeration_preserves_traversal_budget_failure() {
+        let root = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        let mut nested = root.join("tools");
+        for _ in 0..(MAX_CORPUS_TRAVERSAL_DEPTH + 2) {
+            nested.push("nested");
+        }
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("item.yaml"), "name: item").unwrap();
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        assert!(try_enumerate_kind_refs(&roots, &schema, "tool").is_err());
+        // The best-effort wrapper deliberately keeps its lossy contract.
+        assert!(enumerate_kind_refs(&roots, &schema, "tool").is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -906,6 +1274,535 @@ mod tests {
         ));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn two_formats_of_one_name_in_one_folder_are_refused() {
+        let root = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&root, "tools", "demo/x", ".py", "# python");
+        write_item(&root, "tools", "demo/x", ".yaml", "executor_id: run");
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::AmbiguousResolution { candidates, .. }) => {
+                assert_eq!(
+                    candidates,
+                    [
+                        PathBuf::from(".ai/tools/demo/x.py"),
+                        PathBuf::from(".ai/tools/demo/x.yaml")
+                    ]
+                );
+            }
+            other => panic!("expected an ambiguous-format refusal, got {other:?}"),
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_single_format_records_its_later_siblings_as_absences() {
+        let root = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&root, "tools", "demo/x", ".py", "# python");
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert!(
+            result
+                .probed_absent
+                .iter()
+                .any(|absence| absence.path.ends_with("tools/demo/x.yaml"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_same_name_across_roots_is_a_shadow_not_a_collision() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&project, "tools", "demo/x", ".yaml", "executor_id: run");
+        write_item(&bundle, "tools", "demo/x", ".py", "# python");
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let item = CanonicalRef::parse("tool:demo/x").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert_eq!(result.shadowed.len(), 1);
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    fn owning_roots(project: &Path, bundle: &Path) -> ResolutionRoots {
+        let mut roots =
+            ResolutionRoots::from_flat(Some(project.to_path_buf()), vec![bundle.to_path_buf()]);
+        roots.owned_namespaces = vec![OwnedNamespace {
+            bundle: "core".to_owned(),
+            namespace: "ryeos/core".to_owned(),
+        }];
+        roots
+    }
+
+    #[test]
+    fn project_candidate_under_an_installed_bundle_name_is_refused() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        let project_ai = project.join(crate::AI_DIR);
+        write_item(&project_ai, "tools", "core/x", ".yaml", "executor_id: run");
+        write_item(&project_ai, "tools", "mine/x", ".yaml", "executor_id: run");
+        let installed = vec![RegisteredBundleRoot {
+            name: "core".to_owned(),
+            canonical_root: bundle.clone(),
+            owned_namespaces: vec!["ryeos/core".to_owned()],
+        }];
+        let roots = ResolutionRoots::from_registered(Some(project.clone()), &installed);
+        let item = CanonicalRef::parse("tool:core/x").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::ReservedNamespaceShadow {
+                namespace, bundle, ..
+            }) => {
+                assert_eq!(namespace, "core");
+                assert_eq!(bundle, "core");
+            }
+            other => panic!("expected reserved_namespace_shadow, got {other:?}"),
+        }
+        let unique = CanonicalRef::parse("tool:mine/x").unwrap();
+        assert!(resolve_item_full(&roots, &schema, &unique).is_ok());
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn project_candidate_in_owned_namespace_is_refused() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        write_item(
+            &project,
+            "tools",
+            "ryeos/core/runtimes/python/function",
+            ".yaml",
+            "executor_id: run",
+        );
+        write_item(
+            &bundle,
+            "tools",
+            "ryeos/core/runtimes/python/function",
+            ".yaml",
+            "executor_id: run",
+        );
+        let roots = owning_roots(&project, &bundle);
+        let item = CanonicalRef::parse("tool:ryeos/core/runtimes/python/function").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::ReservedNamespaceShadow {
+                namespace,
+                bundle,
+                project_path,
+                ..
+            }) => {
+                assert_eq!(namespace, "ryeos/core");
+                assert_eq!(bundle, "core");
+                assert!(project_path.ends_with("tools/ryeos/core/runtimes/python/function.yaml"));
+            }
+            other => panic!("expected reserved_namespace_shadow, got {other:?}"),
+        }
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn project_candidate_outside_owned_namespace_still_wins_and_is_reported() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        write_item(
+            &project,
+            "tools",
+            "ryeos/other/x",
+            ".yaml",
+            "executor_id: run",
+        );
+        write_item(
+            &bundle,
+            "tools",
+            "ryeos/other/x",
+            ".yaml",
+            "executor_id: run",
+        );
+        // A namespace that merely shares a name prefix owns nothing here.
+        write_item(
+            &project,
+            "tools",
+            "ryeos/corex/y",
+            ".yaml",
+            "executor_id: run",
+        );
+        let roots = owning_roots(&project, &bundle);
+
+        let item = CanonicalRef::parse("tool:ryeos/other/x").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert_eq!(result.shadowed.len(), 1);
+        assert_eq!(result.shadowed[0].space, ItemSpace::Bundle);
+
+        let item = CanonicalRef::parse("tool:ryeos/corex/y").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn executor_hop_into_owned_namespace_resolves_bundle_only() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        write_item(
+            &bundle,
+            "tools",
+            "ryeos/core/runtimes/python/function",
+            ".yaml",
+            "executor_id: run",
+        );
+        // The project owns other names; none of them are in the namespace.
+        write_item(
+            &project,
+            "tools",
+            "mine/runtimes/python/function",
+            ".yaml",
+            "executor_id: run",
+        );
+        let roots = owning_roots(&project, &bundle);
+        let hop = CanonicalRef::parse("tool:ryeos/core/runtimes/python/function").unwrap();
+        let result = resolve_item_full(&roots, &schema, &hop).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Bundle);
+        assert!(result.shadowed.is_empty());
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn owned_namespaces_validate_as_canonical_non_overlapping_segments() {
+        assert!(
+            validate_owned_namespaces(&["ryeos/core".to_owned(), "ryeos/coreutils".to_owned()])
+                .is_ok()
+        );
+        for bad in [
+            "",
+            "ryeos/*",
+            "/ryeos",
+            "ryeos//core",
+            "ryeos/../core",
+            "ryeos/core/",
+        ] {
+            assert!(
+                validate_owned_namespaces(&[bad.to_owned()]).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(validate_owned_namespaces(&["ryeos".to_owned(), "ryeos/core".to_owned()]).is_err());
+        assert!(
+            validate_owned_namespaces(&["ryeos/core".to_owned(), "ryeos/core".to_owned()]).is_err()
+        );
+    }
+
+    fn shadow_refusing_schema(directory: &str) -> KindSchema {
+        let mut schema = make_kind_schema(directory, vec![(".yaml", "yaml")]);
+        schema.project_shadowing = crate::kind_registry::ProjectShadowing::Refuse;
+        schema
+    }
+
+    #[test]
+    fn a_project_item_shadowing_a_bundle_item_is_refused_when_the_kind_declares_it() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let project_ai = project.join(crate::AI_DIR);
+        let bundle_ai = bundle.join(crate::AI_DIR);
+        write_item(&project_ai, "views", "shared/x", ".yaml", "widget: text");
+        write_item(&bundle_ai, "views", "shared/x", ".yaml", "widget: rows");
+        write_item(&project_ai, "views", "mine/x", ".yaml", "widget: text");
+        write_item(&bundle_ai, "views", "theirs/x", ".yaml", "widget: rows");
+        let installed = vec![RegisteredBundleRoot {
+            name: "shipper".to_owned(),
+            canonical_root: bundle.clone(),
+            owned_namespaces: Vec::new(),
+        }];
+        let roots = ResolutionRoots::from_registered(Some(project.clone()), &installed);
+        let schema = shadow_refusing_schema("views");
+
+        let item = CanonicalRef::parse("view:shared/x").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::ProjectShadowsBundleItem {
+                canonical_ref,
+                kind,
+                bundle: named,
+                project_path,
+                bundle_path,
+            }) => {
+                assert_eq!(canonical_ref, "view:shared/x");
+                assert_eq!(kind, "view");
+                assert_eq!(named, "shipper");
+                assert!(project_path.starts_with(&project));
+                assert!(bundle_path.starts_with(&bundle));
+            }
+            other => panic!("expected project_shadows_bundle_item, got {other:?}"),
+        }
+
+        // A project item under its own ref, and a bundle item nothing in the
+        // project names, both resolve as before.
+        let mine = resolve_item_full(
+            &roots,
+            &schema,
+            &CanonicalRef::parse("view:mine/x").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mine.winner_space, ItemSpace::Project);
+        let theirs = resolve_item_full(
+            &roots,
+            &schema,
+            &CanonicalRef::parse("view:theirs/x").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(theirs.winner_space, ItemSpace::Bundle);
+
+        // Without the project the bundle item answers for the shared ref.
+        let node_only = ResolutionRoots::from_registered(None, &installed);
+        assert_eq!(
+            resolve_item_full(&node_only, &schema, &item)
+                .unwrap()
+                .winner_space,
+            ItemSpace::Bundle
+        );
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn a_kind_that_does_not_declare_the_refusal_keeps_project_first_shadowing() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let project_ai = project.join(crate::AI_DIR);
+        let bundle_ai = bundle.join(crate::AI_DIR);
+        write_item(&project_ai, "views", "shared/x", ".yaml", "widget: text");
+        write_item(&bundle_ai, "views", "shared/x", ".yaml", "widget: rows");
+        let installed = vec![RegisteredBundleRoot {
+            name: "shipper".to_owned(),
+            canonical_root: bundle.clone(),
+            owned_namespaces: Vec::new(),
+        }];
+        let roots = ResolutionRoots::from_registered(Some(project.clone()), &installed);
+        let schema = make_kind_schema("views", vec![(".yaml", "yaml")]);
+        let item = CanonicalRef::parse("view:shared/x").unwrap();
+
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert_eq!(result.shadowed.len(), 1);
+        assert_eq!(result.shadowed[0].space, ItemSpace::Bundle);
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    fn bundle_only_schema() -> KindSchema {
+        let mut schema = make_kind_schema("services", vec![(".yaml", "yaml")]);
+        schema.launch_trust = Some(crate::kind_registry::launch_trust::LaunchTrustPolicy {
+            allowed_spaces: vec![ItemSpace::Bundle],
+            allowed_trust: vec![crate::resolution::TrustClass::TrustedBundle],
+            operator_may_admit: Vec::new(),
+        });
+        schema
+    }
+
+    #[test]
+    fn a_project_file_never_wins_for_a_bundle_only_kind_and_is_reported() {
+        let project = tempdir();
+        let bundle = tempdir();
+        write_item(
+            &project,
+            "services",
+            "health/status",
+            ".yaml",
+            "endpoint: remote.list",
+        );
+        write_item(
+            &bundle,
+            "services",
+            "health/status",
+            ".yaml",
+            "endpoint: health.status",
+        );
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let schema = bundle_only_schema();
+        let item = CanonicalRef::parse("service:health/status").unwrap();
+
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Bundle);
+        assert!(result.winner_path.starts_with(&bundle));
+        assert_eq!(result.shadowed.len(), 1);
+        assert_eq!(result.shadowed[0].space, ItemSpace::Project);
+        assert!(
+            result
+                .probed_absent
+                .iter()
+                .all(|absence| absence.space != ItemSpace::Project)
+        );
+        assert_eq!(enumerate_kind_refs(&roots, &schema, "service").len(), 1);
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn a_project_only_item_of_a_bundle_only_kind_is_not_found() {
+        let project = tempdir();
+        let bundle = tempdir();
+        write_item(
+            &project,
+            "services",
+            "planted/x",
+            ".yaml",
+            "endpoint: remote.configure",
+        );
+        let roots = ResolutionRoots::from_flat(Some(project.clone()), vec![bundle.clone()]);
+        let schema = bundle_only_schema();
+        let item = CanonicalRef::parse("service:planted/x").unwrap();
+        assert!(matches!(
+            resolve_item_full(&roots, &schema, &item),
+            Err(EngineError::ItemNotFound { .. })
+        ));
+        assert!(enumerate_kind_refs(&roots, &schema, "service").is_empty());
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    fn registered_pair() -> (PathBuf, PathBuf, Vec<RegisteredBundleRoot>) {
+        let early = tempdir().join("early");
+        let chosen = tempdir().join("chosen");
+        fs::create_dir_all(early.join(crate::AI_DIR)).unwrap();
+        fs::create_dir_all(chosen.join(crate::AI_DIR)).unwrap();
+        let registered = vec![
+            RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
+                name: "early".to_owned(),
+                canonical_root: early.clone(),
+            },
+            RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
+                name: "chosen".to_owned(),
+                canonical_root: chosen.clone(),
+            },
+        ];
+        (early, chosen, registered)
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_finds_the_named_bundle_item_over_an_earlier_bundle() {
+        let (early, chosen, registered) = registered_pair();
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
+        let ai = crate::AI_DIR;
+        write_item(&early.join(ai), "tools", "chosen/hook", ".py", "# early");
+        write_item(&chosen.join(ai), "tools", "chosen/hook", ".py", "# chosen");
+        let ref_ = CanonicalRef::parse("tool:chosen/hook").unwrap();
+
+        let all = ResolutionRoots::from_registered(None, &registered);
+        let unselected = resolve_item_full(&all, &schema, &ref_).unwrap();
+        assert!(unselected.winner_path.starts_with(&early));
+
+        {
+            let selection = RegisteredBundleSelection::Only;
+            let selected = select_registered_bundle(&registered, "chosen", selection).unwrap();
+            let roots = ResolutionRoots::from_registered(None, &selected);
+            let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
+            assert!(result.winner_path.starts_with(&chosen), "{selection:?}");
+            assert_eq!(result.winner_space, ItemSpace::Bundle);
+            assert_eq!(
+                result.winner_root_identity,
+                ItemSourceRoot::Bundle {
+                    name: "chosen".to_owned()
+                }
+            );
+            assert_eq!(result.winner_ai_root, chosen.join(ai));
+        }
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_does_not_fall_back_to_another_bundle() {
+        let (early, _chosen, registered) = registered_pair();
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
+        write_item(
+            &early.join(crate::AI_DIR),
+            "tools",
+            "chosen/hook",
+            ".py",
+            "# early",
+        );
+        let ref_ = CanonicalRef::parse("tool:chosen/hook").unwrap();
+
+        let only = select_registered_bundle(&registered, "chosen", RegisteredBundleSelection::Only)
+            .unwrap();
+        let roots = ResolutionRoots::from_registered(None, &only);
+        assert!(matches!(
+            resolve_item_full(&roots, &schema, &ref_),
+            Err(EngineError::ItemNotFound { .. })
+        ));
+        assert!(roots.authoritative_bundle("early").is_err());
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_selects_exactly_the_named_entry() {
+        let registered = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
+                name: name.to_owned(),
+                canonical_root: PathBuf::from(format!("/bundles/{name}")),
+            })
+            .collect::<Vec<_>>();
+        let only =
+            select_registered_bundle(&registered, "b", RegisteredBundleSelection::Only).unwrap();
+        assert_eq!(only, vec![registered[1].clone()]);
+    }
+
+    #[test]
+    fn named_bundle_item_resolution_refuses_an_unregistered_or_duplicated_name() {
+        let registered = vec![
+            RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
+                name: "twice".to_owned(),
+                canonical_root: PathBuf::from("/bundles/one"),
+            },
+            RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
+                name: "twice".to_owned(),
+                canonical_root: PathBuf::from("/bundles/two"),
+            },
+        ];
+        {
+            let selection = RegisteredBundleSelection::Only;
+            assert!(matches!(
+                select_registered_bundle(&registered, "absent", selection),
+                Err(EngineError::RegisteredBundleSelectionRefused {
+                    refusal: RegisteredBundleSelectionRefusal::NotRegistered,
+                    name: _,
+                })
+            ));
+            assert!(matches!(
+                select_registered_bundle(&registered, "twice", selection),
+                Err(EngineError::RegisteredBundleSelectionRefused {
+                    refusal: RegisteredBundleSelectionRefusal::RegisteredMoreThanOnce,
+                    name: _,
+                })
+            ));
+        }
     }
 
     #[test]
@@ -1019,23 +1916,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_extension_priority() {
+    fn resolve_finds_an_item_in_any_declared_format() {
         let project_root = tempdir();
-        // .py is listed first, so it should win even though .yaml also exists
+        // Only the second declared format exists: every format is probed,
+        // and the single match resolves. Two formats of one name in one
+        // folder are refused (see two_formats_of_one_name_in_one_folder_are_refused).
         let schema = make_kind_schema(
             "tools",
             vec![(".py", "python/tool-header"), (".yaml", "yaml/yaml")],
         );
 
-        write_item(&project_root, "tools", "my_tool", ".py", "# python");
         write_item(&project_root, "tools", "my_tool", ".yaml", "name: yaml");
 
         let roots = ResolutionRoots::from_flat(Some(project_root), vec![]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, _, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
-        assert_eq!(ext, ".py");
-        assert!(path.to_string_lossy().ends_with(".py"));
+        assert_eq!(ext, ".yaml");
+        assert!(path.to_string_lossy().ends_with(".yaml"));
     }
 
     #[test]

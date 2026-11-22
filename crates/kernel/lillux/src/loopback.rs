@@ -6,7 +6,7 @@
 
 use crate::exec::{
     DescriptorTransferBounds, InheritedDescriptorAuthority, InheritedDescriptorTransferSender,
-    ReceivedDescriptorAuthority, retain_fork_sensitive_descriptors,
+    ReceivedDescriptorAuthority, try_retain_fork_sensitive_descriptors,
 };
 use crate::time::{Duration, MonotonicDeadline};
 use std::io::{self, Read as _, Write as _};
@@ -77,7 +77,7 @@ impl LoopbackListenerTransferSource {
     pub fn bind_exact(address: SocketAddr) -> io::Result<Self> {
         // Acquire the fork lease before creating the descriptor, so unrelated
         // held children can never inherit an unregistered listener.
-        let lease = retain_fork_sensitive_descriptors();
+        let lease = try_retain_fork_sensitive_descriptors()?;
         let listener = ExactLoopbackListener::bind_exact(address)?;
         let ListenerOwner::Local(listener) = listener.listener else {
             unreachable!("bind_exact always creates a local listener")

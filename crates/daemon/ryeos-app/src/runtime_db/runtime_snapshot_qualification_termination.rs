@@ -157,152 +157,216 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn require_consumer_termination_admission(
+    conn: &Connection,
+    intent: &RuntimeSnapshotQualificationTerminationIntent,
+    admission: Option<
+        &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+    >,
+) -> Result<()> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let qualification =
+        super::runtime_snapshot_qualification::read(conn, &intent.qualification_operation_id)?
+            .context("consumer termination qualification disappeared")?;
+    admission.require_termination(intent, &qualification.intent)?;
+    ensure!(
+        qualification.phase
+            == super::runtime_snapshot_qualification::SnapshotQualificationPhase::OccurrenceBound,
+        "consumer termination has no bound occurrence"
+    );
+    let occurrence = qualification
+        .occurrence
+        .as_ref()
+        .context("consumer termination occurrence absent")?;
+    intent.validate_for(&qualification.intent, occurrence)?;
+    let owner = admission
+        .callback_launch_owner()
+        .context("consumer termination requires callback admission")?;
+    super::restored_verifier_attempt::require_current_callback_launch(
+        conn,
+        &admission.coordinate().accepted_root_id,
+        owner,
+    )
+}
+
 impl RuntimeDb {
     pub fn qualification_termination_operation(
         &self,
         operation_id: &str,
     ) -> Result<Option<QualificationTerminationRecord>> {
-        read(&self.conn, operation_id)
+        self.conn.with_sql(|conn| read(conn, operation_id))
     }
 
     pub fn reserve_qualification_termination(
         &self,
         intent: &RuntimeSnapshotQualificationTerminationIntent,
     ) -> Result<QualificationTerminationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        if let Some(existing) = read(&tx, &intent.operation_id)? {
+        self.reserve_qualification_termination_with_admission(intent, None)
+    }
+
+    pub(crate) fn reserve_qualification_termination_with_admission(
+        &self,
+        intent: &RuntimeSnapshotQualificationTerminationIntent,
+        admission: Option<
+            &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        >,
+    ) -> Result<QualificationTerminationRecord> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            require_consumer_termination_admission(&tx, intent, admission)?;
+            if let Some(existing) = read(&tx, &intent.operation_id)? {
+                ensure!(
+                    existing.intent == *intent,
+                    "qualification termination reservation replay changed"
+                );
+                tx.commit()?;
+                return Ok(existing);
+            }
+            let qualification =
+                super::runtime_snapshot_qualification::read(&tx, &intent.qualification_operation_id)?
+                    .context("qualification termination source was not retained")?;
+            let occurrence = qualification
+                .occurrence
+                .as_ref()
+                .context("qualification termination source has no occurrence")?;
+            intent.validate_for(&qualification.intent, occurrence)?;
+            let now = lillux::time::timestamp_millis();
             ensure!(
-                existing.intent == *intent,
-                "qualification termination reservation replay changed"
+                intent.attempt_deadline_ms > now
+                    && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
+                "qualification termination deadline is outside its admission window"
             );
-            tx.commit()?;
-            return Ok(existing);
-        }
-        let qualification =
-            super::runtime_snapshot_qualification::read(&tx, &intent.qualification_operation_id)?
-                .context("qualification termination source was not retained")?;
-        let occurrence = qualification
-            .occurrence
-            .as_ref()
-            .context("qualification termination source has no occurrence")?;
-        intent.validate_for(&qualification.intent, occurrence)?;
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            intent.attempt_deadline_ms > now
-                && intent.attempt_deadline_ms.saturating_sub(now) <= 300_000,
-            "qualification termination deadline is outside its admission window"
-        );
-        tx.execute(
-            "INSERT INTO runtime_snapshot_qualification_termination
+            tx.execute(
+                "INSERT INTO runtime_snapshot_qualification_termination
              (operation_id,qualification_operation_id,intent_json,phase,observation_json,created_at_ms,updated_at_ms)
              VALUES(?1,?2,?3,'reserved',NULL,?4,?4)",
-            params![intent.operation_id, intent.qualification_operation_id, canonical(intent)?, now],
-        )?;
-        let record = read(&tx, &intent.operation_id)?
-            .context("qualification termination reservation vanished")?;
-        tx.commit()?;
-        Ok(record)
+                params![intent.operation_id, intent.qualification_operation_id, canonical(intent)?, now],
+            )?;
+            let record = read(&tx, &intent.operation_id)?
+                .context("qualification termination reservation vanished")?;
+            tx.commit()?;
+            Ok(record)
+        })
     }
 
     pub fn claim_qualification_termination_attempt(
         &self,
         operation_id: &str,
     ) -> Result<QualificationTerminationClaim> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record =
-            read(&tx, operation_id)?.context("qualification termination was not reserved")?;
-        match record.phase {
-            QualificationTerminationPhase::Terminal => {
-                tx.commit()?;
-                return Ok(QualificationTerminationClaim::Terminal(record));
+        self.claim_qualification_termination_with_admission(operation_id, None)
+    }
+
+    pub(crate) fn claim_qualification_termination_with_admission(
+        &self,
+        operation_id: &str,
+        admission: Option<
+            &crate::operator_external_content::product_qualification::AuthenticatedConsumerRoot,
+        >,
+    ) -> Result<QualificationTerminationClaim> {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let record =
+                read(&tx, operation_id)?.context("qualification termination was not reserved")?;
+            require_consumer_termination_admission(&tx, &record.intent, admission)?;
+            match record.phase {
+                QualificationTerminationPhase::Terminal => {
+                    tx.commit()?;
+                    return Ok(QualificationTerminationClaim::Terminal(record));
+                }
+                QualificationTerminationPhase::AttemptPending
+                | QualificationTerminationPhase::Quarantined => {
+                    tx.commit()?;
+                    return Ok(QualificationTerminationClaim::Reconcile(record));
+                }
+                QualificationTerminationPhase::Reserved => {}
             }
-            QualificationTerminationPhase::AttemptPending
-            | QualificationTerminationPhase::Quarantined => {
-                tx.commit()?;
-                return Ok(QualificationTerminationClaim::Reconcile(record));
-            }
-            QualificationTerminationPhase::Reserved => {}
-        }
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        ensure!(
-            now < record.intent.attempt_deadline_ms,
-            "qualification termination deadline expired"
-        );
-        let changed = tx.execute(
-            "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',updated_at_ms=?2
+            let now = lillux::time::timestamp_millis();
+            ensure!(
+                now < record.intent.attempt_deadline_ms,
+                "qualification termination deadline expired"
+            );
+            let changed = tx.execute(
+                "UPDATE runtime_snapshot_qualification_termination SET phase='attempt_pending',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='reserved'",
-            params![operation_id, now],
-        )?;
-        ensure!(
-            changed == 1,
-            "qualification termination attempt lost durable CAS"
-        );
-        let current =
-            read(&tx, operation_id)?.context("qualification termination attempt vanished")?;
-        tx.commit()?;
-        Ok(QualificationTerminationClaim::StartAttempt(current))
+                params![operation_id, now],
+            )?;
+            ensure!(
+                changed == 1,
+                "qualification termination attempt lost durable CAS"
+            );
+            let current =
+                read(&tx, operation_id)?.context("qualification termination attempt vanished")?;
+            tx.commit()?;
+            Ok(QualificationTerminationClaim::StartAttempt(current))
+        })
     }
 
     pub fn quarantine_qualification_termination_attempt(
         &self,
         operation_id: &str,
     ) -> Result<QualificationTerminationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record =
-            read(&tx, operation_id)?.context("qualification termination attempt is absent")?;
-        if record.phase == QualificationTerminationPhase::Quarantined {
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            record.phase == QualificationTerminationPhase::AttemptPending,
-            "qualification termination quarantine requires pending attempt"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "UPDATE runtime_snapshot_qualification_termination SET phase='quarantined',updated_at_ms=?2
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let record =
+                read(&tx, operation_id)?.context("qualification termination attempt is absent")?;
+            if record.phase == QualificationTerminationPhase::Quarantined {
+                tx.commit()?;
+                return Ok(record);
+            }
+            ensure!(
+                record.phase == QualificationTerminationPhase::AttemptPending,
+                "qualification termination quarantine requires pending attempt"
+            );
+            let now = lillux::time::timestamp_millis();
+            tx.execute(
+                "UPDATE runtime_snapshot_qualification_termination SET phase='quarantined',updated_at_ms=?2
              WHERE operation_id=?1 AND phase='attempt_pending'",
-            params![operation_id, now],
-        )?;
-        let current =
-            read(&tx, operation_id)?.context("qualification termination quarantine vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![operation_id, now],
+            )?;
+            let current =
+                read(&tx, operation_id)?.context("qualification termination quarantine vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 
     pub fn bind_qualification_terminal_observation(
         &self,
         observation: &RuntimeSnapshotQualificationTerminalObservation,
     ) -> Result<QualificationTerminationRecord> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let record = read(&tx, &observation.operation_id)?
-            .context("qualification termination attempt is absent")?;
-        observation.validate_for(&record.intent)?;
-        if let Some(existing) = record.observation.as_ref() {
+        self.conn.with_sql(|conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let record = read(&tx, &observation.operation_id)?
+                .context("qualification termination attempt is absent")?;
+            observation.validate_for(&record.intent)?;
+            if let Some(existing) = record.observation.as_ref() {
+                ensure!(
+                    existing == observation,
+                    "qualification terminal observation changed on replay"
+                );
+                tx.commit()?;
+                return Ok(record);
+            }
             ensure!(
-                existing == observation,
-                "qualification terminal observation changed on replay"
+                matches!(
+                    record.phase,
+                    QualificationTerminationPhase::AttemptPending
+                        | QualificationTerminationPhase::Quarantined
+                ),
+                "qualification termination had no claimed provider contact"
             );
-            tx.commit()?;
-            return Ok(record);
-        }
-        ensure!(
-            matches!(
-                record.phase,
-                QualificationTerminationPhase::AttemptPending
-                    | QualificationTerminationPhase::Quarantined
-            ),
-            "qualification termination had no claimed provider contact"
-        );
-        let now = i64::try_from(lillux::time::timestamp_millis())?;
-        tx.execute(
-            "UPDATE runtime_snapshot_qualification_termination SET phase='terminal',observation_json=?2,updated_at_ms=?3
+            let now = lillux::time::timestamp_millis();
+            tx.execute(
+                "UPDATE runtime_snapshot_qualification_termination SET phase='terminal',observation_json=?2,updated_at_ms=?3
              WHERE operation_id=?1 AND phase IN ('attempt_pending','quarantined')",
-            params![observation.operation_id, canonical(observation)?, now],
-        )?;
-        let current = read(&tx, &observation.operation_id)?
-            .context("qualification terminal observation vanished")?;
-        tx.commit()?;
-        Ok(current)
+                params![observation.operation_id, canonical(observation)?, now],
+            )?;
+            let current = read(&tx, &observation.operation_id)?
+                .context("qualification terminal observation vanished")?;
+            tx.commit()?;
+            Ok(current)
+        })
     }
 }

@@ -12,45 +12,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Timeline roles: how a projected record participates in the
-/// coalesced timeline. Mechanism vocabulary — which event kinds map
-/// to which roles is declared in the view item, never here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TimelineRole {
-    Flow,
-    Boundary,
-    PairOpen,
-    PairClose,
-    #[default]
-    Line,
-}
-
-impl TimelineRole {
-    fn from_projection(projection: &Value) -> Self {
-        match projection.get("role").and_then(Value::as_str) {
-            Some("flow") => Self::Flow,
-            Some("boundary") => Self::Boundary,
-            Some("pair_open") => Self::PairOpen,
-            Some("pair_close") => Self::PairClose,
-            _ => Self::Line,
-        }
-    }
-}
-
 /// A resolved `view:` item, embedded in the effective surface at session
 /// time. Every view remains an addressable, overridable item; this is its
 /// composed value as the engine consumes it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewBinding {
+    /// Closed Rust-owned presentation metadata, not a second executable source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_projection: Option<super::local_projection::ViewLocalProjection>,
     /// Canonical parent ref retained by the engine's effective composer as
     /// provenance. The client consumes the already-composed fields and never
     /// resolves this ref itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extends: Option<String>,
     /// One of the closed widget primitives: rows | text | document |
-    /// key_value | timeline | scene. Unknown widgets degrade visibly.
+    /// key_value | timeline. Unknown widgets degrade visibly.
     #[serde(default)]
     pub widget: String,
     /// The view item's authored `name:` (content, like `description`). Used
@@ -92,9 +69,15 @@ pub struct ViewBinding {
     pub facet: Option<String>,
     #[serde(default)]
     pub projections: Value,
-    /// Row-activation binding intrinsic to the `rows` widget:
+    /// The signed picture this view draws behind its content. Only a
+    /// node-authored view may name one; the daemon drops it from a
+    /// project-authored view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<crate::art::ArtRef>,
+    /// Row-activation binding for the `rows` and `table` widgets:
     /// `selection.activate: <affordance_id>`. Explicit — there is no
-    /// implicit "first affordance" activation.
+    /// implicit "first affordance" activation. A `timeline` view names the
+    /// affordance its "N older" line fires, handed `{older, next_limit}`.
     #[serde(default)]
     pub selection: Option<SelectionBinding>,
     /// The one new optional capability: a singular transient input buffer
@@ -122,6 +105,68 @@ pub struct ViewBinding {
     /// view — degrade honestly, never drop silently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    /// Daemon-stamped marker: present only when this view was authored from
+    /// project space. Absent for bundle (node) views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorship: Option<ItemAuthorship>,
+}
+
+/// Where a composed item was authored, as stamped by the daemon. Only
+/// project-authored items carry it; the daemon owns the value. Every part
+/// beyond `space` and `trust_class` may be absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemAuthorship {
+    pub space: String,
+    pub trust_class: String,
+    /// The item's canonical ref.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub item_ref: Option<String>,
+    /// Absent when the item is unsigned or the signer is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<ItemSigner>,
+    /// The sources the daemon actually bound for this item.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<String>,
+}
+
+/// The key that signed a project-authored item, with the node's label for it
+/// when the node has one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemSigner {
+    pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl ItemAuthorship {
+    /// The signer's display name: the node's label, else the first eight
+    /// characters of the fingerprint. `None` when there is no signer.
+    pub fn signer_label(&self) -> Option<String> {
+        let signer = self.signer.as_ref()?;
+        Some(
+            match signer.name.as_deref().filter(|name| !name.is_empty()) {
+                Some(name) => name.to_owned(),
+                None => signer.fingerprint.chars().take(8).collect(),
+            },
+        )
+    }
+
+    /// The word shown where a signer would be, when there is none.
+    pub fn trust_word(&self) -> &str {
+        match self.trust_class.as_str() {
+            "trusted_project" => "trusted",
+            "untrusted_project" => "untrusted",
+            other => other,
+        }
+    }
+
+    /// Signer label, or the trust word when the item has no signer.
+    pub fn mark_tail(&self) -> String {
+        self.signer_label()
+            .unwrap_or_else(|| self.trust_word().to_owned())
+    }
 }
 
 /// Renderer-neutral presentation eligibility for one signed affordance.
@@ -360,6 +405,9 @@ impl FieldCursorScopeBinding {
 pub struct InputBlock {
     /// Unique within the view (instance keying).
     pub id: String,
+    /// Filter this ordinary View's Rust local projection without a source call.
+    #[serde(default)]
+    pub local_filter: bool,
     #[serde(default)]
     pub placeholder: Option<String>,
     /// Optional author label for the prompt's target strip; else derived
@@ -555,7 +603,7 @@ impl InputBlock {
     /// and the renderer composes it as a filter line above its widget rather
     /// than replacing the widget with a prompt.
     pub fn is_live_filter(&self) -> bool {
-        self.feeds.is_some() && self.submit.is_none()
+        (self.local_filter || self.feeds.is_some()) && self.submit.is_none()
     }
 }
 
@@ -575,6 +623,10 @@ pub struct SourceBinding {
     /// text).
     #[serde(default)]
     pub collection: Option<String>,
+    /// Optional response path to a bounded collection-coverage statement.
+    /// This is presentation metadata, never proof of authority or absence.
+    #[serde(default)]
+    pub coverage: Option<String>,
     /// Per-channel liveness policy. When present it overrides the containing
     /// view's refresh rule for this source only.
     #[serde(default)]
@@ -645,30 +697,20 @@ pub struct ProjectedRecord {
     pub meta: Option<String>,
     #[serde(default)]
     pub tone: Option<String>,
-    #[serde(default)]
-    pub role: TimelineRole,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pair_key: Option<String>,
     pub raw: Value,
 }
 
 /// Project one record through a `{primary, meta, tone}` projection block.
-/// Missing projections degrade to compact raw JSON, never error. Flow records
-/// with no primary are skipped by timeline folding instead of showing raw JSON,
-/// because replay deltas are ephemeral and durable fields may be absent on old
-/// events.
+/// Missing projections degrade to compact raw JSON (or the record's
+/// `event_type` when it is an event record), never error.
 pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
-    let projected_primary = projection
+    let primary = projection
         .get("primary")
         .and_then(Value::as_str)
-        .and_then(|path| field_text(record, path));
-    let role = TimelineRole::from_projection(projection);
-    let primary = if role == TimelineRole::Flow && projected_primary.is_none() {
-        String::new()
-    } else {
-        projected_primary.clone().unwrap_or_else(|| {
+        .and_then(|path| field_text(record, path))
+        .unwrap_or_else(|| {
             // A declared projection that misses must NOT dump raw event JSON
-            // into the feed. Degrade to the record's `event_type` (its honest
+            // into the view. Degrade to the record's `event_type` (its honest
             // kind) when it is an event; only non-event records (rows over a
             // service) fall back to compact JSON. The full record stays in
             // `raw` for an inspector.
@@ -677,32 +719,18 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| compact(record))
-        })
-    };
+        });
     let meta = projection
         .get("meta")
         .and_then(Value::as_str)
+        // A null field is no value: the row shows nothing rather than "null".
+        .filter(|path| !matches!(field_path(record, path), Some(Value::Null)))
         .and_then(|path| field_text(record, path));
     let tone = project_tone(record, projection);
-    let pair_key = match role {
-        TimelineRole::PairOpen | TimelineRole::PairClose => projection
-            .get("pair_key")
-            .and_then(Value::as_str)
-            .and_then(|path| field_text(record, path)),
-        _ => None,
-    };
-    let role =
-        if matches!(role, TimelineRole::PairOpen | TimelineRole::PairClose) && pair_key.is_none() {
-            TimelineRole::Line
-        } else {
-            role
-        };
     ProjectedRecord {
         primary,
         meta,
         tone,
-        role,
-        pair_key,
         raw: record.clone(),
     }
 }
@@ -727,10 +755,67 @@ pub fn project_tone(record: &Value, projection: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What a table column holds. A client chooses font, dimming, alignment,
+/// truncation and default width from the role; the view only names the field.
+/// The set is closed because each role is a drawing choice, not a policy.
+///
+/// A graphical client draws every role. A terminal has no font or dimming, so
+/// it keeps only what a character grid can show: right alignment for `count`,
+/// truncation (middle for `id` and `ref`, from the left for `path`), the first
+/// eight characters of a `hash`, and the status mark and word for `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnRole {
+    /// Words in the body face; takes the room left over.
+    #[default]
+    Text,
+    /// A thread or chain id: monospace, truncated in the middle.
+    Id,
+    /// An item ref: monospace, truncated in the middle, keeps the leaf.
+    Ref,
+    /// A file path: monospace, dim, truncated from the left.
+    Path,
+    /// A kind word, soft ink.
+    Kind,
+    /// A status word led by a dot in the row's tone, in one cell. A view with
+    /// a status column draws no leading row dot.
+    Status,
+    /// A time, dim.
+    Time,
+    /// A number: right-aligned.
+    Count,
+    /// A digest: monospace, dim, first eight characters.
+    Hash,
+    /// A single quiet affordance.
+    Action,
+}
+
+impl ColumnRole {
+    /// The role an authored `role` word names; `None` for a word outside the
+    /// closed set (the view kind schema refuses those before they get here).
+    pub fn from_word(word: &str) -> Option<Self> {
+        Some(match word {
+            "text" => Self::Text,
+            "id" => Self::Id,
+            "ref" => Self::Ref,
+            "path" => Self::Path,
+            "kind" => Self::Kind,
+            "status" => Self::Status,
+            "time" => Self::Time,
+            "count" => Self::Count,
+            "hash" => Self::Hash,
+            "action" => Self::Action,
+            _ => return None,
+        })
+    }
+}
+
 /// One declared column of a `table` view: a header label and the record field
 /// it projects. `projections.columns` is the ordered list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableColumn {
+    /// What the column holds; absent means `text`.
+    pub role: ColumnRole,
     pub label: String,
     pub field: String,
     /// Optional per-column tone block — the same `{field, map, default,
@@ -743,11 +828,18 @@ pub struct TableColumn {
     /// narrow cell keeps the segment that names the thing instead of the
     /// namespace boilerplate. `leaf` keeps only that final segment; `words`
     /// turns underscore-delimited wire values into display words; `time_date`
-    /// renders a canonical timestamp as `14:32 · 15 Jul`.
+    /// renders a canonical timestamp as `14:32 · 15 Jul`; `time_relative`
+    /// renders one from today as its time of day (`14:26`), one from the day
+    /// before as the `yesterday` word of `labels`, and any other as
+    /// `time_date` does. Days are counted in UTC.
     pub present: Option<String>,
     /// Authored display value used only when the projected field is absent or
     /// empty. This is presentation fallback, not synthesized record data.
     pub fallback: Option<String>,
+    /// Authored words for raw values: a cell equal to a key here reads as its
+    /// value (`directive_run` as `directive`). Applied before `present`, and
+    /// `time_relative` reads its `yesterday` entry from the same map.
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 /// Optional structural projection for a hierarchy-aware table. The source owns
@@ -774,8 +866,19 @@ pub struct TableHierarchyRow {
 /// `tail_first` flips a pathed value so the leaf leads and the namespace
 /// trails — the readable half survives right-truncation. Unknown or
 /// inapplicable presentations pass the cell through untouched.
-fn present_cell(cell: &str, present: Option<&str>) -> String {
+fn present_cell(
+    cell: &str,
+    present: Option<&str>,
+    now_ms: u64,
+    labels: &std::collections::BTreeMap<String, String>,
+) -> String {
+    if let Some(word) = labels.get(cell) {
+        return word.clone();
+    }
     match present {
+        Some("time_relative") => present_time_relative(cell, now_ms, labels)
+            .or_else(|| present_time_date(cell))
+            .unwrap_or_else(|| cell.to_string()),
         Some("tail_first") => match cell.rsplit_once('/') {
             Some((prefix, leaf)) if !leaf.is_empty() => format!("{leaf} ‹ {prefix}"),
             _ => cell.to_string(),
@@ -789,6 +892,46 @@ fn present_cell(cell: &str, present: Option<&str>) -> String {
         Some("words") => cell.replace('_', " "),
         Some("time_date") => present_time_date(cell).unwrap_or_else(|| cell.to_string()),
         _ => cell.to_string(),
+    }
+}
+
+/// The time of day of a timestamp from today, or the `yesterday` word for one
+/// from the day before. `None` for any other day, an unparsable value or no
+/// known clock (`now_ms` of zero), which then read as `time_date`.
+fn present_time_relative(
+    value: &str,
+    now_ms: u64,
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if now_ms == 0 {
+        return None;
+    }
+    let (date, time) = value.split_once('T')?;
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse::<i64>().ok()?;
+    let month = parts.next()?.parse::<i64>().ok()?;
+    let day = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let hour = time.get(..2)?.parse::<u8>().ok()?;
+    let minute = time.get(3..5)?.parse::<u8>().ok()?;
+    if time.as_bytes().get(2) != Some(&b':') || hour > 23 || minute > 59 {
+        return None;
+    }
+    // Days since the epoch for a civil date (proleptic Gregorian).
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year - era * 400;
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let then_day = era * 146_097 + day_of_era - 719_468;
+    let now_day = i64::try_from(now_ms / 86_400_000).ok()?;
+    match now_day - then_day {
+        0 => Some(format!("{hour:02}:{minute:02}")),
+        1 => labels.get("yesterday").cloned(),
+        _ => None,
     }
 }
 
@@ -843,7 +986,7 @@ fn present_time_date(value: &str) -> Option<String> {
 }
 
 /// The columns a `table` view declares — `projections.columns`, each
-/// `{label, field, tone?, present?, fallback?}` (label defaults to the field
+/// `{label, field, role?, tone?, present?, fallback?}` (label defaults to the field
 /// path). A column missing a field is skipped; absent `columns` → empty (the
 /// table renders headerless).
 pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
@@ -857,6 +1000,11 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                     let field = col.get("field").and_then(Value::as_str)?;
                     let label = col.get("label").and_then(Value::as_str).unwrap_or(field);
                     Some(TableColumn {
+                        role: col
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .and_then(ColumnRole::from_word)
+                            .unwrap_or_default(),
                         label: label.to_string(),
                         field: field.to_string(),
                         tone: col.get("tone").cloned(),
@@ -868,6 +1016,18 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                             .get("fallback")
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        labels: col
+                            .get("labels")
+                            .and_then(Value::as_object)
+                            .map(|words| {
+                                words
+                                    .iter()
+                                    .filter_map(|(raw, word)| {
+                                        Some((raw.clone(), word.as_str()?.to_string()))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -931,7 +1091,6 @@ pub fn table_hierarchy_rows(
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn visit(
         index: usize,
         is_last: bool,
@@ -1055,19 +1214,12 @@ pub fn source_collection<'a>(binding: &ViewBinding, response: &'a Value) -> &'a 
 }
 
 pub fn project_record_for_binding(binding: &ViewBinding, record: &Value) -> ProjectedRecord {
-    let event_kinds = binding.projections.get("event_kinds");
     let default_projection = binding
         .projections
         .get("default")
         .cloned()
         .unwrap_or_else(|| binding.projections.clone());
-    let projection = event_kinds
-        .and_then(|kinds| {
-            let kind = record.get("event_type").and_then(Value::as_str)?;
-            kinds.get(kind)
-        })
-        .unwrap_or(&default_projection);
-    project_record(record, projection)
+    project_record(record, &default_projection)
 }
 
 /// One projected table row: a cell per column (in column order), the per-cell
@@ -1091,10 +1243,11 @@ pub fn project_table(
     binding: &ViewBinding,
     response: &Value,
     columns: &[TableColumn],
+    now_ms: u64,
 ) -> Vec<ProjectedTableRow> {
     source_collection(binding, response)
         .iter()
-        .map(|record| project_table_record(binding, record, columns))
+        .map(|record| project_table_record(binding, record, columns, now_ms))
         .collect()
 }
 
@@ -1102,6 +1255,7 @@ pub fn project_table_record(
     binding: &ViewBinding,
     record: &Value,
     columns: &[TableColumn],
+    now_ms: u64,
 ) -> ProjectedTableRow {
     ProjectedTableRow {
         cells: columns
@@ -1111,7 +1265,7 @@ pub fn project_table_record(
                     .filter(|cell| !cell.is_empty())
                     .or_else(|| col.fallback.clone())
                     .unwrap_or_default();
-                present_cell(&cell, col.present.as_deref())
+                present_cell(&cell, col.present.as_deref(), now_ms, &col.labels)
             })
             .collect(),
         cell_tones: columns
@@ -1126,10 +1280,8 @@ pub fn project_table_record(
     }
 }
 
-/// Project a rows/timeline source response: pull the collection, apply
-/// per-record projections. Timeline uses per-event-kind blocks keyed by
-/// the record's `event_type`, falling back to `default`, falling back to
-/// raw — degradation is the v0, not an error path.
+/// Project a rows source response: pull the collection, apply the binding's
+/// record projection — degradation is the v0, not an error path.
 pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<ProjectedRecord> {
     source_collection(binding, response)
         .iter()
@@ -1138,7 +1290,7 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 }
 
 /// Project one section's source response into records, applying the section's
-/// single projection (no per-event-kind blocks — that's `project_records`).
+/// single projection.
 /// A section with a `collection` is a list source: one row per record. A
 /// section without one is a *detail* source: the whole response is a single
 /// record — one row — so a sections view can carry a singular status line
@@ -1440,6 +1592,31 @@ pub fn feeds_param_collision(binding: &ViewBinding) -> Option<String> {
 }
 
 fn source_contract_error(binding: &ViewBinding) -> Option<String> {
+    if let Some(input) = binding.input.as_ref().filter(|input| input.local_filter) {
+        if binding.local_projection.is_none() {
+            return Some("input.local_filter requires an ordinary local_projection View".into());
+        }
+        if input.feeds.is_some()
+            || input.completion.is_some()
+            || input.mentions.is_some()
+            || input.submit.is_some()
+            || input.command_submit.is_some()
+            || input.thread_control.is_some()
+            || input.target.is_some()
+        {
+            return Some("input.local_filter cannot compose source feeds, network suggestions, submission or route controls".into());
+        }
+    }
+    if binding.local_projection.is_some() {
+        if !matches!(binding.widget.as_str(), "rows" | "table") {
+            return Some("local_projection requires a rows or table widget".into());
+        }
+        if !binding.sources.is_empty() || binding.facet.is_some() || !binding.sections.is_empty() {
+            return Some(
+                "local_projection cannot compose executable sources, facets or sections".into(),
+            );
+        }
+    }
     if binding.widget == "field" && binding.sources.is_empty() {
         return Some("field views require at least one named source".to_string());
     }
@@ -1509,6 +1686,109 @@ fn source_contract_error(binding: &ViewBinding) -> Option<String> {
     None
 }
 
+#[cfg(test)]
+mod local_projection_contract_tests {
+    use super::*;
+
+    #[test]
+    fn local_projection_is_closed_and_never_an_executable_source() {
+        let binding: ViewBinding = serde_json::from_value(serde_json::json!({
+            "widget":"rows", "local_projection":"launcher",
+        }))
+        .unwrap();
+        assert!(source_contract_error(&binding).is_none());
+        assert!(
+            serde_json::from_value::<ViewBinding>(serde_json::json!({
+                "widget":"rows", "local_projection":"runtime:anything",
+            }))
+            .is_err()
+        );
+        for payload in [
+            serde_json::json!({"widget":"text", "local_projection":"launcher"}),
+            serde_json::json!({"widget":"rows", "local_projection":"launcher", "facet":"selection"}),
+            serde_json::json!({"widget":"rows", "local_projection":"launcher", "sources":{"default":{"ref":"service:test/read"}}}),
+            serde_json::json!({"widget":"rows", "local_projection":"shortcuts", "sections":[{"title":"x","source_channel":"default","collection":"rows","projection":{}}]}),
+        ] {
+            let binding: ViewBinding = serde_json::from_value(payload).unwrap();
+            assert!(source_contract_error(&binding).is_some());
+        }
+    }
+
+    #[test]
+    fn local_filter_is_explicit_and_cannot_contact_or_retarget_a_source() {
+        let valid = serde_json::json!({"widget":"rows","local_projection":"launcher","input":{"id":"query","local_filter":true}});
+        let binding: ViewBinding = serde_json::from_value(valid.clone()).unwrap();
+        assert!(source_contract_error(&binding).is_none());
+        assert!(binding.input.as_ref().unwrap().is_live_filter());
+        let mut missing_projection = valid.clone();
+        missing_projection
+            .as_object_mut()
+            .unwrap()
+            .remove("local_projection");
+        assert!(
+            source_contract_error(&serde_json::from_value(missing_projection).unwrap()).is_some()
+        );
+        for (field, value) in [
+            ("feeds", serde_json::json!({"param":"query"})),
+            (
+                "completion",
+                serde_json::json!({"ref":"service:test/suggestions"}),
+            ),
+            (
+                "mentions",
+                serde_json::json!({"ref":"service:test/mentions","reference":"ref"}),
+            ),
+            ("submit", serde_json::json!("route")),
+            ("command_submit", serde_json::json!("commands")),
+            ("thread_control", serde_json::json!("control")),
+            ("target", serde_json::json!({"cycle":"route_chains"})),
+        ] {
+            let mut payload = valid.clone();
+            payload["input"][field] = value;
+            assert!(
+                source_contract_error(&serde_json::from_value(payload).unwrap()).is_some(),
+                "{field}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<ViewBinding>(
+                serde_json::json!({"widget":"rows","input":{"id":"query","local_filter":"true"}})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ViewBinding>(
+                serde_json::json!({"widget":"rows","input":{"id":"query","mode":"live_filter"}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn authored_view_kind_composes_and_types_local_projection_and_filter() {
+        let schema: Value = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/ryeos-ui/.ai/node/engine/kinds/view/view.kind-schema.yaml"
+        ))
+        .unwrap();
+        let fields = schema["composer_config"]["fields"].as_array().unwrap();
+        let projection = fields
+            .iter()
+            .find(|field| field["name"] == "local_projection")
+            .unwrap();
+        assert_eq!(projection["strategy"], "replace_root_last");
+        assert_eq!(projection["expect_value_type"], "string");
+        assert_eq!(
+            schema["composed_value_contract"]["optional"]["local_projection"]["enum"],
+            serde_json::json!(["launcher", "shortcuts", "session_details"])
+        );
+        assert_eq!(
+            schema["composed_value_contract"]["optional"]["input"]["contract"]["optional"]["local_filter"]
+                ["prim"],
+            "boolean"
+        );
+    }
+}
+
 fn value_contains_exact_string(value: &Value, needle: &str) -> bool {
     match value {
         Value::String(value) => value == needle,
@@ -1569,12 +1849,12 @@ pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
                 REFRESH_KEYS.join(", ")
             ));
         }
-        if let Some(value) = object.get("after_invoke") {
-            if !view_level || !value.is_boolean() {
-                return Some(format!(
-                    "invalid {scope} refresh.after_invoke: only a view-level boolean is supported"
-                ));
-            }
+        if let Some(value) = object.get("after_invoke")
+            && (!view_level || !value.is_boolean())
+        {
+            return Some(format!(
+                "invalid {scope} refresh.after_invoke: only a view-level boolean is supported"
+            ));
         }
         if object
             .get("on_facet")
@@ -1625,6 +1905,14 @@ pub enum AffordanceInvoke {
         persist_affordance: String,
     },
     SaveParticularViewSet {
+        context: Value,
+        persist_affordance: String,
+    },
+    SaveActiveSurface {
+        context: Value,
+        persist_affordance: String,
+    },
+    SaveParticularSurface {
         context: Value,
         persist_affordance: String,
     },
@@ -1721,6 +2009,26 @@ pub fn resolve_affordance_invoke(
                             context: value,
                             persist_affordance: companion.to_owned(),
                         })
+                    }
+                    "save_active_surface" | "save_particular_surface" => {
+                        let companion = invoke.get("persist_affordance")?.as_str()?;
+                        if companion.is_empty()
+                            || companion.trim() != companion
+                            || companion.chars().any(char::is_control)
+                        {
+                            return None;
+                        }
+                        if operation == "save_active_surface" {
+                            Some(AffordanceInvoke::SaveActiveSurface {
+                                context: value,
+                                persist_affordance: companion.to_owned(),
+                            })
+                        } else {
+                            Some(AffordanceInvoke::SaveParticularSurface {
+                                context: value,
+                                persist_affordance: companion.to_owned(),
+                            })
+                        }
                     }
                     _ => None,
                 };
@@ -2001,7 +2309,7 @@ mod tests {
             { "thread_id": "T-cd", "status": "failed" }
         ]});
         let columns = table_columns(&binding);
-        let rows = project_table(&binding, &response, &columns);
+        let rows = project_table(&binding, &response, &columns, 0);
 
         // Follow row: row tone from status (neutral default), follow CELL warn.
         assert_eq!(rows[0].tone.as_deref(), Some("neutral"));
@@ -2035,7 +2343,7 @@ mod tests {
             "created_at": "2026-07-15T14:32:18Z"
         });
         let columns = table_columns(&binding);
-        let rows = project_table(&binding, &json!({ "items": [record.clone()] }), &columns);
+        let rows = project_table(&binding, &json!({ "items": [record.clone()] }), &columns, 0);
 
         assert_eq!(
             rows[0].cells,
@@ -2045,13 +2353,44 @@ mod tests {
     }
 
     #[test]
+    fn a_column_reads_authored_words_and_relative_days() {
+        let words: std::collections::BTreeMap<String, String> = [
+            ("directive_run".to_string(), "directive".to_string()),
+            ("yesterday".to_string(), "yesterday".to_string()),
+        ]
+        .into();
+        // 2026-11-12T14:40:00Z
+        let now = 1_794_494_400_000;
+        assert_eq!(
+            present_cell("directive_run", Some("words"), now, &words),
+            "directive"
+        );
+        assert_eq!(
+            present_cell("tool_run", Some("words"), now, &words),
+            "tool run"
+        );
+        let relative =
+            |value: &str, now: u64| present_cell(value, Some("time_relative"), now, &words);
+        assert_eq!(relative("2026-11-12T09:12:00Z", now), "09:12");
+        assert_eq!(relative("2026-11-11T23:59:00Z", now), "yesterday");
+        assert_eq!(relative("2026-11-10T08:00:00Z", now), "08:00 · 10 Nov");
+        // No known clock: the date form.
+        assert_eq!(relative("2026-11-12T09:12:00Z", 0), "09:12 · 12 Nov");
+    }
+
+    #[test]
     fn invalid_time_date_presentation_keeps_the_authored_value() {
         assert_eq!(
-            present_cell("not-a-timestamp", Some("time_date")),
+            present_cell("not-a-timestamp", Some("time_date"), 0, &Default::default()),
             "not-a-timestamp"
         );
         assert_eq!(
-            present_cell("2026-07-15T29:88:00Z", Some("time_date")),
+            present_cell(
+                "2026-07-15T29:88:00Z",
+                Some("time_date"),
+                0,
+                &Default::default()
+            ),
             "2026-07-15T29:88:00Z"
         );
     }
@@ -2259,6 +2598,91 @@ mod tests {
         let binding = out.get("view:ryeos/gone").expect("present");
         assert_eq!(binding.degraded.as_deref(), Some("item not found"));
         assert_eq!(binding.view_ref.as_deref(), Some("view:ryeos/gone"));
+    }
+
+    #[test]
+    fn embedded_view_authorship_parses() {
+        let surface = json!({ "views": {
+            "view:proj/mine": {
+                "widget": "rows",
+                "authorship": { "space": "project", "trust_class": "untrusted_project" }
+            }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:proj/mine").expect("present");
+        assert!(binding.degraded.is_none(), "{:?}", binding.degraded);
+        let authorship = binding.authorship.as_ref().expect("authorship parsed");
+        assert_eq!(authorship.space, "project");
+        assert_eq!(authorship.trust_class, "untrusted_project");
+        assert_eq!(authorship.item_ref, None);
+        assert_eq!(authorship.signer, None);
+        assert!(authorship.source_refs.is_empty());
+        assert_eq!(authorship.mark_tail(), "untrusted");
+    }
+
+    #[test]
+    fn embedded_view_authorship_full_shape_parses() {
+        let surface = json!({ "views": {
+            "view:farm/project/field": {
+                "widget": "rows",
+                "authorship": {
+                    "space": "project",
+                    "trust_class": "trusted_project",
+                    "ref": "view:farm/project/field",
+                    "signer": { "fingerprint": "0123456789abcdef", "name": "leo" },
+                    "source_refs": ["service:ui/ryeos-ui/field/project"]
+                }
+            },
+            "view:farm/project/nameless": {
+                "widget": "rows",
+                "authorship": {
+                    "space": "project",
+                    "trust_class": "trusted_project",
+                    "signer": { "fingerprint": "0123456789abcdef" }
+                }
+            }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let full = out.get("view:farm/project/field").expect("present");
+        assert!(full.degraded.is_none(), "{:?}", full.degraded);
+        let authorship = full.authorship.as_ref().expect("authorship parsed");
+        assert_eq!(
+            authorship.item_ref.as_deref(),
+            Some("view:farm/project/field")
+        );
+        assert_eq!(
+            authorship.source_refs,
+            vec!["service:ui/ryeos-ui/field/project"]
+        );
+        let signer = authorship.signer.as_ref().expect("signer parsed");
+        assert_eq!(signer.fingerprint, "0123456789abcdef");
+        assert_eq!(signer.name.as_deref(), Some("leo"));
+        assert_eq!(authorship.mark_tail(), "leo");
+        let nameless = out.get("view:farm/project/nameless").expect("present");
+        let authorship = nameless.authorship.as_ref().expect("authorship parsed");
+        assert_eq!(authorship.mark_tail(), "01234567");
+    }
+
+    #[test]
+    fn embedded_bundle_view_has_no_authorship() {
+        let surface = json!({ "views": {
+            "view:ryeos/threads": { "widget": "rows" }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:ryeos/threads").expect("present");
+        assert!(binding.degraded.is_none(), "{:?}", binding.degraded);
+        assert_eq!(binding.authorship, None);
+    }
+
+    #[test]
+    fn degraded_entry_has_no_authorship() {
+        let surface = json!({ "views": {
+            "view:ryeos/gone": { "degraded": "item not found" }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:ryeos/gone").expect("present");
+        assert_eq!(binding.degraded.as_deref(), Some("item not found"));
+        assert_eq!(binding.authorship, None);
     }
 
     #[test]
@@ -2509,128 +2933,6 @@ mod tests {
     }
 
     #[test]
-    fn timeline_event_kinds_with_default_degradation() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": { "message_delta": { "primary": "payload.delta" } },
-                "default": { "primary": "event_type", "meta": "ts" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "message_delta", "payload": { "delta": "hel" }, "ts": "t1" },
-            { "event_type": "totally_unknown_kind", "payload": {}, "ts": "t2" }
-        ]});
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].primary, "hel");
-        assert_eq!(rows[1].primary, "totally_unknown_kind");
-        assert_eq!(rows[1].meta.as_deref(), Some("t2"));
-    }
-
-    #[test]
-    fn timeline_roles_and_pair_keys_are_projected_from_content() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "delta": { "primary": "payload.text", "role": "flow" },
-                    "start": { "primary": "payload.name", "role": "pair_open", "pair_key": "payload.id" },
-                    "done": { "primary": "payload.result", "role": "pair_close", "pair_key": "payload.id" },
-                    "turn": { "primary": "payload.label", "role": "boundary" },
-                    "typo": { "primary": "payload.text", "role": "FLOW" }
-                },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "delta", "payload": { "text": "hello" } },
-            { "event_type": "start", "payload": { "name": "tool", "id": "call-1" } },
-            { "event_type": "done", "payload": { "result": "ok", "id": "call-1" } },
-            { "event_type": "turn", "payload": { "label": "turn 1" } },
-            { "event_type": "typo", "payload": { "text": "literal" } }
-        ]});
-
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].role, TimelineRole::Flow);
-        assert_eq!(rows[1].role, TimelineRole::PairOpen);
-        assert_eq!(rows[1].pair_key.as_deref(), Some("call-1"));
-        assert_eq!(rows[2].role, TimelineRole::PairClose);
-        assert_eq!(rows[2].pair_key.as_deref(), Some("call-1"));
-        assert_eq!(rows[3].role, TimelineRole::Boundary);
-        assert_eq!(rows[4].role, TimelineRole::Line);
-    }
-
-    #[test]
-    fn pair_roles_without_resolvable_key_degrade_to_line() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "start": { "primary": "payload.name", "role": "pair_open", "pair_key": "payload.missing" }
-                },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "start", "payload": { "name": "tool", "id": "call-1" } }
-        ]});
-
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].role, TimelineRole::Line);
-        assert_eq!(rows[0].pair_key, None);
-    }
-
-    #[test]
-    fn flow_role_without_projected_primary_is_empty_for_fold_skip() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "message_delta": { "primary": "payload.delta", "role": "flow" }
-                },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "message_delta", "payload": { "content": "final answer" } }
-        ]});
-
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].role, TimelineRole::Flow);
-        assert!(rows[0].primary.is_empty());
-    }
-
-    #[test]
-    fn flow_role_uses_durable_content_projection() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "message_delta": { "primary": "payload.content", "role": "flow" }
-                },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "message_delta", "payload": { "delta": "partial", "content": "final answer" } }
-        ]});
-
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].role, TimelineRole::Flow);
-        assert_eq!(rows[0].primary, "final answer");
-    }
-
-    #[test]
     fn detail_projects_and_degrades() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "key_value",
@@ -2643,6 +2945,468 @@ mod tests {
         assert_eq!(
             detail[0],
             ("canonical_ref".to_string(), "view:x".to_string())
+        );
+    }
+
+    #[test]
+    fn authored_item_inspector_projects_nested_response_and_inline_summary() {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/ryeos-ui/.ai/views/ryeos/item/inspector.yaml");
+        let authored: Value =
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": authored["widget"],
+            "projections": authored["projections"]
+        }))
+        .unwrap();
+        let response = json!({
+            "schema_version": "ryeos-ui.item.inspect.v1",
+            "item": {
+                "canonical_ref": "tool:example/check",
+                "item_kind": "tool",
+                "space": "bundle",
+                "executable": true,
+                "trust": {"class": "trusted"}
+            },
+            "effective": {"description": "Check input"},
+            "effective_coverage": {"state": "available", "reason": "read_succeeded"},
+            "raw_coverage": {"state": "not_requested", "reason": "not_requested"}
+        });
+        let detail = project_detail(&binding, &response);
+        assert!(detail.contains(&("item.canonical_ref".into(), "tool:example/check".into())));
+        assert!(detail.contains(&("item.item_kind".into(), "tool".into())));
+        assert!(detail.iter().any(|(key, _)| key == "effective"));
+        assert!(detail.contains(&("effective_coverage.state".into(), "available".into())));
+        assert!(detail.contains(&("raw_coverage.state".into(), "not_requested".into())));
+        let failed = project_detail(
+            &binding,
+            &json!({
+                "effective_coverage": {"state": "failed", "reason": "read_failed"}
+            }),
+        );
+        assert!(failed.contains(&("effective_coverage.state".into(), "failed".into())));
+        assert!(failed.contains(&("effective_coverage.reason".into(), "read_failed".into())));
+        let summary = project_detail(
+            &binding,
+            &json!({"title": "Failure", "detail": "Exact cause"}),
+        );
+        assert_eq!(
+            summary,
+            vec![
+                ("title".into(), "Failure".into()),
+                ("detail".into(), "Exact cause".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn authored_catalogue_inspection_preserves_attachment_project_scope() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+        let read = |relative: &str| -> Value {
+            serde_yaml::from_str(&std::fs::read_to_string(root.join(relative)).unwrap()).unwrap()
+        };
+        let inspector = read("item/inspector.yaml");
+        for relative in ["items/space.yaml", "item/inspector.yaml"] {
+            let view = read(relative);
+            let source: SourceBinding =
+                serde_json::from_value(view["sources"]["default"].clone()).unwrap();
+            assert!(!source.requires_project, "{relative}");
+            assert!(source.params.get("project_path").is_none(), "{relative}");
+        }
+        let project = read("project/items.yaml");
+        assert_eq!(project["sources"]["default"]["requires_project"], true);
+        for relative in ["items/space.yaml", "project/items.yaml"] {
+            let view = read(relative);
+            let action = view["affordances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|action| action["id"] == "inspect")
+                .unwrap();
+            assert_eq!(action["invoke"]["plane"], "ui");
+            assert_eq!(action["invoke"]["facet"], "selection");
+            assert_eq!(
+                action["invoke"]["value"],
+                json!({"item": "{record.canonical_ref}"})
+            );
+            assert_eq!(action["invoke"]["open_view"], "view:ryeos/item/inspector");
+            assert_eq!(action["invoke"]["drill"], true);
+            let resolved = resolve_params(&inspector["sources"]["default"]["params"], |key| {
+                (key == "selection").then(|| json!({"item": "tool:example/check"}))
+            });
+            assert_eq!(resolved["canonical_ref"], "tool:example/check");
+            assert!(resolved.get("project_path").is_none());
+        }
+    }
+
+    #[test]
+    fn authored_node_inspection_has_no_conversation_route_and_declares_exact_view_targets() {
+        fn refs(value: &Value, queue: &mut Vec<String>) {
+            match value {
+                Value::String(value) if value.starts_with("view:") => queue.push(value.clone()),
+                Value::Array(values) => values.iter().for_each(|value| refs(value, queue)),
+                Value::Object(values) => values.values().for_each(|value| refs(value, queue)),
+                _ => {}
+            }
+        }
+        let root = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai");
+        let node: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(root.join("surfaces/ryeos/ui/node.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert!(node.get("input").is_none());
+        assert!(node.get("affordances").is_none());
+        assert_eq!(
+            node["tiles"],
+            json!([
+                "view:ryeos/node/threads/history",
+                "view:ryeos/projects/list",
+                "view:ryeos/node/events"
+            ])
+        );
+        let mut queue = Vec::new();
+        refs(&node, &mut queue);
+        let mut visited = std::collections::BTreeSet::new();
+        let mut sources = std::collections::BTreeSet::new();
+        let mut actions = std::collections::BTreeSet::new();
+        while let Some(view_ref) = queue.pop() {
+            if !visited.insert(view_ref.clone()) {
+                continue;
+            }
+            let path = root
+                .join("views")
+                .join(format!("{}.yaml", view_ref.strip_prefix("view:").unwrap()));
+            let view: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            refs(&view, &mut queue);
+            for source in view
+                .get("sources")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|map| map.values())
+            {
+                let target = source["ref"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("service:")
+                    .unwrap();
+                sources.insert(format!("ryeos.execute.service.{target}"));
+            }
+            for action in view
+                .get("affordances")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if action["invoke"]["plane"] == "rye" {
+                    let target = action["invoke"]["ref"]
+                        .as_str()
+                        .unwrap()
+                        .strip_prefix("service:")
+                        .unwrap();
+                    actions.insert(format!("ryeos.execute.service.{target}"));
+                }
+            }
+        }
+        // A lane must name the capabilities a listed service itself requires. The machines
+        // view reads a UI service that fans out through the node's locality service, so the
+        // lane carries that capability although no view names the service directly.
+        sources.insert("ryeos.execute.service.node/locality/groups".to_owned());
+        for (lane, expected) in [("sources", sources), ("affordances", actions)] {
+            let declared: std::collections::BTreeSet<String> = node["capabilities"][lane]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(declared, expected, "{lane}");
+            assert!(declared.iter().all(|capability| !capability.contains('*')));
+        }
+        let gc: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(root.join("views/ryeos/node/gc.yaml")).unwrap(),
+        )
+        .unwrap();
+        let source: SourceBinding =
+            serde_json::from_value(gc["sources"]["default"].clone()).unwrap();
+        assert!(!source.requires_project);
+        assert_eq!(source.params, json!({}));
+        assert_eq!(source.item_ref, "service:ui/ryeos-ui/gc/status");
+        let service: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(root.join("services/ui/ryeos-ui/gc/status.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(service["ui_read_only"], true);
+        assert_eq!(service["state_access"], "read_only_existing");
+    }
+
+    #[test]
+    fn authored_remotes_show_invalid_entries_without_network_probe() {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/ryeos-ui/.ai/views/ryeos/node/remotes.yaml");
+        let view: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(view["widget"], "sections");
+        assert_eq!(view["sources"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            view["sources"]["default"]["ref"],
+            "service:ui/ryeos-ui/remotes/list"
+        );
+        assert!(view.get("affordances").is_none());
+        let sections: Vec<SectionBinding> =
+            serde_json::from_value(view["sections"].clone()).unwrap();
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.collection.as_deref() == Some("remotes")
+                    && section.title.contains("not probed"))
+        );
+        let invalid = json!({"name": "broken", "error": "invalid configuration", "repair_hint": "repair this entry"});
+        let invalid_sections: Vec<_> = sections
+            .iter()
+            .filter(|section| section.collection.as_deref() == Some("invalid_remotes"))
+            .collect();
+        assert_eq!(invalid_sections.len(), 2);
+        let projected: Vec<_> = invalid_sections
+            .iter()
+            .map(|section| project_record(&invalid, &section.projection))
+            .collect();
+        assert!(projected.iter().all(|row| row.primary == "broken"));
+        assert!(
+            projected
+                .iter()
+                .any(|row| row.meta.as_deref() == Some("invalid configuration"))
+        );
+        assert!(
+            projected
+                .iter()
+                .any(|row| row.meta.as_deref() == Some("repair this entry"))
+        );
+        assert!(sections.iter().all(|section| section.activate.is_none()));
+        let configured = sections
+            .iter()
+            .find(|section| section.collection.as_deref() == Some("remotes"))
+            .unwrap();
+        let fields = expand_fields_from_projection(&configured.projection);
+        for field in [
+            "scope",
+            "principal_id",
+            "site_id",
+            "config_path",
+            "project_bindings",
+        ] {
+            assert!(fields.iter().any(|candidate| candidate == field));
+        }
+        let remote = json!({"name":"build", "scope":"project", "principal_id":"principal", "site_id":"site", "config_path":"config/remote.yaml", "project_bindings":[]});
+        assert_eq!(field_text(&remote, "scope").as_deref(), Some("project"));
+        assert!(invalid_sections.iter().any(|section| {
+            expand_fields_from_projection(&section.projection)
+                .iter()
+                .any(|field| field == "repair_hint")
+        }));
+        assert!(
+            sections
+                .iter()
+                .all(|section| section.projection["identity"] == "name")
+        );
+    }
+
+    #[test]
+    fn thread_detail_label_value_sections_lead_with_the_label() {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml");
+        let binding: ViewBinding =
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let response = json!({
+            "execution_meta": [{"label": "executor", "value": "directive-runtime"}],
+            "usage": [{"label": "tokens in", "value": "184,220"}],
+        });
+        for (title, label, value) in [
+            ("Execution", "executor", "directive-runtime"),
+            ("Usage", "tokens in", "184,220"),
+        ] {
+            let section = binding
+                .sections
+                .iter()
+                .find(|section| section.title == title)
+                .expect("section is authored");
+            let rows = project_section(section, &response);
+            assert_eq!(rows.len(), 1, "{title}");
+            assert_eq!(rows[0].primary, label, "{title}: the name leads");
+            assert_eq!(rows[0].meta.as_deref(), Some(value), "{title}");
+        }
+    }
+
+    #[test]
+    fn authored_outcome_coverage_remains_visible_without_a_result() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+        for relative in ["work/evidence.yaml", "threads/detail.yaml"] {
+            let authored: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(root.join(relative)).unwrap())
+                    .unwrap();
+            let sections: Vec<SectionBinding> =
+                serde_json::from_value(authored["sections"].clone()).unwrap();
+            let section = sections
+                .iter()
+                .find(|section| section.collection.as_deref() == Some("outcome_coverage"))
+                .unwrap();
+            assert!(section.activate.is_none());
+            for (state, reason, status) in [
+                (
+                    "pending",
+                    "nonterminal_snapshot_has_no_outcome_fields_yet",
+                    "running",
+                ),
+                (
+                    "absent",
+                    "terminal_snapshot_declares_no_outcome_fields",
+                    "completed",
+                ),
+                ("available", "signed_outcome_fields_retained", "failed"),
+            ] {
+                let rows = project_section(
+                    section,
+                    &json!({"result":null,
+                    "outcome_coverage":{"state":state,"reason":reason,"thread_status":status}}),
+                );
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].primary, state);
+                assert_eq!(rows[0].meta.as_deref(), Some(reason));
+                assert_eq!(
+                    field_text(&rows[0].raw, "thread_status").as_deref(),
+                    Some(status)
+                );
+                assert!(
+                    expand_fields_from_projection(&section.projection)
+                        .contains(&"thread_status".to_string())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authored_artifact_sections_show_signed_identity_and_metadata_without_blob_actions() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+        for relative in ["work/evidence.yaml", "threads/detail.yaml"] {
+            let authored: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(root.join(relative)).unwrap())
+                    .unwrap();
+            let sections: Vec<SectionBinding> =
+                serde_json::from_value(authored["sections"].clone()).unwrap();
+            let section = sections
+                .iter()
+                .find(|section| section.collection.as_deref() == Some("artifacts"))
+                .unwrap();
+            assert!(section.activate.is_none());
+            assert_eq!(section.projection["identity"], "artifact_id");
+            let artifact = json!({
+                "artifact_id":42, "artifact_type":"diagnostic_report", "uri":"", "content_hash":null,
+                "metadata":{"outcome":"passed", "checks":3}
+            });
+            let rows = project_section(section, &json!({"artifacts":[artifact.clone()]}));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].primary, "diagnostic_report");
+            assert_eq!(rows[0].meta.as_deref(), Some("42"));
+            let fields = expand_fields_from_projection(&section.projection);
+            assert_eq!(fields, vec!["artifact_id", "artifact_type", "metadata"]);
+            assert_eq!(
+                serde_json::from_str::<Value>(&field_text(&artifact, &fields[2]).unwrap()).unwrap(),
+                artifact["metadata"]
+            );
+            assert!(
+                !fields
+                    .iter()
+                    .any(|field| field == "uri" || field == "content_hash")
+            );
+        }
+    }
+
+    #[test]
+    fn authored_schedule_lists_do_not_activate_mutations_on_selection() {
+        for relative in ["schedules/list.yaml", "project/schedules.yaml"] {
+            let path = ryeos_engine::test_support::workspace_root()
+                .join("bundles/ryeos-ui/.ai/views/ryeos")
+                .join(relative);
+            let authored: Value =
+                serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(authored.get("selection").is_none(), "{relative}");
+            let actions = authored["affordances"].as_array().unwrap();
+            assert!(actions.iter().any(|action| action["id"] == "pause"));
+            assert!(actions.iter().any(|action| action["id"] == "resume"));
+        }
+    }
+
+    #[test]
+    fn authored_execution_inspection_uses_selection_without_conversation_routing() {
+        let root =
+            ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui/.ai/views/ryeos");
+        let read = |relative: &str| -> Value {
+            serde_yaml::from_str(&std::fs::read_to_string(root.join(relative)).unwrap()).unwrap()
+        };
+        for (relative, id, destination) in [
+            ("node/threads/history.yaml", "watch", "threads/detail"),
+            ("node/threads/history.yaml", "tree", "thread/tree"),
+            ("node/events.yaml", "watch-thread", "threads/detail"),
+            ("home/overview.yaml", "watch-thread", "threads/detail"),
+            ("thread/tree.yaml", "watch", "threads/detail"),
+            ("threads/list.yaml", "tree", "thread/tree"),
+            ("threads/history.yaml", "tree", "thread/tree"),
+        ] {
+            let view = read(relative);
+            let action = view["affordances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|action| action["id"] == id)
+                .unwrap();
+            assert_eq!(action["invoke"]["plane"], "ui", "{relative}:{id}");
+            assert_eq!(action["invoke"]["facet"], "selection", "{relative}:{id}");
+            assert_eq!(
+                action["invoke"]["value"],
+                json!({"thread_id": "{record.thread_id}"})
+            );
+            assert_eq!(
+                action["invoke"]["open_view"],
+                format!("view:ryeos/{destination}")
+            );
+            assert_eq!(action["invoke"]["drill"], true);
+            let target = read(&format!("{destination}.yaml"));
+            for source in target["sources"].as_object().unwrap().values() {
+                assert_eq!(source["params"]["thread_id"], "@facet:selection.thread_id");
+                let resolved = resolve_params(&source["params"], |key| {
+                    (key == "selection").then(|| json!({"thread_id": "T-inspected"}))
+                });
+                assert_eq!(resolved["thread_id"], "T-inspected");
+                let unresolved = resolve_params(&source["params"], |key| {
+                    (key == "input.route").then(|| json!({"thread": "T-conversation"}))
+                });
+                assert!(unresolved["thread_id"].is_null());
+            }
+        }
+        // Generic execution lists inspect executions, not conversation routes.
+        for relative in ["threads/list.yaml", "threads/history.yaml"] {
+            let view = read(relative);
+            let watch = view["affordances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|action| action["id"] == "watch")
+                .unwrap();
+            assert_eq!(watch["invoke"]["facet"], "selection");
+            assert_eq!(
+                watch["invoke"]["value"],
+                json!({"thread_id":"{record.thread_id}"})
+            );
+            assert_eq!(watch["invoke"]["open_view"], "view:ryeos/threads/detail");
+        }
+        assert_eq!(
+            read("thread/transcript.yaml")["sources"]["default"]["params"]["chain_root_id"],
+            "@facet:input.route.chain_root"
+        );
+        assert_eq!(
+            read("thread/conversation.yaml")["extends"],
+            "view:ryeos/thread/transcript"
         );
     }
 
@@ -3096,6 +3860,54 @@ mod tests {
         }))
         .unwrap();
         assert!(refresh_keys_error(&binding).is_some());
+    }
+
+    #[test]
+    fn saved_surface_operations_require_resolved_context_and_exact_companion() {
+        let record = json!({"context":{"expected_revision":4}});
+        for operation in ["save_active_surface", "save_particular_surface"] {
+            let mut affordance = json!({"invoke":{
+                "plane":"ui", "operation":operation,
+                "value":"{record.context}", "persist_affordance":"persist"
+            }});
+            let parsed = resolve_affordance_invoke(
+                &affordance,
+                Producer::Selection,
+                &Payload::Selection(&record),
+            );
+            let (context, companion) = match parsed.unwrap() {
+                AffordanceInvoke::SaveActiveSurface {
+                    context,
+                    persist_affordance,
+                }
+                | AffordanceInvoke::SaveParticularSurface {
+                    context,
+                    persist_affordance,
+                } => (context, persist_affordance),
+                _ => panic!("Surface operation parsed as another operation"),
+            };
+            assert_eq!(context, record["context"]);
+            assert_eq!(companion, "persist");
+            assert!(
+                resolve_affordance_invoke(
+                    &affordance,
+                    Producer::Selection,
+                    &Payload::Selection(&json!({})),
+                )
+                .is_none()
+            );
+            for companion in ["", " persist", "persist\n"] {
+                affordance["invoke"]["persist_affordance"] = json!(companion);
+                assert!(
+                    resolve_affordance_invoke(
+                        &affordance,
+                        Producer::Selection,
+                        &Payload::Selection(&record),
+                    )
+                    .is_none()
+                );
+            }
+        }
     }
 
     #[test]

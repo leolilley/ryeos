@@ -97,8 +97,11 @@ realpath_candidate="$(command -v -- realpath)" || {
     echo "realpath is required" >&2
     exit 2
 }
-[[ "$realpath_candidate" == /* && -f "$realpath_candidate" && -x "$realpath_candidate" && ! -L "$realpath_candidate" ]] || {
-    echo "realpath must resolve to an absolute regular executable, not a symlink" >&2
+# A multi-call coreutils installs `realpath` as a symlink to one binary that
+# dispatches on its invocation name, so the name is kept and the physical
+# target is what must be a regular executable outside the project.
+[[ "$realpath_candidate" == /* && -f "$realpath_candidate" && -x "$realpath_candidate" ]] || {
+    echo "realpath must resolve to an absolute regular executable" >&2
     exit 2
 }
 realpath_directory="${realpath_candidate%/*}"
@@ -112,11 +115,22 @@ physical_realpath_directory="$(
     exit 2
 }
 realpath_bin="$physical_realpath_directory/$realpath_name"
-[[ -f "$realpath_bin" && -x "$realpath_bin" && ! -L "$realpath_bin" ]] || {
-    echo "realpath physical target must be a regular executable, not a symlink" >&2
+# Never execute a realpath that physically lives in the project.
+case "$realpath_bin" in
+    "$project"|"$project/"*)
+        echo "realpath must be outside the synchronized project" >&2
+        exit 2
+        ;;
+esac
+realpath_target="$("$realpath_bin" -e -- "$realpath_bin")" || {
+    echo "realpath cannot resolve its own executable" >&2
     exit 2
 }
-case "$realpath_bin" in
+[[ "$realpath_target" == /* && -f "$realpath_target" && -x "$realpath_target" && ! -L "$realpath_target" ]] || {
+    echo "realpath physical target must be a regular executable" >&2
+    exit 2
+}
+case "$realpath_target" in
     "$project"|"$project/"*)
         echo "realpath must be outside the synchronized project" >&2
         exit 2
@@ -151,6 +165,23 @@ pin_external_command() {
             exit 2
             ;;
     esac
+    # A multi-call binary (one coreutils executable behind many names) acts on
+    # the name it is invoked by: keep that name in the command's physical
+    # directory instead of invoking the shared target under its own name.
+    if [[ "${resolved##*/}" != "${candidate##*/}" ]]; then
+        local physical_directory
+        physical_directory="$(unset CDPATH; cd -P -- "${candidate%/*}" && pwd -P)" || {
+            echo "$command_name directory cannot be physically resolved" >&2
+            exit 2
+        }
+        case "$physical_directory" in
+            "$project"|"$project/"*)
+                echo "$command_name must be outside the synchronized project: $physical_directory" >&2
+                exit 2
+                ;;
+        esac
+        resolved="$physical_directory/${candidate##*/}"
+    fi
     printf -v "$output_name" '%s' "$resolved"
 }
 
@@ -223,11 +254,9 @@ require_source_authority_directory() {
 }
 
 source_ai_root="$source_app_root/.ai"
-source_config_root="$source_ai_root/config"
 source_node_config_root="$source_ai_root/node"
-source_signing_key="$source_config_root/keys/signing/private_key.pem"
+source_signing_key="$source_node_config_root/operator/signing/private_key.pem"
 require_source_authority_directory "source RyeOS authority root" "$source_ai_root"
-require_source_authority_directory "source RyeOS operator configuration" "$source_config_root"
 require_source_authority_directory "source RyeOS node configuration" "$source_node_config_root"
 [[ -f "$source_signing_key" && ! -L "$source_signing_key" ]] || {
     echo "source RyeOS operator signing key must be a regular non-symlink file" >&2

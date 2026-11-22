@@ -1,3 +1,4 @@
+use ryeos_runtime::graph_result::ErrorRecord;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -5,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::context::ExecutionContext;
 use crate::evaluation::{ExpressionScope, GraphRunExpressionContext, validate_runtime_value};
-use crate::model::{DispatchObservation, ErrorRecord, GraphNode, GraphToolCallStatus, RetryConfig};
+use crate::model::{DispatchObservation, GraphNode, GraphToolCallStatus, RetryConfig};
 use ryeos_graph_definition::CompiledNode;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeCostError};
@@ -260,7 +261,6 @@ struct RetryEventCtx {
 /// emits a braid-visible `graph_node_retry` event, then sleeps the backoff.
 // Retry plumbing: the policy, backoff, and per-item event context for one
 // dispatch attempt, threaded verbatim from the foreach loop.
-#[allow(clippy::too_many_arguments)]
 async fn dispatch_item_with_retry(
     client: &CallbackClient,
     action: &Value,
@@ -287,7 +287,7 @@ async fn dispatch_item_with_retry(
             item_index,
             attempt,
         );
-        let outcome = crate::dispatch::dispatch_action(
+        let mut outcome = crate::dispatch::dispatch_action(
             client,
             &attempt_action,
             thread_id,
@@ -298,9 +298,22 @@ async fn dispatch_item_with_retry(
         .await;
         let retryable = match &outcome {
             Err(error) => error.retryable,
-            Ok(crate::dispatch::ActionOutcome::Failure(failure)) => failure.retryable,
+            Ok(crate::dispatch::ActionOutcome::Failure(failure)) => {
+                failure.retryable
+                    || (!failure.integrity && retry.is_some_and(|rc| rc.retries_tool_failure()))
+            }
             Ok(crate::dispatch::ActionOutcome::Success(_)) => false,
         };
+        if !retryable && attempt < total {
+            let note = crate::walker::retry_refused_note(total);
+            match &mut outcome {
+                Err(error) => error.diagnostic.push_str(&note),
+                Ok(crate::dispatch::ActionOutcome::Failure(failure)) => {
+                    failure.diagnostic.push_str(&note)
+                }
+                Ok(crate::dispatch::ActionOutcome::Success(_)) => {}
+            }
+        }
         if !retryable || attempt >= total {
             return RetriedDispatch {
                 outcome,

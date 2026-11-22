@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T05:42:27Z:a4a30dc19828559db82163d8d1373d2123f39858053c2ac19b2d4b9cf75c8a36:LCCDmgsF9y2cGbvK0QWGQCp1F+QhDGLmRjyGbd+2gNdKqYsCpqs8jSs506lqZWzYzZNc1FSdjAu0tcUKIP2CBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-10-26T23:21:33Z:8f22d893d8364ba155f6fab2b58d3f85e407535c1b68ac2e965bb4b0c5c0b5e4:GxeVcTEfSFK+O9vEO47drjbw5OaffNp9xXxoqXIR86CGlbWKnO4qCtO0DWvG3B5Q5p1HMgy0WgpXwSuIPCOUAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/authoring-environment-production
 #   version: "1.0.0"
@@ -10,7 +10,8 @@
 #   network_authority: isolated
 #   config_schema:
 #     type: object
-#     properties: {}
+#     properties:
+#       profile: {type: string, enum: [fixed_absolute_v1, private_origin_v1]}
 #     additionalProperties: false
 #   config_resolve:
 #     type: single

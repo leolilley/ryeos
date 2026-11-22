@@ -763,8 +763,8 @@ impl WorkloadClientResponseFrame {
         if let WorkloadClientOutcome::Dispatched { response } = &self.outcome {
             response.dispatch.validate()?;
         }
-        if let WorkloadClientOutcome::Failed { code, message, .. } = &self.outcome {
-            if code.is_empty()
+        if let WorkloadClientOutcome::Failed { code, message, .. } = &self.outcome
+            && (code.is_empty()
                 || code.len() > MAX_WORKLOAD_CLIENT_ERROR_CODE_BYTES
                 || !code.bytes().all(|byte| {
                     byte.is_ascii_lowercase()
@@ -772,10 +772,9 @@ impl WorkloadClientResponseFrame {
                         || matches!(byte, b'_' | b'-')
                 })
                 || message.len() > MAX_WORKLOAD_CLIENT_ERROR_MESSAGE_BYTES
-                || message.bytes().any(|byte| byte == 0)
-            {
-                anyhow::bail!("workload-client error is not canonical");
-            }
+                || message.bytes().any(|byte| byte == 0))
+        {
+            anyhow::bail!("workload-client error is not canonical");
         }
         let encoded = serde_json::to_vec(self)?;
         if encoded.is_empty() || encoded.len() > MAX_WORKLOAD_CLIENT_FRAME_BYTES {
@@ -922,6 +921,7 @@ mod tests {
             witness_hash: "a".repeat(64),
             witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
             qualification_hash: Some("b".repeat(64)),
+            remote_testimony: None,
         };
         let input = ProductSelectionInput {
             target: ProductSelectionTarget::WorkloadExecution {
@@ -930,7 +930,8 @@ mod tests {
             selection: selection.clone(),
         };
         let admitted =
-            admitted_execution_product_selections(&[input.clone()], Some(&request)).unwrap();
+            admitted_execution_product_selections(std::slice::from_ref(&input), Some(&request))
+                .unwrap();
         assert_eq!(
             admitted["tool:project/check"],
             vec![ProductSelectionInput {
@@ -938,7 +939,7 @@ mod tests {
                 selection,
             }]
         );
-        assert!(admitted_execution_product_selections(&[input.clone()], None).is_err());
+        assert!(admitted_execution_product_selections(std::slice::from_ref(&input), None).is_err());
 
         let mut outside = input;
         outside.target = ProductSelectionTarget::WorkloadExecution {

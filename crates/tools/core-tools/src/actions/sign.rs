@@ -77,22 +77,65 @@ impl SignSource {
 ///
 /// `project_path` is required when `source = Project`; ignored
 /// otherwise. The operator signing key is loaded from
-/// `<app_root>/.ai/config/keys/signing/private_key.pem`.
+/// `<app_root>/.ai/node/operator/signing/private_key.pem`; this runs in the
+/// operator's own process, never in the daemon.
 ///
 /// Returns a `BatchReport` always — single-item refs produce a one-
 /// element vec. Per-item failures are collected; a failed validator
 /// or sign on one item does NOT stop the batch.
 pub fn run_sign(
+    app_root: &Path,
     item_ref: &str,
     project_path: Option<&Path>,
     source: SignSource,
 ) -> Result<BatchReport> {
-    run_sign_batch(&[item_ref.to_owned()], project_path, source)
+    run_sign_batch(app_root, &[item_ref.to_owned()], project_path, source)
+}
+
+/// Everything an offline authoring run needs from the node at `app_root`: the
+/// retained registered generation's kinds, parsers and trust, and the
+/// operator signing key. The key is read here, in the operator's own process.
+pub(crate) struct OfflineAuthoring {
+    pub(crate) isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    pub(crate) kinds: KindRegistry,
+    pub(crate) parsers: ParserDispatcher,
+    pub(crate) node_trust_store: TrustStore,
+    pub(crate) signing_key: SigningKey,
+}
+
+pub(crate) fn load_offline_authoring(app_root: &Path) -> Result<OfflineAuthoring> {
+    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)
+        .context("load retained node isolation generation")?;
+    let bundle_roots = isolation
+        .registered_generation_bundle_roots()
+        .context("retained isolation generation omitted bundle roots")?
+        .to_vec();
+    let node_trust_store = isolation
+        .registered_generation_node_trust()
+        .context("retained isolation generation omitted node trust")?
+        .clone();
+    let kinds = build_kind_registry(&bundle_roots, &node_trust_store)?;
+    let parsers = build_parser_dispatcher(
+        &bundle_roots,
+        &kinds,
+        &node_trust_store,
+        Arc::clone(&isolation),
+    )?;
+    let signing_key = load_operator_signing_key(app_root)?;
+    ensure_operator_key_is_trusted(&node_trust_store, &signing_key)?;
+    Ok(OfflineAuthoring {
+        isolation,
+        kinds,
+        parsers,
+        node_trust_store,
+        signing_key,
+    })
 }
 
 /// Offline batch form of [`run_sign`], retaining one admitted engine
 /// generation and one project mutation lock for both signing phases.
 pub fn run_sign_batch(
+    app_root: &Path,
     item_refs: &[String],
     project_path: Option<&Path>,
     source: SignSource,
@@ -106,36 +149,11 @@ pub fn run_sign_batch(
             return parsed_target.map(|_| unreachable!());
         }
     }
-    let app_root = match std::env::var("RYEOS_APP_ROOT") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => dirs::data_dir()
-            .map(|d| d.join("ryeos"))
-            .expect("could not determine XDG data directory"),
-    };
-    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
-        .context("load retained node isolation generation")?;
-    let bundle_roots = isolation
-        .registered_generation_bundle_roots()
-        .context("retained isolation generation omitted bundle roots")?
-        .to_vec();
-    let node_trust_store = isolation
-        .registered_generation_node_trust()
-        .context("retained isolation generation omitted node trust")?
-        .clone();
-    let trust_store = match project_path {
-        Some(project_path) => node_trust_store
-            .with_project_keys(project_path)
-            .map(std::borrow::Cow::into_owned)
-            .with_context(|| "load project trust")?,
-        None => node_trust_store.clone(),
-    };
-
-    let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
-    let parsers =
-        build_parser_dispatcher(&bundle_roots, &kinds, &trust_store, Arc::clone(&isolation))?;
+    let authoring = load_offline_authoring(app_root)?;
     let resolution_roots = ryeos_engine::item_resolution::ResolutionRoots::from_registered(
         project_path.map(Path::to_path_buf),
-        isolation
+        authoring
+            .isolation
             .registered_generation_roots()
             .context("retained isolation generation omitted typed bundle roots")?,
     );
@@ -146,27 +164,24 @@ pub fn run_sign_batch(
             // superset of every node-specific ignored view.
             patterns: Vec::new(),
         })?;
-    let signing_key = load_operator_signing_key(&app_root)?;
-    ensure_operator_key_is_trusted(&trust_store, &signing_key)?;
     run_sign_prepared_batch(
         item_refs,
         project_path,
         source,
-        &kinds,
-        &parsers,
+        &authoring.kinds,
+        &authoring.parsers,
         &resolution_roots,
-        &trust_store,
-        &node_trust_store,
+        &authoring.node_trust_store,
+        &authoring.node_trust_store,
         &configured_ignore,
-        &signing_key,
+        &authoring.signing_key,
     )
 }
 
-/// Sign project items through an already-admitted daemon engine generation.
-///
-/// The daemon handler owns caller authentication and supplies the exact local
-/// operator key. This function publishes only the selected project item bytes;
-/// it never takes the node-wide state lock or writes runtime/CAS state.
+/// Sign project items through an already-admitted engine generation and the
+/// operator key the caller holds. This function publishes only the selected
+/// project item bytes; it never takes the node-wide state lock or writes
+/// runtime/CAS state.
 pub fn run_sign_online(
     item_ref: &str,
     project_path: &Path,
@@ -193,11 +208,7 @@ pub fn run_sign_online_batch(
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
     signing_key: &SigningKey,
 ) -> Result<BatchReport> {
-    let trust_store = engine
-        .node_trust_store
-        .with_project_keys(project_path)
-        .map(std::borrow::Cow::into_owned)
-        .context("load project trust")?;
+    let trust_store = engine.node_trust_store.clone();
     ensure_operator_key_is_trusted(&trust_store, signing_key)?;
     let resolution_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
     run_sign_prepared_batch(
@@ -225,7 +236,6 @@ fn ensure_operator_key_is_trusted(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_sign_prepared_batch(
     item_refs: &[String],
     project_path: Option<&Path>,
@@ -301,7 +311,7 @@ fn sign_target_descriptors(
     // no reason to make the caller retype what we already resolved.
     let target = match parsed_target {
         Ok(t) => t,
-        Err(e) => match resolve_path_to_ref(item_ref, source, project_path, &kinds) {
+        Err(e) => match resolve_path_to_ref(item_ref, source, project_path, kinds) {
             Some(resolved) => {
                 tracing::info!(
                     path = %item_ref,
@@ -317,6 +327,7 @@ fn sign_target_descriptors(
     let kind_schema = kinds
         .get(&target.kind)
         .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
+    crate::actions::revision::refuse_revision_kind(&target.kind)?;
 
     let kind_dir = source_kind_dir(kind_schema, source, project_path)?;
     let ai_root = source_ai_root(source, project_path)?;
@@ -412,6 +423,7 @@ fn sign_target_descriptors(
                 warnings,
                 executor_id,
                 resulting_content_digest,
+                content_before,
             }) => {
                 if let Some(executor_id) = executor_id {
                     pending_source_units.push(PendingProjectSourceUnit {
@@ -423,6 +435,24 @@ fn sign_target_descriptors(
                     });
                 }
                 let item_was_signed = matches!(outcome, SignOutcome::Signed { .. });
+                if item_was_signed
+                    && let Err(error) = record_signed_revision(
+                        project_path,
+                        signing_key,
+                        &display_ref,
+                        &file_path,
+                        &content_before,
+                    )
+                {
+                    report.failed.push(ItemOutcome {
+                        item_ref: display_ref,
+                        signature: None,
+                        error: Some(format!("{error:#}")),
+                        warnings,
+                        source_unit_files_signed: 0,
+                    });
+                    continue;
+                }
                 let signature = match outcome {
                     SignOutcome::Signed { report, .. } => report,
                     SignOutcome::Unchanged {
@@ -471,7 +501,7 @@ struct PreparedSignTarget {
     pending_source_units: Vec<PendingProjectSourceUnit>,
 }
 
-fn looks_path_arg(arg: &str) -> bool {
+pub(crate) fn looks_path_arg(arg: &str) -> bool {
     arg.contains('/') && (Path::new(arg).exists() || Path::new(arg).extension().is_some())
 }
 
@@ -567,6 +597,7 @@ fn sign_one(
         warnings,
         executor_id: metadata.executor_id,
         resulting_content_digest,
+        content_before: content,
     })
 }
 
@@ -578,7 +609,6 @@ struct PendingProjectSourceUnit {
     expected_source_digest: String,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn sign_project_source_units(
     source_root: &Path,
     kinds: &KindRegistry,
@@ -890,7 +920,7 @@ pub(crate) fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
 /// doesn't look like a path, isn't under the source `.ai/` root, or doesn't
 /// match a known kind directory + extension. A path under the project `.ai/`
 /// maps to exactly one ref, so the caller signs the resolved ref directly.
-fn resolve_path_to_ref(
+pub(crate) fn resolve_path_to_ref(
     arg: &str,
     source: SignSource,
     project_path: Option<&Path>,
@@ -929,7 +959,7 @@ fn is_glob_ref(s: &str) -> bool {
     s.contains('*') || s.contains('?')
 }
 
-fn is_glob(s: &str) -> bool {
+pub(crate) fn is_glob(s: &str) -> bool {
     s.contains('*') || s.contains('?')
 }
 
@@ -939,7 +969,7 @@ fn is_glob(s: &str) -> bool {
 ///     `kind_dir`)
 ///   * pattern without `/` → `**/{pattern}{ext}` (recursive)
 ///   * literal `*` → `**/*{ext}` (every item)
-fn glob_match_items(
+pub(crate) fn glob_match_items(
     kind_dir: &Path,
     kind_schema: &KindSchema,
     pattern: &str,
@@ -989,7 +1019,11 @@ fn glob_match_items(
 
 /// Reverse the file's path back to a `bare_id` for reporting.
 /// `<kind_dir>/<bare_id><ext>` → `<bare_id>`.
-fn derive_bare_id(file_path: &Path, kind_dir: &Path, kind_schema: &KindSchema) -> Option<String> {
+pub(crate) fn derive_bare_id(
+    file_path: &Path,
+    kind_dir: &Path,
+    kind_schema: &KindSchema,
+) -> Option<String> {
     let rel = file_path.strip_prefix(kind_dir).ok()?;
     let s = rel.to_string_lossy().to_string();
     for spec in &kind_schema.extensions {
@@ -1000,7 +1034,7 @@ fn derive_bare_id(file_path: &Path, kind_dir: &Path, kind_schema: &KindSchema) -
     None
 }
 
-fn source_kind_dir(
+pub(crate) fn source_kind_dir(
     kind_schema: &KindSchema,
     source: SignSource,
     project_path: Option<&Path>,
@@ -1009,7 +1043,7 @@ fn source_kind_dir(
     Ok(ai_root.join(&kind_schema.directory))
 }
 
-fn source_ai_root(source: SignSource, project_path: Option<&Path>) -> Result<PathBuf> {
+pub(crate) fn source_ai_root(source: SignSource, project_path: Option<&Path>) -> Result<PathBuf> {
     match source {
         SignSource::Project => {
             let p =
@@ -1148,12 +1182,12 @@ pub(super) fn sign_in_place_with_key(
     let parent = lillux::PinnedDirectory::open(parent_path)?
         .ok_or_else(|| anyhow!("sign target parent is unavailable"))?;
     let _lock = parent.lock_exclusive()?;
-    let mut incumbent = parent
+    let incumbent = parent
         .open_regular(name, false)?
         .ok_or_else(|| anyhow!("sign target is not a regular file"))?;
     let observation = lillux::observe_open_regular_file(&incumbent)?;
     let incumbent_bytes = lillux::read_open_regular_file_stable_bounded(
-        &mut incumbent,
+        &incumbent,
         &observation,
         ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
     )?;
@@ -1230,9 +1264,9 @@ pub(super) fn sign_in_place_with_key(
             if !observed.matches_quarantined_incumbent(&expected_observation) {
                 bail!("sign target metadata changed before publication");
             }
-            let mut current = current.try_clone()?;
+            let current = current.try_clone()?;
             let current = lillux::read_open_regular_file_stable_bounded(
-                &mut current,
+                &current,
                 &observed,
                 ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
             )?;
@@ -1351,12 +1385,11 @@ fn is_already_validly_signed_operator(
         return false;
     };
 
-    let signed_body = lillux::signature::content_to_sign(body, envelope.after_shebang);
     lillux::signature::is_valid_signature_for(
         &header.content_hash,
         &header.signature_b64,
         &header.signer_fingerprint,
-        signed_body,
+        body,
         verifying_key,
         fingerprint,
     )
@@ -1368,6 +1401,36 @@ struct SignOneResult {
     warnings: Vec<String>,
     executor_id: Option<String>,
     resulting_content_digest: String,
+    /// The item file as it stood before it was signed.
+    content_before: String,
+}
+
+/// Record the signature just written as a revision of the item, signed by the
+/// operator's key.
+fn record_signed_revision(
+    project_path: Option<&Path>,
+    signing_key: &SigningKey,
+    item_ref: &str,
+    file_path: &Path,
+    content_before: &str,
+) -> Result<()> {
+    let project_root =
+        project_path.ok_or_else(|| anyhow!("project source has no authoritative root"))?;
+    let after = lillux::read_regular_file_bounded_no_follow(
+        file_path,
+        ryeos_engine::item_resolution::MAX_ITEM_SOURCE_BYTES,
+    )
+    .with_context(|| format!("read signed {}", file_path.display()))?;
+    crate::actions::revision::record_operator_change(
+        project_root,
+        signing_key,
+        item_ref,
+        file_path,
+        Some(content_before.as_bytes()),
+        Some(after.as_slice()),
+        "sign",
+    )
+    .map(|_| ())
 }
 
 pub(super) enum SignOutcome {
@@ -1417,13 +1480,12 @@ pub fn load_user_signing_key() -> Result<SigningKey> {
 }
 
 /// Load the exact operator signing key beneath one already-selected node root.
-/// Daemon-owned authoring passes its configured root explicitly rather than
-/// relying on process environment discovery.
+/// Only operator-side processes call this; the daemon never holds the key.
 pub fn load_operator_signing_key(runtime_root: &Path) -> Result<SigningKey> {
     let root = lillux::PinnedDirectory::open(runtime_root)?
         .ok_or_else(|| anyhow!("operator runtime root is unavailable"))?;
     let mut parent = root.try_clone()?;
-    for segment in [ryeos_engine::AI_DIR, "config", "keys", "signing"] {
+    for segment in [ryeos_engine::AI_DIR, "node", "operator", "signing"] {
         parent = parent
             .open_child_directory(std::ffi::OsStr::new(segment))?
             .ok_or_else(|| anyhow!("operator signing-key directory is unavailable"))?;
@@ -1452,27 +1514,47 @@ mod tests {
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
 
-    fn live_bundle_engine() -> ryeos_engine::engine::Engine {
-        let trust_store = ryeos_engine::test_support::live_trust_store();
+    fn live_bundle_engine(operator: &SigningKey) -> ryeos_engine::engine::Engine {
+        let operator_vk = operator.verifying_key();
+        let trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(
+                    &ryeos_engine::test_support::platform_author_verifying_key(),
+                ),
+                verifying_key: ryeos_engine::test_support::platform_author_verifying_key(),
+                label: Some("test-support: platform author".into()),
+            },
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(
+                    &ryeos_engine::test_support::dev_publisher_verifying_key(),
+                ),
+                verifying_key: ryeos_engine::test_support::dev_publisher_verifying_key(),
+                label: Some("test-support: dev publisher".into()),
+            },
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(&operator_vk),
+                verifying_key: operator_vk,
+                label: Some("source-unit-sign-test".into()),
+            },
+        ]);
         let core = ryeos_engine::test_support::core_bundle_root();
-        let standard = ryeos_engine::test_support::standard_bundle_root();
-        let kinds = KindRegistry::load_base(
-            &[
-                core.join(ryeos_engine::AI_DIR)
-                    .join(ryeos_engine::KIND_SCHEMAS_DIR),
-                standard
-                    .join(ryeos_engine::AI_DIR)
-                    .join(ryeos_engine::KIND_SCHEMAS_DIR),
-            ],
-            &trust_store,
-        )
-        .unwrap();
-        let roots = vec![core, standard];
+        let workflow = ryeos_engine::test_support::workflow_bundle_roots();
+        let kind_roots: Vec<_> = std::iter::once(&core)
+            .chain(workflow.iter())
+            .map(|root| {
+                root.join(ryeos_engine::AI_DIR)
+                    .join(ryeos_engine::KIND_SCHEMAS_DIR)
+            })
+            .collect();
+        let kinds = KindRegistry::load_base(&kind_roots, &trust_store).unwrap();
+        let mut roots = vec![core];
+        roots.extend(workflow);
         let registered_roots = roots
             .iter()
-            .zip(["core", "standard"])
+            .zip(["core", "knowledge", "directive", "graph"])
             .map(
                 |(root, name)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
                     name: name.to_owned(),
                     canonical_root: root.clone(),
                 },
@@ -1490,21 +1572,123 @@ mod tests {
             .with_registered_bundle_roots(registered_roots)
     }
 
-    fn write_project_trust(project: &Path, key: &SigningKey) {
-        let verifying_key = key.verifying_key();
-        let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
-        let doc = ryeos_engine::trust::TrustedKeyDoc {
-            fingerprint,
-            owner: "source-unit-sign-test".to_owned(),
-            version: "1".to_owned(),
-            attestation: None,
-            verifying_key,
+    fn revision_bodies(
+        project: &Path,
+        kind: &str,
+        bare_id: &str,
+    ) -> Vec<ryeos_node_runtime::item_revision::RevisionBody> {
+        let directory = project.join(".ai/revisions").join(kind).join(bare_id);
+        let mut names: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+            .iter()
+            .map(|name| {
+                let text = std::fs::read_to_string(directory.join(name)).unwrap();
+                let (_, body) = text.split_once('\n').unwrap();
+                serde_yaml::from_str(body).unwrap()
+            })
+            .collect()
+    }
+
+    fn no_ignore() -> ryeos_state::ignore::IgnoreMatcher {
+        ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn operator_sign_and_remove_are_recorded_as_operator_signed_revisions() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let project = project_dir.path();
+        let item = project.join(".ai/knowledge/notes/a.yaml");
+        std::fs::create_dir_all(item.parent().unwrap()).unwrap();
+        std::fs::write(&item, "title: first\n").unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let engine = live_bundle_engine(&key);
+        let ignore = no_ignore();
+        let sign = || {
+            let report =
+                run_sign_online("knowledge:notes/a", project, &engine, &ignore, &key).unwrap();
+            assert!(report.is_total_success(), "{report:?}");
         };
-        let trust_dir = project
-            .join(ryeos_engine::AI_DIR)
-            .join(ryeos_engine::TRUST_KEYS_DIR);
-        std::fs::create_dir_all(&trust_dir).unwrap();
-        std::fs::write(trust_dir.join("operator.toml"), doc.to_toml()).unwrap();
+
+        sign();
+        let signed_once = std::fs::read(&item).unwrap();
+        std::fs::write(&item, "title: second\n").unwrap();
+        sign();
+        let signed_twice = std::fs::read(&item).unwrap();
+        // Signing an already-signed item changes nothing and records nothing.
+        sign();
+
+        let removed = crate::actions::revision::remove_item(
+            &engine.kinds,
+            &key,
+            "knowledge:notes/a",
+            project,
+        )
+        .unwrap();
+        assert_eq!(removed.revision, 3);
+        assert!(!item.exists());
+
+        let bodies = revision_bodies(project, "knowledge", "notes/a");
+        assert_eq!(bodies.len(), 3);
+        let fingerprint = format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&key.verifying_key())
+        );
+        assert!(bodies.iter().all(|body| {
+            body.actor.fingerprint == fingerprint
+                && body.actor.role == ryeos_node_runtime::item_revision::ActorRole::Operator
+        }));
+        assert_eq!(
+            bodies[0].before_digest,
+            Some(lillux::sha256_hex(b"title: first\n"))
+        );
+        assert_eq!(
+            bodies[0].after_digest,
+            Some(lillux::sha256_hex(&signed_once))
+        );
+        assert_eq!(
+            bodies[1].before_digest,
+            Some(lillux::sha256_hex(b"title: second\n"))
+        );
+        assert_eq!(
+            bodies[1].after_digest,
+            Some(lillux::sha256_hex(&signed_twice))
+        );
+        assert_eq!(bodies[2].before_digest, bodies[1].after_digest);
+        assert!(bodies[2].is_tombstone());
+        assert_eq!(bodies[2].provenance["action"], "remove");
+        assert_eq!(bodies[0].provenance["action"], "sign");
+    }
+
+    #[test]
+    fn revision_records_cannot_be_signed_or_removed_by_hand() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let engine = live_bundle_engine(&key);
+        let ignore = no_ignore();
+        let error = run_sign_online(
+            "revision:knowledge/notes/a/00000001",
+            project_dir.path(),
+            &engine,
+            &ignore,
+            &key,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("revision records"), "{error:#}");
+        let error = crate::actions::revision::remove_item(
+            &engine.kinds,
+            &key,
+            "revision:knowledge/notes/a/00000001",
+            project_dir.path(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("revision records"), "{error:#}");
     }
 
     #[test]
@@ -1543,7 +1727,13 @@ mod tests {
     fn run_sign_rejects_malformed_canonical_ref() {
         // `not-a-ref` has no `:` — CanonicalRef::parse fails. We
         // never reach trust-store / kind-registry loading.
-        let err = run_sign("not-a-ref", None, SignSource::Project).unwrap_err();
+        let err = run_sign(
+            Path::new("/nonexistent"),
+            "not-a-ref",
+            None,
+            SignSource::Project,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("malformed canonical ref"),
             "expected malformed-ref error, got: {err}"
@@ -1751,8 +1941,7 @@ printf '%s\n' fixture
         )
         .unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        write_project_trust(project, &key);
-        let engine = live_bundle_engine();
+        let engine = live_bundle_engine(&key);
         let ignore =
             ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
                 patterns: Vec::new(),
@@ -1828,6 +2017,7 @@ printf '%s\n' fixture
             effective_trust: Default::default(),
             content: None,
             execution: None,
+            thread_profile: None,
             composed_value_contract: ryeos_engine::contracts::ValueShape::any_mapping(),
             composer: "handler:ryeos/core/identity".to_owned(),
             composer_config: serde_json::Value::Null,
@@ -1835,6 +2025,9 @@ printf '%s\n' fixture
             inventory_kinds: Vec::new(),
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
+            launch_trust: None,
+            project_shadowing: Default::default(),
+            runtime_authoring: Default::default(),
         };
 
         assert!(matches!(

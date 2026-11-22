@@ -84,6 +84,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             &site_id,
         );
         let plan_ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: principal_id.clone(),
                 scopes: principal_scopes.clone(),
@@ -113,7 +114,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
         )
         .map_err(|error| {
             RouteDispatchError::Internal(format!(
-                "compiled service '{}' failed resolution/verification: {error}",
+                "compiled service '{}' failed resolution/verification: {error:#}",
                 self.service_ref
             ))
         })?;
@@ -121,7 +122,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             ryeos_app::service_registry::extract_endpoint(&verified.resolved.metadata.extra)
                 .map_err(|error| {
                     RouteDispatchError::Internal(format!(
-                        "compiled service '{}' has invalid verified endpoint metadata: {error}",
+                        "compiled service '{}' has invalid verified endpoint metadata: {error:#}",
                         self.service_ref
                     ))
                 })?;
@@ -134,7 +135,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
         if ryeos_app::service_registry::extract_ui_dispatch(&verified.resolved.metadata.extra)
             .map_err(|error| {
                 RouteDispatchError::Internal(format!(
-                    "compiled service '{}' has invalid verified dispatch metadata: {error}",
+                    "compiled service '{}' has invalid verified dispatch metadata: {error:#}",
                     self.service_ref
                 ))
             })?
@@ -159,7 +160,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             ryeos_app::service_registry::extract_record_thread(&verified.resolved.metadata.extra)
                 .map_err(|error| {
                 RouteDispatchError::Internal(format!(
-                    "compiled service '{}' has invalid recording metadata: {error}",
+                    "compiled service '{}' has invalid recording metadata: {error:#}",
                     self.service_ref
                 ))
             })?;
@@ -261,7 +262,7 @@ mod tests {
             verifier_key: "ryeos_signed",
             verified: true,
             authorized_key_class: Some(
-                ryeos_app::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             ),
             authenticated_origin_site_id: Some("site:remote".to_string()),
             authenticated_grant_authority: None,

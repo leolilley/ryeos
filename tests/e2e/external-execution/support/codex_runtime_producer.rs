@@ -4,6 +4,8 @@
 //! scripts/populate-bundles.sh (its require_static_payload gate), not an
 //! arbitrary host-linked debug binary. Execution retains enforced isolation.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use std::path::Path;
 
 use anyhow::{Context as _, ensure};
@@ -51,6 +53,7 @@ fn stage_exact_input(
             &mut std::io::Cursor::new(bytes),
             maximum_bytes,
             0o755,
+            TEST_PURPOSE,
         )?
         .context("private Codex input already exists")?;
     ensure!(copied == observed.size(), "private Codex copy size changed");
@@ -220,7 +223,7 @@ pub fn prepare(
         ),
     )?;
 
-    use ryeos_app::node_policy::sections::external_content::{
+    use ryeos_node_runtime::node_policy::sections::external_content::{
         ExternalContentImportPolicyRecord, ExternalContentImportRoot, ManagedExternalContentPolicy,
     };
     let import_policy_path = state_path.join(".ai/node/policies/external_content.yaml");
@@ -233,7 +236,7 @@ pub fn prepare(
         "current signed fixture node limits cannot admit the declared large runtime; do not widen small CAS"
     );
     let root = lillux::PinnedDirectory::open(&incoming)?.context("private input root")?;
-    let (containing_device, root_inode) = root.device_inode()?;
+    let root_identity = root.identity()?;
     ensure!(
         import_policy.roots.is_empty(),
         "unexpected ambient fixture import roots"
@@ -242,8 +245,8 @@ pub fn prepare(
         IMPORT_ROOT.into(),
         ExternalContentImportRoot {
             path: incoming,
-            containing_device,
-            root_inode,
+            root_identity,
+            in_place: None,
         },
     );
     import_policy.managed_activation = ManagedExternalContentPolicy {

@@ -30,7 +30,7 @@ while IFS= read -r bundle; do
     mkdir -p "$source_dir/$bundle/.ai"
     printf 'name: %s\n' "$bundle" > "$source_dir/$bundle/.ai/manifest.yaml"
     write_trust_doc "$source_dir/$bundle/PUBLISHER_TRUST.toml"
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_release_archive_bundle_names)
 mkdir -p "$source_dir/.ai/node/init/profiles"
 while IFS= read -r node_init_profile; do
     {
@@ -57,6 +57,7 @@ shift
 app_root=""
 source_dir=""
 node_profile=""
+host_class=""
 substrate_digest=""
 substrate_protocol=""
 while (( $# > 0 )); do
@@ -65,6 +66,7 @@ while (( $# > 0 )); do
         --app-root) app_root="${2:-}"; shift 2 ;;
         --source) source_dir="${2:-}"; shift 2 ;;
         --node-profile) node_profile="${2:-}"; shift 2 ;;
+        --host-class) host_class="${2:-}"; shift 2 ;;
         --substrate-image-digest) substrate_digest="${2:-}"; shift 2 ;;
         --substrate-protocol) substrate_protocol="${2:-}"; shift 2 ;;
         *) echo "unexpected init argument: $1" >&2; exit 2 ;;
@@ -73,9 +75,17 @@ done
 [[ -n "$app_root" && -n "$source_dir" && -d "$source_dir/.ai" ]]
 [[ "$substrate_digest" == "sha256:$(printf '0%.0s' {1..64})" ]]
 [[ "$substrate_protocol" == 1 ]]
+# The real gate refuses an app root outside the verification root's storage.
+[[ "$app_root" == "${FAKE_RYEOS_VERIFY_ROOT:?}"/*/* ]]
 mkdir -p "$app_root"
 printf '%s\n' "${node_profile:-none}" >> "${FAKE_RYEOS_CALLS:?}"
 [[ -n "$node_profile" ]] || exit 2
+# The standard profile is preflighted as an unconfined local host; the controller profile as
+# the hosting provider's container class.
+case "$node_profile" in
+    hosted-controller) [[ "$host_class" == hosted ]] ;;
+    *) [[ "$host_class" == local_unconfined ]] ;;
+esac
 if [[ -n "$node_profile" ]]; then
     profile="$source_dir/.ai/node/init/profiles/$node_profile.yaml"
     [[ -f "$profile" ]]
@@ -88,8 +98,14 @@ if [[ -n "$node_profile" ]]; then
         find "$source_dir" -mindepth 1 -maxdepth 1 -type d -exec test -d '{}/.ai' \; -printf '%f\n' \
             | sort
     )"
-    [[ -n "$expected_bundles" && "$actual_bundles" == "$expected_bundles" ]]
+    # Init ignores bundles outside the profile, so the profile's members must
+    # all be present but extras are allowed.
+    [[ -n "$expected_bundles" ]]
+    [[ -z "$(comm -23 <(printf '%s\n' "$expected_bundles") <(printf '%s\n' "$actual_bundles"))" ]]
     mkdir -p "$app_root/.ai/node/policies"
+    # Real init writes the signed operator-sections record in every
+    # generation it publishes.
+    printf 'sections: []\n' > "$app_root/.ai/node/policies/_operator-sections.yaml"
     while IFS= read -r policy_name; do
         printf 'schema: 1\n' > "$app_root/.ai/node/policies/$policy_name.yaml"
     done < <(
@@ -100,6 +116,10 @@ fi
 EOF
 chmod +x "$fake_ryeos"
 
+verify_root="$tmp/verify-root"
+mkdir "$verify_root"
+export FAKE_RYEOS_VERIFY_ROOT="$verify_root"
+
 for run in one two; do
     mkdir -p "$tmp/$run"
     FAKE_RYEOS_CALLS="$tmp/$run/init-calls" \
@@ -108,8 +128,11 @@ for run in one two; do
         --source "$source_dir" \
         --output "$tmp/$run/ryeos-bundles-1.2.3-x86_64.tar.gz" \
         --source-date-epoch 1700000000 \
+        --verify-root "$verify_root" \
         --ryeos-bin "$fake_ryeos" >/dev/null
-    printf '%s\n' none full > "$tmp/$run/expected-init-calls"
+    # Every verification app root was removed from the verification root.
+    [[ -z "$(find "$verify_root" -mindepth 1 -print -quit)" ]]
+    printf '%s\n' none standard hosted-controller > "$tmp/$run/expected-init-calls"
     cmp "$tmp/$run/expected-init-calls" "$tmp/$run/init-calls"
     (cd "$tmp/$run" && sha256sum -c ryeos-bundles-1.2.3-x86_64.tar.gz.sha256)
     "$root/scripts/release/verify-bundle-artifact.sh" \
@@ -124,6 +147,9 @@ tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     | grep -qx 'ryeos-bundles-1.2.3-x86_64/core/.ai/manifest.yaml'
 tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     | grep -qx 'ryeos-bundles-1.2.3-x86_64/.ai/node/init/profiles/hosted-workflow.yaml'
+# The controller distribution's bundle outside `standard` is archived too.
+tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
+    | grep -qx 'ryeos-bundles-1.2.3-x86_64/render-sandbox/.ai/manifest.yaml'
 
 mkdir "$tmp/malformed"
 malformed_checksum="$tmp/malformed/ryeos-bundles-1.2.3-x86_64.tar.gz.sha256"
@@ -183,6 +209,7 @@ if FAKE_RYEOS_CALLS="$tmp/missing-source-profile-calls" \
     --source "$source_dir" \
     --output "$tmp/missing-source-profile/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected packaging to reject a missing node init profile" >&2
     exit 1
@@ -198,6 +225,7 @@ if FAKE_RYEOS_CALLS="$tmp/mismatched-source-profile-calls" \
     --source "$source_dir" \
     --output "$tmp/mismatched-source-profile/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected packaging to reject a mismatched node init profile" >&2
     exit 1
@@ -211,6 +239,7 @@ if FAKE_RYEOS_CALLS="$tmp/legacy-init-input-calls" \
     --source "$source_dir" \
     --output "$tmp/legacy-init-input/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected packaging to reject a parallel legacy init input" >&2
     exit 1
@@ -243,6 +272,7 @@ if FAKE_RYEOS_CALLS="$tmp/private-key-init-calls" \
     --source "$source_dir" \
     --output "$tmp/private-key/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected private key material to be rejected" >&2
     exit 1
@@ -256,6 +286,7 @@ if FAKE_RYEOS_CALLS="$tmp/hard-link-init-calls" \
     --source "$source_dir" \
     --output "$tmp/hard-link/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected multiply-linked files to be rejected" >&2
     exit 1
@@ -270,7 +301,21 @@ if FAKE_RYEOS_CALLS="$tmp/rejected-init-calls" \
     --source "$source_dir" \
     --output "$tmp/rejected/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     --source-date-epoch 1700000000 \
+    --verify-root "$verify_root" \
     --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
     echo "expected non-official publisher metadata to be rejected" >&2
+    exit 1
+fi
+
+# A verification root that does not exist is refused, never defaulted.
+if FAKE_RYEOS_CALLS="$tmp/missing-verify-root-calls" \
+    "$root/scripts/release/package-bundle-artifact.sh" \
+    --version 1.2.3 \
+    --source "$source_dir" \
+    --output "$tmp/missing-verify-root/ryeos-bundles-1.2.3-x86_64.tar.gz" \
+    --source-date-epoch 1700000000 \
+    --verify-root "$tmp/absent-verify-root" \
+    --ryeos-bin "$fake_ryeos" >/dev/null 2>&1; then
+    echo "expected a missing verification root to be rejected" >&2
     exit 1
 fi

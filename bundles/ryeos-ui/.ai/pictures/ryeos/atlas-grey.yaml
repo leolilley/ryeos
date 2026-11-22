@@ -1,0 +1,22 @@
+# ryeos:signed:2026-11-19T07:00:15Z:ef1c4310c1884533865ca7d119fae47488aa0d74a3f464fd3ebc0acc2e8a3208:hhKNV2fcaB7dme2jel2Afq4iPhYEJTxZApOVUD3st+TfT3o0YOE1tSjT0JTws34UCFT+gF0Be0M8zXxkn60CCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+title: "Hercules or Atlas Supporting the Globe"
+artist: "Clodion (Claude Michel)"
+date: "ca. 1780"
+source_url: https://www.metmuseum.org/art/collection/search/189645
+licence: cc0
+derived_from:
+  - "Met object 189645, Hercules or Atlas Supporting the Globe (https://www.metmuseum.org/art/collection/search/189645)"
+transform: "greyscale crop; sculpture cut out onto a grey gradient background; re-encoded as WebP"
+renditions:
+  - role: hero
+    sha256: "d9754cb861f90352465ba4c32fbf3f9776888c40887bd02465de85aafaab1aab"
+    media_type: image/webp
+    width: 1600
+    height: 1000
+    bytes: 56648
+  - role: card
+    sha256: "1fe3557fb45e6fbc2366cff8f28876e947a0698fa417715d8fd006576ed03ab1"
+    media_type: image/webp
+    width: 480
+    height: 300
+    bytes: 6234

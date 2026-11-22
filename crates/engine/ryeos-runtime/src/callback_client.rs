@@ -4,33 +4,30 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::callback::{
-    CallbackError, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
+    CallbackError, EventAppendOptions, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI,
+    TerminalCompletion,
 };
 use crate::envelope::EnvelopeCallback;
-use crate::events::{RuntimeEventType, StorageClass};
+use crate::events::RuntimeEventType;
+use ryeos_provider_contract::Part;
 
-/// Map a typed event to the storage class accepted by the daemon.
-pub fn storage_class_for(event_type: RuntimeEventType) -> &'static str {
-    event_type.storage_class().as_str()
-}
-
-fn storage_class_for_payload(event_type: RuntimeEventType, payload: &Value) -> &'static str {
-    // Progressive streamed cognition_out is live-only (ephemeral): deltas, partial
-    // tool args, AND complete `tool_use` blocks. The DURABLE record of a turn's
-    // tool calls is `emit_turn_complete`'s `cognition_out{tool_calls}` — persisting
-    // the mid-stream `tool_use` too would fold a spurious extra assistant turn on
-    // resume (reconstruct_messages reads `tool_calls`, not `tool_use`). Must stay
-    // in lock-step with the daemon's `is_ephemeral_allowed`. (The payload keys are
-    // JSON field names, not event types, so they stay string-keyed.)
-    if event_type == RuntimeEventType::CognitionOut
-        && (payload.get("delta").is_some()
-            || payload.get("tool_use_partial").is_some()
-            || payload.get("tool_use").is_some())
-    {
-        return StorageClass::Ephemeral.as_str();
-    }
-
-    storage_class_for(event_type)
+/// What a `tool_call_start` event records about one tool call.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolDispatchEvent<'a> {
+    pub operation_id: &'a str,
+    /// The tool name the model called.
+    pub tool: &'a str,
+    /// The id the call carries on the wire, provider-issued or synthesised.
+    pub call_id: &'a str,
+    /// The canonical reference of the item the call resolves to; absent when
+    /// the call resolves to no item, as for the lifecycle `directive_return`
+    /// signal.
+    pub item_ref: Option<&'a str>,
+    /// The turn number along the chain that proposed the call.
+    pub turn: u32,
+    /// The ordinal of this call among the tool calls of that turn.
+    pub call_index: usize,
+    pub effective_caps: &'a [String],
 }
 
 /// Inline cap for tool result bodies in `tool_call_result` SSE
@@ -273,12 +270,11 @@ impl CallbackClient {
         event_type: RuntimeEventType,
         payload: Value,
     ) -> Result<()> {
-        let storage_class = storage_class_for_payload(event_type, &payload);
         let is_transcript = event_type.is_transcript();
         match &self.inner {
             Some(client) => {
                 client
-                    .append_event(&self.thread_id, event_type.as_str(), payload, storage_class)
+                    .append_event(&self.thread_id, event_type.as_str(), payload)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
@@ -297,13 +293,25 @@ impl CallbackClient {
     /// progress where one acknowledged daemon RPC per event would otherwise
     /// backpressure the producer.
     ///
-    /// The storage class remains a per-event decision derived from the same
-    /// typed event and payload policy as [`Self::append_runtime_event`]. A batch
-    /// containing any transcript-bearing event fails closed when the callback
-    /// channel is absent.
+    /// The daemon stores each event under the node's signed `event_storage`
+    /// policy; the runtime sends no storage class. A batch containing any
+    /// transcript-bearing event fails closed when the callback channel is
+    /// absent.
     pub async fn append_runtime_events(
         &self,
         events: Vec<(RuntimeEventType, Value)>,
+    ) -> Result<()> {
+        self.append_runtime_events_with(events, EventAppendOptions::default())
+            .await
+    }
+
+    /// [`Self::append_runtime_events`] with attachments stored beside the
+    /// batch and an idempotency key for it. An event names an attachment by
+    /// listing its `EventAttachment::object_hash` in `attachment_refs`.
+    pub async fn append_runtime_events_with(
+        &self,
+        events: Vec<(RuntimeEventType, Value)>,
+        options: EventAppendOptions,
     ) -> Result<()> {
         if events.is_empty() {
             return Ok(());
@@ -317,18 +325,23 @@ impl CallbackClient {
                 let events = events
                     .into_iter()
                     .map(|(event_type, payload)| {
-                        let storage_class = storage_class_for_payload(event_type, &payload);
                         serde_json::json!({
                             "event_type": event_type.as_str(),
                             "payload": payload,
-                            "storage_class": storage_class,
                         })
                     })
                     .collect();
                 client
-                    .append_events(&self.thread_id, events)
+                    .append_events(&self.thread_id, events, options)
                     .await
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    .map_err(|error| match error {
+                        CallbackError::ActionFailed { code, message, .. }
+                            if code == crate::callback::ATTACHMENT_REFUSED_CODE =>
+                        {
+                            anyhow::Error::new(crate::callback::AttachmentRefused(message))
+                        }
+                        other => anyhow::anyhow!("{other}"),
+                    })?;
                 Ok(())
             }
             None if contains_transcript => Err(anyhow::anyhow!(
@@ -654,7 +667,6 @@ impl CallbackClient {
     /// derives all trust-bearing state from the validated tokens.
     // Keep graph position, child payload, frontier, and terminal handoff
     // explicit: each field participates independently in resume correctness.
-    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_follow_child(
         &self,
         graph_run_id: &str,
@@ -698,7 +710,6 @@ impl CallbackClient {
 
     // Keep graph position, launch-window policy, frontier, and terminal handoff
     // explicit: each field participates independently in resume correctness.
-    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_follow_children(
         &self,
         graph_run_id: &str,
@@ -939,10 +950,18 @@ impl CallbackClient {
     /// (compose-context, sub-dispatch); prefer [`Self::replay_thread`] over the
     /// continuation path for rehydration so sibling-branch events don't pollute
     /// the transcript.
-    pub async fn replay_chain(&self, chain_root_id: &str) -> Result<ReplayResponse> {
+    ///
+    /// `event_types` limits the replay to those event type names; `None`
+    /// returns every type. The daemon refuses a name it does not know.
+    pub async fn replay_chain(
+        &self,
+        chain_root_id: &str,
+        event_types: Option<&[&str]>,
+    ) -> Result<ReplayResponse> {
         self.replay_paged(
             "chain_root_id",
             chain_root_id,
+            event_types,
             &mut RuntimeReplayBudget::default(),
         )
         .await
@@ -951,8 +970,16 @@ impl CallbackClient {
     /// Resume-critical: fold ONE thread's own events (thread-scoped), paginated.
     /// Used to fold the linear continuation path turn-by-turn — thread scoping
     /// structurally excludes child/sibling threads that share the chain root.
-    pub async fn replay_thread(&self, thread_id: &str) -> Result<ReplayResponse> {
-        self.replay_thread_with_budget(thread_id, &mut RuntimeReplayBudget::default())
+    ///
+    /// `event_types` limits the replay to those event type names; `None`
+    /// returns every type. Events of other types then neither come back nor
+    /// count against the replay budget.
+    pub async fn replay_thread(
+        &self,
+        thread_id: &str,
+        event_types: Option<&[&str]>,
+    ) -> Result<ReplayResponse> {
+        self.replay_thread_with_budget(thread_id, event_types, &mut RuntimeReplayBudget::default())
             .await
     }
 
@@ -962,9 +989,11 @@ impl CallbackClient {
     pub async fn replay_thread_with_budget(
         &self,
         thread_id: &str,
+        event_types: Option<&[&str]>,
         budget: &mut RuntimeReplayBudget,
     ) -> Result<ReplayResponse> {
-        self.replay_paged("thread_id", thread_id, budget).await
+        self.replay_paged("thread_id", thread_id, event_types, budget)
+            .await
     }
 
     /// Page through `after_chain_seq` cursors for a single replay scope
@@ -974,6 +1003,7 @@ impl CallbackClient {
         &self,
         scope_key: &str,
         scope_value: &str,
+        event_types: Option<&[&str]>,
         budget: &mut RuntimeReplayBudget,
     ) -> Result<ReplayResponse> {
         let client = self.inner.as_ref().ok_or_else(|| {
@@ -997,6 +1027,9 @@ impl CallbackClient {
             );
             if let Some(cursor) = after_chain_seq {
                 params.insert("after_chain_seq".to_string(), serde_json::json!(cursor));
+            }
+            if let Some(event_types) = event_types {
+                params.insert("event_types".to_string(), serde_json::json!(event_types));
             }
             let raw: Value = client
                 .replay_events(Value::Object(params))
@@ -1057,16 +1090,16 @@ impl CallbackClient {
 
     // Typed event emission methods (merged from EventEmitter)
 
-    /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
-    /// Maps to the validator-accepted `cognition_in` event.
     /// Resume-critical: transcript-bearing; hard-fails on disconnect.
-    /// Emits the stimulus that opens a run as a `cognition_in` event — the
-    /// input to cognition, not a "user" turn. A chained successor folds these
-    /// from the chain to rebuild the prior context (the stimulus is rendered
-    /// from the directive body + inputs at launch, so it is not otherwise
-    /// recoverable from events).
-    pub async fn emit_stimulus(&self, content: &str) -> Result<()> {
-        let payloads = crate::events::encode_cognition_in_payloads(content)?;
+    /// Records one input to cognition as `cognition_in`: the launch stimulus,
+    /// an operator steer, a harness nudge. An input too large for one event
+    /// is written as one atomic chunk set. A chained successor folds these
+    /// from the chain to rebuild the prior context.
+    pub async fn emit_cognition_input(
+        &self,
+        input: &crate::cognition::CognitionInput,
+    ) -> Result<()> {
+        let payloads = crate::events::encode_cognition_in_payloads(input)?;
         if payloads.len() == 1 {
             return self
                 .append_runtime_event(RuntimeEventType::CognitionIn, payloads[0].clone())
@@ -1075,58 +1108,101 @@ impl CallbackClient {
 
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "callback emit_stimulus called without an inner UDS client \
+                "callback emit_cognition_input called without an inner UDS client \
                  (socket missing); transcript-bearing event batch must not be silently dropped"
             )
         })?;
         let event_type = RuntimeEventType::CognitionIn;
-        let storage_class = storage_class_for(event_type);
         let events = payloads
             .into_iter()
             .map(|payload| {
                 serde_json::json!({
                     "event_type": event_type.as_str(),
                     "payload": payload,
-                    "storage_class": storage_class,
                 })
             })
             .collect();
         client
-            .append_events(&self.thread_id, events)
+            .append_events(&self.thread_id, events, EventAppendOptions::default())
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(())
     }
 
-    pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
+    /// Resume-critical: the launch records of a conversation as one atomic
+    /// batch: the frame when there is one, then the inputs in the order the
+    /// model is given them, under one budget. The frame's tool inventory is
+    /// stored beside the batch. A retry of the whole batch after a lost
+    /// acknowledgement repeats `idempotency_key` and is answered without
+    /// appending twice.
+    pub async fn emit_launch_records(
+        &self,
+        frame: Option<&crate::cognition::FrameRecord>,
+        inputs: &[crate::cognition::CognitionInput],
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let mut events = Vec::new();
+        let mut options = EventAppendOptions {
+            attachments: Vec::new(),
+            idempotency_key: Some(idempotency_key.to_string()),
+        };
+        let mut reserved_bytes = 0usize;
+        if let Some(frame) = frame {
+            frame.payload.validate()?;
+            let payload = crate::cognition::to_payload(&frame.payload)?;
+            reserved_bytes = serde_json::to_vec(&payload)?.len();
+            events.push((RuntimeEventType::CognitionFrame, payload));
+            options.attachments.push(frame.inventory.clone());
+        }
+        let payloads =
+            crate::events::encode_cognition_in_batch(events.len(), reserved_bytes, inputs)?;
+        events.extend(
+            payloads
+                .into_iter()
+                .map(|payload| (RuntimeEventType::CognitionIn, payload)),
+        );
+        self.append_runtime_events_with(events, options).await
+    }
+
+    /// Resume-critical: the opening marker of a provider turn. `tools_offered`
+    /// names the tools offered on this turn when they differ from the tool
+    /// inventory of the frame in force.
+    pub async fn emit_turn_start(
+        &self,
+        turn: u32,
+        tools_offered: Option<Vec<String>>,
+    ) -> Result<()> {
         self.append_runtime_event(
             RuntimeEventType::CognitionIn,
-            serde_json::json!({"turn": turn}),
+            crate::cognition::to_payload(&crate::cognition::TurnMarker {
+                turn,
+                tools_offered,
+            })?,
         )
         .await
     }
 
     /// Resume-critical: seal a cognition cut short by a live interrupt. Emits a
-    /// transcript-bearing `cognition_out` with the partial `content`/
-    /// `reasoning_content` and `interrupted: true`, and deliberately NO
-    /// `tool_calls` — an interrupted cognition didn't complete its tool call, so
-    /// the folded wire history carries no unpaired tool call. Durable (indexed):
-    /// resume renders it into the provider transcript so the redirect has honest context.
-    pub async fn emit_turn_interrupted(
-        &self,
-        turn: u32,
-        content: Option<Value>,
-        reasoning_content: Option<String>,
-    ) -> Result<()> {
-        let mut data = serde_json::json!({ "turn": turn, "interrupted": true });
-        if let Some(content) = content {
-            data["content"] = content;
-        }
-        if let Some(reasoning_content) = reasoning_content {
-            data["reasoning_content"] = Value::String(reasoning_content);
-        }
-        self.append_runtime_event(RuntimeEventType::CognitionOut, data)
-            .await
+    /// transcript-bearing `cognition_out` with `finish: "interrupted"` and the
+    /// parts that were complete, and deliberately no tool call: an interrupted
+    /// cognition didn't complete its tool call, so the folded wire history
+    /// carries no unpaired tool call. Durable (indexed): resume renders it
+    /// into the provider transcript so the redirect has honest context.
+    pub async fn emit_turn_interrupted(&self, turn: u32, parts: Vec<Part>) -> Result<()> {
+        let payload = crate::cognition::CognitionOutPayload {
+            turn,
+            parts,
+            finish: crate::cognition::FINISH_INTERRUPTED.to_string(),
+            usage: None,
+            provider_accounting: None,
+            malformed_calls: Vec::new(),
+        };
+        payload.validate()?;
+        self.append_runtime_event(
+            RuntimeEventType::CognitionOut,
+            crate::cognition::to_payload(&payload)?,
+        )
+        .await
     }
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
@@ -1134,55 +1210,55 @@ impl CallbackClient {
     pub async fn emit_turn_complete(
         &self,
         turn: u32,
+        finish: &str,
         tokens: Option<(u64, u64)>,
-        content: Option<Value>,
-        tool_calls: Option<Value>,
-        reasoning_content: Option<String>,
+        parts: Vec<Part>,
         provider_accounting: Option<Value>,
+        malformed_calls: Vec<crate::cognition::MalformedCall>,
     ) -> Result<()> {
-        let mut data = serde_json::json!({"turn": turn});
-        if let Some(content) = content {
-            data["content"] = content;
-        }
-        if let Some(tool_calls) = tool_calls {
-            data["tool_calls"] = tool_calls;
-        }
-        if let Some(reasoning_content) = reasoning_content {
-            data["reasoning_content"] = Value::String(reasoning_content);
-        }
-        if let Some((input, output)) = tokens {
-            data["input_tokens"] = serde_json::json!(input);
-            data["output_tokens"] = serde_json::json!(output);
-        }
-        if let Some(provider_accounting) = provider_accounting {
-            data["provider_accounting"] = provider_accounting;
-        }
-        self.append_runtime_event(RuntimeEventType::CognitionOut, data)
-            .await
+        let payload = crate::cognition::CognitionOutPayload {
+            turn,
+            parts,
+            finish: finish.to_string(),
+            usage: tokens.map(
+                |(input_tokens, output_tokens)| crate::cognition::CognitionUsage {
+                    input_tokens,
+                    output_tokens,
+                },
+            ),
+            provider_accounting,
+            malformed_calls,
+        };
+        payload.validate()?;
+        self.append_runtime_event(
+            RuntimeEventType::CognitionOut,
+            crate::cognition::to_payload(&payload)?,
+        )
+        .await
     }
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to `tool_call_start`. Includes the thread's effective
     /// capabilities so event consumers can see what the thread was
     /// authorized to do at dispatch time.
-    pub async fn emit_tool_dispatch(
-        &self,
-        operation_id: &str,
-        tool: &str,
-        call_id: Option<&str>,
-        effective_caps: &[String],
-    ) -> Result<()> {
-        if !crate::callback::valid_action_operation_id(operation_id) {
+    pub async fn emit_tool_dispatch(&self, dispatch: &ToolDispatchEvent<'_>) -> Result<()> {
+        if !crate::callback::valid_action_operation_id(dispatch.operation_id) {
             anyhow::bail!("tool dispatch operation_id is not a canonical lowercase SHA-256 digest");
         }
-        let mut data = serde_json::json!({
-            "operation_id": operation_id,
-            "tool": tool,
-        });
-        if let Some(id) = call_id {
-            data["call_id"] = serde_json::json!(id);
+        if dispatch.call_id.is_empty() {
+            anyhow::bail!("tool dispatch call_id is empty");
         }
-        data["effective_caps"] = serde_json::json!(effective_caps);
+        let mut data = serde_json::json!({
+            "operation_id": dispatch.operation_id,
+            "call_id": dispatch.call_id,
+            "tool": dispatch.tool,
+            "turn": dispatch.turn,
+            "call_index": dispatch.call_index,
+        });
+        if let Some(item_ref) = dispatch.item_ref {
+            data["item_ref"] = serde_json::json!(item_ref);
+        }
+        data["effective_caps"] = serde_json::json!(dispatch.effective_caps);
         self.append_runtime_event(RuntimeEventType::ToolCallStart, data)
             .await
     }
@@ -1190,54 +1266,102 @@ impl CallbackClient {
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to `tool_call_result`.
     ///
-    /// `body` is the exact bounded model-visible result string (the same JSON
-    /// string value the runtime pushes into the provider message stream). It is
-    /// retained as `result_text` without reparsing so crash recovery reproduces
-    /// the identical value and provider wire shape.
-    ///
-    /// `tool` is the canonical ref (e.g. `apps_tv_tracker_workspace_render_chart`)
-    /// so SSE consumers can route results without cross-referencing tool_call_start.
-    // Wire-shaped: each argument is one field of the emitted result
-    // envelope; eight call sites pass them positionally today.
-    #[allow(clippy::too_many_arguments)]
+    /// The result's text parts are the exact bounded model-visible string the
+    /// runtime pushes into the provider message stream. They are retained
+    /// without reparsing so crash recovery reproduces the identical value and
+    /// provider wire shape. `tool` is the canonical ref so consumers can route
+    /// results without cross-referencing `tool_call_start`.
     pub async fn emit_tool_result(
         &self,
-        operation_id: &str,
-        call_id: &str,
-        tool: &str,
-        body: &str,
-        truncated: bool,
-        truncated_reason: Option<&str>,
-        result_size_bytes: u64,
-        duplicate_of: Option<&str>,
+        result: &crate::cognition::ToolResultPayload,
     ) -> Result<()> {
-        if !crate::callback::valid_action_operation_id(operation_id) {
-            anyhow::bail!("tool result operation_id is not a canonical lowercase SHA-256 digest");
-        }
-        if body.len() > TOOL_RESULT_INLINE_MAX_BYTES {
+        self.emit_tool_result_with_attachments(result, Vec::new())
+            .await
+    }
+
+    /// [`Self::emit_tool_result`] storing `attachments` beside the event: the
+    /// bytes of images the result names that the node does not hold yet. Every
+    /// upload must be named by the result's `attachment_refs`.
+    pub async fn emit_tool_result_with_attachments(
+        &self,
+        result: &crate::cognition::ToolResultPayload,
+        attachments: Vec<crate::callback::EventAttachment>,
+    ) -> Result<()> {
+        result.validate()?;
+        let text_bytes: usize = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                Part::Text(text) => text.text.len(),
+                _ => 0,
+            })
+            .sum();
+        if text_bytes > TOOL_RESULT_INLINE_MAX_BYTES {
             anyhow::bail!(
-                "tool result model content is {} bytes; maximum is {}",
-                body.len(),
-                TOOL_RESULT_INLINE_MAX_BYTES
+                "tool result model content is {text_bytes} bytes; maximum is {TOOL_RESULT_INLINE_MAX_BYTES}"
             );
         }
-        let mut data = serde_json::json!({
-            "operation_id": operation_id,
-            "call_id": call_id,
-            "tool": tool,
-            "truncated": truncated,
-            "result_size_bytes": result_size_bytes,
-        });
-        data["result_text"] = serde_json::json!(body);
-        if let Some(hash) = duplicate_of {
-            data["deduplicated"] = serde_json::json!(true);
-            data["duplicate_of"] = serde_json::json!(hash);
+        for attachment in &attachments {
+            if !result
+                .attachment_refs
+                .iter()
+                .any(|named| named == attachment.object_hash())
+            {
+                anyhow::bail!(
+                    "tool result uploads attachment {} that it does not name",
+                    attachment.object_hash()
+                );
+            }
         }
-        if let Some(reason) = truncated_reason {
-            data["truncated_reason"] = serde_json::json!(reason);
+        let payload = crate::cognition::to_payload(result)?;
+        if attachments.is_empty() {
+            return self
+                .append_runtime_event(RuntimeEventType::ToolCallResult, payload)
+                .await;
         }
-        self.append_runtime_event(RuntimeEventType::ToolCallResult, data)
+        self.append_runtime_events_with(
+            vec![(RuntimeEventType::ToolCallResult, payload)],
+            EventAppendOptions {
+                attachments,
+                idempotency_key: None,
+            },
+        )
+        .await
+    }
+
+    /// The media type and bytes of one stored attachment named by an event of
+    /// this thread's chain. The bytes are checked against the hash asked for,
+    /// so a store that returned other bytes is an error, not an image.
+    pub async fn read_attachment(&self, attachment: &str) -> Result<(String, Vec<u8>)> {
+        use base64::Engine as _;
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback read_attachment called without an inner UDS client \
+                 (socket missing); runtime cannot read stored bytes"
+            )
+        })?;
+        let raw = client
+            .read_attachment(&self.thread_id, attachment)
             .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let media_type = raw
+            .get("media_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("read_attachment answer has no media_type"))?
+            .to_owned();
+        let encoded = raw
+            .get("bytes_b64")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("read_attachment answer has no bytes_b64"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .context("read_attachment bytes are not valid base64")?;
+        let actual = ryeos_state::objects::ThreadAttachment::for_bytes(&media_type, &bytes)?
+            .object_hash()?;
+        if actual != attachment {
+            anyhow::bail!("read_attachment returned bytes that hash to {actual}, not {attachment}");
+        }
+        Ok((media_type, bytes))
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -1272,11 +1396,10 @@ impl CallbackClient {
             )
         })?;
         let event_type = RuntimeEventType::ThreadUsage;
-        let storage_class = storage_class_for(event_type);
         let payload = serde_json::to_value(usage)
             .map_err(|e| anyhow::anyhow!("serialize ThreadUsage: {e}"))?;
         client
-            .append_event(&self.thread_id, event_type.as_str(), payload, storage_class)
+            .append_event(&self.thread_id, event_type.as_str(), payload)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
@@ -1313,7 +1436,7 @@ impl CallbackClient {
         let value = serde_json::to_value(&payload)
             .map_err(|e| anyhow::anyhow!("encode ProgressEvent: {e}"))?;
         // High-frequency progressive event — maps to `stream_snapshot`
-        // (journal_only). The original "progress" name is preserved
+        // (ephemeral). The original "progress" name is preserved
         // inside the payload via a `kind` field for downstream
         // consumers that want to discriminate.
         let mut wrapped = serde_json::json!({"kind": "progress"});
@@ -1355,49 +1478,23 @@ mod tests {
     const TEST_OPERATION_ID: &str =
         "1111111111111111111111111111111111111111111111111111111111111111";
 
-    #[test]
-    fn progressive_cognition_out_is_ephemeral() {
-        // delta / tool_use_partial / complete tool_use are all live-only so they
-        // don't fold a spurious extra assistant turn on resume.
-        for payload in [
-            json!({"turn": 1, "delta": "hi"}),
-            json!({"turn": 1, "tool_use_partial": {"id": "x"}}),
-            json!({"turn": 1, "tool_use": {"id": "x", "name": "f", "arguments": {}}}),
-        ] {
-            assert_eq!(
-                storage_class_for_payload(RuntimeEventType::CognitionOut, &payload),
-                StorageClass::Ephemeral.as_str(),
-                "payload {payload} should be ephemeral"
-            );
-        }
-    }
-
-    #[test]
-    fn turn_complete_cognition_out_is_indexed() {
-        // The durable record of a turn (with tool_calls array) is indexed.
-        let payload = json!({"turn": 1, "content": "done", "tool_calls": []});
-        assert_eq!(
-            storage_class_for_payload(RuntimeEventType::CognitionOut, &payload),
-            StorageClass::Indexed.as_str()
-        );
-        // An interrupted seal (no progressive keys) is also durable.
-        let interrupted = json!({"turn": 1, "content": "par", "interrupted": true});
-        assert_eq!(
-            storage_class_for_payload(RuntimeEventType::CognitionOut, &interrupted),
-            StorageClass::Indexed.as_str()
-        );
-    }
-
     // ── Mock callback that records events in memory ──────────────────
 
     struct EventRecorder {
         events: Mutex<Vec<(String, Value)>>,
+        /// The options of every batch append, in order.
+        options: Mutex<Vec<crate::callback::EventAppendOptions>>,
+        /// Answers an append that carries attachments with the node's
+        /// attachment refusal.
+        refuse_attachments: std::sync::atomic::AtomicBool,
     }
 
     impl EventRecorder {
         fn new() -> Self {
             Self {
                 events: Mutex::new(Vec::new()),
+                options: Mutex::new(Vec::new()),
+                refuse_attachments: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -1448,7 +1545,6 @@ mod tests {
             _thread_id: &str,
             event_type: &str,
             payload: Value,
-            _storage_class: &str,
         ) -> Result<Value, CallbackError> {
             self.events
                 .lock()
@@ -1460,7 +1556,20 @@ mod tests {
             &self,
             _thread_id: &str,
             events: Vec<Value>,
+            options: crate::callback::EventAppendOptions,
         ) -> Result<Value, CallbackError> {
+            if !options.attachments.is_empty()
+                && self
+                    .refuse_attachments
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(CallbackError::ActionFailed {
+                    code: crate::callback::ATTACHMENT_REFUSED_CODE.to_string(),
+                    message: "attachment is too large".to_string(),
+                    retryable: false,
+                });
+            }
+            self.options.lock().unwrap().push(options);
             let mut recorded = self.events.lock().unwrap();
             for event in events {
                 let event_type =
@@ -1567,11 +1676,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_stimulus_atomically_chunks_large_transcript_input() {
+    async fn emit_cognition_input_atomically_chunks_large_input() {
         let (callback, recorder) = make_recorder_client();
         let content = "ARC evidence \"quoted\"\n".repeat(16_000);
 
-        callback.emit_stimulus(&content).await.unwrap();
+        let input = crate::cognition::CognitionInput::text("launch", content.clone()).pinned();
+        callback.emit_cognition_input(&input).await.unwrap();
 
         let events = recorder.events.lock().unwrap();
         assert!(events.len() > 1);
@@ -1590,7 +1700,195 @@ mod tests {
             }
         }
         assembler.finish().unwrap();
-        assert_eq!(recovered.as_deref(), Some(content.as_str()));
+        assert_eq!(recovered.as_ref(), Some(&input));
+    }
+
+    #[tokio::test]
+    async fn launch_records_are_one_batch_of_frame_then_inputs_in_model_order() {
+        let (callback, recorder) = make_recorder_client();
+        let frame = crate::cognition::FrameRecord::new(
+            1,
+            Some("system text"),
+            crate::cognition::FrameRequestOptions {
+                model: "m".to_string(),
+                reasoning: None,
+                sampling: None,
+                max_output_tokens: None,
+            },
+            &"ab".repeat(32),
+            b"[]".to_vec(),
+        )
+        .unwrap();
+        let before = crate::cognition::CognitionInput::text("context", "before")
+            .with_ack("Understood. I will use this context.");
+        let stimulus = crate::cognition::CognitionInput::text("launch", "go").pinned();
+        callback
+            .emit_launch_records(Some(&frame), &[before, stimulus], "launch:T-test")
+            .await
+            .unwrap();
+        let events = recorder.events.lock().unwrap();
+        let kinds: Vec<_> = events.iter().map(|(kind, _)| kind.as_str()).collect();
+        assert_eq!(kinds, ["cognition_frame", "cognition_in", "cognition_in"]);
+        assert_eq!(
+            events[0].1["attachment_refs"][0],
+            events[0].1["tool_inventory"]
+        );
+        assert_eq!(events[1].1["origin"], "context");
+        assert_eq!(events[1].1["ack"], "Understood. I will use this context.");
+        assert_eq!(events[2].1["pinned"], true);
+        let options = recorder.options.lock().unwrap();
+        assert_eq!(options.len(), 1, "one append for the whole batch");
+        assert_eq!(options[0].idempotency_key.as_deref(), Some("launch:T-test"));
+        assert_eq!(options[0].attachments.len(), 1);
+        assert_eq!(
+            options[0].attachments[0].object_hash(),
+            events[0].1["tool_inventory"].as_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_turn_marker_names_offered_tools_only_when_given() {
+        let (callback, recorder) = make_recorder_client();
+        callback.emit_turn_start(1, None).await.unwrap();
+        callback
+            .emit_turn_start(2, Some(vec!["only_tool".to_string()]))
+            .await
+            .unwrap();
+        let events = recorder.events.lock().unwrap();
+        assert_eq!(events[0].1, json!({"turn": 1}));
+        assert_eq!(
+            events[1].1,
+            json!({"turn": 2, "tools_offered": ["only_tool"]})
+        );
+    }
+
+    fn tool_result(
+        operation_id: &str,
+        call_id: &str,
+        tool: &str,
+        body: &str,
+        truncated: bool,
+        reason: Option<&str>,
+        size: u64,
+        duplicate_of: Option<&str>,
+    ) -> crate::cognition::ToolResultPayload {
+        crate::cognition::ToolResultPayload {
+            operation_id: operation_id.to_string(),
+            call_id: call_id.to_string(),
+            tool: tool.to_string(),
+            status: ryeos_provider_contract::ToolResultStatus::Ok,
+            parts: vec![Part::text(body)],
+            guard: crate::cognition::ToolResultGuard {
+                result_size_bytes: size,
+                truncated,
+                truncated_reason: reason.map(str::to_string),
+                duplicate_of: duplicate_of.map(str::to_string),
+                dropped_images: Vec::new(),
+                spill: None,
+            },
+            attachment_refs: Vec::new(),
+        }
+    }
+
+    fn image_tool_result(
+        bytes: &[u8],
+    ) -> (
+        crate::cognition::ToolResultPayload,
+        crate::callback::EventAttachment,
+    ) {
+        let attachment =
+            crate::callback::EventAttachment::new("image/png", bytes.to_vec()).unwrap();
+        let mut result = tool_result(
+            TEST_OPERATION_ID,
+            "call_1",
+            "test/shot",
+            "one image",
+            false,
+            None,
+            9,
+            None,
+        );
+        result
+            .parts
+            .push(Part::Image(ryeos_provider_contract::ImagePart {
+                media_type: "image/png".to_string(),
+                attachment: attachment.object_hash().to_string(),
+                byte_length: bytes.len() as u64,
+                width: Some(1),
+                height: Some(1),
+            }));
+        result.attachment_refs = vec![attachment.object_hash().to_string()];
+        (result, attachment)
+    }
+
+    #[tokio::test]
+    async fn a_tool_result_with_an_image_stores_its_bytes_beside_the_event() {
+        let (cb, recorder) = make_recorder_client();
+        let (result, attachment) = image_tool_result(b"pixels");
+        cb.emit_tool_result_with_attachments(&result, vec![attachment.clone()])
+            .await
+            .unwrap();
+        let evt = recorder.last("tool_call_result").unwrap();
+        assert_eq!(evt["attachment_refs"][0], attachment.object_hash());
+        assert_eq!(evt["parts"][1]["type"], "image");
+        assert_eq!(evt["parts"][1]["attachment"], attachment.object_hash());
+        assert!(
+            evt.to_string().find("cGl4ZWxz").is_none(),
+            "no base64 in the event"
+        );
+        let options = recorder.options.lock().unwrap();
+        assert_eq!(options[0].attachments, vec![attachment]);
+    }
+
+    #[tokio::test]
+    async fn a_node_attachment_refusal_reaches_the_caller_as_a_typed_error() {
+        let (cb, recorder) = make_recorder_client();
+        recorder
+            .refuse_attachments
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (result, attachment) = image_tool_result(b"pixels");
+        let error = cb
+            .emit_tool_result_with_attachments(&result, vec![attachment])
+            .await
+            .unwrap_err();
+        let refused = error
+            .downcast_ref::<crate::callback::AttachmentRefused>()
+            .expect("a typed refusal");
+        assert!(refused.0.contains("too large"), "{refused}");
+        assert!(recorder.last("tool_call_result").is_none());
+        // Without images the same result still appends.
+        let mut plain = result.clone();
+        plain.parts.truncate(1);
+        plain.attachment_refs.clear();
+        cb.emit_tool_result(&plain).await.unwrap();
+        assert!(recorder.last("tool_call_result").is_some());
+    }
+
+    #[tokio::test]
+    async fn an_upload_the_result_does_not_name_is_refused_before_any_append() {
+        let (cb, recorder) = make_recorder_client();
+        let (result, _) = image_tool_result(b"pixels");
+        let stray = crate::callback::EventAttachment::new("image/png", b"other".to_vec()).unwrap();
+        let error = cb
+            .emit_tool_result_with_attachments(&result, vec![stray])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not name"), "{error}");
+        assert!(recorder.last("tool_call_result").is_none());
+    }
+
+    #[test]
+    fn attachment_refs_must_match_the_image_parts() {
+        let (mut result, _) = image_tool_result(b"pixels");
+        result.validate().unwrap();
+        result.attachment_refs.clear();
+        assert!(result.validate().is_err());
+        let (mut result, _) = image_tool_result(b"pixels");
+        result
+            .attachment_refs
+            .push(result.attachment_refs[0].clone());
+        assert!(result.validate().is_err());
     }
 
     // ── New emit_tool_result tests ───────────────────────────────────
@@ -1599,7 +1897,7 @@ mod tests {
     async fn emit_tool_result_retains_exact_model_visible_text() {
         let (cb, recorder) = make_recorder_client();
         let body = r#"{"ok":true,"workspace_card":{"chart_kind":"callout"}}"#;
-        cb.emit_tool_result(
+        cb.emit_tool_result(&tool_result(
             TEST_OPERATION_ID,
             "call_1",
             "test/render_chart",
@@ -1608,29 +1906,37 @@ mod tests {
             None,
             58,
             None,
-        )
+        ))
         .await
         .unwrap();
 
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["call_id"], "call_1");
         assert_eq!(evt["tool"], "test/render_chart");
-        assert_eq!(evt["truncated"], false);
-        assert_eq!(evt["result_size_bytes"], 58);
-        assert_eq!(evt["result_text"], body);
+        assert_eq!(evt["guard"]["truncated"], false);
+        assert_eq!(evt["guard"]["result_size_bytes"], 58);
+        assert_eq!(evt["parts"][0]["text"], body);
         assert!(evt.get("result").is_none());
-        assert!(evt.get("truncated_reason").is_none());
+        assert!(evt["guard"].get("truncated_reason").is_none());
     }
 
     #[tokio::test]
     async fn tool_start_and_result_retain_one_exact_operation_id() {
         let (callback, recorder) = make_recorder_client();
         callback
-            .emit_tool_dispatch(TEST_OPERATION_ID, "test/tool", Some("call-1"), &[])
+            .emit_tool_dispatch(&ToolDispatchEvent {
+                operation_id: TEST_OPERATION_ID,
+                tool: "test/tool",
+                call_id: "call-1",
+                item_ref: Some("tool:test/tool"),
+                turn: 3,
+                call_index: 1,
+                effective_caps: &[],
+            })
             .await
             .unwrap();
         callback
-            .emit_tool_result(
+            .emit_tool_result(&tool_result(
                 TEST_OPERATION_ID,
                 "call-1",
                 "test/tool",
@@ -1639,14 +1945,16 @@ mod tests {
                 None,
                 11,
                 None,
-            )
+            ))
             .await
             .unwrap();
 
-        assert_eq!(
-            recorder.last("tool_call_start").unwrap()["operation_id"],
-            TEST_OPERATION_ID
-        );
+        let start = recorder.last("tool_call_start").unwrap();
+        assert_eq!(start["operation_id"], TEST_OPERATION_ID);
+        assert_eq!(start["item_ref"], "tool:test/tool");
+        assert_eq!(start["turn"], 3);
+        assert_eq!(start["call_index"], 1);
+        assert!(start.get("graph_run_id").is_none());
         assert_eq!(
             recorder.last("tool_call_result").unwrap()["operation_id"],
             TEST_OPERATION_ID
@@ -1658,11 +1966,19 @@ mod tests {
         let (callback, recorder) = make_recorder_client();
         let uppercase = "A".repeat(64);
         let start = callback
-            .emit_tool_dispatch(&uppercase, "test/tool", Some("call-1"), &[])
+            .emit_tool_dispatch(&ToolDispatchEvent {
+                operation_id: &uppercase,
+                tool: "test/tool",
+                call_id: "call-1",
+                item_ref: None,
+                turn: 1,
+                call_index: 0,
+                effective_caps: &[],
+            })
             .await
             .unwrap_err();
         let result = callback
-            .emit_tool_result(
+            .emit_tool_result(&tool_result(
                 &uppercase,
                 "call-1",
                 "test/tool",
@@ -1671,7 +1987,7 @@ mod tests {
                 None,
                 11,
                 None,
-            )
+            ))
             .await
             .unwrap_err();
         assert!(start.to_string().contains("canonical lowercase"));
@@ -1684,7 +2000,7 @@ mod tests {
         let (cb, recorder) = make_recorder_client();
         let body = "x".repeat(TOOL_RESULT_INLINE_MAX_BYTES + 1);
         let error = cb
-            .emit_tool_result(
+            .emit_tool_result(&tool_result(
                 TEST_OPERATION_ID,
                 "call_2",
                 "test/search",
@@ -1693,7 +2009,7 @@ mod tests {
                 Some("result_guard"),
                 body.len() as u64,
                 None,
-            )
+            ))
             .await
             .unwrap_err();
 
@@ -1705,7 +2021,7 @@ mod tests {
     async fn emit_tool_result_inlines_body_with_nested_json() {
         let (cb, recorder) = make_recorder_client();
         let body = r#"{"ok":true,"data":{"nested":[1,2,3]}}"#;
-        cb.emit_tool_result(
+        cb.emit_tool_result(&tool_result(
             TEST_OPERATION_ID,
             "call_4",
             "test/nested",
@@ -1714,11 +2030,11 @@ mod tests {
             None,
             body.len() as u64,
             None,
-        )
+        ))
         .await
         .unwrap();
         let evt = recorder.last("tool_call_result").unwrap();
-        assert_eq!(evt["result_text"], body);
+        assert_eq!(evt["parts"][0]["text"], body);
         assert!(evt.get("result").is_none());
     }
 
@@ -1726,7 +2042,7 @@ mod tests {
     async fn emit_tool_result_preserves_invalid_json_body_without_panicking() {
         let (cb, recorder) = make_recorder_client();
         let body = "[truncated json";
-        cb.emit_tool_result(
+        cb.emit_tool_result(&tool_result(
             TEST_OPERATION_ID,
             "call_bad_json",
             "test/search",
@@ -1735,15 +2051,15 @@ mod tests {
             Some("result_guard"),
             body.len() as u64,
             None,
-        )
+        ))
         .await
         .unwrap();
 
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["call_id"], "call_bad_json");
-        assert_eq!(evt["truncated"], true);
-        assert_eq!(evt["truncated_reason"], "result_guard");
-        assert_eq!(evt["result_text"], body);
+        assert_eq!(evt["guard"]["truncated"], true);
+        assert_eq!(evt["guard"]["truncated_reason"], "result_guard");
+        assert_eq!(evt["parts"][0]["text"], body);
         assert!(evt.get("result").is_none());
         assert!(evt.get("result_parse_error").is_none());
     }
@@ -1752,7 +2068,7 @@ mod tests {
     async fn emit_tool_result_marks_deduplicated_body_as_text_without_parse_error() {
         let (cb, recorder) = make_recorder_client();
         let body = "[duplicate result omitted — hash deadbeefdeadbeef]";
-        cb.emit_tool_result(
+        cb.emit_tool_result(&tool_result(
             TEST_OPERATION_ID,
             "call_duplicate",
             "test/search",
@@ -1761,15 +2077,18 @@ mod tests {
             None,
             2048,
             Some("deadbeefdeadbeefdeadbeefdeadbeef"),
-        )
+        ))
         .await
         .unwrap();
 
         let evt = recorder.last("tool_call_result").unwrap();
         assert_eq!(evt["call_id"], "call_duplicate");
-        assert_eq!(evt["result_text"], body);
-        assert_eq!(evt["deduplicated"], true);
-        assert_eq!(evt["duplicate_of"], "deadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(evt["parts"][0]["text"], body);
+        assert_eq!(evt["status"], "ok");
+        assert_eq!(
+            evt["guard"]["duplicate_of"],
+            "deadbeefdeadbeefdeadbeefdeadbeef"
+        );
         assert!(evt.get("result").is_none());
         assert!(evt.get("result_parse_error").is_none());
     }
@@ -1999,13 +2318,11 @@ mod tests {
             "stream_snapshot",
             "stream_closed",
             "artifact_published",
-            "thread_reconciled",
-            "orphan_process_killed",
-            "system_prompt",
-            "context_injected",
             "cognition_in",
             "cognition_out",
             "cognition_reasoning",
+            "cognition_frame",
+            "cognition_compaction",
             "tool_call_start",
             "tool_call_result",
             // Graph lifecycle events
@@ -2017,7 +2334,6 @@ mod tests {
             "graph_foreach_iteration",
             "thread_usage",
         ];
-        const VALIDATOR_STORAGE: &[&str] = &["indexed", "journal_only", "ephemeral"];
 
         // Every event the runtime can emit, post-P2.2:
         let runtime_emits = [
@@ -2040,35 +2356,7 @@ mod tests {
                 "runtime emits {wire_name:?} but the daemon's validate_event_type \
                  does not accept it — runtime <> daemon vocabulary drift"
             );
-            let sc = storage_class_for(ev);
-            assert!(
-                VALIDATOR_STORAGE.contains(&sc),
-                "storage_class_for({wire_name:?}) returned {sc:?} which is not in \
-                 the daemon's accepted set"
-            );
         }
-    }
-
-    #[test]
-    fn cognition_out_progressive_payloads_are_ephemeral() {
-        assert_eq!(
-            storage_class_for_payload(
-                RuntimeEventType::CognitionOut,
-                &json!({"turn": 1, "delta": "hi"}),
-            ),
-            "ephemeral"
-        );
-        assert_eq!(
-            storage_class_for_payload(
-                RuntimeEventType::CognitionOut,
-                &json!({"turn": 1, "tool_use_partial": {"id": "c", "delta": "{}"}}),
-            ),
-            "ephemeral"
-        );
-        assert_eq!(
-            storage_class_for_payload(RuntimeEventType::CognitionOut, &json!({"turn": 1})),
-            "indexed"
-        );
     }
 
     #[tokio::test]
@@ -2076,32 +2364,46 @@ mod tests {
         let (cb, recorder) = make_recorder_client();
         cb.emit_turn_complete(
             1,
+            "tool_calls",
             Some((10, 5)),
-            Some(json!("final answer")),
-            Some(json!([{"id": "c1", "name": "search", "arguments": {"q": "x"}}])),
-            Some("hidden".to_owned()),
+            vec![
+                Part::Reasoning(ryeos_provider_contract::ReasoningPart {
+                    text: Some("hidden".to_owned()),
+                    artefact: None,
+                }),
+                Part::text("final answer"),
+                Part::tool_call("c1", "search", json!({"q": "x"})),
+            ],
             Some(json!({
                 "requested_output_tokens": 32768,
                 "generation_header_id": "generation-1",
                 "contract_anomalies": ["reported output exceeds request limit"],
             })),
+            vec![crate::cognition::MalformedCall {
+                call_index: 0,
+                raw_len: 9,
+                sha256: "cd".repeat(32),
+            }],
         )
         .await
         .unwrap();
 
         let evt = recorder.last("cognition_out").unwrap();
         assert_eq!(evt["turn"], 1);
-        assert_eq!(evt["content"], "final answer");
-        assert_eq!(evt["tool_calls"][0]["name"], "search");
-        assert_eq!(evt["reasoning_content"], "hidden");
-        assert_eq!(evt["input_tokens"], 10);
-        assert_eq!(evt["output_tokens"], 5);
+        assert_eq!(evt["finish"], "tool_calls");
+        assert_eq!(evt["parts"][0]["type"], "reasoning");
+        assert_eq!(evt["parts"][1]["text"], "final answer");
+        assert_eq!(evt["parts"][2]["name"], "search");
+        assert_eq!(evt["usage"]["input_tokens"], 10);
+        assert_eq!(evt["usage"]["output_tokens"], 5);
         assert_eq!(evt["provider_accounting"]["requested_output_tokens"], 32768);
         assert_eq!(
             evt["provider_accounting"]["generation_header_id"],
             "generation-1"
         );
         assert!(evt.get("delta").is_none());
+        assert_eq!(evt["malformed_calls"][0]["call_index"], 0);
+        assert_eq!(evt["malformed_calls"][0]["raw_len"], 9);
     }
 
     // ── replay_chain pagination ──────────────────────────────────────
@@ -2141,16 +2443,15 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
-        async fn append_event(
-            &self,
-            _: &str,
-            _: &str,
-            _: Value,
-            _: &str,
-        ) -> Result<Value, CallbackError> {
+        async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: crate::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
@@ -2228,7 +2529,7 @@ mod tests {
             "/project",
             "tat-test",
         );
-        let resp = client.replay_chain("C-1").await.unwrap();
+        let resp = client.replay_chain("C-1", None).await.unwrap();
         let types: Vec<&str> = resp.events.iter().map(|e| e.event_type.as_str()).collect();
         assert_eq!(
             types,

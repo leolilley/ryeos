@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::managed_external_content_operation::AcquisitionMode;
-use crate::node_policy::sections::external_content::{
+use ryeos_node_runtime::node_policy::sections::external_content::{
     ExternalContentImportLimits, ManagedExternalContentActivationPolicy,
 };
 
@@ -173,6 +173,11 @@ pub struct ResolvedManagedActivationComponent {
     pub expected_manifest_hash: String,
     pub expected_manifest_kind: String,
     pub declaration_kind: ryeos_engine::external_content::ExternalContentKind,
+    pub declaration_mount_root: ryeos_engine::external_content::ExternalContentMountRoot,
+    pub declaration_mount: String,
+    pub qualification_allowance: Option<
+        ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
+    >,
     pub capture_bounds: ManagedActivationComponentBounds,
     pub expected_file_sha256: Option<String>,
 }
@@ -450,6 +455,9 @@ impl ManagedExternalContentActivation {
                 expected_manifest_hash,
                 expected_manifest_kind: expected_manifest_kind.to_owned(),
                 declaration_kind: declaration.kind,
+                declaration_mount_root: declaration.mount_root,
+                declaration_mount: declaration.mount.clone(),
+                qualification_allowance: declaration.qualification_allowance.clone(),
                 capture_bounds,
                 expected_file_sha256,
             });
@@ -631,6 +639,30 @@ fn derive_mapped_capture_bounds(
 }
 
 impl ResolvedManagedExternalContentActivation {
+    /// Read the consumer's signed selection, not a policy chosen by the
+    /// acquisition recipe or qualification caller. This remains input data;
+    /// resolving the policy and authenticating execution are separate joins.
+    pub fn qualification_allowance(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<
+        &ryeos_state::external_content::qualification_allowance::ContentQualificationAllowance,
+    > {
+        let allowance = self
+            .component(id)?
+            .qualification_allowance
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("consumer declaration has no qualification allowance")
+            })?;
+        allowance.validate()?;
+        anyhow::ensure!(
+            allowance.activation_ref == self.activation_ref,
+            "consumer qualification allowance names a different activation"
+        );
+        Ok(allowance)
+    }
+
     pub fn component(&self, id: &str) -> anyhow::Result<&ResolvedManagedActivationComponent> {
         self.components
             .iter()
@@ -675,8 +707,68 @@ pub fn resolve_activation(
     activation_ref: &str,
     acquisition_mode: AcquisitionMode,
 ) -> anyhow::Result<ResolvedManagedExternalContentActivation> {
+    Ok(resolve_activation_with_policy(state, activation_ref, acquisition_mode, None)?.0)
+}
+
+/// Qualification-only resolution. Ordinary acquisition does not resolve or
+/// interpret compatibility policy. The selected policy is read under the
+/// same checked generation operation as activation and consuming item.
+pub fn resolve_activation_for_qualification(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+    declaration_id: &str,
+) -> anyhow::Result<(
+    ResolvedManagedExternalContentActivation,
+    ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
+)> {
+    let (activation, policy, _) = resolve_activation_qualification_authority(
+        state,
+        activation_ref,
+        acquisition_mode,
+        declaration_id,
+    )?;
+    Ok((activation, policy))
+}
+
+/// Retain the exact signed activation definition from the same generation as
+/// its consumer-selected policy. The caller must still authenticate the
+/// activation receipt and content binding before using this declaration.
+pub fn resolve_activation_qualification_authority(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+    declaration_id: &str,
+) -> anyhow::Result<(
+    ResolvedManagedExternalContentActivation,
+    ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
+    ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
+)>{
+    let (activation, selection) = resolve_activation_with_policy(
+        state,
+        activation_ref,
+        acquisition_mode,
+        Some(declaration_id),
+    )?;
+    let (policy, authority) = selection
+        .ok_or_else(|| anyhow::anyhow!("qualification resolution has no selected policy"))?;
+    Ok((activation, policy, authority))
+}
+
+fn resolve_activation_with_policy(
+    state: &crate::state::AppState,
+    activation_ref: &str,
+    acquisition_mode: AcquisitionMode,
+    qualification_declaration_id: Option<&str>,
+) -> anyhow::Result<(
+    ResolvedManagedExternalContentActivation,
+    Option<(
+        ryeos_state::external_content::products::qualification::ProductQualificationPolicySource,
+        ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority,
+    )>,
+)>{
     let import_policy = state.node_policy.require::<
-        crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
+        ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord,
     >()?;
     let policy = import_policy.managed_activation.require_enabled()?;
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(activation_ref)
@@ -684,30 +776,66 @@ pub fn resolve_activation(
     if canonical.to_string() != activation_ref || canonical.kind != "config" {
         bail!("managed activation requires one canonical config ref");
     }
-    let effective = state.engine.with_checked_bundle_generation(|generation| {
-        generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-            item_ref: canonical,
-            expected_kind: Some("config".to_owned()),
-            project_root: None,
-            subject_resolution_authority:
-                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
-        })
-    })?;
-    require_trusted_bundle_item(&effective, "managed activation config")?;
-    let publisher_fingerprint = item_publisher(&effective, "managed activation config")?;
-    let document = ManagedExternalContentActivation::from_value(&effective.composed_value)?;
-
-    let consumer_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&document.consumer_ref)
-        .map_err(|error| anyhow::anyhow!("invalid activation consumer ref: {error}"))?;
-    let consumer = state.engine.with_checked_bundle_generation(|generation| {
-        generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-            item_ref: consumer_ref,
-            expected_kind: None,
-            project_root: None,
-            subject_resolution_authority:
-                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
-        })
-    })?;
+    // The activation and its consumer are one signed relationship. Resolving
+    // them in separate generation operations permits a Bundle replacement
+    // between reads to assemble a source program that never existed.
+    let (effective, consumer, document, publisher_fingerprint, qualification_policy) =
+        state.engine.with_checked_bundle_generation(|generation| {
+            let effective =
+                generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
+                    item_ref: canonical,
+                    expected_kind: Some("config".to_owned()),
+                    project_root: None,
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+                })?;
+            require_trusted_bundle_item(&effective, "managed activation config")?;
+            let publisher_fingerprint = item_publisher(&effective, "managed activation config")?;
+            let document = ManagedExternalContentActivation::from_value(&effective.composed_value)?;
+            let consumer_ref =
+                ryeos_engine::canonical_ref::CanonicalRef::parse(&document.consumer_ref)
+                    .map_err(|error| anyhow::anyhow!("invalid activation consumer ref: {error}"))?;
+            let consumer =
+                generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
+                    item_ref: consumer_ref,
+                    expected_kind: None,
+                    project_root: None,
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+                })?;
+            let qualification_policy = if let Some(id) = qualification_declaration_id {
+                require_trusted_bundle_item(&consumer, "qualification consumer")?;
+                let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> = serde_json::from_value(
+                    consumer.composed_value.get("external_content").cloned()
+                        .context("qualification consumer has no content declarations")?,
+                )?;
+                let declaration = declarations.iter().find(|entry| entry.id == id)
+                    .context("qualification consumer declaration is absent")?;
+                let allowance = declaration.qualification_allowance.as_ref()
+                    .context("qualification consumer has no signed allowance")?;
+                allowance.validate()?;
+                anyhow::ensure!(allowance.activation_ref == activation_ref,
+                    "qualification consumer selected a different activation");
+                let source = crate::operator_external_content::product_qualification::resolve_current_bundle_qualification_policy_in_generation(generation, &allowance.policy_ref)?;
+                allowance.validate_policy_source(&source)?;
+                let activation_definition = ryeos_state::external_content::products::qualification::ProductQualificationBundleDefinitionIdentity {
+                    canonical_ref: effective.canonical_ref.clone(),
+                    raw_content_digest: effective.source.content_hash.clone(),
+                    effective_definition_digest: effective.effective_definition_digest.as_str().into(),
+                    publisher_fingerprint: publisher_fingerprint.clone(),
+                };
+                activation_definition.validate()?;
+                let authority = ryeos_state::external_content::products::qualification::QualificationConsumerDeclarationAuthority::ActivatedContent {
+                    activation_definition,
+                    declaration_id: id.into(),
+                    allowance: allowance.clone(),
+                };
+                Some((source, authority))
+            } else { None };
+            Ok::<_, anyhow::Error>((effective, consumer, document, publisher_fingerprint, qualification_policy))
+        })?;
     require_trusted_bundle_item(&consumer, "managed activation consumer")?;
     let consumer_publisher = item_publisher(&consumer, "managed activation consumer")?;
     if consumer_publisher != publisher_fingerprint {
@@ -757,13 +885,16 @@ pub fn resolve_activation(
                 "large_content_supported": external_contract.large_content.is_some(),
             }
         }))?;
-    Ok(ResolvedManagedExternalContentActivation {
-        activation_ref: effective.canonical_ref,
-        activation_program_digest,
-        publisher_fingerprint,
-        document,
-        components,
-    })
+    Ok((
+        ResolvedManagedExternalContentActivation {
+            activation_ref: effective.canonical_ref,
+            activation_program_digest,
+            publisher_fingerprint,
+            document,
+            components,
+        },
+        qualification_policy,
+    ))
 }
 
 fn require_trusted_bundle_item(
@@ -898,7 +1029,7 @@ mod tests {
             .nth(3)
             .expect("ryeos-app lives below the repository root");
         let activation_path = repository
-            .join("bundles/standard/.ai/config/development/ryeos/producer-python-activation.yaml");
+            .join("bundles/environment-qualification/.ai/config/development/ryeos/producer-python-activation.yaml");
         let activation_value: Value =
             serde_yaml::from_str(&lillux::signature::strip_signature_lines(
                 &std::fs::read_to_string(&activation_path).expect("read shipped activation"),
@@ -920,7 +1051,7 @@ mod tests {
         );
 
         let consumer_path = repository.join(
-            "bundles/standard/.ai/tools/ryeos/environments/qualification/native-authoring/verify.py",
+            "bundles/environment-qualification/.ai/tools/ryeos/environments/qualification/native-authoring/verify.py",
         );
         let consumer = std::fs::read_to_string(consumer_path).expect("read shipped consumer");
         assert!(consumer.contains("#     - id: producer-python\n"));
@@ -935,7 +1066,7 @@ mod tests {
             .ancestors()
             .nth(3)
             .expect("ryeos-app lives below the repository root");
-        let policy_table = crate::node_policy::NodePolicyTable::new();
+        let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         for worker_profile in ["qwen3-0.6b-cpu-4096", "qwen3-0.6b-cpu-2048"] {
             let activation_path = repository
                 .join("bundles/local-inference/.ai/config/ryeos-runtime")
@@ -957,19 +1088,22 @@ mod tests {
             let declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration> =
                 serde_json::from_value(worker["external_content"].clone()).unwrap();
 
-            for node_profile in ["full"] {
+            {
+                let node_profile = "standard";
                 let profile_path = repository
                     .join("bundles/.ai/node/init/profiles")
                     .join(format!("{node_profile}.yaml"));
-                let profile: crate::node_policy::generation::NodeInitProfile =
+                let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
                     serde_yaml::from_str(&lillux::signature::strip_signature_lines(
                         &std::fs::read_to_string(&profile_path).unwrap(),
                     ))
                     .unwrap();
                 let generation = profile
+                    .for_host_class("local")
+                    .unwrap()
                     .validated_generation(&policy_table, &profile_path)
                     .unwrap();
-                let external: crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord =
+                let external: ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord =
                     serde_json::from_value(generation.policies()["external_content"].clone()).unwrap();
                 activation
                     .admit(
@@ -1062,6 +1196,7 @@ mod tests {
             digest: Some("c".repeat(64)),
             exclude: Vec::new(),
             metadata_hint: None,
+            qualification_allowance: None,
             mount_root: ryeos_engine::external_content::ExternalContentMountRoot::Project,
             mount: "bin/runtime".to_owned(),
         }]
@@ -1328,19 +1463,23 @@ mod tests {
 
     #[test]
     fn staging_cleanup_budget_covers_every_portable_whole_tree_entry() {
-        assert!(
-            MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
-                >= MAX_PORTABLE_ARCHIVES * MAX_PORTABLE_ARCHIVE_ENTRIES
-                    + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS
-        );
+        const {
+            assert!(
+                MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
+                    >= MAX_PORTABLE_ARCHIVES * MAX_PORTABLE_ARCHIVE_ENTRIES
+                        + ryeos_state::objects::MAX_EXTERNAL_CONTENT_ACTIVATION_COMPONENTS
+            )
+        };
     }
 
     #[test]
     fn staging_cleanup_budget_covers_mixed_mapped_and_whole_tree_shapes() {
-        assert!(
-            MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
-                >= MAX_MAPPED_ACTIVATION_STAGING_ENTRIES
-                    + MAX_WHOLE_TREE_ACTIVATION_STAGING_ENTRIES
-        );
+        const {
+            assert!(
+                MAX_MANAGED_ACTIVATION_STAGING_ENTRIES
+                    >= MAX_MAPPED_ACTIVATION_STAGING_ENTRIES
+                        + MAX_WHOLE_TREE_ACTIVATION_STAGING_ENTRIES
+            )
+        };
     }
 }

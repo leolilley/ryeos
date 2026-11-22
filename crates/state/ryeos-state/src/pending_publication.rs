@@ -54,13 +54,13 @@ impl Drop for PendingCasPublication {
         match self.authority.acquire_shared_guard() {
             Ok(guard) => {
                 if let Err(error) = staged_roots.finish_admitted(&guard) {
-                    tracing::warn!(%error, "failed to discard staged CAS publication roots");
+                    tracing::warn!(error = %format!("{error:#}"), "failed to discard staged CAS publication roots");
                 }
             }
             Err(error) => {
                 // Fail closed: keep the durable recovery roots and lease
                 // record rather than resolving a new filesystem authority.
-                tracing::warn!(%error, "abandoning staged CAS roots under pinned-authority failure");
+                tracing::warn!(error = %format!("{error:#}"), "abandoning staged CAS roots under pinned-authority failure");
             }
         }
     }

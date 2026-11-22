@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use anyhow::Context;
-use ryeos_app::node_config::loader::BootstrapLoader;
+use ryeos_app::node_config::loader::NodeConfigLoader;
 use ryeos_app::node_config::{NodeConfigSnapshot, NodeConfigTable};
-use ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority;
-use ryeos_app::node_policy::{NodePolicySnapshot, NodePolicyTable};
+use ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader;
+use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
+use ryeos_node_runtime::node_policy::{NodePolicySnapshot, NodePolicyTable};
 use ryeos_runtime::{CommandDef, CommandDispatch};
 
 #[derive(Debug, Clone)]
@@ -24,11 +25,8 @@ impl LoadedCommandDescriptor {
 }
 
 pub fn load_verified_snapshot(app_root: &Path) -> anyhow::Result<NodeConfigSnapshot> {
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )
-    .context("load trust store for verified node config")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("load trust store for verified node config")?;
     load_verified_snapshot_with_trust(app_root, &trust_store)
 }
 
@@ -37,29 +35,29 @@ pub fn load_verified_snapshot_with_trust(
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> anyhow::Result<NodeConfigSnapshot> {
     let policy = load_verified_policy_snapshot_with_trust(app_root, trust_store)?;
-    let loader = BootstrapLoader {
+    let bootstrap = BundleBootstrapLoader {
         app_root,
         trust_store,
     };
-    let bundles = loader
+    let bundles = bootstrap
         .load_bundle_section()
         .context("load verified node bundle registrations")?;
-    loader
-        .load_full(
-            &NodeConfigTable::new(),
-            &bundles,
-            policy.require::<CommandRegistrationAuthority>()?,
-            &NodePolicyTable::new(),
-        )
-        .context("load verified node config")
+    NodeConfigLoader {
+        app_root,
+        trust_store,
+    }
+    .load_full(
+        &NodeConfigTable::new(),
+        &bundles,
+        policy.require::<CommandRegistrationAuthority>()?,
+        &NodePolicyTable::new(),
+    )
+    .context("load verified node config")
 }
 
 pub fn load_verified_policy_snapshot(app_root: &Path) -> anyhow::Result<NodePolicySnapshot> {
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )
-    .context("load trust store for verified node policy")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("load trust store for verified node policy")?;
     load_verified_policy_snapshot_with_trust(app_root, &trust_store)
 }
 
@@ -67,7 +65,7 @@ pub fn load_verified_policy_snapshot_with_trust(
     app_root: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> anyhow::Result<NodePolicySnapshot> {
-    ryeos_app::node_policy::load_snapshot(app_root, trust_store, &NodePolicyTable::new())
+    ryeos_node_runtime::node_policy::load_snapshot(app_root, trust_store, &NodePolicyTable::new())
         .context("load verified node policy generation")
 }
 
@@ -126,8 +124,11 @@ mod tests {
     #[test]
     fn exposes_snapshot_commands_without_legacy_alias_conversion() {
         let snapshot = NodeConfigSnapshot {
+            stale_bindings: Vec::new(),
             external_execution: Vec::new(),
             runtime_snapshot_production: Vec::new(),
+            guest_runtime_materialization: Vec::new(),
+            runtime_snapshot_qualification: Vec::new(),
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {
@@ -194,89 +195,95 @@ mod tests {
             (
                 "core",
                 "remote-bundle-install.yaml",
-                vec!["prod", "standard"],
-                serde_json::json!({"remote": "prod", "bundle_name": "standard"}),
+                vec!["prod", "knowledge"],
+                serde_json::json!({"remote": "prod", "bundle_name": "knowledge"}),
             ),
             (
                 "core",
                 "remote-bundle-install.yaml",
-                vec!["standard"],
-                serde_json::json!({"bundle_name": "standard"}),
+                vec!["knowledge"],
+                serde_json::json!({"bundle_name": "knowledge"}),
             ),
             (
-                "standard",
+                "core",
                 "thread-cancel.yaml",
                 vec!["T-123"],
                 serde_json::json!({"thread_id": "T-123"}),
             ),
             (
-                "standard",
+                "core",
                 "thread-get.yaml",
                 vec!["T-123"],
                 serde_json::json!({"thread_id": "T-123"}),
             ),
             (
-                "standard",
+                "core",
                 "thread-chain.yaml",
                 vec!["T-123"],
                 serde_json::json!({"thread_id": "T-123"}),
             ),
             (
-                "standard",
+                "core",
                 "thread-children.yaml",
                 vec!["T-123"],
                 serde_json::json!({"thread_id": "T-123"}),
             ),
             (
-                "standard",
+                "core",
                 "thread-receipts.yaml",
                 vec!["T-123"],
                 serde_json::json!({"thread_id": "T-123"}),
             ),
             (
-                "standard",
+                "core",
                 "events-replay.yaml",
                 vec!["T-123"],
                 serde_json::json!({"thread_id": "T-123"}),
             ),
             (
-                "standard",
+                "core",
                 "events-chain-replay.yaml",
                 vec!["T-root"],
                 serde_json::json!({"chain_root_id": "T-root"}),
             ),
             (
-                "standard",
+                "scheduling",
                 "scheduler-pause.yaml",
                 vec!["nightly"],
                 serde_json::json!({"schedule_id": "nightly"}),
             ),
             (
-                "standard",
+                "scheduling",
                 "scheduler-resume.yaml",
                 vec!["nightly"],
                 serde_json::json!({"schedule_id": "nightly"}),
             ),
             (
-                "standard",
+                "scheduling",
+                "scheduler-reauthorize.yaml",
+                vec!["nightly"],
+                serde_json::json!({"schedule_id": "nightly"}),
+            ),
+            (
+                "scheduling",
                 "scheduler-explain.yaml",
                 vec!["nightly"],
                 serde_json::json!({"schedule_id": "nightly"}),
             ),
             (
-                "standard",
+                "scheduling",
                 "scheduler-deregister.yaml",
                 vec!["nightly"],
                 serde_json::json!({"schedule_id": "nightly"}),
             ),
             (
-                "standard",
+                "scheduling",
                 "scheduler-show-fires.yaml",
                 vec!["nightly"],
                 serde_json::json!({"schedule_id": "nightly"}),
             ),
             (
-                "standard",
+                "core",
                 "commands-submit.yaml",
                 vec!["T-123", "cancel"],
                 serde_json::json!({"thread_id": "T-123", "command_type": "cancel"}),

@@ -457,7 +457,13 @@ pub(crate) fn write_signed_ref_in_directory(
     let canonical = encode_signed_ref(signed_ref, signer)?;
     let expected = directory.open_regular(name, false)?;
     directory
-        .atomic_write_if_same(name, expected.as_ref(), &canonical, 0o666)
+        .atomic_write_if_same(
+            name,
+            expected.as_ref(),
+            &canonical,
+            0o666,
+            crate::STATE_TEMP_PURPOSE,
+        )
         .context("failed to write descriptor-bound signed ref")
 }
 
@@ -470,7 +476,7 @@ fn write_signed_ref_in_directory_if_same(
 ) -> anyhow::Result<()> {
     let canonical = encode_signed_ref(signed_ref, signer)?;
     directory
-        .atomic_write_if_same(name, expected, &canonical, 0o666)
+        .atomic_write_if_same(name, expected, &canonical, 0o666, crate::STATE_TEMP_PURPOSE)
         .context("failed to compare-and-write descriptor-bound signed ref")
 }
 
@@ -715,8 +721,9 @@ fn acquire_pinned_ref_lock(
     directory: &lillux::PinnedDirectory,
     create: bool,
     label: &str,
-) -> anyhow::Result<File> {
+) -> anyhow::Result<lillux::locks::ForkClosedLockFile> {
     let name = std::ffi::OsStr::new("lock");
+    let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
     let file = if create {
         let file = directory.open_regular_create(name, true, false, 0o666)?;
         directory.sync()?;
@@ -730,13 +737,15 @@ fn acquire_pinned_ref_lock(
         })?
     };
     #[cfg(unix)]
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("acquire {label} lock {}", directory.path().display()));
+    {
+        let file = lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
+        file.lock_exclusive()
+            .with_context(|| format!("acquire {label} lock {}", directory.path().display()))?;
+        Ok(file)
     }
     #[cfg(not(unix))]
-    anyhow::bail!("{label} locking is unavailable on this platform");
-    Ok(file)
+    anyhow::bail!("{label} locking is unavailable on this platform")
 }
 
 fn ensure_pinned_ref_lock(
@@ -1242,7 +1251,7 @@ pub(crate) fn list_verified_project_head_refs_in_directory(
 /// Mutation helpers require this exact guard and prove its inode belongs to the
 /// supplied refs root before comparing or publishing.
 pub struct ProjectHeadLock {
-    _lock_file: File,
+    _lock_file: lillux::locks::ForkClosedLockFile,
     principal_key: String,
     project_hash: String,
 }
@@ -1324,27 +1333,28 @@ impl ProjectHeadLock {
             .join("lock");
 
         #[cfg(unix)]
-        let lock_file = open_regular_ref_path_no_follow(&lock_path, true, create, create)?
-            .ok_or_else(|| {
+        let lock_file = {
+            let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
+            let file = open_regular_ref_path_no_follow(&lock_path, true, create, create)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "project HEAD lock anchor is missing: {}",
+                        lock_path.display()
+                    )
+                })?;
+            let file =
+                lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+            drop(fork_sensitive_descriptors);
+            file.lock_exclusive().map_err(|error| {
                 anyhow!(
-                    "project HEAD lock anchor is missing: {}",
+                    "project HEAD flock failed at {}: {error}",
                     lock_path.display()
                 )
             })?;
+            file
+        };
         #[cfg(not(unix))]
-        let lock_file: File = anyhow::bail!("project HEAD locking is unavailable on this platform");
-
-        #[cfg(unix)]
-        {
-            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                anyhow::bail!(
-                    "project HEAD flock failed at {}: {}",
-                    lock_path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
+        let lock_file = anyhow::bail!("project HEAD locking is unavailable on this platform");
 
         Ok(Self {
             _lock_file: lock_file,
@@ -1400,17 +1410,8 @@ impl ProjectHeadLock {
     }
 }
 
-impl Drop for ProjectHeadLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            let _ = libc::flock(self._lock_file.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
-
 pub(crate) struct DeployedProjectHeadLock {
-    _lock_file: File,
+    _lock_file: lillux::locks::ForkClosedLockFile,
     project_hash: String,
 }
 
@@ -1461,14 +1462,66 @@ impl DeployedProjectHeadLock {
     }
 }
 
-impl Drop for DeployedProjectHeadLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            let _ = libc::flock(self._lock_file.as_raw_fd(), libc::LOCK_UN);
+/// A project-HEAD advance refused before any write: the HEAD ref was not
+/// touched by the refusing call. Callers downcast an advance error to this
+/// type to tell "not applied" apart from a write whose outcome is unknown;
+/// any other error from an advance may have reached the ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectHeadAdvanceRefusal {
+    /// The current HEAD is not the expected one (`observed` is `None` when
+    /// the project has no HEAD).
+    Conflict {
+        expected: String,
+        observed: Option<String>,
+    },
+    /// A worker-handoff reservation fences this project's HEAD.
+    Fenced(String),
+    /// The signer is not trusted by this node.
+    Untrusted(String),
+    /// The request or the stored ref failed validation, or the ref could not
+    /// be locked or read.
+    Invalid(String),
+}
+
+impl ProjectHeadAdvanceRefusal {
+    /// Stable reason code for facts, payloads and typed API refusals.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Conflict { .. } => "head_moved",
+            Self::Fenced(_) => "fenced",
+            Self::Untrusted(_) => "untrusted_signer",
+            Self::Invalid(_) => "invalid",
+        }
+    }
+
+    /// Classify an error raised before any write as `Invalid`, keeping a
+    /// refusal that is already typed.
+    pub fn before_write(error: anyhow::Error) -> anyhow::Error {
+        if error.downcast_ref::<Self>().is_some() {
+            return error;
+        }
+        Self::Invalid(format!("{error:#}")).into()
+    }
+}
+
+impl std::fmt::Display for ProjectHeadAdvanceRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { expected, observed } => write!(
+                formatter,
+                "project head conflict: expected {expected}, got {}",
+                observed.as_deref().unwrap_or("no HEAD")
+            ),
+            Self::Fenced(detail) => write!(formatter, "project head is fenced: {detail}"),
+            Self::Untrusted(detail) => {
+                write!(formatter, "project head signer is not trusted: {detail}")
+            }
+            Self::Invalid(detail) => write!(formatter, "project head advance refused: {detail}"),
         }
     }
 }
+
+impl std::error::Error for ProjectHeadAdvanceRefusal {}
 
 /// Advance a project head ref with compare-and-swap.
 ///
@@ -1482,7 +1535,6 @@ impl Drop for DeployedProjectHeadLock {
 #[cfg(test)]
 // This test-only CAS adapter deliberately exposes every identity, trust, and
 // held-lock prerequisite independently, matching the production boundary.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_project_head_ref(
     refs_root: &Path,
     principal_key: &str,
@@ -1493,29 +1545,30 @@ pub(crate) fn advance_verified_project_head_ref(
     trust_store: &TrustStore,
     project_lock: &ProjectHeadLock,
 ) -> anyhow::Result<()> {
-    project_lock.ensure_protects(refs_root, principal_key, project_hash)?;
-    crate::signer::ensure_signer_trusted(signer, trust_store)?;
+    project_lock
+        .ensure_protects(refs_root, principal_key, project_hash)
+        .map_err(ProjectHeadAdvanceRefusal::before_write)?;
+    crate::signer::ensure_signer_trusted(signer, trust_store)
+        .map_err(|error| ProjectHeadAdvanceRefusal::Untrusted(format!("{error:#}")))?;
     let current =
-        read_verified_project_head_ref(refs_root, principal_key, project_hash, trust_store)?
-            .ok_or_else(|| {
-                anyhow!(
-                    "no project head ref for principal/project {}/{}",
-                    principal_key,
-                    project_hash
-                )
+        read_verified_project_head_ref(refs_root, principal_key, project_hash, trust_store)
+            .map_err(ProjectHeadAdvanceRefusal::before_write)?
+            .ok_or_else(|| ProjectHeadAdvanceRefusal::Conflict {
+                expected: expected_current_hash.to_owned(),
+                observed: None,
             })?;
 
     if current.target_hash != expected_current_hash {
-        anyhow::bail!(
-            "project head conflict for principal/project {}/{}: expected {}, got {}",
-            principal_key,
-            project_hash,
-            expected_current_hash,
-            current.target_hash
-        );
+        return Err(ProjectHeadAdvanceRefusal::Conflict {
+            expected: expected_current_hash.to_owned(),
+            observed: Some(current.target_hash),
+        }
+        .into());
     }
 
-    project_lock.ensure_protects(refs_root, principal_key, project_hash)?;
+    project_lock
+        .ensure_protects(refs_root, principal_key, project_hash)
+        .map_err(ProjectHeadAdvanceRefusal::before_write)?;
     write_project_head_ref_unchecked(
         refs_root,
         principal_key,
@@ -1527,7 +1580,6 @@ pub(crate) fn advance_verified_project_head_ref(
 
 // Signed-ref authority, CAS expectation, trust, and the held lock are explicit
 // so callers cannot conflate verification with publication authority.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_project_head_ref_in_directory(
     refs_directory: &lillux::PinnedDirectory,
     principal_key: &str,
@@ -1538,42 +1590,47 @@ pub(crate) fn advance_verified_project_head_ref_in_directory(
     trust_store: &TrustStore,
     project_lock: &ProjectHeadLock,
 ) -> anyhow::Result<()> {
-    let head_directory =
-        project_lock.protected_directory_in_refs(refs_directory, principal_key, project_hash)?;
-    crate::signer::ensure_signer_trusted(signer, trust_store)?;
+    // Every refusal before the write below is a typed
+    // `ProjectHeadAdvanceRefusal`: the ref is provably untouched.
+    let head_directory = project_lock
+        .protected_directory_in_refs(refs_directory, principal_key, project_hash)
+        .map_err(ProjectHeadAdvanceRefusal::before_write)?;
+    crate::signer::ensure_signer_trusted(signer, trust_store)
+        .map_err(|error| ProjectHeadAdvanceRefusal::Untrusted(format!("{error:#}")))?;
     if !is_canonical_hash(new_snapshot_hash) {
-        anyhow::bail!("invalid project snapshot hash: {new_snapshot_hash}");
+        return Err(ProjectHeadAdvanceRefusal::Invalid(format!(
+            "invalid project snapshot hash: {new_snapshot_hash}"
+        ))
+        .into());
     }
-    let expected_ref_path = project_head_ref_path(principal_key, project_hash)?;
+    let expected_ref_path = project_head_ref_path(principal_key, project_hash)
+        .map_err(ProjectHeadAdvanceRefusal::before_write)?;
     let (current, current_file) = read_verified_ref_with_file_in_directory(
         &head_directory,
         std::ffi::OsStr::new("head"),
         trust_store,
-    )?
-    .ok_or_else(|| {
-        anyhow!(
-            "no project head ref for principal/project {}/{}",
-            principal_key,
-            project_hash
-        )
+    )
+    .map_err(ProjectHeadAdvanceRefusal::before_write)?
+    .ok_or_else(|| ProjectHeadAdvanceRefusal::Conflict {
+        expected: expected_current_hash.to_owned(),
+        observed: None,
     })?;
     if current.ref_path != expected_ref_path {
-        anyhow::bail!(
+        return Err(ProjectHeadAdvanceRefusal::Invalid(format!(
             "project head ref_path mismatch: expected {}, got {}",
-            expected_ref_path,
-            current.ref_path
-        );
+            expected_ref_path, current.ref_path
+        ))
+        .into());
     }
     if current.target_hash != expected_current_hash {
-        anyhow::bail!(
-            "project head conflict for principal/project {}/{}: expected {}, got {}",
-            principal_key,
-            project_hash,
-            expected_current_hash,
-            current.target_hash
-        );
+        return Err(ProjectHeadAdvanceRefusal::Conflict {
+            expected: expected_current_hash.to_owned(),
+            observed: Some(current.target_hash),
+        }
+        .into());
     }
-    ensure_pinned_ref_lock(&project_lock._lock_file, &head_directory, "project HEAD")?;
+    ensure_pinned_ref_lock(&project_lock._lock_file, &head_directory, "project HEAD")
+        .map_err(ProjectHeadAdvanceRefusal::before_write)?;
     write_project_head_ref_unchecked_in_head_directory(
         &head_directory,
         principal_key,
@@ -1638,7 +1695,7 @@ fn generic_head_file_path(
 }
 
 pub(crate) struct GenericHeadLock {
-    _lock_file: File,
+    _lock_file: lillux::locks::ForkClosedLockFile,
     namespace: String,
     name: String,
 }
@@ -1653,21 +1710,23 @@ impl GenericHeadLock {
             .join(name)
             .join("lock");
         #[cfg(unix)]
-        let lock_file = open_regular_ref_path_no_follow(&lock_path, true, true, true)?
-            .expect("create=true opens generic HEAD lock");
+        let lock_file = {
+            let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
+            let file = open_regular_ref_path_no_follow(&lock_path, true, true, true)?
+                .expect("create=true opens generic HEAD lock");
+            let file =
+                lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+            drop(fork_sensitive_descriptors);
+            file.lock_exclusive().map_err(|error| {
+                anyhow!(
+                    "generic HEAD flock failed at {}: {error}",
+                    lock_path.display()
+                )
+            })?;
+            file
+        };
         #[cfg(not(unix))]
-        let lock_file: File = anyhow::bail!("generic HEAD locking is unavailable on this platform");
-        #[cfg(unix)]
-        {
-            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                anyhow::bail!(
-                    "generic HEAD flock failed at {}: {}",
-                    lock_path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
+        let lock_file = anyhow::bail!("generic HEAD locking is unavailable on this platform");
         Ok(Self {
             _lock_file: lock_file,
             namespace: namespace.to_string(),
@@ -1750,15 +1809,6 @@ impl GenericHeadLock {
         .ok_or_else(|| anyhow!("generic HEAD lock directory disappeared"))?;
         ensure_pinned_ref_lock(&self._lock_file, &directory, "generic HEAD")?;
         Ok(directory)
-    }
-}
-
-impl Drop for GenericHeadLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            let _ = libc::flock(self._lock_file.as_raw_fd(), libc::LOCK_UN);
-        }
     }
 }
 
@@ -1973,7 +2023,6 @@ pub(crate) fn remove_generic_head_ref_in_directory(
 #[cfg(test)]
 // Keep namespace identity, CAS expectation, trust, and lock authority explicit
 // in tests so invalid combinations remain directly constructible.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_generic_head_ref(
     refs_root: &Path,
     namespace: &str,
@@ -2002,7 +2051,6 @@ pub(crate) fn advance_verified_generic_head_ref(
 
 // Signed-ref authority, CAS expectation, trust, and the held lock are explicit
 // so callers cannot conflate verification with publication authority.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_generic_head_ref_in_directory(
     refs_directory: &lillux::PinnedDirectory,
     namespace: &str,
@@ -2808,6 +2856,83 @@ mod tests {
         let mismatch =
             read_verified_project_head_ref(&first_refs, principal, project, &trust).unwrap_err();
         assert!(mismatch.to_string().contains("ref_path mismatch"));
+    }
+
+    #[test]
+    fn advance_project_head_conflict_is_typed_before_write() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let refs = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let trust = trust_store(&signer);
+        let (principal, project) = ("principal-a", "project-a");
+        let head = "11".repeat(32);
+        let stale_base = "22".repeat(32);
+        let candidate = "33".repeat(32);
+        let lock = ProjectHeadLock::acquire(&refs, principal, project).unwrap();
+        write_verified_project_head_ref(&refs, principal, project, &head, &signer, &trust, &lock)
+            .unwrap();
+        let before =
+            std::fs::read(project_head_file_path(&refs, principal, project).unwrap()).unwrap();
+
+        let error = advance_verified_project_head_ref(
+            &refs,
+            principal,
+            project,
+            &candidate,
+            &stale_base,
+            &signer,
+            &trust,
+            &lock,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ProjectHeadAdvanceRefusal>(),
+            Some(&ProjectHeadAdvanceRefusal::Conflict {
+                expected: stale_base,
+                observed: Some(head.clone()),
+            })
+        );
+        assert_eq!(
+            std::fs::read(project_head_file_path(&refs, principal, project).unwrap()).unwrap(),
+            before,
+            "a refused advance never touches the ref"
+        );
+    }
+
+    #[test]
+    fn untrusted_signer_refusal_is_pre_write() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let refs = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let trust = trust_store(&signer);
+        let (principal, project) = ("principal-a", "project-a");
+        let head = "11".repeat(32);
+        let lock = ProjectHeadLock::acquire(&refs, principal, project).unwrap();
+        write_verified_project_head_ref(&refs, principal, project, &head, &signer, &trust, &lock)
+            .unwrap();
+        let error = advance_verified_project_head_ref(
+            &refs,
+            principal,
+            project,
+            &"33".repeat(32),
+            &head,
+            &signer,
+            &TrustStore::new(),
+            &lock,
+        )
+        .unwrap_err();
+        let refusal = error
+            .downcast_ref::<ProjectHeadAdvanceRefusal>()
+            .expect("typed pre-write refusal");
+        assert!(matches!(refusal, ProjectHeadAdvanceRefusal::Untrusted(_)));
+        assert_eq!(refusal.reason(), "untrusted_signer");
+        assert_eq!(
+            read_verified_project_head_ref(&refs, principal, project, &trust)
+                .unwrap()
+                .unwrap()
+                .target_hash,
+            head
+        );
     }
 
     #[test]

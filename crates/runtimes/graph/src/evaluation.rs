@@ -115,6 +115,96 @@ pub(crate) fn post_action_dispatch_value(
     value
 }
 
+impl<'a> ExpressionScope<'a> {
+    pub(crate) fn new(
+        state: &'a Value,
+        inputs: &'a Value,
+        execution: Option<&'a Value>,
+        run: GraphRunExpressionContext<'_>,
+    ) -> Self {
+        Self {
+            state,
+            inputs,
+            result: None,
+            execution,
+            run: run.to_value(),
+            post_action_dispatch: None,
+            foreach: None,
+            limits: EvaluationLimits::default(),
+        }
+    }
+
+    pub(crate) fn with_result(mut self, result: &'a Value) -> Self {
+        self.result = Some(result);
+        self
+    }
+
+    pub(crate) fn with_post_action_dispatch(
+        mut self,
+        evidence: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+        child_thread_id: Option<&'a str>,
+    ) -> Self {
+        self.post_action_dispatch = Some(PostActionDispatchExpressionContext {
+            evidence,
+            child_thread_id,
+        });
+        self
+    }
+
+    pub(crate) fn with_foreach(mut self, name: &'a str, item: &'a Value) -> Self {
+        self.foreach = Some((name, item));
+        self
+    }
+
+    pub(crate) fn render_action(
+        &self,
+        template: &CompiledActionTemplate,
+    ) -> Result<Value, ExpressionError> {
+        self.evaluate(|session| template.render(session))
+    }
+
+    pub(crate) fn render_json(
+        &self,
+        template: &CompiledJsonTemplate,
+    ) -> Result<Value, ExpressionError> {
+        self.evaluate(|session| template.render(session))
+    }
+
+    pub(crate) fn render_template(
+        &self,
+        template: &CompiledTemplate,
+    ) -> Result<Value, ExpressionError> {
+        self.evaluate(|session| session.render_template(template))
+    }
+
+    fn evaluate<T>(
+        &self,
+        evaluate: impl FnOnce(&mut EvaluationSession<'_>) -> Result<T, ExpressionError>,
+    ) -> Result<T, ExpressionError> {
+        let mut context = EvaluationContext::new()
+            .with_root("state", self.state)
+            .with_root("inputs", self.inputs);
+        if let Some(result) = self.result {
+            context.insert("result", result);
+        }
+        if let Some(execution) = self.execution {
+            context.insert("execution", execution);
+        }
+        context.insert("run", &self.run);
+        let dispatch_value;
+        if let Some(dispatch) = self.post_action_dispatch {
+            dispatch_value =
+                post_action_dispatch_value(dispatch.evidence, dispatch.child_thread_id);
+            context.insert("dispatch", &dispatch_value);
+        }
+        if let Some((name, item)) = self.foreach {
+            context.insert(name, item);
+        }
+        let mut session = EvaluationSession::with_context(&context, &self.limits);
+        evaluate(&mut session)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,95 +327,5 @@ mod tests {
         .render_json(&compiled)
         .unwrap();
         assert_eq!(no_evidence["child"], Value::Null);
-    }
-}
-
-impl<'a> ExpressionScope<'a> {
-    pub(crate) fn new(
-        state: &'a Value,
-        inputs: &'a Value,
-        execution: Option<&'a Value>,
-        run: GraphRunExpressionContext<'_>,
-    ) -> Self {
-        Self {
-            state,
-            inputs,
-            result: None,
-            execution,
-            run: run.to_value(),
-            post_action_dispatch: None,
-            foreach: None,
-            limits: EvaluationLimits::default(),
-        }
-    }
-
-    pub(crate) fn with_result(mut self, result: &'a Value) -> Self {
-        self.result = Some(result);
-        self
-    }
-
-    pub(crate) fn with_post_action_dispatch(
-        mut self,
-        evidence: Option<&'a ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
-        child_thread_id: Option<&'a str>,
-    ) -> Self {
-        self.post_action_dispatch = Some(PostActionDispatchExpressionContext {
-            evidence,
-            child_thread_id,
-        });
-        self
-    }
-
-    pub(crate) fn with_foreach(mut self, name: &'a str, item: &'a Value) -> Self {
-        self.foreach = Some((name, item));
-        self
-    }
-
-    pub(crate) fn render_action(
-        &self,
-        template: &CompiledActionTemplate,
-    ) -> Result<Value, ExpressionError> {
-        self.evaluate(|session| template.render(session))
-    }
-
-    pub(crate) fn render_json(
-        &self,
-        template: &CompiledJsonTemplate,
-    ) -> Result<Value, ExpressionError> {
-        self.evaluate(|session| template.render(session))
-    }
-
-    pub(crate) fn render_template(
-        &self,
-        template: &CompiledTemplate,
-    ) -> Result<Value, ExpressionError> {
-        self.evaluate(|session| session.render_template(template))
-    }
-
-    fn evaluate<T>(
-        &self,
-        evaluate: impl FnOnce(&mut EvaluationSession<'_>) -> Result<T, ExpressionError>,
-    ) -> Result<T, ExpressionError> {
-        let mut context = EvaluationContext::new()
-            .with_root("state", self.state)
-            .with_root("inputs", self.inputs);
-        if let Some(result) = self.result {
-            context.insert("result", result);
-        }
-        if let Some(execution) = self.execution {
-            context.insert("execution", execution);
-        }
-        context.insert("run", &self.run);
-        let dispatch_value;
-        if let Some(dispatch) = self.post_action_dispatch {
-            dispatch_value =
-                post_action_dispatch_value(dispatch.evidence, dispatch.child_thread_id);
-            context.insert("dispatch", &dispatch_value);
-        }
-        if let Some((name, item)) = self.foreach {
-            context.insert(name, item);
-        }
-        let mut session = EvaluationSession::with_context(&context, &self.limits);
-        evaluate(&mut session)
     }
 }

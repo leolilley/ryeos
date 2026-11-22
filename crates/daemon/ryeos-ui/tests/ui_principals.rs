@@ -1,6 +1,6 @@
 // Tests for principal-aware RyeOS UI user-space storage.
 
-mod test_state;
+use ryeos_ui::test_support as test_state;
 use test_state::{build_test_state, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
@@ -9,16 +9,30 @@ use ryeos_ui::state::get_ui_state;
 use serde_json::json;
 use std::sync::Arc;
 
+/// A launch whose compiled binding is owned by `user_principal_id`: the
+/// durable principal its user-space store is keyed by.
 fn principal_launch_context(user_principal_id: String) -> ryeos_ui::browser_session::LaunchContext {
-    launch_context(
+    let mut context = launch_context(
         "surface:ryeos/ui/base",
         None,
         ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
-        Some(user_principal_id),
-    )
+        Some(user_principal_id.clone()),
+    );
+    Arc::make_mut(&mut context.compiled_binding)
+        .binding
+        .principal_id = user_principal_id;
+    context
 }
 
-fn session_context(state: &ryeos_app::state::AppState, principal: &str) -> HandlerContext {
+/// A minted, activated session for `principal`: its `session:` context and
+/// the launch attachment its UI services are dispatched under.
+fn session_context(
+    state: &ryeos_app::state::AppState,
+    principal: &str,
+) -> (
+    HandlerContext,
+    Arc<ryeos_ui::browser_session::AdmittedBindingAttachment>,
+) {
     let (session_id, token) =
         test_state::mint_launch(state, principal_launch_context(principal.to_string()));
     assert_eq!(
@@ -28,43 +42,65 @@ fn session_context(state: &ryeos_app::state::AppState, principal: &str) -> Handl
             .consume_launch_token(&token),
         Some(session_id.clone())
     );
-    HandlerContext::new(
-        format!("session:{session_id}"),
-        vec!["ui.read".into()],
-        false,
+    let session = get_ui_state(state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .expect("live browser session");
+    let attachment = session
+        .attachments
+        .get(&session.root_attachment_id)
+        .expect("launch attachment")
+        .clone();
+    (
+        HandlerContext::new(
+            format!("session:{session_id}"),
+            vec!["ui.read".into()],
+            false,
+        ),
+        attachment,
     )
 }
 
 #[tokio::test]
 async fn ryeos_config_is_isolated_by_durable_user_principal() {
-    let (tmp, state) = build_test_state();
+    let (tmp, _state_owner, state) = build_test_state();
     let principal_a = format!("fp:{}", "aa".repeat(32));
     let principal_b = format!("fp:{}", "bb".repeat(32));
 
-    let ctx_a = session_context(&state, &principal_a);
-    let updated = ryeos_ui::handlers::ui_projects::handle_config_update(
-        json!({ "theme": "dark" }),
-        ctx_a.clone(),
-        Arc::new(state.clone()),
+    let (ctx_a, attachment_a) = session_context(&state, &principal_a);
+    let updated = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment_a.clone(),
+        ryeos_ui::handlers::ui_projects::handle_config_update(
+            json!({ "theme": "gruvbox" }),
+            ctx_a.clone(),
+            Arc::new(state.clone()),
+        ),
     )
     .await
     .expect("principal A should update config");
-    assert_eq!(updated["theme"], "dark");
+    assert_eq!(updated["theme"], "gruvbox");
 
-    let loaded_a = ryeos_ui::handlers::ui_projects::handle_config_get(
-        json!(null),
-        ctx_a,
-        Arc::new(state.clone()),
+    let loaded_a = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment_a,
+        ryeos_ui::handlers::ui_projects::handle_config_get(
+            json!(null),
+            ctx_a,
+            Arc::new(state.clone()),
+        ),
     )
     .await
     .expect("principal A should read updated config");
-    assert_eq!(loaded_a["theme"], "dark");
+    assert_eq!(loaded_a["theme"], "gruvbox");
 
-    let ctx_b = session_context(&state, &principal_b);
-    let loaded_b = ryeos_ui::handlers::ui_projects::handle_config_get(
-        json!(null),
-        ctx_b,
-        Arc::new(state.clone()),
+    let (ctx_b, attachment_b) = session_context(&state, &principal_b);
+    let loaded_b = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment_b,
+        ryeos_ui::handlers::ui_projects::handle_config_get(
+            json!(null),
+            ctx_b,
+            Arc::new(state.clone()),
+        ),
     )
     .await
     .expect("principal B should read default config");
@@ -81,15 +117,74 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
 }
 
 #[tokio::test]
-async fn ryeos_dimension_exposes_session_user_principal() {
-    let (_tmp, state) = build_test_state();
-    let principal = format!("fp:{}", "cc".repeat(32));
-    let ctx = session_context(&state, &principal);
+async fn a_stored_light_or_dark_theme_reads_as_system_and_can_be_replaced() {
+    let (tmp, _state_owner, state) = build_test_state();
+    let principal = format!("fp:{}", "dd".repeat(32));
+    let (ctx, attachment) = session_context(&state, &principal);
+    let call = |params: serde_json::Value, update: bool| {
+        let (ctx, attachment, state) = (ctx.clone(), attachment.clone(), Arc::new(state.clone()));
+        async move {
+            if update {
+                ryeos_ui::seat_auth::with_compiled_ui_attachment(
+                    attachment,
+                    ryeos_ui::handlers::ui_projects::handle_config_update(params, ctx, state),
+                )
+                .await
+            } else {
+                ryeos_ui::seat_auth::with_compiled_ui_attachment(
+                    attachment,
+                    ryeos_ui::handlers::ui_projects::handle_config_get(params, ctx, state),
+                )
+                .await
+            }
+        }
+    };
+    call(json!({ "theme": "gruvbox" }), true)
+        .await
+        .expect("writes the config file");
+    let file = tmp
+        .path()
+        .join(".ai/principals")
+        .join("dd".repeat(32))
+        .join("space/.ai/config/ryeos-ui.yaml");
+    let text = std::fs::read_to_string(&file).expect("config file");
+    std::fs::write(&file, text.replace("theme: gruvbox", "theme: dark")).expect("rewrite");
 
-    let dimension =
-        ryeos_ui::handlers::ui_dimension::handle(json!(null), ctx, Arc::new(state.clone()))
-            .await
-            .expect("ryeos-ui dimension should load");
+    // The whole config still reads; only the theme is treated as unset.
+    let loaded = call(json!(null), false).await.expect("config still reads");
+    assert_eq!(loaded["theme"], "system");
+    assert_eq!(loaded["landing_view"], "projects");
+    // And a config update still works and writes a valid theme back.
+    let updated = call(json!({ "theme": "paper" }), true)
+        .await
+        .expect("update works over the stale theme");
+    assert_eq!(updated["theme"], "paper");
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("theme: paper")
+    );
+}
+
+#[tokio::test]
+async fn ryeos_dimension_exposes_session_user_principal() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let principal = format!("fp:{}", "cc".repeat(32));
+    let (ctx, attachment) = session_context(&state, &principal);
+
+    let session_id = ctx
+        .fingerprint
+        .strip_prefix("session:")
+        .expect("session context")
+        .to_owned();
+    let dimension = test_state::with_dispatched_session(
+        &state,
+        &session_id,
+        attachment,
+        ryeos_ui::handlers::ui_dimension::handle(json!(null), ctx, Arc::new(state.clone())),
+    )
+    .await
+    .expect("ryeos-ui dimension should load");
 
     assert_eq!(dimension["session"]["user_principal_id"], principal);
     assert_eq!(dimension["session"]["surface_ref"], "surface:ryeos/ui/base");
@@ -97,12 +192,13 @@ async fn ryeos_dimension_exposes_session_user_principal() {
 
 #[tokio::test]
 async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let req = ryeos_ui::handlers::ui_launch_mint::Request {
         ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
-        surface_ref: "surface:ryeos/ui/base".into(),
+        root_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         user_principal_id: Some("session:not-a-principal".into()),
+        scopes: None,
     };
 
     let err = ryeos_ui::handlers::ui_launch_mint::handle(
@@ -119,12 +215,13 @@ async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
 
 #[tokio::test]
 async fn launch_mint_rejects_mismatched_user_principal() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, _state_owner, state) = build_test_state();
     let req = ryeos_ui::handlers::ui_launch_mint::Request {
         ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
-        surface_ref: "surface:ryeos/ui/base".into(),
+        root_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         user_principal_id: Some(format!("fp:{}", "aa".repeat(32))),
+        scopes: None,
     };
 
     let err = ryeos_ui::handlers::ui_launch_mint::handle(

@@ -11,15 +11,71 @@ pub(super) enum ManagedProtocolRoute {
     FramedStreaming,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectProtocolRoute {
+    Ordinary,
+    QualificationOpaqueCallback,
+}
+
+pub(crate) fn direct_protocol_route(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+) -> Option<DirectProtocolRoute> {
+    use ryeos_engine::protocol_vocabulary::{
+        CallbackChannel, LifecycleMode, StdinShape, StdoutMode, StdoutShape,
+    };
+    if protocol.descriptor.lifecycle.mode == LifecycleMode::Managed
+        && protocol.descriptor.stdin.shape == StdinShape::Opaque
+        && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
+        && protocol.descriptor.stdout.mode == StdoutMode::Terminal
+        && protocol.descriptor.callback_channel == CallbackChannel::RuntimeSocket
+        && !protocol.descriptor.capabilities.allows_detached
+        && protocol.descriptor.qualification_callback
+            == Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer)
+    {
+        return Some(DirectProtocolRoute::QualificationOpaqueCallback);
+    }
+    (protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
+        || protocol.descriptor.callback_channel == CallbackChannel::None)
+        .then_some(DirectProtocolRoute::Ordinary)
+}
+
 /// Select the existing executor-plan surface from wire mechanics, never a
 /// kind or protocol name. Managed callback runtimes own launch envelopes;
 /// callback-free streams consume the ordinary signed subprocess plan.
 pub(super) fn uses_direct_subprocess_plan(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> bool {
-    use ryeos_engine::protocol_vocabulary::{CallbackChannel, LifecycleMode};
-    protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
-        || protocol.descriptor.callback_channel == CallbackChannel::None
+    direct_protocol_route(protocol).is_some()
+}
+
+fn qualification_route_refusal(kind: &str) -> DispatchError {
+    DispatchError::SchemaMisconfigured {
+        kind: kind.to_owned(),
+        detail: "qualification opaque callback requires a remote-consumer launch proof naming this item and the composition-retained native custody; selected route remains refused".into(),
+    }
+}
+
+/// Admission for a direct subprocess hop. The qualification callback route is
+/// admitted only when the launch proof names this exact hop; the exact wire
+/// match that selected the route is its shape check, since its managed
+/// lifecycle is outside the ordinary shapes. Every other route takes the
+/// ordinary contract unchanged, with or without a proof. A proof is necessary,
+/// not sufficient: the runner still requires the born-root custody before it
+/// mints any callback authority.
+pub(crate) fn validate_direct_protocol_contract(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    kind: &str,
+    proof: Option<&ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof>,
+    hop_ref: &str,
+) -> Result<(), DispatchError> {
+    if direct_protocol_route(protocol) == Some(DirectProtocolRoute::QualificationOpaqueCallback) {
+        return if proof.is_some_and(|proof| proof.authorizes(hop_ref)) {
+            Ok(())
+        } else {
+            Err(qualification_route_refusal(kind))
+        };
+    }
+    validate_ordinary_protocol_contract(protocol, kind)
 }
 
 /// Enforce the one ordinary-subprocess wire contract everywhere admission can
@@ -30,6 +86,10 @@ pub(crate) fn validate_ordinary_protocol_contract(
     kind: &str,
 ) -> Result<(), DispatchError> {
     use ryeos_engine::protocol_vocabulary::{LifecycleMode, StdinShape, StdoutMode, StdoutShape};
+
+    if direct_protocol_route(protocol) == Some(DirectProtocolRoute::QualificationOpaqueCallback) {
+        return Err(qualification_route_refusal(kind));
+    }
 
     let terminal = protocol.descriptor.lifecycle.mode == LifecycleMode::DetachedOk
         && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
@@ -175,7 +235,13 @@ pub(crate) async fn dispatch_subprocess(
         root_subject,
         hop_runtime,
         launch_handoff,
+        invocation_root,
     } = sctx;
+    if invocation_root.requires_selected() {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "selected dedicated owner issuer is not yet joined; contact and ordinary fallback refused"
+        )));
+    }
     let schema = ctx.engine.kinds.get(&current_ref.kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
         available.sort();
@@ -200,7 +266,7 @@ pub(crate) async fn dispatch_subprocess(
                 kind: current_ref.kind.clone(),
                 detail: "dispatch_subprocess called on a schema with no terminator".into(),
             })?;
-    let protocol_ref = match terminator {
+    let (protocol_ref, composed_value) = match terminator {
         TerminatorDecl::Subprocess { protocol } => {
             let verified = hop_verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: current_ref.kind.clone(),
@@ -209,6 +275,7 @@ pub(crate) async fn dispatch_subprocess(
             let effective = ctx
                 .engine
                 .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: verified.resolved.logical_project_root.clone(),
                     item_ref: verified.resolved.canonical_ref.clone(),
                     expected_kind: Some(current_ref.kind.clone()),
                     project_root: verified.resolved.materialized_project_root.clone(),
@@ -229,12 +296,18 @@ pub(crate) async fn dispatch_subprocess(
                             .into(),
                 });
             }
-            protocol
-                .resolve(&effective.composed_value)
-                .map_err(|detail| DispatchError::SchemaMisconfigured {
-                    kind: current_ref.kind.clone(),
-                    detail,
-                })?
+            let protocol_ref = crate::dispatch::node_selected_protocol_ref(
+                exec,
+                protocol,
+                &effective.composed_value,
+                &ctx.engine,
+                state.isolation.as_ref(),
+            )
+            .map_err(|detail| DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail,
+            })?;
+            (protocol_ref, effective.composed_value)
         }
         TerminatorDecl::InProcess { .. } => {
             return Err(DispatchError::SchemaMisconfigured {
@@ -252,7 +325,26 @@ pub(crate) async fn dispatch_subprocess(
         .require(&protocol_ref)
         .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref.clone()))?;
 
-    check_dispatch_capabilities(&protocol.descriptor.capabilities, request)?;
+    // The declaration is read only where it matters: a gated protocol and a
+    // pushed-head project source. Every other launch never evaluates it.
+    let declares_pushed_head = crate::dispatch::pushed_head_declaration_if_gated(
+        &protocol.descriptor.capabilities,
+        matches!(
+            request.provenance.project_source(),
+            ProjectSourceKind::PushedHead
+        ),
+        exec,
+        &composed_value,
+    )
+    .map_err(|error| DispatchError::SchemaMisconfigured {
+        kind: current_ref.kind.clone(),
+        detail: error.to_string(),
+    })?;
+    check_dispatch_capabilities(
+        &protocol.descriptor.capabilities,
+        request,
+        declares_pushed_head,
+    )?;
 
     use ryeos_engine::protocol_vocabulary::StdoutMode;
     if protocol.descriptor.stdout.mode == StdoutMode::Streaming && request.launch_mode == "detached"
@@ -280,13 +372,26 @@ pub(crate) async fn dispatch_subprocess(
                     root_subject,
                     hop_runtime,
                     launch_handoff,
+                    invocation_root,
                 },
                 protocol,
             ))
             .await
         }
         true => {
-            validate_ordinary_protocol_contract(protocol, &current_ref.kind)?;
+            let remote_consumer = request
+                .root_admission
+                .as_ref()
+                .map(ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof::from_admission)
+                .transpose()
+                .map_err(DispatchError::Internal)?
+                .flatten();
+            validate_direct_protocol_contract(
+                protocol,
+                &current_ref.kind,
+                remote_consumer.as_ref(),
+                &current_ref.to_string(),
+            )?;
             Box::pin(dispatch_tool_subprocess(
                 current_ref,
                 thread_profile,
@@ -319,8 +424,14 @@ async fn dispatch_managed_subprocess(
         handler_context,
         role,
         launch_handoff,
+        invocation_root,
     } = sctx;
 
+    if invocation_root.requires_selected() {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "selected managed owner driver is not admitted"
+        )));
+    }
     if classify_managed_protocol(protocol, &canonical_ref.kind)?
         == ManagedProtocolRoute::FramedStreaming
     {
@@ -414,11 +525,19 @@ async fn dispatch_managed_subprocess(
             &launch_contract,
             root_admission.resolution_subject_authority(),
             handler_context.as_ref(),
-            &ctx.engine.resolution_roots(
-                root_admission
-                    .resolution_workspace()
-                    .map(std::path::Path::to_path_buf),
-            ),
+            &ctx.engine
+                .resolution_roots(
+                    root_admission
+                        .resolution_workspace()
+                        .map(std::path::Path::to_path_buf),
+                )
+                .with_logical_project_root(
+                    root_admission
+                        .verified_subject()
+                        .resolved
+                        .logical_project_root
+                        .clone(),
+                ),
         )
         .map_err(DispatchError::Internal)?;
         let dependencies_ready = dependencies.admission_ready;
@@ -436,12 +555,14 @@ async fn dispatch_managed_subprocess(
         );
         credential_names.sort();
         credential_names.dedup();
-        let credentials_ready = credential_names.is_empty();
-        let credential_readiness = if credentials_ready {
-            "required_none"
-        } else {
-            "not_checked"
-        };
+        let credential_presence = report_preview_secret_presence(
+            &credential_names,
+            acting_principal,
+            request.provenance.project_authority(),
+            state,
+        )?;
+        let (credentials_ready, credential_readiness) =
+            preview_credential_readiness(&credential_names, &credential_presence);
         let project_result_ready =
             crate::execution::launch_preparation::project_result_requirement_satisfied(
                 &launch_contract,
@@ -496,10 +617,8 @@ async fn dispatch_managed_subprocess(
                 "execution_dependencies": dependencies.execution_dependencies,
                 "content_dependencies": dependencies.content_dependencies,
                 "environment_contributions": dependencies.environment_contributions,
-                "credential_readiness": {
-                    "status": credential_readiness,
-                    "required_count": credential_names.len(),
-                },
+                "credential_readiness": credential_readiness,
+                "runtime_facts": preview_runtime_facts(&launch_contract.runtime_facts),
                 "admission_ready": runtime_preparation_ready,
             },
         }));
@@ -525,14 +644,20 @@ async fn dispatch_managed_subprocess(
         parameters: &params,
         metadata_required_secrets: &prepared.resolved.resolved_item.metadata.required_secrets,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
+        initial_facets: request.initial_facets.clone(),
         effect_authority: request.effect_authority.as_ref(),
         previous_thread_id: request.previous_thread_id.as_deref(),
         parent_execution_context: request.parent_execution_context.as_ref(),
         // Fresh launches and operator follow-ups inject their inputs as the
         // opening stimulus; only an autonomous machine continuation suppresses it.
         suppress_stimulus: false,
-        // Fresh resolution: use the freshly-resolved caps (no captured set to pin).
-        capability_policy: crate::execution::launch::CapabilityPolicy::AdmissionDefault,
+        // Fresh root: the caller must cover every declared cap; the thread runs
+        // with exactly declared ∪ manifest runtime authority.
+        capability_policy: crate::execution::launch::CapabilityPolicy::RootAdmission {
+            caller_scopes: crate::execution::launch::principal_caller_scopes(
+                &prepared.resolved.plan_context.requested_by,
+            ),
+        },
         // Fresh launch: cold start, no checkpoint resume.
         checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
         pre_pinned_checkpoint_authority: None,
@@ -552,6 +677,89 @@ async fn dispatch_managed_subprocess(
             .map_err(|error| DispatchError::Internal(error.into()))?;
     }
     Ok(response)
+}
+
+/// Names-only vault check for the validate-only preview, over the same secret
+/// sources, recipient and project authority the delivering launch uses.
+/// Values are read inside the vault helper, zeroized and discarded; only
+/// per-name presence leaves it.
+fn report_preview_secret_presence(
+    names: &[String],
+    recipient_principal: &str,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    state: &AppState,
+) -> Result<Vec<(String, bool)>, DispatchError> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    ryeos_app::vault::report_secret_presence(
+        &state.secret_sources(),
+        ryeos_app::vault::SecretRecipient {
+            principal: recipient_principal,
+        },
+        names,
+        project_authority,
+    )
+    .map_err(|error| DispatchError::LaunchPreparationFailed {
+        code: "launch_secret_check_failed".to_owned(),
+        message: error.to_string(),
+        classification: "internal".to_owned(),
+        binding: None,
+        details: Box::new(std::collections::BTreeMap::new()),
+    })
+}
+
+/// The preview's `runtime_facts` view: the launch preparer's declared safe
+/// facts (contract-bounded in kind and size, never opaque runtime data or
+/// secret values). The workload-client request is an internal handoff, not an
+/// operator-facing fact, and is left out.
+fn preview_runtime_facts(
+    facts: &std::collections::BTreeMap<String, Value>,
+) -> std::collections::BTreeMap<&str, &Value> {
+    facts
+        .iter()
+        .filter(|(name, _)| {
+            name.as_str() != ryeos_runtime::workload_client::WORKLOAD_CLIENT_REQUEST_FACT
+        })
+        .map(|(name, value)| (name.as_str(), value))
+        .collect()
+}
+
+/// The preview's `credential_readiness` view: `required_none` when nothing is
+/// declared, `present` when the vault would deliver every name, `missing`
+/// with the undelivered names otherwise. A name absent from the presence
+/// report counts as missing.
+fn preview_credential_readiness(names: &[String], presence: &[(String, bool)]) -> (bool, Value) {
+    if names.is_empty() {
+        return (
+            true,
+            json!({ "status": "required_none", "required_count": 0 }),
+        );
+    }
+    let missing: Vec<&str> = names
+        .iter()
+        .filter(|name| {
+            !presence
+                .iter()
+                .any(|(candidate, present)| *present && candidate == *name)
+        })
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        (
+            true,
+            json!({ "status": "present", "required_count": names.len() }),
+        )
+    } else {
+        (
+            false,
+            json!({
+                "status": "missing",
+                "required_count": names.len(),
+                "missing": missing,
+            }),
+        )
+    }
 }
 
 fn validate_managed_effective_program(
@@ -590,7 +798,15 @@ fn validate_managed_effective_program(
         })
     })
     .transpose()?;
-    let roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let request_snapshot = match admission.admitted_request_snapshot() {
         Some(admitted) => engine.effective_request_snapshot_under_admitted_authority(
             resolution_project_root.ok_or_else(|| {
@@ -663,27 +879,51 @@ async fn dispatch_tool_subprocess(
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
 
+    // Direct tools have no continuation admission. Refuse before resolution,
+    // finalization, CAS context or any vault access.
+    if let Some(previous) = request.previous_thread_id.as_deref() {
+        return Err(DispatchError::DirectContinuationUnsupported {
+            item_ref,
+            previous_thread_id: previous.to_owned(),
+        });
+    }
+
     require_terminal_executor_id(verified, &item_ref)?;
 
-    let admitted_resolution = if request.previous_thread_id.is_none() {
-        request
-            .root_admission
-            .as_ref()
-            .map(|admission| {
-                admission
-                    .ensure_matches_provenance(&request.provenance)
-                    .map_err(DispatchError::Internal)?;
-                admission
-                    .execution_request(
-                        ryeos_app::thread_lifecycle::RootExecutionRoute::RootExecutorChain,
-                        request.launch_mode.to_owned(),
-                        request.params.clone(),
-                    )
-                    .map_err(DispatchError::Internal)
-            })
-            .transpose()?
+    let admitted_resolution = request
+        .root_admission
+        .as_ref()
+        .map(|admission| {
+            admission
+                .ensure_matches_provenance(&request.provenance)
+                .map_err(DispatchError::Internal)?;
+            admission
+                .execution_request(
+                    ryeos_app::thread_lifecycle::RootExecutionRoute::RootExecutorChain,
+                    request.launch_mode.to_owned(),
+                    request.params.clone(),
+                )
+                .map_err(DispatchError::Internal)
+        })
+        .transpose()?;
+    // A root the execute route did not admit (a graph child, a schedule
+    // fire) is judged for host access here, before its root admission is
+    // sealed, so a granted one is sealed as what runs: unconfined on the host.
+    let provenance = if admitted_resolution.is_some() {
+        request.provenance.clone()
     } else {
-        None
+        crate::execution::host_access_gate::host_direct_provenance_before_admission(
+            state,
+            current_ref,
+            &request.provenance,
+            &crate::execution::host_access_gate::dispatch_caller(
+                state,
+                request,
+                &ctx.plan_ctx,
+                handler_context.as_ref(),
+            ),
+        )?
+        .unwrap_or_else(|| request.provenance.clone())
     };
     let resolution_engine = std::sync::Arc::clone(&ctx.engine);
     let resolution_item_ref = item_ref.clone();
@@ -692,7 +932,7 @@ async fn dispatch_tool_subprocess(
         ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
             &ctx.engine,
             &ctx.plan_ctx,
-            &request.provenance,
+            &provenance,
         )?;
     let node_history_policy = std::sync::Arc::new(state.node_history_policy()?.clone());
     let resolution_ref_bindings = request.ref_bindings.clone();
@@ -701,8 +941,7 @@ async fn dispatch_tool_subprocess(
     let resolution_parameters = request.params.clone();
     let resolution_usage_subject = request.usage_subject.clone();
     let resolution_usage_subject_asserted_by = request.usage_subject_asserted_by.clone();
-    let creates_chain_root =
-        request.previous_thread_id.is_none() && request.root_admission.is_none();
+    let creates_chain_root = request.root_admission.is_none();
     let mut resolved = match admitted_resolution {
         Some(resolved) => resolved,
         None => tokio::task::spawn_blocking(move || {
@@ -772,11 +1011,64 @@ async fn dispatch_tool_subprocess(
             .and_then(|admission| admission.admitted_request_snapshot())
             .map(AsRef::as_ref),
     )
-    .map_err(|e| DispatchError::SchemaMisconfigured {
-        kind: current_ref.kind.clone(),
-        detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
+    .map_err(|e| {
+        super::reserved_namespace_shadow_error(&e).unwrap_or_else(|| {
+            DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
+            }
+        })
     })?;
+    // The launch root and every executor hop must be admitted for their kind
+    // before anything is finalized, any secret is read or any process starts.
+    // This holds for a method-dispatch wrapper too: its own chain is judged
+    // here and its target on the target's launch.
+    let (root_space, root_class) = match verified {
+        Some(verified) => (
+            verified.resolved.source_space,
+            verified.launch_trust_class(),
+        ),
+        None => {
+            let root = &resolved
+                .root_admission
+                .as_ref()
+                .ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "direct launch of '{item_ref}' has neither a verified root nor a root admission"
+                    ))
+                })?
+                .resolution_output()
+                .root;
+            (root.source_space, root.trust_class)
+        }
+    };
+    crate::execution::launch_trust_gate::enforce_direct_root(
+        &ctx.engine.kinds,
+        &state.node_policy,
+        &item_ref,
+        &current_ref.kind,
+        root_space,
+        root_class,
+    )?;
+    crate::execution::launch_trust_gate::enforce_executor_chain(
+        &ctx.engine.kinds,
+        &state.node_policy,
+        &terminal.chain_authorities,
+    )?;
     if terminal.kind == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch {
+        // A method-dispatch wrapper spawns nothing itself, so it cannot be
+        // the subject of a host-access grant.
+        if resolved.root_admission.is_some()
+            && crate::execution::host_access_gate::admitted_posture(&ctx.engine, &resolved)?
+                .is_host_direct()
+        {
+            return Err(DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: format!(
+                    "`{item_ref}` declares host authority, but a method-dispatch wrapper spawns no process of its own"
+                ),
+            });
+        }
         if protocol.descriptor.stdout.mode
             == ryeos_engine::protocol_vocabulary::StdoutMode::Streaming
         {
@@ -786,6 +1078,9 @@ async fn dispatch_tool_subprocess(
                     .into(),
             });
         }
+        // The wrapper spawns nothing itself, but a guarantee it declares is
+        // still judged here; the method target is admitted on its own launch.
+        admit_tool_node_requirements(state, &resolved.resolved_item, &resolved.item_ref)?;
         return Box::pin(dispatch_via_method_executor(
             &resolved,
             request,
@@ -800,9 +1095,7 @@ async fn dispatch_tool_subprocess(
     // A method-dispatch wrapper carries the target's admission through the
     // recursive request above. Only a concrete subprocess root may attach that
     // admission to the locally resolved subject.
-    if request.previous_thread_id.is_none()
-        && let Some(admission) = request.root_admission.as_ref()
-    {
+    if let Some(admission) = request.root_admission.as_ref() {
         let local_subject = verified.ok_or_else(|| {
             DispatchError::InvalidRef(
                 item_ref.clone(),
@@ -823,14 +1116,34 @@ async fn dispatch_tool_subprocess(
         resolved.target_site_id = Some(target.to_string());
     }
 
+    // Host access is judged right after launch trust, before finalization,
+    // secret reads or any process start: the node lane, the operator's exact
+    // grant (now with the resolved runtime) and the configured operator.
+    let host_access = crate::execution::host_access_gate::enforce_host_access(
+        state,
+        &ctx.engine,
+        &resolved,
+        &terminal,
+        request,
+        handler_context.as_ref(),
+    )?;
+    if host_access.is_some() {
+        crate::execution::host_access_gate::require_host_direct_project(&provenance)?;
+    }
+
     if request.validate_only {
         let engine = ctx.engine.clone();
         let validation_engine = engine.clone();
         let resolved_clone = resolved.clone();
-        let workspace_lifeline = request.provenance.workspace_lifeline();
+        let workspace_lifeline = provenance.workspace_lifeline();
+        let validation_isolation = state.isolation.clone();
         let validated = tokio::task::spawn_blocking(move || {
             let _workspace_lifeline = workspace_lifeline;
-            ryeos_app::thread_lifecycle::validate_item(&validation_engine, &resolved_clone)
+            ryeos_app::thread_lifecycle::validate_item(
+                &validation_engine,
+                &resolved_clone,
+                validation_isolation.as_ref(),
+            )
         })
         .await
         .map_err(|e| DispatchError::SubprocessRunFailed {
@@ -846,6 +1159,18 @@ async fn dispatch_tool_subprocess(
             });
         let source =
             validate_direct_source_closure(state, &engine, &resolved, source_project_root)?;
+        // Validation applies the same launch admission a real run applies
+        // before it spawns: the manifest-backed runtime caps and the node
+        // guarantees the tool declares. A tool this node cannot host is
+        // refused here rather than reported ready for admission.
+        admit_tool_launch(
+            state,
+            &resolved.resolved_item,
+            root_class,
+            &resolved.item_ref,
+            ctx,
+            &request.params,
+        )?;
         let admission_ready = source
             .as_ref()
             .is_none_or(|preview| preview.ready_for_admission);
@@ -862,6 +1187,18 @@ async fn dispatch_tool_subprocess(
         }));
     }
 
+    // Admitted before the direct program is finalized or any process is
+    // spawned: a tool declaring a node guarantee this node does not prove
+    // leaves nothing behind.
+    let effective_caps = admit_tool_launch(
+        state,
+        &resolved.resolved_item,
+        root_class,
+        &resolved.item_ref,
+        ctx,
+        &request.params,
+    )?;
+
     let parent_thread_id = request
         .parent_execution_context
         .as_ref()
@@ -869,15 +1206,13 @@ async fn dispatch_tool_subprocess(
     let finalized_direct = crate::execution::runner::finalize_direct_effective_program(
         state,
         &resolved,
-        &request.provenance,
+        &provenance,
         parent_thread_id.as_deref(),
         handler_context.as_ref(),
     )
     .map_err(DispatchError::Internal)?;
 
     let item_ref_for_error = resolved.item_ref.clone();
-    let effective_caps =
-        derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, ctx)?;
 
     let required_caps =
         ryeos_app::service_registry::extract_required_caps(&resolved.resolved_item.metadata.extra);
@@ -890,45 +1225,15 @@ async fn dispatch_tool_subprocess(
         )?;
     }
 
-    let dotenv_dirs =
-        ryeos_app::vault::dotenv_search_dirs(Some(request.provenance.original_project_path()));
-    let vault_bindings = ryeos_app::vault::read_required_secrets(
-        state.vault.as_ref(),
-        request.acting_principal,
-        &resolved.resolved_item.metadata.required_secrets,
-        &dotenv_dirs,
-    )
-    .map_err(|e| match e {
-        ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
-            let env_var = names
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            DispatchError::RequiredSecretMissing {
-                item_ref: item_ref_for_error.clone(),
-                env_var: env_var.clone(),
-                source_kind: "declared".to_string(),
-                source_name: "item metadata".to_string(),
-                remediation: crate::dispatch_error::required_secret_remediation(&env_var),
-            }
-        }
-        error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
-            DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
-        }
-        ryeos_app::vault::VaultReadError::Internal(e) => {
-            DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}"))
-        }
-    })?;
-
     let params = crate::execution::runner::ExecutionParams {
         resolved,
         acting_principal: request.acting_principal.to_string(),
         handler_context,
-        vault_bindings,
         parameters: request.params.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
+        initial_facets: request.initial_facets.clone(),
         effective_caps,
-        provenance: request.provenance.clone(),
+        provenance,
         lifecycle_authority: request.lifecycle_authority,
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.
@@ -936,6 +1241,12 @@ async fn dispatch_tool_subprocess(
         parent_thread_id,
         effect_authority: request.effect_authority.clone(),
         finalized_direct: Some(finalized_direct),
+        host_access,
+        deadline_end_at_ms: caller_hard_stop_at_ms(
+            state,
+            request.parent_execution_context.as_ref(),
+        )
+        .map_err(DispatchError::Internal)?,
     };
 
     if request.launch_mode == "detached" {
@@ -986,6 +1297,45 @@ async fn dispatch_tool_subprocess(
     }
 }
 
+/// The end of a tool called by a runtime that runs under a run deadline: the
+/// caller's hard stop, from the daemon's sealed records only. The tree deadline
+/// comes from the accounting ledger and the caller's hold-back and reserve from
+/// its sealed hard limits; nothing the caller reports enters the computation.
+/// `None` when the call has no parent, the parent has no deadline share, or the
+/// tree has no deadline.
+fn caller_hard_stop_at_ms(
+    state: &AppState,
+    parent: Option<&crate::dispatch::ParentExecutionContext>,
+) -> anyhow::Result<Option<i64>> {
+    let Some(parent) = parent else {
+        return Ok(None);
+    };
+    let (Some(scope), Some(accounting)) =
+        (parent.accounting_scope.as_ref(), state.accounting.as_ref())
+    else {
+        return Ok(None);
+    };
+    if parent
+        .hard_limits
+        .as_object()
+        .is_none_or(|limits| limits.is_empty())
+    {
+        return Ok(None);
+    }
+    let limits: ryeos_engine::launch_envelope_types::HardLimits =
+        serde_json::from_value(parent.hard_limits.clone())
+            .map_err(|error| anyhow::anyhow!("failed to parse parent hard limits: {error}"))?;
+    let tree_deadline_at_ms = accounting
+        .execution_resource_budget_snapshot(&scope.execution_budget_id)
+        .map_err(|error| anyhow::anyhow!("execution budget deadline lookup failed: {error:#}"))?
+        .and_then(|budget| budget.deadline_at_ms);
+    Ok(ryeos_app::run_deadline::tool_end_at_ms(
+        tree_deadline_at_ms,
+        &limits.deadline,
+        lillux::time::timestamp_millis(),
+    ))
+}
+
 fn validate_direct_source_closure(
     state: &AppState,
     engine: &ryeos_engine::engine::Engine,
@@ -1001,7 +1351,15 @@ fn validate_direct_source_closure(
         ))
     })?;
     let resolution = admission.resolution_output();
-    let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
+    let roots = engine
+        .resolution_roots(project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let materialization = admission
         .resolution_materialization_binding()
         .map_err(DispatchError::Internal)?;
@@ -1041,7 +1399,10 @@ fn validate_direct_source_closure(
             &engine.node_trust_store,
             project,
         )
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?
+        .map_err(|error| {
+            super::reserved_namespace_shadow_error(&error)
+                .unwrap_or_else(|| DispatchError::Internal(anyhow::anyhow!(error)))
+        })?
     } else {
         None
     };
@@ -1072,6 +1433,62 @@ fn validate_direct_source_closure(
 }
 
 fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
+    // The runner reads declared secrets only after admission verification;
+    // their refusal keeps its public class rather than a subprocess failure.
+    if let Some(vault_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ryeos_app::vault::VaultReadError>())
+    {
+        return match vault_error {
+            ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
+                let env_var = names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                DispatchError::RequiredSecretMissing {
+                    item_ref,
+                    env_var: env_var.clone(),
+                    source_kind: "declared".to_string(),
+                    source_name: "item metadata".to_string(),
+                    remediation: crate::dispatch_error::required_secret_remediation(&env_var),
+                }
+            }
+            // An authorization refusal carrying the ceiling's own code.
+            ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+                DispatchError::LaunchPolicyForbidden {
+                    code: refusal.code().to_owned(),
+                    message: refusal.to_string(),
+                    binding: None,
+                }
+            }
+            error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                DispatchError::Internal(anyhow::anyhow!("vault read refused: {error:#}"))
+            }
+            ryeos_app::vault::VaultReadError::Internal(error) => {
+                DispatchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
+            }
+        };
+    }
+    // A live project authority the tool could never see keeps its stable
+    // typed refusal instead of the generic subprocess failure.
+    if let Some((code, message)) =
+        error
+            .chain()
+            .find_map(|cause| match cause.downcast_ref::<DispatchError>() {
+                Some(DispatchError::LaunchPolicyForbidden { code, message, .. })
+                    if code == crate::execution::runner::LIVE_PROJECT_UNAVAILABLE_CODE =>
+                {
+                    Some((code.clone(), message.clone()))
+                }
+                _ => None,
+            })
+    {
+        return DispatchError::LaunchPolicyForbidden {
+            code,
+            message,
+            binding: None,
+        };
+    }
     if let Some(eligibility) = error.chain().find_map(|cause| {
         cause.downcast_ref::<crate::execution::runner::ExecutionNotRestartEligible>()
     }) {
@@ -1091,6 +1508,102 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
     DispatchError::SubprocessRunFailed { item_ref, detail }
 }
 
+/// Static control: no production `DispatchRequest`/`DispatchLaunchOptions`
+/// literal produces a predecessor thread. A direct continuation needs its own
+/// admission first; until then a new producer must fail this control.
+#[cfg(test)]
+mod direct_continuation_producer_controls {
+    fn visit(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if path.is_dir() {
+                if name != "tests" && name != "target" && !name.starts_with('.') {
+                    visit(&path, files);
+                }
+            } else if name.ends_with(".rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    fn literal_body(source: &str, open: usize) -> &str {
+        let mut depth = 0usize;
+        for (offset, character) in source[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &source[open..]
+    }
+
+    #[test]
+    fn no_production_literal_produces_a_previous_thread_id() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        visit(&crates, &mut files);
+        let mut literals = 0usize;
+        for path in files {
+            let source = std::fs::read_to_string(&path).unwrap();
+            // Production code only: stop at the first test module.
+            let source = source.split("#[cfg(test)]").next().unwrap_or("");
+            for name in ["DispatchRequest {", "DispatchLaunchOptions {"] {
+                for (index, _) in source.match_indices(name) {
+                    let prefix = &source[..index];
+                    if prefix.ends_with("struct ")
+                        || prefix.ends_with("impl ")
+                        || prefix.ends_with("for ")
+                    {
+                        continue;
+                    }
+                    let body = literal_body(source, index + name.len() - 1);
+                    for line in body.lines().map(str::trim) {
+                        let Some(value) = line.strip_prefix("previous_thread_id") else {
+                            continue;
+                        };
+                        literals += 1;
+                        let value = value.trim_start_matches(':').trim();
+                        assert!(
+                            value.starts_with("None")
+                                || value.starts_with("request.previous_thread_id")
+                                || value == ",",
+                            "{}: a dispatch literal produces previous_thread_id `{line}`",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            // In a file that builds a dispatch literal, a shorthand forward
+            // must forward an existing request or option.
+            let builds_literal = ["DispatchRequest {", "DispatchLaunchOptions {"]
+                .iter()
+                .any(|name| source.contains(name));
+            for line in source.lines().map(str::trim).filter(|_| builds_literal) {
+                if let Some(value) = line.strip_prefix("let previous_thread_id =") {
+                    let value = value.trim();
+                    assert!(
+                        value.starts_with("request.previous_thread_id")
+                            || value.starts_with("options.previous_thread_id"),
+                        "{}: previous_thread_id local is produced, not forwarded: `{line}`",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert!(literals > 0, "the scan found no dispatch literal");
+    }
+}
+
 #[cfg(test)]
 mod runner_error_tests {
     use super::*;
@@ -1105,11 +1618,78 @@ mod runner_error_tests {
         assert_eq!(item_ref, "tool:test/run");
         assert_eq!(detail, "spawn item: lillux refused exact mount authority");
     }
+
+    #[test]
+    fn preview_reports_present_credentials_ready() {
+        let names = vec!["API_TOKEN".to_owned(), "OTHER_KEY".to_owned()];
+        let presence = vec![
+            ("API_TOKEN".to_owned(), true),
+            ("OTHER_KEY".to_owned(), true),
+        ];
+        let (ready, view) = preview_credential_readiness(&names, &presence);
+        assert!(ready);
+        assert_eq!(
+            view,
+            serde_json::json!({ "status": "present", "required_count": 2 })
+        );
+    }
+
+    #[test]
+    fn preview_reports_missing_credential_names() {
+        let names = vec![
+            "API_TOKEN".to_owned(),
+            "OTHER_KEY".to_owned(),
+            "UNREPORTED".to_owned(),
+        ];
+        let presence = vec![
+            ("API_TOKEN".to_owned(), true),
+            ("OTHER_KEY".to_owned(), false),
+        ];
+        let (ready, view) = preview_credential_readiness(&names, &presence);
+        assert!(!ready);
+        assert_eq!(
+            view,
+            serde_json::json!({
+                "status": "missing",
+                "required_count": 3,
+                "missing": ["OTHER_KEY", "UNREPORTED"],
+            })
+        );
+    }
+
+    #[test]
+    fn preview_without_declared_secrets_keeps_required_none_shape() {
+        let (ready, view) = preview_credential_readiness(&[], &[]);
+        assert!(ready);
+        assert_eq!(
+            view,
+            serde_json::json!({ "status": "required_none", "required_count": 0 })
+        );
+    }
+
+    #[test]
+    fn post_admission_missing_secret_keeps_its_public_class() {
+        let error = anyhow::Error::new(ryeos_app::vault::VaultReadError::MissingSecrets {
+            principal: "fp:test".to_owned(),
+            names: vec!["API_TOKEN".to_owned()],
+        })
+        .context("authorize declared secrets for the admitted waiting root");
+        let mapped = map_runner_error("tool:test/run".to_owned(), error);
+        let DispatchError::RequiredSecretMissing {
+            item_ref, env_var, ..
+        } = mapped
+        else {
+            panic!("missing declared secret must keep its public error class");
+        };
+        assert_eq!(item_ref, "tool:test/run");
+        assert_eq!(env_var, "API_TOKEN");
+    }
 }
 
 #[cfg(test)]
 mod direct_protocol_tests {
     use super::*;
+    use ryeos_app::remote_consumer_launch::RemoteConsumerLaunchProof;
     use ryeos_engine::{
         protocol_vocabulary::{EnvInjection, EnvInjectionSource, StdinShape},
         protocols::VerifiedProtocol,
@@ -1138,6 +1718,111 @@ mod direct_protocol_tests {
         validate_ordinary_protocol_contract(&protocol, "fixture").unwrap();
         protocol.descriptor.stdin.shape = StdinShape::ParametersJson;
         assert!(validate_ordinary_protocol_contract(&protocol, "fixture").is_err());
+    }
+
+    fn qualification() -> VerifiedProtocol {
+        let mut protocol = streaming();
+        protocol.descriptor = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
+        )))
+        .unwrap();
+        // Canonical label cannot determine the mechanics or grant readiness.
+        protocol.canonical_ref = "protocol:fixture/unrelated-label".into();
+        protocol
+    }
+
+    #[test]
+    fn exact_qualification_wire_is_direct_and_refused_without_matching_proof() {
+        let mut protocol = qualification();
+        assert_eq!(
+            direct_protocol_route(&protocol),
+            Some(DirectProtocolRoute::QualificationOpaqueCallback)
+        );
+        assert!(uses_direct_subprocess_plan(&protocol));
+        // The ordinary validator refuses for every caller that holds no proof.
+        let error = validate_ordinary_protocol_contract(&protocol, "tool").unwrap_err();
+        assert!(error.to_string().contains("selected route remains refused"));
+        // The direct validator refuses without a proof or with a foreign one.
+        let hop = "tool:fixture/verifier";
+        assert!(validate_direct_protocol_contract(&protocol, "tool", None, hop).is_err());
+        let foreign = RemoteConsumerLaunchProof::for_tests("scenario", "tool:fixture/other");
+        let error =
+            validate_direct_protocol_contract(&protocol, "tool", Some(&foreign), hop).unwrap_err();
+        assert!(error.to_string().contains("selected route remains refused"));
+        // A matching proof admits exactly the hop it names.
+        let proof = RemoteConsumerLaunchProof::for_tests("scenario", hop);
+        validate_direct_protocol_contract(&protocol, "tool", Some(&proof), hop).unwrap();
+        // Managed classification and the retained-root gate keep refusing.
+        assert!(classify_managed_protocol(&protocol, "tool").is_err());
+        assert!(crate::dispatch::validate_admitted_direct_protocol(&protocol, "tool").is_err());
+        protocol.descriptor.qualification_callback = None;
+        assert_eq!(direct_protocol_route(&protocol), None);
+        protocol.descriptor.qualification_callback =
+            Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer);
+        assert_eq!(direct_protocol_route(&protocol), None);
+    }
+
+    #[test]
+    fn proof_does_not_widen_other_routes() {
+        let proof = RemoteConsumerLaunchProof::for_tests("scenario", "tool:fixture/verifier");
+        let mut protocol = streaming();
+        validate_direct_protocol_contract(
+            &protocol,
+            "fixture",
+            Some(&proof),
+            "tool:fixture/verifier",
+        )
+        .unwrap();
+        protocol.descriptor.stdin.shape = StdinShape::ParametersJson;
+        assert!(
+            validate_direct_protocol_contract(
+                &protocol,
+                "fixture",
+                Some(&proof),
+                "tool:fixture/verifier",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn qualification_near_miss_wire_cannot_select_the_typed_route() {
+        let mut original = streaming();
+        original.descriptor = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/protocols/ryeos/core/qualification_consumer_callback.yaml"
+        )))
+        .unwrap();
+        let mut changed = original.clone();
+        changed.descriptor.capabilities.allows_detached = true;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original.clone();
+        changed.descriptor.stdin.shape = StdinShape::LaunchEnvelope;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original.clone();
+        changed.descriptor.stdout.shape =
+            ryeos_engine::protocol_vocabulary::StdoutShape::RuntimeResult;
+        assert_eq!(direct_protocol_route(&changed), None);
+        let mut changed = original;
+        changed.descriptor.callback_channel =
+            ryeos_engine::protocol_vocabulary::CallbackChannel::None;
+        assert_eq!(
+            direct_protocol_route(&changed),
+            Some(DirectProtocolRoute::Ordinary)
+        );
+        assert!(validate_ordinary_protocol_contract(&changed, "tool").is_err());
+        // A proof naming the hop cannot launder a near-miss wire.
+        let proof = RemoteConsumerLaunchProof::for_tests("scenario", "tool:fixture/verifier");
+        assert!(
+            validate_direct_protocol_contract(
+                &changed,
+                "tool",
+                Some(&proof),
+                "tool:fixture/verifier"
+            )
+            .is_err()
+        );
     }
 
     #[test]

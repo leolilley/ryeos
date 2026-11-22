@@ -1,13 +1,13 @@
-<!-- rye:signed:2026-06-03T03:31:26Z:90311c108d8b9def06dc694970c7156f7dc4931f43d274cfba6c4711467c701c:iPhzqfEROHLyZ7m3l5yZYyKNxCpo0n4qFF6EpusBHVFNjvQ9YAAyvCKmmxC1FAy1-GhRvIsLwEbTLNGZfwDLAw:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-10-06T01:00:58Z:0ca0f1e3245f68cd66ac33b61d4c72ca2a556f32c13be73b5bdeabbb3244cecd:wOxaf9eGXV2HTk3AXirLWiTZChOUmhiJleVRvEQlWeQ7eZe6G2vnI+wcpBaRpfNmVwM9rzei20WG7xNwoYGxDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: ryeos-ui-local-project-registry-and-multitenancy
 title: Future Principal Spaces, Project/World Registries, and Hosted Boundaries
 entry_type: implementation_guide
-version: "0.2.0"
+version: "0.2.1"
 author: amp
 created_at: 2026-05-30T00:00:00Z
-updated_at: 2026-06-03T00:00:00Z
+updated_at: 2026-10-06T00:00:00Z
 description: Future boundary design for principal spaces, project/world registries, hosted node boundaries, and multi-tenant constraints beyond the current local/hosted-principal RyeOS UI substrate.
 tags:
   - ryeos-ui
@@ -27,6 +27,17 @@ tags:
 This note describes the future boundary model beyond the current local/hosted-principal RyeOS UI substrate.
 
 The goal is to grow from local project registration into Cockpit-managed principal spaces, hosted project/world registries, portal discovery, and eventually multi-principal hosted operation without turning hosted providers or app-local auth into RyeOS identity authorities.
+
+## Place in the platform direction
+
+This is a deferred extension of the application experience described by the
+[platform direction and delivery](platform-direction-and-delivery.md). Pull
+forward portable identity/locator mapping when an actual application moves
+between sites. Select richer discovery or multi-principal hosting separately
+when their stated triggers occur; they do not gate ordinary local application
+authoring. Proposed project/world/job objects below must first map to current
+identity, execution and retention owners rather than create parallel kinds.
+Historical baseline assertions require a current source and qualification audit.
 
 ## Baseline assumed
 

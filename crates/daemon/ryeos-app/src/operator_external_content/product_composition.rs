@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{BindResponse, RetainedProductImportRequest};
 use crate::handler_context::HandlerContext;
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 /// Root selector admission uses the already-admitted execution principal.
 /// This does not import content or create bindings: explicit composition must
@@ -161,15 +161,14 @@ impl ComposeRetainedProductsRequest {
         if canonical.to_string() != self.consumer_ref || canonical.suffix.is_some() {
             bail!("product composition requires an exact canonical consumer ref");
         }
-        if let Some(project) = &self.project_context {
-            if !lillux::valid_hash(&project.snapshot_hash)
+        if let Some(project) = &self.project_context
+            && (!lillux::valid_hash(&project.snapshot_hash)
                 || project
                     .snapshot_hash
                     .bytes()
-                    .any(|b| b.is_ascii_uppercase())
-            {
-                bail!("product composition context requires an exact canonical snapshot");
-            }
+                    .any(|b| b.is_ascii_uppercase()))
+        {
+            bail!("product composition context requires an exact canonical snapshot");
         }
         if self.maximum_bytes == 0 {
             bail!("product composition requires a positive aggregate import bound");
@@ -244,7 +243,6 @@ pub(super) fn validate_selection_batch(selectors: &[ProductSelection]) -> anyhow
 /// Verify a complete selection against the exact request engine's source view.
 /// This is synchronous CPU/CAS work; operator API calls run it on a blocking
 /// worker. It grants no import or binding authority during launch preparation.
-#[allow(clippy::too_many_arguments)]
 pub fn select_products(
     state: &AppState,
     context: &HandlerContext,
@@ -259,7 +257,6 @@ pub fn select_products(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn select_products_with_project_context_resolver(
     state: &AppState,
     context: &HandlerContext,
@@ -285,7 +282,6 @@ pub fn select_products_with_project_context_resolver(
     .map(|(selections, _)| selections)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn select_products_verified(
     state: &AppState,
     context: &HandlerContext,
@@ -329,21 +325,27 @@ fn select_products_verified(
         .node_policy
         .require::<NodeObjectClosurePolicy>()?
         .closure_limits()?;
+    // Relationship, policy and verifier resolution start handler processes,
+    // so no CAS guard spans the batch. Each witness, manifest-bound and
+    // qualification read runs in its own guarded segment, and a qualified
+    // selection is re-read as current after its verifier is re-resolved.
+    super::product_qualification::require_unguarded_resolution("product selection")?;
     let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
     let mut proofs = BTreeMap::new();
     let mut witnesses = BTreeMap::new();
     for selector in selectors {
-        let witness = super::product_receipt::load_product_source(
-            state,
-            &authority,
-            &guard,
-            limits,
-            &context.fingerprint,
-            &selector.witness_hash,
-            &selector.witness_source,
-            super::product_receipt::ProductSourceVerification::Fresh,
-        )?;
+        let witness = super::product_qualification::with_state_guard(&authority, |guard| {
+            super::product_receipt::load_product_source(
+                state,
+                &authority,
+                guard,
+                limits,
+                &context.fingerprint,
+                &selector.witness_hash,
+                &selector.witness_source,
+                super::product_receipt::ProductSourceVerification::Fresh,
+            )
+        })?;
         let selection = select_verified_product(
             state,
             context,
@@ -353,7 +355,6 @@ fn select_products_verified(
             resolution,
             selector,
             &authority,
-            &guard,
             &witness,
             limits,
             project_context_resolver,
@@ -396,7 +397,7 @@ pub fn select_and_import_products(
         &request.selections,
         project_context_resolver,
     )?;
-    let import_policy = state.node_policy.require::<crate::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
+    let import_policy = state.node_policy.require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?;
     if request.maximum_bytes > import_policy.limits.max_total_bytes {
         bail!("product batch import ceiling exceeds node policy");
     }
@@ -474,6 +475,7 @@ fn relationship_resolution_request(
         }
     };
     Ok(ryeos_engine::engine::EffectiveItemRequest {
+        logical_project_root: roots.logical_project_root.clone(),
         item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(relationship_ref)?,
         expected_kind: Some("config".to_owned()),
         project_root,
@@ -481,7 +483,6 @@ fn relationship_resolution_request(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn select_verified_product(
     state: &AppState,
     context: &HandlerContext,
@@ -491,7 +492,6 @@ fn select_verified_product(
     resolution: &ResolutionOutput,
     selector: &ProductSelection,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     witness: &ryeos_state::external_content::products::publication::VerifiedProductWitness,
     closure_limits: ryeos_state::object_closure::ObjectClosureLimits,
     project_context_resolver: Option<
@@ -499,7 +499,6 @@ fn select_verified_product(
     >,
 ) -> anyhow::Result<ResolvedExternalProductSelection> {
     selector.validate()?;
-    authority.ensure_guard(guard)?;
     if witness.attestation_hash != selector.witness_hash
         || witness.evidence.owner_principal != context.fingerprint
     {
@@ -565,30 +564,35 @@ fn select_verified_product(
         bail!("resolved product relationship disagrees with the exact signed consumer slot");
     }
     relationship.validate_compatible_product_evidence(evidence)?;
-    let qualification = admit_selected_qualification(
+    let (qualification, remote_testimony) = match admit_selected_qualification(
         state,
         context,
         authority,
-        guard,
         closure_limits,
         selector,
         &relationship,
         witness,
         project_context_resolver,
-    )?;
-    ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
-        authority,
-        evidence,
-        &relationship.required_product.bounds,
-        closure_limits,
-        guard,
-    )?;
+    )? {
+        Some((admitted, retained)) => (Some(admitted), retained),
+        None => (None, None),
+    };
+    super::product_qualification::with_state_guard(authority, |guard| {
+        ryeos_state::external_content::products::publication::verify_product_manifest_against_bounds(
+            authority,
+            evidence,
+            &relationship.required_product.bounds,
+            closure_limits,
+            guard,
+        )
+    })?;
     let selection = ResolvedExternalProductSelection {
         schema: ryeos_state::external_content::products::composition::RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA.to_owned(),
         declaration_id: slot.id.clone(),
         relationship_name: slot.relationship.clone(),
         relationship_ref: slot.relationship_ref.clone(),
         relationship_raw_content_digest: relationship_resolution.root.raw_content_digest.clone(),
+        relationship_project_dependent: crate::external_content_admission::resolution_has_project_contributor(&relationship_resolution),
         relationship,
         witness_hash: selector.witness_hash.clone(),
         witness_source: selector.witness_source.clone(),
@@ -604,17 +608,24 @@ fn select_verified_product(
             id: slot.id.clone(), kind: slot.kind, manifest_hash: evidence.manifest_hash.clone(),
             mount_root: slot.mount_root, mount: slot.mount.clone(),
         },
+        remote_testimony,
     };
     selection.validate()?;
     Ok(selection)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// An admitted qualification and, when it is a remote testimony accepted
+/// under local policy, the retained acceptance that lets recovery
+/// re-authenticate it without current grants.
+type AdmittedSelectionQualification = (
+    ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    Option<ryeos_state::objects::RetainedRemoteQualificationTestimony>,
+);
+
 fn admit_selected_qualification(
     state: &AppState,
     context: &HandlerContext,
     authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     selector: &ProductSelection,
     relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
@@ -622,9 +633,7 @@ fn admit_selected_qualification(
     project_context_resolver: Option<
         &dyn super::product_qualification::QualificationProjectContextResolver,
     >,
-) -> anyhow::Result<
-    Option<ryeos_state::external_content::products::composition::AdmittedProductQualification>,
-> {
+) -> anyhow::Result<Option<AdmittedSelectionQualification>> {
     use super::product_qualification as qualification;
     use ryeos_state::external_content::products::composition::AdmittedProductQualification;
     let (policy_ref, hash) = match (
@@ -635,69 +644,50 @@ fn admit_selected_qualification(
         (Some(policy), Some(hash)) => (policy, hash),
         _ => bail!("product selection must provide exactly its declared qualification proof"),
     };
-    let proof = qualification::load_current_qualification(
-        state,
-        authority,
-        guard,
-        limits,
-        &context.fingerprint,
-        hash,
-    )?;
-    if proof.evidence.product_witness_hash != product.attestation_hash
-        || proof.evidence.product_coordinate
-            != ProductCaptureCoordinate::from_evidence(&product.evidence)?
-        || proof.evidence.result.subject_manifest_hash != product.evidence.manifest_hash
-    {
-        bail!("qualification does not prove the exact selected product witness and manifest");
+    if selector.remote_testimony.is_some() {
+        // The proof is another node's testimony, admitted under local policy.
+        // It is never loaded as, or re-derived into, a local qualification.
+        let (admitted, retained) =
+            super::qualification_testimony::verify_current_remote_selection_testimony(
+                state,
+                context,
+                authority,
+                limits,
+                selector,
+                relationship,
+                product,
+            )?;
+        return Ok(Some((admitted, Some(retained))));
     }
-    let current_policy =
-        qualification::resolve_current_bundle_qualification_policy(state, policy_ref)?;
-    if let Some(consumer_context) = &current_policy.policy.consumer_execution_context {
-        consumer_context.validate_relationship_consumer(&relationship.consumer)?;
-        qualification::require_current_consumer_content_for_selection(
+    let proof = qualification::with_state_guard(authority, |guard| {
+        qualification::load_current_qualification(
             state,
             authority,
             guard,
             limits,
-            &current_policy,
-            relationship,
-            &proof.evidence,
-            &product.evidence.manifest_hash,
-        )?;
-        bail!("qualification consumer execution context has no applied runtime parity proof");
-    }
-    let current_verifier = qualification::resolve_current_bundle_verifier_identity_for_evidence(
+            &context.fingerprint,
+            hash,
+        )
+    })?;
+    qualification::verify_loaded_qualification_against_relationship(
         state,
+        context,
         authority,
-        guard,
         limits,
-        context,
-        &current_policy.policy.verifier_ref,
-        &current_policy.policy.verifier_parameters,
-        &proof.evidence,
+        policy_ref,
+        relationship,
+        &proof,
+        product,
+        false,
         project_context_resolver,
     )?;
-    proof.evidence.validate_current_policy(
-        &current_policy,
-        &current_verifier.effective_definition_digest,
-        &relationship.qualification.required_claims,
-    )?;
-    proof
-        .evidence
-        .validate_current_artifact(&current_verifier.artifact_identity)?;
-    qualification::execution_evidence::verify_current(
-        state,
-        authority,
-        guard,
-        context,
-        &proof.evidence,
-        &current_verifier,
-        project_context_resolver,
-    )?;
-    Ok(Some(AdmittedProductQualification {
-        attestation_hash: proof.attestation_hash,
-        evidence: proof.evidence,
-    }))
+    Ok(Some((
+        AdmittedProductQualification {
+            attestation_hash: proof.attestation_hash,
+            evidence: proof.evidence,
+        },
+        None,
+    )))
 }
 
 /// A recovered capsule has already admitted source, relationship and testimony.
@@ -728,7 +718,6 @@ pub fn verify_recovered_selections(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn verify_recovered_selections_guarded(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
@@ -752,15 +741,44 @@ pub(super) fn verify_recovered_selections_guarded(
             .get(&selector.declaration_id)
             .context("recovered product consumer lost the sealed selection")?;
         selection.validate()?;
-        if let Some(proof) = &selection.qualification {
-            super::product_qualification::verify_retained_qualification_guarded(
-                state,
-                authority,
-                guard,
-                limits,
-                proof,
-                owner_principal,
-            )?;
+        match (&selection.qualification, &selection.remote_testimony) {
+            (Some(proof), Some(retained)) => {
+                // A remote testimony is authenticated through its retained
+                // acceptance alone: no current grant, policy or clock is
+                // reapplied, and the origin's verifier realization is not in
+                // this node's CAS. The consumer content it names must still
+                // be fully present here.
+                super::qualification_testimony::verify_retained_remote_testimony_guarded(
+                    state,
+                    authority,
+                    guard,
+                    limits,
+                    retained,
+                    proof,
+                    owner_principal,
+                )?;
+                let content =
+                    proof.evidence.consumer_content.as_ref().context(
+                        "recovered remote product testimony carries no consumer content",
+                    )?;
+                super::product_qualification::require_retained_consumer_content_closure(
+                    authority, guard, limits, content,
+                )?;
+                if retained.acceptance.product_source.as_ref() != Some(&selection.witness_source) {
+                    bail!("recovered remote testimony was accepted for a different product source");
+                }
+            }
+            (Some(proof), None) => {
+                super::product_qualification::verify_retained_qualification_guarded(
+                    state,
+                    authority,
+                    guard,
+                    limits,
+                    proof,
+                    owner_principal,
+                )?;
+            }
+            (None, _) => {}
         }
         if selection.witness_hash != selector.witness_hash
             || selection.witness_source != selector.witness_source
@@ -769,6 +787,15 @@ pub(super) fn verify_recovered_selections_guarded(
                 .as_ref()
                 .map(|proof| &proof.attestation_hash)
                 != selector.qualification_hash.as_ref()
+            || selection.remote_testimony.as_ref().map(|retained| {
+                (
+                    &retained.acceptance_hash,
+                    &retained.acceptance.acceptance_policy_ref,
+                )
+            }) != selector
+                .remote_testimony
+                .as_ref()
+                .map(|remote| (&remote.acceptance_hash, &remote.acceptance_policy_ref))
             || selection.owner_principal != owner_principal
             || selection.consumer_source != source
         {
@@ -853,7 +880,7 @@ fn product_consumer_source(
     )
 }
 
-fn verify_witness_projection(
+pub(crate) fn verify_witness_projection(
     selection: &ResolvedExternalProductSelection,
     witness: &ryeos_state::external_content::products::publication::VerifiedProductWitness,
 ) -> anyhow::Result<()> {
@@ -1041,6 +1068,7 @@ mod tests {
                 witness_hash: "a".repeat(64),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
+                remote_testimony: None,
             }],
             maximum_bytes: 1024,
         }
@@ -1060,7 +1088,7 @@ mod tests {
             json!([{
                 "declaration_id": "runtime", "witness_hash": "a".repeat(64),
                 "witness_source": {"kind":"local_capture"},
-                "qualification_hash": null,
+                "qualification_hash": null, "remote_testimony": null,
             }])
         );
         for field in [
@@ -1169,6 +1197,30 @@ mod tests {
     }
 
     #[test]
+    fn relationship_lookup_states_the_roots_logical_project_not_the_checkout() {
+        use ryeos_engine::item_resolution::ResolutionRoots;
+        let checkout = std::path::PathBuf::from("/admitted/exact-source-generation");
+        let logical = std::path::PathBuf::from("/srv/projects/alpha");
+        let pinned = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        let stated = ResolutionRoots::from_registered(Some(checkout.clone()), &[])
+            .with_logical_project_root(Some(logical.clone()));
+        let request =
+            relationship_resolution_request(&stated, &pinned, "config:example/relationships")
+                .unwrap();
+        assert_eq!(request.logical_project_root, Some(logical));
+        assert_eq!(request.project_root, Some(checkout.clone()));
+
+        let unstated = ResolutionRoots::from_registered(Some(checkout.clone()), &[]);
+        let request =
+            relationship_resolution_request(&unstated, &pinned, "config:example/relationships")
+                .unwrap();
+        assert_eq!(request.logical_project_root, None);
+        assert_eq!(request.project_root, Some(checkout));
+    }
+
+    #[test]
     fn relationship_lookup_never_promotes_live_or_loose_roots() {
         use ryeos_engine::item_resolution::ResolutionRoots;
         let roots = ResolutionRoots::from_registered(None, &[]);
@@ -1216,10 +1268,11 @@ mod tests {
             root: ResolvedAncestor {
                 requested_id: "qualification/verify".into(),
                 resolved_ref: "tool:qualification/verify".into(),
-                source_path: "/bundles/standard/.ai/tools/qualification/verify.py".into(),
+                source_path: "/bundles/environment-qualification/.ai/tools/qualification/verify.py"
+                    .into(),
                 source_space: ItemSpace::Bundle,
                 source_root: ItemSourceRoot::Bundle {
-                    name: "standard".into(),
+                    name: "knowledge".into(),
                 },
                 trust_class: TrustClass::TrustedBundle,
                 signer_fingerprint: Some("a".repeat(64)),
@@ -1292,5 +1345,137 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The fact recorded on a selection is the shared predicate applied to the
+    /// relationship's real resolution, the same call `select_verified_product`
+    /// makes. A bundle-owned relationship records false; the same ref overlaid
+    /// from project space records true (the root-space arm). The config kind
+    /// has no extends chain or references, so the ancestor and referenced-item
+    /// arms are covered by the predicate's own unit test.
+    #[test]
+    fn relationship_resolution_records_project_dependence_from_its_real_source() {
+        use lillux::crypto::SigningKey;
+        use ryeos_engine::trust::TrustedSigner;
+
+        const REF: &str = "config:product-fixture/relationships";
+        let sign = |path: &std::path::Path, source: &str, key: &SigningKey| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                lillux::signature::sign_content(source, key, "#", None),
+            )
+            .unwrap();
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let (_store_owner, mut state) =
+            crate::state::test_support::build(directory.path()).unwrap();
+        let signer = SigningKey::from_bytes(&[53; 32]);
+        let relationship_source = |marker: &str| {
+            format!(
+                "category: product-fixture\nname: relationships\nversion: '1.0.0'\nmarker: {marker}\n"
+            )
+        };
+        let bundle = directory.path().join("fixture-bundle");
+        sign(
+            &bundle.join(".ai/manifest.yaml"),
+            "name: product-bundle\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+            &signer,
+        );
+        sign(
+            &bundle.join(".ai/config/product-fixture/relationships.yaml"),
+            &relationship_source("bundle"),
+            &signer,
+        );
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let core = ryeos_engine::test_support::core_bundle_root();
+        let roots = vec![core.clone(), bundle];
+        let trust = crate::state::test_support::live_trust_store_with(vec![TrustedSigner {
+            fingerprint: lillux::signature::compute_fingerprint(&signer.verifying_key()),
+            verifying_key: signer.verifying_key(),
+            label: Some("product fixture".into()),
+        }]);
+        let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
+            &[core.join(".ai/node/engine/kinds")],
+            &trust,
+        )
+        .unwrap();
+        let (parsers, _) =
+            ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds).unwrap();
+        let handlers = ryeos_engine::test_support::load_live_handler_registry();
+        let composers =
+            ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+        let tagged = roots
+            .iter()
+            .map(|root| {
+                (
+                    root.clone(),
+                    ryeos_engine::resolution::TrustClass::TrustedBundle,
+                )
+            })
+            .collect::<Vec<_>>();
+        let protocols =
+            ryeos_engine::protocols::ProtocolRegistry::load_base(&tagged, &trust).unwrap();
+        let validators =
+            ryeos_engine::effective_validators::EffectiveValidatorRegistry::from_kinds(
+                &kinds,
+                &handlers,
+                state.isolation.clone(),
+                &roots,
+            )
+            .unwrap();
+        // The installed bundle's name must differ from the relationship's
+        // namespace: a project may not shadow a namespace named for a bundle.
+        let registered = ["core", "product-bundle"]
+            .into_iter()
+            .zip(roots.iter())
+            .map(
+                |(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
+                    name: name.into(),
+                    canonical_root: root.clone(),
+                },
+            )
+            .collect();
+        state.engine = Arc::new(
+            ryeos_engine::engine::Engine::new(
+                kinds,
+                ryeos_engine::parsers::ParserDispatcher::new(parsers, handlers),
+                roots,
+            )
+            .with_trust_store(trust.clone())
+            .with_node_trust_store(trust)
+            .with_composers(composers)
+            .with_protocols(protocols)
+            .with_effective_validators(validators)
+            .with_registered_bundle_roots(registered),
+        );
+
+        let subject = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "d".repeat(64),
+        };
+        let recorded = |engine: &ryeos_engine::engine::Engine| {
+            let roots = engine.resolution_roots(Some(project.clone()));
+            let resolution = engine
+                .effective_resolution_output(
+                    relationship_resolution_request(&roots, &subject, REF).unwrap(),
+                )
+                .unwrap();
+            (
+                resolution.root.source_space,
+                crate::external_content_admission::resolution_has_project_contributor(&resolution),
+            )
+        };
+
+        assert_eq!(recorded(&state.engine), (ItemSpace::Bundle, false));
+
+        sign(
+            &project.join(".ai/config/product-fixture/relationships.yaml"),
+            &relationship_source("project"),
+            &signer,
+        );
+        assert_eq!(recorded(&state.engine), (ItemSpace::Project, true));
     }
 }

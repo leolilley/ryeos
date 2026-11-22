@@ -1,0 +1,75 @@
+# ryeos:signed:2026-11-17T17:48:41Z:52ad9b4e6ec279259900133a3975eee6d8ca263746a6726b963cb4d34dbaf17a:HJTyMVOC3Kr7ceGLm7ZWBfDCntW5q3sPtnsVPk/pjaqMwEIUOe/3Lf3y9ahKCqTyZMg1YGwtv2FVU6KTNa1HCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime/model-providers"
+family: chat_completions
+# Offline/eval target: a local OpenAI-compatible server (vLLM, llama.cpp,
+# etc.). `auth: {}` means no credential header is sent, so this provider
+# works with internet disabled and no API key set.
+transport:
+  kind: remote_http
+  base_url: "http://127.0.0.1:8000/v1"
+auth: {}
+headers:
+  Content-Type: application/json
+schemas:
+  messages:
+    role_map: {user: user, assistant: assistant, system: system, tool: tool}
+    content_key: content
+    system_message: {mode: message_role}
+    tool_result:
+      role: tool
+      wrap_mode: direct
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      id: "{id}"
+      type: function
+      function:
+        name: "{name}"
+        arguments: "{input_json}"
+  tools:
+    template:
+      type: function
+      function:
+        name: "{name}"
+        description: "{description}"
+        parameters: "{schema}"
+  streaming:
+    mode: delta_merge
+    metadata:
+      finish_reason_path: choices.0.finish_reason
+      response_id_path: id
+      error:
+        path: error
+        message_path: message
+        code_path: code
+  reasoning:
+    capture:
+      - {id: text, kind: text_delta, fields: [reasoning_content, reasoning]}
+    replay:
+      placements:
+        - from: text
+          into: {message_field: reasoning_content}
+          scope: all
+  output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
+body_template:
+  model: "{model}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
+  stream_options:
+    include_usage: true
+# Local open-weights models are free to run; report zero spend so cost
+# accounting still records token counts without inventing a dollar figure.
+pricing:
+  explicitly_free: true
+  input_per_million: "0"
+  output_per_million: "0"
+extra:
+  stream_url: "/chat/completions"
+  setup:
+    display_name: Local OpenAI-compatible
+    priority: 90
+    credential: null
+    validation: {ref: "service:model-providers/validate", url: "http://127.0.0.1:8000/v1/models", timeout_seconds: 5}
+    models: []

@@ -211,16 +211,16 @@ fn prepare_inner(
                 relationships,
             };
             let fact_value = fact.runtime_fact_value().map_err(|error| {
-                if error.to_string().contains("runtime-fact budget") {
+                if format!("{error:#}").contains("runtime-fact budget") {
                     wire_error(
                         "product_recipe_admission_too_large",
-                        error.to_string(),
+                        format!("{error:#}"),
                         LaunchPrepareErrorClass::Configuration,
                     )
                 } else {
                     wire_error(
                         "product_recipe_admission_invalid",
-                        error.to_string(),
+                        format!("{error:#}"),
                         LaunchPrepareErrorClass::Internal,
                     )
                 }
@@ -285,6 +285,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
             != (RefBindingSourceWire::PrimaryField {
                 path: vec![PRODUCT_RECIPE_BINDING.to_owned()],
             })
+        || binding.continuation_rebind != ryeos_handler_protocol::ContinuationRebindWire::Never
         || binding.allowed_kinds != ["config"]
         || binding.allowed_spaces != [ItemSpaceWire::Bundle, ItemSpaceWire::Project]
         || binding.allowed_trust
@@ -333,6 +334,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
             .environment_contributions
             .max_variables_per_contribution
             != 0
+        || request.environment_contributions.max_delivered_secrets != 0
         || request.financial_authority != FinancialAuthorityDeclWire::None
         || request.external_effect_authority != ExternalEffectAuthorityDeclWire::None
     {

@@ -5,6 +5,8 @@
 //! native Linux x86_64 execution. No Codex executable or network/model account
 //! is needed. This enrolls a synthetic fixture account, not real Codex access.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -18,13 +20,6 @@ use crate::{public_enrollment, retained_runtime_producer};
 pub const PROFILE_ID: &str = "credential:public-offline-enrollment";
 const LOGIN_LAUNCH_ID: &str = "L-2b3e89703b173ebaf7195f4d672a1010";
 const PRODUCER_LAUNCH_ID: &str = "L-2b3e89703b173ebaf7195f4d672a1009";
-
-pub struct EnrolledPublicFixture {
-    pub harness: DaemonHarness,
-    pub keys: fast_fixture::FastFixture,
-    pub producer_project: tempfile::TempDir,
-    pub evidence: Value,
-}
 
 fn expected_runtime_manifest() -> Result<String> {
     crate::offline_runtime_input::bytes()?;
@@ -54,12 +49,26 @@ fn trusted_enrollment_policy(raw: &str, node: &lillux::crypto::SigningKey) -> Re
         "preboot isolation policy is not signed by this fixture node"
     );
     let mut document: Value = serde_yaml::from_str(&body)?;
+    // The node's selected policy declares exactly one host class; the flag
+    // and the mode both live inside it.
+    let classes = document
+        .pointer_mut("/policy/host_classes")
+        .and_then(Value::as_object_mut)
+        .context("preboot isolation policy declares no host classes")?;
     ensure!(
-        document.pointer("/policy/mode") == Some(&json!("disabled")),
+        classes.len() == 1,
+        "trusted enrollment fixture expects exactly one selected host class"
+    );
+    let class = classes
+        .values_mut()
+        .next()
+        .context("selected host class is absent")?;
+    ensure!(
+        class.get("mode") == Some(&json!("disabled")),
         "trusted enrollment fixture expects existing disabled isolation topology"
     );
-    let flag = document
-        .pointer_mut("/policy/trusted_process_group_sessions")
+    let flag = class
+        .get_mut("trusted_process_group_sessions")
         .context("preboot isolation policy omits explicit trusted session policy")?;
     ensure!(flag.is_boolean(), "trusted session policy is not boolean");
     *flag = json!(true);
@@ -99,10 +108,10 @@ pub fn install_before_start(
     fast_fixture::register_presigned_fixture_bundle(state, "public-enrollment-fixture", &root, keys)
 }
 
-/// One isolated acceptance. Returns the still-running disposable harness so a
-/// subsequent candidate test can reuse the SAME active profile and owner.
-/// All runtime mutations occur once through authenticated public services.
-pub async fn start_enrolled_fixture() -> Result<EnrolledPublicFixture> {
+/// One isolated acceptance. Returns the enrollment evidence; the disposable
+/// harness retains its node evidence when it drops. All runtime mutations
+/// occur once through authenticated public services.
+pub async fn start_enrolled_fixture() -> Result<Value> {
     ensure!(
         std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64",
         "offline fixture ELF has an exact Linux x86_64 target"
@@ -110,7 +119,7 @@ pub async fn start_enrolled_fixture() -> Result<EnrolledPublicFixture> {
     let expected_manifest = expected_runtime_manifest()?;
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, keys| {
-            fast_fixture::register_standard_bundle(state, keys)?;
+            fast_fixture::register_workflow_bundles(state, keys)?;
             install_before_start(state, keys, &expected_manifest)
         },
         |_| {},
@@ -128,12 +137,7 @@ pub async fn start_enrolled_fixture() -> Result<EnrolledPublicFixture> {
         .await.with_context(|| format!(
             "public enrollment stopped; retain node={}, producer={}, login_launch={LOGIN_LAUNCH_ID}; never relaunch uncertain work",
             harness.state_path.display(), producer_project.path().display()))?;
-    Ok(EnrolledPublicFixture {
-        harness,
-        keys,
-        producer_project,
-        evidence,
-    })
+    Ok(evidence)
 }
 
 async fn enroll(
@@ -162,6 +166,7 @@ async fn enroll(
             &mut std::io::Cursor::new(&runtime),
             32768,
             0o755,
+            TEST_PURPOSE,
         )?
         .is_some(),
         "fixture runtime already exists"
@@ -442,11 +447,21 @@ mod tests {
     #[test]
     fn enrollment_preboot_opt_in_changes_only_trusted_session_flag_and_remains_node_signed() {
         let profile: Value = serde_yaml::from_str(include_str!(
-            "../../../../bundles/.ai/node/init/profiles/full.yaml"
+            "../../../../bundles/.ai/node/init/profiles/standard.yaml"
         ))
         .unwrap();
-        let original = profile["policies"]["isolation"].clone();
-        assert_eq!(original["policy"]["trusted_process_group_sessions"], false);
+        let mut original = profile["policies"]["isolation"].clone();
+        // A node's selected policy declares exactly one host class: keep the
+        // class the fixture runs under, as initialization would.
+        let class = fast_fixture::fixture_host_class_of_policy(&original).unwrap();
+        original["policy"]["host_classes"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|name, _| name == class);
+        fn flag<'a>(document: &'a mut Value, class: &str) -> &'a mut Value {
+            &mut document["policy"]["host_classes"][class]["trusted_process_group_sessions"]
+        }
+        assert_eq!(*flag(&mut original, class), false);
         let node = fast_fixture::node_signing_key();
         let raw = lillux::signature::sign_content_at(
             &serde_yaml::to_string(&original).unwrap(),
@@ -458,8 +473,8 @@ mod tests {
         let signed = trusted_enrollment_policy(&raw, &node).unwrap();
         let body = lillux::signature::strip_signature_lines(&signed);
         let mut observed: Value = serde_yaml::from_str(&body).unwrap();
-        assert_eq!(observed["policy"]["trusted_process_group_sessions"], true);
-        observed["policy"]["trusted_process_group_sessions"] = json!(false);
+        assert_eq!(*flag(&mut observed, class), true);
+        *flag(&mut observed, class) = json!(false);
         assert_eq!(observed, original, "fixture widened another policy field");
         let header =
             lillux::signature::parse_signature_line(signed.lines().next().unwrap(), "#", None)
@@ -479,13 +494,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires current signed core/standard daemon artifacts and native Linux x86_64 execution"]
     async fn public_offline_enrollment_observes_then_confirms_exact_profile() -> Result<()> {
-        let fixture = start_enrolled_fixture().await?;
+        let evidence = start_enrolled_fixture().await?;
         ensure!(
-            fixture.evidence["profile"]["state"] == "active"
-                && fixture.evidence["profile"]["profile_id"] == PROFILE_ID,
+            evidence["profile"]["state"] == "active"
+                && evidence["profile"]["profile_id"] == PROFILE_ID,
             "public enrollment did not retain its exact active profile"
         );
-        eprintln!("public-offline-enrollment-evidence: {}", fixture.evidence);
+        eprintln!("public-offline-enrollment-evidence: {}", evidence);
         Ok(())
     }
 

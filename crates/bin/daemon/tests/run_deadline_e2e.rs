@@ -1,0 +1,887 @@
+//! The run deadline, end to end against the scripted chat stub.
+//!
+//! A root launch sets `run_timeout`; the directive runtime derives its wrap-up
+//! notice and its hard stop from it. These tests drive that with a stub whose
+//! turns are slow enough to cross each boundary in real time, so each takes
+//! about a minute. They need populated bundles (`-f bundles=branch`).
+
+use ryeosd::test_support as common;
+
+#[path = "common/stub_rig.rs"]
+mod stub_rig;
+use stub_rig::*;
+
+use std::time::{Duration, Instant};
+
+use common::DaemonHarness;
+use serde_json::{Value, json};
+
+/// The reserve every probe directive here declares, in milliseconds. The
+/// runtime must notice its hard stop and settle itself over the callback inside
+/// this window, before the daemon's kill at the deadline. On a saturated shared
+/// runner a 5 s window is sometimes missed: the daemon's kill then records a
+/// plain timed-out thread with no deadline phase or stop time. The window is
+/// sized for the worst case under load, not the idle one.
+const RESERVE_MS: i64 = 20_000;
+/// A reserve of 20 s and a wrap-up window of 20 s for the probe directive.
+const WRAP_UP_HEADER: &str =
+    "limits:\n  wrap_up_seconds: 20\n  deadline:\n    reserve_seconds: 20\n";
+/// A reserve of 20 s and no wrap-up notice.
+const NO_WRAP_UP_HEADER: &str =
+    "limits:\n  wrap_up_seconds: 0\n  deadline:\n    reserve_seconds: 20\n";
+
+async fn thread_ids_of_chain(h: &DaemonHarness, root: &str) -> Vec<(String, String)> {
+    h.list_threads(2000)
+        .await
+        .map(|listed| {
+            listed
+                .into_iter()
+                .filter(|t| t.chain_root_id == root || t.thread_id == root)
+                .map(|t| (t.thread_id, t.status))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn wrap_up_inputs(rig: &Rig, root: &str) -> Vec<Value> {
+    chain_payloads(&rig.h, root, "cognition_in")
+        .await
+        .into_iter()
+        .filter(|payload| payload.get("kind").and_then(Value::as_str) == Some("deadline_wrap_up"))
+        .collect()
+}
+
+fn request_text(body: &Value) -> String {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .map(|m| m.get("content").map(Value::to_string).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// The first nested object that carries the runtime's deadline result, found
+/// anywhere in a thread record.
+fn find_deadline_result(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("phase") && map.contains_key("stopped_at_ms") {
+                return Some(value);
+            }
+            map.values().find_map(find_deadline_result)
+        }
+        Value::Array(items) => items.iter().find_map(find_deadline_result),
+        _ => None,
+    }
+}
+
+/// The recorded deadline result of a settled thread.
+async fn deadline_result(h: &DaemonHarness, id: &str) -> Option<Value> {
+    let record = h.get_thread(id).await.ok().flatten()?;
+    find_deadline_result(&record).cloned()
+}
+
+/// What a failing assertion needs to be read without a rerun: the tail of the
+/// daemon's log (the runtime's lines included) and the chain's events in order.
+async fn failure_dump(rig: &Rig, id: &str) -> String {
+    let log = rig.h.stderr_so_far();
+    let lines: Vec<&str> = log.lines().collect();
+    let tail = lines[lines.len().saturating_sub(60)..].join("\n");
+    let mut events = String::new();
+    for (index, (thread, kind, payload)) in chain_event_list(&rig.h, id).await.iter().enumerate() {
+        events.push_str(&format!(
+            "\n  #{index} {thread} {kind} {}",
+            trunc(&payload.to_string(), 200)
+        ));
+    }
+    format!("\n--- chain events ---{events}\n--- daemon log tail ---\n{tail}")
+}
+
+/// Terminal events of a chain: one thread settles exactly once.
+async fn terminal_event_kinds(h: &DaemonHarness, root: &str) -> Vec<String> {
+    const TERMINAL_EVENTS: [&str; 6] = [
+        "thread_completed",
+        "thread_failed",
+        "thread_cancelled",
+        "thread_killed",
+        "thread_timed_out",
+        "thread_continued",
+    ];
+    chain_event_list(h, root)
+        .await
+        .into_iter()
+        .map(|(_, kind, _)| kind)
+        .filter(|kind| TERMINAL_EVENTS.contains(&kind.as_str()))
+        .collect()
+}
+
+/// A settled run's recorded stop is a deadline stop of the runtime's own: it
+/// names the hard-stop phase, the recorded tree deadline, and a stop time
+/// inside the reserve window (at or after `deadline - reserve`, at or before
+/// the deadline the daemon would have killed at). No wall clock of the test
+/// enters the proof, so machine load cannot break it.
+fn assert_runtime_deadline_stop(result: &Value, tree_deadline_at_ms: i64, reserve_ms: i64) {
+    assert_eq!(result["outcome"], "deadline", "{result}");
+    assert_eq!(result["phase"], "hard_stop", "{result}");
+    assert_eq!(result["deadline_at_ms"], tree_deadline_at_ms, "{result}");
+    let stopped = result["stopped_at_ms"].as_i64().expect("stopped_at_ms");
+    assert!(
+        stopped >= tree_deadline_at_ms - reserve_ms,
+        "the runtime stopped before its hard stop: {result}"
+    );
+    assert!(
+        stopped <= tree_deadline_at_ms,
+        "the runtime settled itself after the daemon's kill: {result}"
+    );
+}
+
+/// Slow tool turns carry the run across the wrap-up boundary and then the hard
+/// stop. The model is told once, and the run settles as a deadline stop before
+/// the daemon's own kill would have fired.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrap_up_notice_then_hard_stop() {
+    let script = "steps:\n  - repeat: 300\n    delay_ms: 1000\n    tool_calls:\n      - { id: \"call_{n}\", name: noop_noop, arguments: {} }\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: WRAP_UP_HEADER,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on_with(&rig, json!({"run_timeout": 60}))
+        .await
+        .expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(120)).await;
+    let detail = thread_detail(&rig.h, &id, 4000).await;
+    let dump = failure_dump(&rig, &id).await;
+    assert_eq!(status, "timed_out", "detail: {detail}{dump}");
+    // The runtime finalized its own stop over the callback: the thread records
+    // the structured deadline result, not the daemon's fallback wrapper for a
+    // runtime that exited (or was killed) without finalizing.
+    assert!(
+        !detail.contains("runtime_exited_without_callback_finalization"),
+        "the stop was settled by the daemon's fallback: {detail}{dump}"
+    );
+    let result = deadline_result(&rig.h, &id)
+        .await
+        .unwrap_or_else(|| panic!("no structured deadline result: {detail}{dump}"));
+    // The hard stop is at deadline - 20 s; the daemon kill is at the deadline.
+    let deadlines = accounting_deadlines(&rig.h);
+    assert_eq!(deadlines.len(), 1, "{deadlines:?}");
+    assert_runtime_deadline_stop(&result, deadlines[0], RESERVE_MS);
+    assert_eq!(
+        terminal_event_kinds(&rig.h, &id).await,
+        vec!["thread_timed_out".to_string()],
+        "the thread settled exactly once, and as a deadline stop{dump}"
+    );
+
+    let notices = wrap_up_inputs(&rig, &id).await;
+    assert_eq!(notices.len(), 1, "exactly one durable wrap-up input{dump}");
+    assert_eq!(notices[0]["origin"], "harness");
+
+    let requests = rig.stub.requests().await;
+    // Load stretches each turn, so only the order is asserted, not a count.
+    assert!(requests.len() >= 3, "{} requests", requests.len());
+    let with_notice: Vec<usize> = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| request_text(&r.body).contains("Deadline notice"))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !with_notice.is_empty(),
+        "a later request carries the notice"
+    );
+    assert!(
+        with_notice.first().copied().unwrap_or(0) >= 1,
+        "the first turn carries no notice"
+    );
+    // Once delivered, every later request keeps it (it is pinned in the
+    // transcript) and it is never repeated.
+    for window in with_notice.windows(2) {
+        assert_eq!(window[1], window[0] + 1, "contiguous from first delivery");
+    }
+    let repeated = requests
+        .iter()
+        .map(|r| request_text(&r.body).matches("Deadline notice").count())
+        .max()
+        .unwrap_or(0);
+    assert_eq!(repeated, 1, "the model is told once");
+}
+
+/// A model call that never produces output is cut at the hard stop rather than
+/// waiting out the stall.
+#[tokio::test(flavor = "multi_thread")]
+async fn hard_stop_cuts_a_stalled_model_call() {
+    let script = "steps:\n  - text: never\n    stall: { after_chunks: 0, ms: 120000 }\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: NO_WRAP_UP_HEADER,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on_with(&rig, json!({"run_timeout": 45}))
+        .await
+        .expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(100)).await;
+    let detail = thread_detail(&rig.h, &id, 4000).await;
+    let dump = failure_dump(&rig, &id).await;
+    assert_eq!(status, "timed_out", "detail: {detail}{dump}");
+    // Cut at the hard stop, inside the reserve window and long before the
+    // 120 s stall could have ended.
+    let result = deadline_result(&rig.h, &id)
+        .await
+        .unwrap_or_else(|| panic!("no structured deadline result: {detail}{dump}"));
+    let deadlines = accounting_deadlines(&rig.h);
+    assert_eq!(deadlines.len(), 1, "{deadlines:?}");
+    assert_runtime_deadline_stop(&result, deadlines[0], RESERVE_MS);
+    assert!(wrap_up_inputs(&rig, &id).await.is_empty());
+}
+
+/// A tool that outlives the run is cut at the caller's hard stop, not at the
+/// tool's own 300 s and not at the daemon's kill: the runtime then settles its
+/// own deadline stop inside its reserve window. The cut call is recorded as
+/// interrupted with an unknown outcome. Later calls (the script keeps asking)
+/// are refused at the reached hard stop and never start a second tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_tool_does_not_outlive_the_run() {
+    let script = "steps:\n  - repeat: 300\n    delay_ms: 200\n    tool_calls:\n      - { id: \"call_{n}\", name: marker_marker, arguments: {} }\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: NO_WRAP_UP_HEADER,
+            marker_sleep_seconds: 300,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on_with(&rig, json!({"run_timeout": 45}))
+        .await
+        .expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(100)).await;
+    let detail = thread_detail(&rig.h, &id, 4000).await;
+    let dump = failure_dump(&rig, &id).await;
+    assert_eq!(status, "timed_out", "detail: {detail}{dump}");
+    // The tool was still running at the hard stop (it sleeps 300 s). It was
+    // cut there, so the runtime had its reserve left to settle itself before
+    // the daemon's kill at the deadline.
+    let result = deadline_result(&rig.h, &id)
+        .await
+        .unwrap_or_else(|| panic!("no structured deadline result: {detail}{dump}"));
+    let deadlines = accounting_deadlines(&rig.h);
+    assert_eq!(deadlines.len(), 1, "{deadlines:?}");
+    assert_runtime_deadline_stop(&result, deadlines[0], RESERVE_MS);
+    assert!(
+        !detail.contains("runtime_exited_without_callback_finalization"),
+        "{detail}{dump}"
+    );
+    // The cut call is recorded as interrupted with an unknown outcome, and it
+    // was not retried.
+    let mut cut_tools = 0;
+    for thread in rig.h.list_threads(2000).await.unwrap_or_default() {
+        let record = thread_detail(&rig.h, &thread.thread_id, 6000).await;
+        if record.contains("tool_interrupted_at_deadline") {
+            assert_eq!(thread.status, "killed", "{record}");
+            assert!(
+                record.contains("side effects may have partially happened"),
+                "{record}"
+            );
+            cut_tools += 1;
+        }
+    }
+    // The script keeps asking, so a call made just before the hard stop can be
+    // cut as well; every tool that started was cut, and none ran on.
+    assert!(cut_tools >= 1, "the running tool was cut{dump}");
+    assert_eq!(
+        rig.marker_count(),
+        cut_tools,
+        "every tool that started was cut at the hard stop"
+    );
+}
+
+/// Segments of one run share one deadline: a context-window continuation does
+/// not restart the clock, and the last segment settles as a deadline stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn continuations_share_one_deadline() {
+    // Each reply carries about 500 tokens of its own text, so the live context
+    // crosses the 2,000-token window's continuation threshold within a few
+    // turns even when load stretches each turn.
+    // (Tool results are de-duplicated by the result guard and would not grow.)
+    // The reserve is generous (20 s of the 60 s run) because the last segment
+    // must start, notice its hard stop and settle itself over the callback
+    // before the daemon's kill at the deadline; on a loaded shared machine a
+    // 5 s window is sometimes missed, and the daemon's kill then records a
+    // timed-out thread with no structured result. The proof is unchanged: one
+    // recorded deadline, one runtime-settled deadline stop, no restarted clock.
+    let padding = "padding ".repeat(250);
+    let script = format!(
+        "steps:\n  - repeat: 200\n    delay_ms: 2000\n    text: \"{padding}\"\n    tool_calls:\n      - {{ id: \"call_{{n}}\", name: noop_noop, arguments: {{}} }}\n"
+    );
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            context_window: 2000,
+            header_extra:
+                "continuation:\n  carry_turns: 2\nlimits:\n  wrap_up_seconds: 0\n  deadline:\n    reserve_seconds: 20\n",
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let launched = Instant::now();
+    let id = launch_on_with(&rig, json!({"run_timeout": 60}))
+        .await
+        .expect("launch");
+    let mut chain;
+    loop {
+        chain = thread_ids_of_chain(&rig.h, &id).await;
+        let all_terminal =
+            !chain.is_empty() && chain.iter().all(|(_, s)| TERMINAL.contains(&s.as_str()));
+        if (all_terminal && launched.elapsed() > Duration::from_secs(5))
+            || launched.elapsed() > Duration::from_secs(120)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let dump = failure_dump(&rig, &id).await;
+    assert!(chain.len() >= 2, "a continuation happened: {chain:?}{dump}");
+    let statuses: Vec<&str> = chain.iter().map(|(_, s)| s.as_str()).collect();
+    let timed_out = statuses.iter().filter(|s| **s == "timed_out").count();
+    assert_eq!(
+        timed_out, 1,
+        "one deadline stop ends the chain: {statuses:?}{dump}"
+    );
+    // Every segment ran under one recorded deadline (no restarted clock), and
+    // the last segment's stop names it.
+    let deadlines = accounting_deadlines(&rig.h);
+    assert_eq!(
+        deadlines.len(),
+        1,
+        "one deadline for the chain: {deadlines:?}"
+    );
+    let last = chain
+        .iter()
+        .find(|(_, s)| s == "timed_out")
+        .map(|(thread, _)| thread.clone())
+        .expect("a timed-out segment");
+    let result = deadline_result(&rig.h, &last)
+        .await
+        .unwrap_or_else(|| panic!("no deadline result on {last}{dump}"));
+    assert_eq!(result["deadline_at_ms"], deadlines[0], "{result}");
+    // The last segment either stopped itself inside the deadline, or found its
+    // end already passed at launch and settled as the typed elapsed stop (which
+    // is recorded after the deadline by definition). Both name the one deadline.
+    if result["phase"] == "hard_stop" {
+        assert!(
+            result["stopped_at_ms"].as_i64().unwrap_or(i64::MAX) <= deadlines[0],
+            "the chain stopped within the one deadline: {result}"
+        );
+    } else {
+        assert_eq!(result["phase"], "elapsed_before_launch", "{result}");
+    }
+}
+
+/// `time_left` is offered to a run with a deadline and answers from the clock.
+#[tokio::test(flavor = "multi_thread")]
+async fn time_left_reports_the_clock() {
+    let script = "steps:\n  - tool_calls:\n      - { id: \"call_a\", name: time_left, arguments: {} }\n  - text: done\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: NO_WRAP_UP_HEADER,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on_with(&rig, json!({"run_timeout": 300}))
+        .await
+        .expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(60)).await;
+    assert_eq!(
+        status,
+        "completed",
+        "{}",
+        thread_detail(&rig.h, &id, 2000).await
+    );
+
+    let requests = rig.stub.requests().await;
+    assert_eq!(requests.len(), 2);
+    let offered: Vec<String> = requests[0]
+        .body
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(offered.iter().any(|n| n == "time_left"), "{offered:?}");
+    let answer = request_text(&requests[1].body);
+    assert!(answer.contains("remaining_ms"), "{answer}");
+    assert!(answer.contains("running"), "{answer}");
+}
+
+/// A run without a deadline is not offered `time_left` and is not touched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_without_a_deadline_is_unchanged() {
+    let script = "steps:\n  - tool_calls:\n      - { id: \"call_a\", name: noop_noop, arguments: {} }\n  - text: done\n";
+    let rig = start_rig(script, RigOptions::default())
+        .await
+        .expect("start rig");
+    let id = launch_on(&rig).await.expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(60)).await;
+    assert_eq!(
+        status,
+        "completed",
+        "{}",
+        thread_detail(&rig.h, &id, 2000).await
+    );
+    let requests = rig.stub.requests().await;
+    let first_tools = requests[0]
+        .body
+        .get("tools")
+        .map(Value::to_string)
+        .unwrap_or_default();
+    assert!(!first_tools.contains("time_left"), "{first_tools}");
+    assert!(wrap_up_inputs(&rig, &id).await.is_empty());
+}
+
+/// A graph that follows a directive child which never finishes. The child ends
+/// at the graph's reserve window, the graph reads the deadline outcome, runs
+/// its fallback node inside its reserve, and completes before the run ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_followed_child_hits_the_deadline_and_the_graph_falls_back() {
+    // The child's model call stalls far past the run.
+    let script = "steps:\n  - text: never\n    stall: { after_chunks: 0, ms: 600000 }\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: NO_WRAP_UP_HEADER,
+            graph_vault: true,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    plant_graph(
+        &rig,
+        "guard",
+        r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.probe/run
+      # A follow child cannot hold authority its parent lacks, and the probe
+      # directive declares the tool wildcard.
+      - "ryeos.execute.tool.*"
+limits:
+  deadline:
+    reserve_seconds: 30
+config:
+  start: work
+  nodes:
+    work:
+      node_type: action
+      follow: true
+      action:
+        item_id: "directive:probe/run"
+        ref_bindings: { model: "directive:probe/run" }
+        params: { name: probe }
+      on_error: fallback
+      next: { type: unconditional, to: done }
+    fallback:
+      node_type: return
+      output:
+        route: "fallback"
+        outcome_kind: "${state._outcome.outcome_kind}"
+    done:
+      node_type: return
+      output:
+        route: "done"
+"#,
+    )
+    .expect("plant graph");
+    let launched = Instant::now();
+    let id = launch_graph_on(&rig, "graph:guard", json!({"run_timeout": 90}))
+        .await
+        .expect("launch graph");
+    // The graph suspends at the follow, then its resume successor completes.
+    let mut chain;
+    loop {
+        chain = thread_ids_of_chain(&rig.h, &id).await;
+        let finished = chain.iter().any(|(_, s)| s == "completed")
+            && chain.iter().all(|(_, s)| TERMINAL.contains(&s.as_str()));
+        if finished || launched.elapsed() > Duration::from_secs(120) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let elapsed = launched.elapsed();
+    if !chain.iter().any(|(_, s)| s == "completed") {
+        let mut details = String::new();
+        for (thread, _) in &chain {
+            details.push_str(&thread_detail(&rig.h, thread, 3000).await);
+            details.push('\n');
+        }
+        panic!(
+            "the graph did not complete through its fallback: {chain:?}\n{details}\nstderr: {}",
+            stderr_hits(&rig.h, &["graph", "error", "refus", "deadline"], 40)
+        );
+    }
+    // The graph completing (not timing out) is the proof that its fallback ran
+    // inside the run deadline; no upper bound on elapsed time is asserted.
+    // The child stopped at the graph's reserve window less its own reserve:
+    // 90 - 30 - 20 = 40 s, well before the 90 s deadline, leaving the graph
+    // the rest of its own 30 s reserve to run the fallback.
+    assert!(
+        elapsed > Duration::from_secs(35),
+        "the child was stopped by the deadline, not early: {elapsed:?}"
+    );
+    let mut result_text = String::new();
+    for (thread, status) in &chain {
+        if status == "completed" {
+            result_text.push_str(&thread_detail(&rig.h, thread, 6000).await);
+        }
+    }
+    assert!(
+        result_text.contains("fallback") && result_text.contains("deadline"),
+        "the fallback read outcome_kind deadline: {result_text}"
+    );
+}
+
+/// A child launch that carries `run_timeout` is refused: only a root sets the
+/// run deadline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_cannot_set_its_own_run_deadline() {
+    let script = "steps:\n  - text: done\n";
+    let rig = start_rig(
+        script,
+        RigOptions {
+            graph_vault: true,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    plant_graph(
+        &rig,
+        "asker",
+        r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.probe/run
+      # A follow child cannot hold authority its parent lacks, and the probe
+      # directive declares the tool wildcard.
+      - "ryeos.execute.tool.*"
+config:
+  start: call
+  on_error: continue
+  nodes:
+    call:
+      node_type: action
+      follow: true
+      action:
+        item_id: "directive:probe/run"
+        ref_bindings: { model: "directive:probe/run" }
+        params: { name: probe, run_timeout: 30 }
+      next: { type: unconditional, to: done }
+    done:
+      node_type: return
+      output:
+        ok: "yes"
+"#,
+    )
+    .expect("plant graph");
+    let id = launch_graph_on(&rig, "graph:asker", json!({}))
+        .await
+        .expect("launch graph");
+    // The followed child is its own chain; wait for every thread to settle.
+    let started = Instant::now();
+    let mut seen = String::new();
+    loop {
+        let listed = rig.h.list_threads(2000).await.unwrap_or_default();
+        let settled = !listed.is_empty()
+            && listed
+                .iter()
+                .all(|t| TERMINAL.contains(&t.status.as_str()) && t.status != "continued");
+        if settled || started.elapsed() > Duration::from_secs(90) {
+            for t in &listed {
+                seen.push_str(&format!("\n[{} {}] ", t.thread_id, t.status));
+                seen.push_str(&thread_detail(&rig.h, &t.thread_id, 3000).await);
+                for (thread_id, kind, payload) in chain_event_list(&rig.h, &t.chain_root_id).await {
+                    seen.push_str(&format!("\n{thread_id} {kind} {payload}"));
+                }
+            }
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let _ = id;
+    // The detached child's launch refusal is logged by the daemon; the thread
+    // records may carry it as well.
+    let stderr = rig.h.stderr_so_far();
+    let refused = |text: &str| {
+        text.contains("run_timeout_root_only") || text.contains("accepted only on the root launch")
+    };
+    assert!(
+        refused(&seen) || refused(&stderr),
+        "the refusal names the root-only rule: {}\nstderr hits: {}",
+        trunc(&seen, 600),
+        stderr_hits(&rig.h, &["detached launch failed", "run_timeout"], 6)
+    );
+    assert!(
+        rig.stub.requests().await.is_empty(),
+        "the refused child never reached the model"
+    );
+}
+
+fn accounting_deadlines(h: &DaemonHarness) -> Vec<i64> {
+    let db = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME);
+    ryeos_app::test_support::read_existing_accounting(&db, |connection| {
+        let mut statement =
+            connection.prepare("SELECT deadline_at_ms FROM execution_resource_budget")?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
+/// A node restart mid-run keeps the same budget row and deadline, resumes the
+/// thread to its hard stop, and does not tell the model twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_mid_run_keeps_the_deadline_and_the_single_wrap_up() {
+    let script = "steps:\n  - repeat: 300\n    delay_ms: 1000\n    tool_calls:\n      - { id: \"call_{n}\", name: noop_noop, arguments: {} }\n";
+    let mut rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: WRAP_UP_HEADER,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on_with(&rig, json!({"run_timeout": 90}))
+        .await
+        .expect("launch");
+    // The wrap-up window opens at 90 - 20 - 20 = 50 s.
+    let wait_until = Instant::now() + Duration::from_secs(100);
+    while wrap_up_inputs(&rig, &id).await.is_empty() {
+        assert!(Instant::now() < wait_until, "no wrap-up notice arrived");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // Kill only while a tool call is executing. A provider attempt that is
+    // reserved or issued when the node dies is fenced as an unknown outcome,
+    // and resuming that turn would contact the provider a second time, which
+    // the ledger refuses by design. Between a turn's settled provider attempt
+    // and its next reservation the run is in the tool phase, which is where a
+    // restart resumes cleanly.
+    let tool_phase_until = Instant::now() + Duration::from_secs(40);
+    loop {
+        let events = chain_event_list(&rig.h, &id).await;
+        let after_notice: Vec<&str> = events
+            .iter()
+            .skip_while(|(_, kind, payload)| {
+                !(kind == "cognition_in"
+                    && payload.get("kind").and_then(Value::as_str) == Some("deadline_wrap_up"))
+            })
+            .map(|(_, kind, _)| kind.as_str())
+            .filter(|kind| {
+                matches!(
+                    *kind,
+                    "tool_call_start" | "tool_call_result" | "cognition_in"
+                )
+            })
+            .collect();
+        if after_notice.last() == Some(&"tool_call_start") {
+            break;
+        }
+        assert!(
+            Instant::now() < tool_phase_until,
+            "no tool call was executing after the wrap-up notice"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    rig.h.kill_daemon().await.expect("kill the node mid-run");
+    let before = accounting_deadlines(&rig.h);
+    assert_eq!(before.len(), 1, "one execution budget row: {before:?}");
+    rig.h.respawn_with(|_| {}).await.expect("restart the node");
+
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(120)).await;
+    let detail = thread_detail(&rig.h, &id, 4000).await;
+    let dump = failure_dump(&rig, &id).await;
+    assert_eq!(status, "timed_out", "detail: {detail}{dump}");
+    // The resumed run stopped at the original deadline. How long the node took
+    // to come back decides which side of the hard stop it found: the runtime
+    // stopped itself inside its reserve window, or recovery settled a deadline
+    // that passed while the node was down. Either names the same deadline.
+    let result = deadline_result(&rig.h, &id)
+        .await
+        .unwrap_or_else(|| panic!("no structured deadline result: {detail}{dump}"));
+    if result["phase"] == "hard_stop" {
+        assert_runtime_deadline_stop(&result, before[0], RESERVE_MS);
+    } else {
+        // The deadline passed while the node was down, or while the resumed
+        // launch waited for its spawn; both settle as the same typed stop.
+        assert!(
+            detail.contains("deadline_elapsed_while_down")
+                || detail.contains("deadline_elapsed_before_launch"),
+            "settled as an elapsed deadline: {detail}{dump}"
+        );
+        assert_eq!(result["deadline_at_ms"], before[0], "{result}");
+        // The settlement was recorded at or after the end it names.
+        let stopped_at_ms = result["stopped_at_ms"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no stopped_at_ms: {result}"));
+        assert!(
+            stopped_at_ms >= result["deadline_at_ms"].as_i64().expect("deadline_at_ms"),
+            "stopped before the recorded end: {result}"
+        );
+    }
+    assert_eq!(
+        wrap_up_inputs(&rig, &id).await.len(),
+        1,
+        "the wrap-up was not repeated after the restart{dump}"
+    );
+    rig.h.kill_daemon().await.expect("stop the node");
+    assert_eq!(
+        accounting_deadlines(&rig.h),
+        before,
+        "the restart neither minted nor moved the deadline"
+    );
+}
+
+/// A node that was down when the run deadline passed settles the thread as a
+/// deadline stop at recovery and spawns nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_after_the_deadline_settles_without_spawning() {
+    let script = "steps:\n  - repeat: 300\n    delay_ms: 1000\n    tool_calls:\n      - { id: \"call_{n}\", name: noop_noop, arguments: {} }\n";
+    let mut rig = start_rig(
+        script,
+        RigOptions {
+            header_extra: NO_WRAP_UP_HEADER,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let launched = Instant::now();
+    let id = launch_on_with(&rig, json!({"run_timeout": 40}))
+        .await
+        .expect("launch");
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    rig.h.kill_daemon().await.expect("kill the node mid-run");
+    // Stay down until the deadline (and the orphaned runtime's own stop) pass.
+    let past = Duration::from_secs(50);
+    if let Some(remaining) = past.checked_sub(launched.elapsed()) {
+        tokio::time::sleep(remaining).await;
+    }
+    let requests_while_down = rig.stub.requests().await.len();
+    rig.h.respawn_with(|_| {}).await.expect("restart the node");
+    let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(60)).await;
+    let detail = thread_detail(&rig.h, &id, 4000).await;
+    let dump = failure_dump(&rig, &id).await;
+    assert_eq!(status, "timed_out", "detail: {detail}{dump}");
+    assert!(
+        detail.contains("deadline_elapsed_while_down"),
+        "settled by recovery as an elapsed deadline: {detail}{dump}"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        rig.stub.requests().await.len(),
+        requests_while_down,
+        "no model call after the restart{dump}"
+    );
+}
+
+/// A successor born inside the wrap-up window (here open for most of a long
+/// run, so several successors are born in it) is told once, with the time left
+/// now, when its carried start no longer holds the notice. With a zero carry a
+/// successor keeps only pinned inputs, so the notice recorded by an earlier
+/// thread of the chain is gone from its conversation; no request ever holds
+/// two notices.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successor_in_the_wrap_up_window_is_told_once() {
+    // Each reply carries about 500 tokens of its own text, so the live context
+    // crosses the 2,000-token window's continuation threshold within a few
+    // turns (tool results alone are de-duplicated and would not grow).
+    let padding = "padding ".repeat(250);
+    let script = format!(
+        "steps:\n  - repeat: 200\n    delay_ms: 2000\n    text: \"{padding}\"\n    tool_calls:\n      - {{ id: \"call_{{n}}\", name: noop_noop, arguments: {{}} }}\n"
+    );
+    let rig = start_rig(
+        &script,
+        RigOptions {
+            context_window: 2000,
+            header_extra: "limits:\n  wrap_up_seconds: 80\n  deadline:\n    reserve_seconds: 20\ncontinuation:\n  carry_turns: 0\n",
+            limits: None,
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let id = launch_on_with(&rig, json!({"run_timeout": 120}))
+        .await
+        .expect("launch");
+    // The root settles as `continued` early; wait for the whole chain.
+    let give_up = Instant::now() + Duration::from_secs(220);
+    let mut stable = 0u32;
+    let mut last = 0usize;
+    while stable < 6 && Instant::now() < give_up {
+        let chain = thread_ids_of_chain(&rig.h, &id).await;
+        let settled = !chain.is_empty()
+            && chain
+                .iter()
+                .all(|(_, status)| TERMINAL.contains(&status.as_str()));
+        stable = if settled && chain.len() == last {
+            stable + 1
+        } else {
+            0
+        };
+        last = chain.len();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let dump = failure_dump(&rig, &id).await;
+    let notices = wrap_up_inputs(&rig, &id).await;
+    let threads = thread_ids_of_chain(&rig.h, &id).await;
+    assert!(
+        threads.len() >= 2,
+        "the small window should have forced a successor: {threads:?}{dump}"
+    );
+    assert!(
+        notices.len() >= 2,
+        "a successor that lost the notice is told again: {} notices{dump}",
+        notices.len()
+    );
+    for request in rig.stub.requests().await {
+        assert!(
+            request_text(&request.body)
+                .matches("Deadline notice")
+                .count()
+                <= 1,
+            "a request holds two notices{dump}"
+        );
+    }
+}

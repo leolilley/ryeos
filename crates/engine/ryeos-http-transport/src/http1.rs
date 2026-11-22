@@ -260,7 +260,8 @@ struct StreamingBody {
     failed: bool,
 }
 
-type TlsStream = rustls::StreamOwned<ClientConnection, NetworkStream>;
+/// A TLS-authenticated byte stream to one explicitly authorized HTTPS origin.
+pub type TlsStream = rustls::StreamOwned<ClientConnection, NetworkStream>;
 
 impl ResponseBody {
     fn empty() -> Self {
@@ -333,8 +334,7 @@ impl Read for ResponseBody {
                 Ok(progress) => progress,
                 Err(_) => {
                     body.failed = true;
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(crate::ResponseRefusal::io(
                         "invalid HTTP response body framing",
                     ));
                 }
@@ -347,8 +347,7 @@ impl Read for ResponseBody {
                 }
                 if (body.delivered as u128) + (emitted as u128) > body.maximum as u128 {
                     body.failed = true;
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(crate::ResponseRefusal::io(
                         "HTTP response body exceeds its bound",
                     ));
                 }
@@ -366,8 +365,7 @@ impl Read for ResponseBody {
             }
             if body.incoming.len() >= body.maximum_framing_buffer {
                 body.failed = true;
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(crate::ResponseRefusal::io(
                     "HTTP response framing exceeds its bound",
                 ));
             }
@@ -391,8 +389,7 @@ impl Read for ResponseBody {
             }
             if (body.wire_received as u128) + (received as u128) > body.maximum_wire as u128 {
                 body.failed = true;
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(crate::ResponseRefusal::io(
                     "HTTP response wire body exceeds its bound",
                 ));
             }
@@ -425,56 +422,19 @@ pub(crate) fn execute(
     request: HttpRequest,
 ) -> Result<HttpResponse, HttpError> {
     validate(&request)?;
-    let host = request
-        .url
-        .host_str()
-        .ok_or_else(|| HttpError::before(io::ErrorKind::InvalidInput, "HTTPS host is absent"))?;
-    let host_without_brackets = host.trim_start_matches('[').trim_end_matches(']');
-    let server_name = if let Ok(address) = host_without_brackets.parse::<IpAddr>() {
-        ServerName::IpAddress(address.into())
-    } else {
-        ServerName::try_from(host_without_brackets.to_owned()).map_err(|_| {
-            HttpError::before(io::ErrorKind::InvalidInput, "invalid HTTPS server name")
-        })?
-    };
-    let tls_config = build_tls_config(&request.tls_roots_der)?;
-    let tls_session = ClientConnection::new(tls_config, server_name)
-        .map_err(|_| HttpError::before(io::ErrorKind::InvalidData, "TLS session setup failed"))?;
     let (request_head, send_request) = encode_request_head(
         build_http_call(&request)?,
         request.limits.request_header_bytes,
     )?;
     // Establish the exact inode and length before any request bytes can leave.
     let mut body_reader = request.body.open_reader()?;
-
-    let setup_deadline = MonotonicDeadline::after(request.deadlines.setup_timeout);
-    let socket = network
-        .connect(
-            host_without_brackets,
-            request.url.port_or_known_default().unwrap_or(443),
-            setup_deadline,
-            request.deadlines.absolute,
-            request.deadlines.idle_timeout,
-            request.cancellation.clone(),
-        )
-        .map_err(|error| HttpError::before(error.kind(), "HTTPS connection setup failed"))?;
-    if request.deadlines.absolute.has_elapsed() {
-        return Err(HttpError::before(
-            io::ErrorKind::TimedOut,
-            "HTTP operation deadline elapsed before request transmission",
-        ));
-    }
-    let mut stream = rustls::StreamOwned::new(tls_session, socket);
-    while stream.conn.is_handshaking() {
-        stream
-            .conn
-            .complete_io(&mut stream.sock)
-            .map_err(|error| HttpError::before(error.kind(), "TLS setup failed"))?;
-    }
-    stream
-        .sock
-        .complete_setup()
-        .map_err(|error| HttpError::before(error.kind(), "TLS setup deadline elapsed"))?;
+    let mut stream = open_tls_stream(
+        network,
+        &request.url,
+        &request.tls_roots_der,
+        request.deadlines,
+        request.cancellation.clone(),
+    )?;
 
     // Past this point every error is conservatively remote-contact ambiguous.
     if request.cancellation.is_cancelled() || request.deadlines.absolute.has_elapsed() {
@@ -509,7 +469,7 @@ pub(crate) fn execute(
                 Vec::new(),
                 request.limits,
                 request.cancellation.clone(),
-                request.deadlines.absolute,
+                request.deadlines,
             );
         }
         Some(SendRequestResult::Await100(_)) => {
@@ -599,8 +559,85 @@ pub(crate) fn execute(
         Vec::new(),
         request.limits,
         request.cancellation,
-        request.deadlines.absolute,
+        request.deadlines,
     )
+}
+
+/// Open one TLS-authenticated stream to an uncredentialed HTTPS URL's origin
+/// under the explicit roots, with TLS negotiated and the setup window closed.
+/// No request bytes have been written when this returns, so every failure is
+/// before contact. The caller owns everything sent afterwards, including a
+/// protocol that starts as HTTP/1.1 and upgrades.
+pub fn open_tls_stream(
+    network: &NetworkContext,
+    url: &url::Url,
+    tls_roots_der: &[Vec<u8>],
+    deadlines: Deadlines,
+    cancellation: NetworkCancellation,
+) -> Result<TlsStream, HttpError> {
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(HttpError::before(
+            io::ErrorKind::InvalidInput,
+            "request requires an uncredentialed HTTPS URL",
+        ));
+    }
+    if deadlines.setup_timeout.is_zero()
+        || deadlines.idle_timeout.is_zero()
+        || deadlines.response_wait.is_zero()
+        || deadlines.absolute.has_elapsed()
+    {
+        return Err(HttpError::before(
+            io::ErrorKind::TimedOut,
+            "HTTP operation has an expired or zero deadline",
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| HttpError::before(io::ErrorKind::InvalidInput, "HTTPS host is absent"))?;
+    let host_without_brackets = host.trim_start_matches('[').trim_end_matches(']');
+    let server_name = if let Ok(address) = host_without_brackets.parse::<IpAddr>() {
+        ServerName::IpAddress(address.into())
+    } else {
+        ServerName::try_from(host_without_brackets.to_owned()).map_err(|_| {
+            HttpError::before(io::ErrorKind::InvalidInput, "invalid HTTPS server name")
+        })?
+    };
+    let tls_config = build_tls_config(tls_roots_der)?;
+    let tls_session = ClientConnection::new(tls_config, server_name)
+        .map_err(|_| HttpError::before(io::ErrorKind::InvalidData, "TLS session setup failed"))?;
+    let setup_deadline = MonotonicDeadline::after(deadlines.setup_timeout);
+    let socket = network
+        .connect(
+            host_without_brackets,
+            url.port_or_known_default().unwrap_or(443),
+            setup_deadline,
+            deadlines.absolute,
+            deadlines.idle_timeout,
+            cancellation,
+        )
+        .map_err(|error| HttpError::before(error.kind(), "HTTPS connection setup failed"))?;
+    if deadlines.absolute.has_elapsed() {
+        return Err(HttpError::before(
+            io::ErrorKind::TimedOut,
+            "HTTP operation deadline elapsed before request transmission",
+        ));
+    }
+    let mut stream = rustls::StreamOwned::new(tls_session, socket);
+    while stream.conn.is_handshaking() {
+        stream
+            .conn
+            .complete_io(&mut stream.sock)
+            .map_err(|error| HttpError::before(error.kind(), "TLS setup failed"))?;
+    }
+    stream
+        .sock
+        .complete_setup()
+        .map_err(|error| HttpError::before(error.kind(), "TLS setup deadline elapsed"))?;
+    Ok(stream)
 }
 
 fn validate(request: &HttpRequest) -> Result<(), HttpError> {
@@ -616,6 +653,7 @@ fn validate(request: &HttpRequest) -> Result<(), HttpError> {
     }
     if request.deadlines.setup_timeout.is_zero()
         || request.deadlines.idle_timeout.is_zero()
+        || request.deadlines.response_wait.is_zero()
         || request.deadlines.absolute.has_elapsed()
     {
         return Err(HttpError::before(
@@ -819,19 +857,20 @@ fn receive_response(
     mut incoming: Vec<u8>,
     limits: Limits,
     cancellation: NetworkCancellation,
-    absolute_deadline: MonotonicDeadline,
+    deadlines: Deadlines,
 ) -> Result<HttpResponse, HttpError> {
+    let absolute_deadline = deadlines.absolute;
+    let mut first_byte_seen = false;
     let mut consumed_headers = 0usize;
     let mut buffer = [0u8; IO_BUFFER_BYTES];
     let (head_bytes, head) = loop {
         check_response_policy(&cancellation, absolute_deadline)?;
-        let (used, parsed) = response.try_response(&incoming, false).map_err(|_| {
-            HttpError::ambiguous(io::ErrorKind::InvalidData, "invalid HTTP response headers")
-        })?;
+        let (used, parsed) = response
+            .try_response(&incoming, false)
+            .map_err(|_| HttpError::refused("invalid HTTP response headers"))?;
         consumed_headers = consumed_headers.saturating_add(used);
         if consumed_headers > limits.response_header_bytes {
-            return Err(HttpError::ambiguous(
-                io::ErrorKind::InvalidData,
+            return Err(HttpError::refused(
                 "HTTP response headers exceed their bound",
             ));
         }
@@ -844,17 +883,25 @@ fn receive_response(
         }
         let buffered = consumed_headers.saturating_add(incoming.len());
         if buffered >= limits.response_header_bytes {
-            return Err(HttpError::ambiguous(
-                io::ErrorKind::InvalidData,
+            return Err(HttpError::refused(
                 "HTTP response headers exceed their bound",
             ));
         }
         let capacity = buffer
             .len()
             .min(limits.response_header_bytes.saturating_sub(buffered));
-        let received = stream
-            .read(&mut buffer[..capacity])
+        // Only the wait for the first response byte is peer processing time;
+        // every later read is bounded by the idle timeout again.
+        if !first_byte_seen {
+            stream
+                .sock
+                .override_idle_timeout(Some(deadlines.response_wait));
+        }
+        let read_result = stream.read(&mut buffer[..capacity]);
+        stream.sock.override_idle_timeout(None);
+        let received = read_result
             .map_err(|error| HttpError::ambiguous(error.kind(), "HTTP response read failed"))?;
+        first_byte_seen = true;
         if received == 0 {
             return Err(HttpError::ambiguous(
                 io::ErrorKind::UnexpectedEof,
@@ -884,8 +931,7 @@ fn receive_response(
         .collect();
     incoming.drain(..head_bytes);
     if incoming.len() as u128 > limits.response_body_wire_bytes as u128 {
-        return Err(HttpError::ambiguous(
-            io::ErrorKind::InvalidData,
+        return Err(HttpError::refused(
             "HTTP response wire body exceeds its bound",
         ));
     }
@@ -945,22 +991,15 @@ fn validate_response_framing(
     max_wire: u64,
 ) -> Result<(), HttpError> {
     if status == 101 {
-        return Err(HttpError::ambiguous(
-            io::ErrorKind::InvalidData,
-            "HTTP protocol switching is unsupported",
-        ));
+        return Err(HttpError::refused("HTTP protocol switching is unsupported"));
     }
     if header_len == 0 {
-        return Err(HttpError::ambiguous(
-            io::ErrorKind::InvalidData,
-            "HTTP response header framing is empty",
-        ));
+        return Err(HttpError::refused("HTTP response header framing is empty"));
     }
     let content_lengths = headers.get_all("content-length");
     let transfer_encodings = headers.get_all("transfer-encoding");
     if content_lengths.iter().next().is_some() && transfer_encodings.iter().next().is_some() {
-        return Err(HttpError::ambiguous(
-            io::ErrorKind::InvalidData,
+        return Err(HttpError::refused(
             "HTTP response has conflicting body framing",
         ));
     }
@@ -971,30 +1010,21 @@ fn validate_response_framing(
                 .is_ok_and(|encoding| encoding.eq_ignore_ascii_case("chunked"))
         })
     {
-        return Err(HttpError::ambiguous(
-            io::ErrorKind::InvalidData,
+        return Err(HttpError::refused(
             "HTTP response uses unsupported transfer encoding",
         ));
     }
     if content_lengths.iter().count() > 1 {
-        return Err(HttpError::ambiguous(
-            io::ErrorKind::InvalidData,
-            "HTTP response repeats Content-Length",
-        ));
+        return Err(HttpError::refused("HTTP response repeats Content-Length"));
     }
     if let Some(value) = content_lengths.iter().next() {
         let length = value
             .to_str()
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| {
-                HttpError::ambiguous(io::ErrorKind::InvalidData, "invalid HTTP Content-Length")
-            })?;
+            .ok_or_else(|| HttpError::refused("invalid HTTP Content-Length"))?;
         if length > max_body || length > max_wire {
-            return Err(HttpError::ambiguous(
-                io::ErrorKind::InvalidData,
-                "HTTP response body exceeds its bound",
-            ));
+            return Err(HttpError::refused("HTTP response body exceeds its bound"));
         }
     }
     Ok(())
@@ -1493,6 +1523,171 @@ mod tests {
         peer.join().unwrap();
     }
 
+    /// Serve one TLS exchange: read the whole request, wait `before_first_byte`,
+    /// send one response byte, wait `after_first_byte`, send the rest. The
+    /// client's outcome is returned.
+    #[cfg(unix)]
+    fn exchange_with_paused_response(
+        deadlines: Deadlines,
+        before_first_byte: std::time::Duration,
+        after_first_byte: std::time::Duration,
+    ) -> Result<HttpResponse, HttpError> {
+        use std::net::TcpListener;
+        use std::time::Duration as StdDuration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(StdDuration::from_secs(10)))
+                .unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(
+                    include_bytes!("../tests/fixtures/test-server.der").to_vec(),
+                )],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(
+                        include_bytes!("../tests/fixtures/test-server-key.der").to_vec(),
+                    ),
+                ),
+            )
+            .unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut tls = rustls::StreamOwned::new(connection, socket);
+            let mut received = Vec::new();
+            while !received.ends_with(b"\r\n\r\nbody") {
+                let mut buffer = [0u8; 1024];
+                let count = tls.read(&mut buffer).unwrap();
+                assert_ne!(count, 0, "client closed before its request ended");
+                received.extend_from_slice(&buffer[..count]);
+            }
+            std::thread::sleep(before_first_byte);
+            let response: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+            // The client may already have settled; those writes then fail.
+            if tls
+                .write_all(&response[..1])
+                .and_then(|()| tls.flush())
+                .is_err()
+            {
+                return;
+            }
+            std::thread::sleep(after_first_byte);
+            let _ = tls.write_all(&response[1..]).and_then(|()| tls.flush());
+            let _ = tls.read(&mut [0u8; 1]);
+        });
+
+        let network =
+            NetworkContext::from_config_bytes(b"nameserver 127.0.0.1\n", b"127.0.0.1 localhost\n")
+                .unwrap();
+        let mut http_request = request(b"body".to_vec());
+        http_request.url =
+            url::Url::parse(&format!("https://localhost:{port}/paused-response")).unwrap();
+        http_request.tls_roots_der = vec![include_bytes!("../tests/fixtures/test-ca.der").to_vec()];
+        http_request.deadlines = deadlines;
+        let outcome = execute(&network, http_request);
+        peer.join().unwrap();
+        outcome
+    }
+
+    #[cfg(unix)]
+    fn paused_deadlines(absolute: Duration) -> Deadlines {
+        Deadlines::new(
+            Duration::from_secs(2),
+            Duration::from_millis(300),
+            MonotonicDeadline::after(absolute),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn response_wait_defaults_to_the_idle_bound_and_never_narrows_below_it() {
+        let deadlines = paused_deadlines(Duration::from_secs(5));
+        assert_eq!(deadlines.response_wait, deadlines.idle_timeout);
+        let zero = deadlines.with_response_wait(Duration::ZERO);
+        assert_eq!(zero.response_wait, deadlines.idle_timeout);
+        let narrower = deadlines.with_response_wait(deadlines.idle_timeout / 2);
+        assert_eq!(narrower.response_wait, deadlines.idle_timeout);
+        let wider = deadlines.with_response_wait(deadlines.idle_timeout * 3);
+        assert_eq!(wider.response_wait, deadlines.idle_timeout * 3);
+        let mut http_request = request(vec![]);
+        http_request.deadlines = zero;
+        assert!(validate(&http_request).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_silent_past_idle_but_within_the_response_wait_still_answers() {
+        let deadlines =
+            paused_deadlines(Duration::from_secs(8)).with_response_wait(Duration::from_secs(4));
+        let response = exchange_with_paused_response(
+            deadlines,
+            std::time::Duration::from_millis(900),
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_silent_past_the_response_wait_fails_timed_out() {
+        let deadlines =
+            paused_deadlines(Duration::from_secs(8)).with_response_wait(Duration::from_millis(500));
+        let error = exchange_with_paused_response(
+            deadlines,
+            std::time::Duration::from_millis(1500),
+            std::time::Duration::ZERO,
+        )
+        .err()
+        .expect("a peer silent past the response wait must fail");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            error.contact_state(),
+            crate::ContactState::RequestMayHaveBeenSent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stall_after_the_first_response_byte_is_bounded_by_idle_not_the_response_wait() {
+        let deadlines =
+            paused_deadlines(Duration::from_secs(8)).with_response_wait(Duration::from_secs(6));
+        let started = std::time::Instant::now();
+        let error = exchange_with_paused_response(
+            deadlines,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(1500),
+        )
+        .err()
+        .expect("a stall after the first byte must fail");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_absolute_deadline_caps_a_longer_response_wait() {
+        let deadlines = paused_deadlines(Duration::from_millis(1200))
+            .with_response_wait(Duration::from_secs(30));
+        let started = std::time::Instant::now();
+        let error = exchange_with_paused_response(
+            deadlines,
+            std::time::Duration::from_millis(2500),
+            std::time::Duration::ZERO,
+        )
+        .err()
+        .expect("the absolute deadline must end the wait");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
     /// Exercise the streaming body with a local TLS peer and captured localhost resolution.
     #[cfg(unix)]
     fn streamed_response_read_error(
@@ -1500,7 +1695,7 @@ mod tests {
         response_body: &'static [u8],
         decoded_limit: u64,
         wire_limit: u64,
-    ) -> io::ErrorKind {
+    ) -> io::Error {
         use std::net::TcpListener;
         use std::sync::mpsc;
         use std::time::Duration as StdDuration;
@@ -1584,7 +1779,7 @@ mod tests {
             }
         };
         server.join().unwrap();
-        error.kind()
+        error
     }
 
     #[cfg(unix)]
@@ -1596,7 +1791,8 @@ mod tests {
             64,
             8,
         );
-        assert_eq!(error, io::ErrorKind::InvalidData);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(crate::is_response_refusal(&error));
     }
 
     #[cfg(unix)]
@@ -1608,7 +1804,8 @@ mod tests {
             4,
             64,
         );
-        assert_eq!(error, io::ErrorKind::InvalidData);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(crate::is_response_refusal(&error));
     }
 
     #[test]
@@ -1621,5 +1818,23 @@ mod tests {
             error.contact_state(),
             crate::ContactState::RequestMayHaveBeenSent
         );
+        assert!(error.response_refused());
+    }
+
+    #[test]
+    fn request_side_and_stream_invalid_data_is_not_a_response_refusal() {
+        let request_side =
+            HttpError::ambiguous(io::ErrorKind::InvalidData, "invalid HTTP request state");
+        assert_eq!(
+            request_side.contact_state(),
+            crate::ContactState::RequestMayHaveBeenSent
+        );
+        assert_eq!(request_side.kind(), io::ErrorKind::InvalidData);
+        assert!(!request_side.response_refused());
+        let stream = io::Error::new(io::ErrorKind::InvalidData, "received corrupt message");
+        assert!(!crate::is_response_refusal(&stream));
+        assert!(crate::is_response_refusal(&crate::ResponseRefusal::io(
+            "HTTP response body exceeds its bound"
+        )));
     }
 }

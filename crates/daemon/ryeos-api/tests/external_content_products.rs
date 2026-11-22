@@ -4,7 +4,7 @@
 //! bytes, deliberately without historical thread/capsule objects. They exercise
 //! the durable lookup/import contract, not admission or first-time capture of a
 //! producer. A full producer launch must qualify that separate boundary.
-mod test_state;
+use ryeos_api::test_support as test_state;
 
 use std::sync::Arc;
 
@@ -13,15 +13,15 @@ use ryeos_api::handlers::{
     external_content_import, external_content_products, product_qualification_launch,
 };
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
-use ryeos_app::node_policy::sections::external_content::{
-    ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
-};
-use ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use ryeos_app::operator_external_content::products::ProductRequest;
 use ryeos_app::operator_external_content::{ImportRequest, RetainedProductImportRequest};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::NodeIdentitySigner;
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
+use ryeos_node_runtime::node_policy::sections::external_content::{
+    ExternalContentImportLimits, ExternalContentImportPolicyRecord, ManagedExternalContentPolicy,
+};
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, publish_product_witness,
 };
@@ -36,12 +36,15 @@ const TERMINAL: &str = "T-00000000-0000-0000-0000-000000000002";
 const PRODUCT_BYTES: &[u8] = b"exact input";
 const REMOTE_ORIGIN: &str = "site:product-source";
 
+/// Fields drop in declaration order: the application, then the owner that
+/// closes its Store, then the directory.
 struct Fixture {
-    _directory: tempfile::TempDir,
     state: Arc<AppState>,
     context: HandlerContext,
     evidence: ProductCaptureEvidence,
     witness_hash: String,
+    _store_owner: ryeos_app::test_support::TestStateStore,
+    _directory: tempfile::TempDir,
 }
 
 fn fixture(large_tier: bool, import_ceiling: u64, publish: bool) -> Fixture {
@@ -54,17 +57,92 @@ fn fixture_with_remote_owner(
     publish: bool,
     remote_owner: bool,
 ) -> Fixture {
-    let (directory, mut state) = test_state::build_test_state();
+    build_fixture(
+        large_tier,
+        import_ceiling,
+        publish,
+        remote_owner,
+        LargeObjectState::None,
+    )
+}
+
+/// How the fixture's large-content manifest relates to the large-object
+/// store. `None` keeps the ordinary single-blob entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LargeObjectState {
+    None,
+    /// The manifest names a large object that is resident with its sidecar.
+    Resident,
+    /// The manifest names a large object that was never stored locally.
+    Absent,
+    /// The object is resident but the manifest commits to a different chunk
+    /// trail than the stored sidecar.
+    SidecarMismatch,
+}
+
+const LARGE_OBJECT_BYTES: &[u8] = b"0123456789abcdefXYZ";
+/// The smallest chunk size a large-content manifest admits; the payload is a
+/// few bytes, so the chunk trail has exactly one hash.
+const LARGE_OBJECT_CHUNK_BYTES: u64 = ryeos_state::objects::MIN_LARGE_CONTENT_CHUNK_BYTES;
+
+/// Ingest `LARGE_OBJECT_BYTES` into the large-object store under `runtime`
+/// with the smallest admitted chunk size and return its manifest entry.
+fn ingest_large_object(
+    runtime: &lillux::PinnedDirectory,
+    scratch: &std::path::Path,
+) -> ryeos_state::objects::ExternalLargeContentManifestEntry {
+    let store = ryeos_state::large_object_store::LargeObjectStore::open_with_chunk_bytes(
+        runtime,
+        LARGE_OBJECT_CHUNK_BYTES,
+    )
+    .unwrap();
+    std::fs::create_dir_all(scratch).unwrap();
+    std::fs::write(scratch.join("payload.bin"), LARGE_OBJECT_BYTES).unwrap();
+    let directory = lillux::PinnedDirectory::open(scratch).unwrap().unwrap();
+    let file = directory
+        .open_regular(std::ffi::OsStr::new("payload.bin"), false)
+        .unwrap()
+        .unwrap();
+    let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+        file: lillux::pinned_regular_file_identity(&file).unwrap(),
+        size: LARGE_OBJECT_BYTES.len() as u64,
+    };
+    let ingested = store
+        .ingest_open_regular(file, source_identity, "payload.bin", None)
+        .unwrap();
+    ryeos_state::objects::ExternalLargeContentManifestEntry {
+        path: "content".to_owned(),
+        kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+        mode: Some(493),
+        blob_hash: None,
+        file_sha256: Some(ingested.file_sha256),
+        size: Some(ingested.size),
+        chunk_size: Some(ingested.chunk_size),
+        chunk_hashes: ingested.chunk_hashes,
+        target: None,
+    }
+}
+
+fn build_fixture(
+    large_tier: bool,
+    import_ceiling: u64,
+    publish: bool,
+    remote_owner: bool,
+    large_object: LargeObjectState,
+) -> Fixture {
+    assert!(large_tier || large_object == LargeObjectState::None);
+    let (directory, store_owner, mut state) = test_state::build_test_state();
     let closure = state
         .node_policy
         .require::<NodeObjectClosurePolicy>()
         .unwrap()
         .clone();
     state.node_policy = Arc::new(
-        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
-                schema: 1,
+                schema: 2,
+                declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
                     max_depth: 4,
@@ -81,7 +159,9 @@ fn fixture_with_remote_owner(
             }),
         ]),
     );
-    let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let local_operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let operator = if remote_owner {
         NodeIdentity::create(&directory.path().join("source-operator.pem")).unwrap()
     } else {
@@ -95,8 +175,9 @@ fn fixture_with_remote_owner(
         "ryeos.execute.service.external-content/import".to_owned(),
         "ryeos.execute.service.external-content/product".to_owned(),
         "ryeos.execute.service.external-content/launch-product-qualification".to_owned(),
+        "ryeos.execute.service.external-content/launch-content-qualification".to_owned(),
     ];
-    ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -104,6 +185,7 @@ fn fixture_with_remote_owner(
         "product test operator",
         state.identity.fingerprint(),
         "2026-09-07T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &state.identity,
         WildcardPolicy::Reject,
         false,
@@ -116,7 +198,7 @@ fn fixture_with_remote_owner(
         scopes,
         true,
         Some(if remote_owner {
-            AuthorizedKeyPrincipalClass::RemoteOperator
+            AuthorizedKeyPrincipalClass::RemotePrincipal
         } else {
             AuthorizedKeyPrincipalClass::LocalClient
         }),
@@ -139,16 +221,40 @@ fn fixture_with_remote_owner(
             ProductStorage::Content,
         )
     };
+    let (entry, payload_len) = if large_object == LargeObjectState::None {
+        (
+            json!({
+                "path": "content", "kind": "file", "mode": 493,
+                "blob_hash": blob, "size": PRODUCT_BYTES.len(),
+            }),
+            PRODUCT_BYTES.len(),
+        )
+    } else {
+        // An absent object is ingested into a scratch runtime so the manifest
+        // names a real digest that this node's store never received.
+        let scratch = directory.path().join("large-source");
+        let mut entry = if large_object == LargeObjectState::Absent {
+            let other =
+                lillux::PinnedDirectory::open_or_create(&directory.path().join("other")).unwrap();
+            ingest_large_object(&other, &scratch)
+        } else {
+            ingest_large_object(authority.runtime_directory(), &scratch)
+        };
+        if large_object == LargeObjectState::SidecarMismatch {
+            entry.chunk_hashes[0] = "e".repeat(64);
+        }
+        (
+            serde_json::to_value(&entry).unwrap(),
+            LARGE_OBJECT_BYTES.len(),
+        )
+    };
     let manifest_hash = cas
         .store_object(&json!({
             "kind": kind,
             "schema": schema,
-            "entries": [{
-                "path": "content", "kind": "file", "mode": 493,
-                "blob_hash": blob, "size": PRODUCT_BYTES.len(),
-            }],
+            "entries": [entry],
             "entry_count": 1,
-            "total_bytes": PRODUCT_BYTES.len(),
+            "total_bytes": payload_len,
         }))
         .unwrap();
     let declaration = ProductDeclaration {
@@ -212,7 +318,7 @@ fn fixture_with_remote_owner(
         manifest_hash,
         manifest_kind: kind.to_owned(),
         entry_count: 1,
-        total_bytes: PRODUCT_BYTES.len() as u64,
+        total_bytes: payload_len as u64,
     };
     let signer = NodeIdentitySigner::from_identity(&state.identity);
     let attestation = evidence
@@ -240,11 +346,12 @@ fn fixture_with_remote_owner(
     };
     drop(guard);
     Fixture {
-        _directory: directory,
         state: Arc::new(state),
         context,
         evidence,
         witness_hash,
+        _store_owner: store_owner,
+        _directory: directory,
     }
 }
 
@@ -316,7 +423,10 @@ async fn published_products_remain_exact_without_historical_threads_and_import_f
         assert_eq!(first["total_bytes"], 11);
         let authority = fixture.state.state_store.pinned_state_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
-        let operator = NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &fixture.state.config.app_root,
+        )
+        .unwrap();
         for response in [&first, &second] {
             let stage = authority
                 .require_recovery()
@@ -370,7 +480,7 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
     let mut foreign = fixture.context.clone();
     foreign.fingerprint = format!("fp:{}", "f".repeat(64));
     let mut remote = fixture.context.clone();
-    remote.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
+    remote.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemotePrincipal);
     remote.authenticated_origin_site_id = None;
     let mut unverified = fixture.context.clone();
     unverified.verified = false;
@@ -408,7 +518,9 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
         ).await.unwrap_err();
         let qualification_error = format!("{qualification:#}");
         assert!(
-            qualification_error.contains("operator") || qualification_error.contains("verified"),
+            qualification_error.contains("operator")
+                || qualification_error.contains("verified")
+                || qualification_error.contains("forwarding proof"),
             "{qualification_error}"
         );
         let composition = external_content_products::compose(
@@ -420,6 +532,7 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
                     witness_hash: fixture.witness_hash.clone(),
                     witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                     qualification_hash: None,
+                    remote_testimony: None,
                 }],
                 maximum_bytes: 4096,
             },
@@ -432,7 +545,9 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
         // nonexistent consumer generation or publishing an import stage.
         let composition_error = format!("{composition:#}");
         assert!(
-            composition_error.contains("operator") || composition_error.contains("verified"),
+            composition_error.contains("operator")
+                || composition_error.contains("verified")
+                || composition_error.contains("forwarding proof"),
             "{composition_error}"
         );
         assert!(
@@ -452,15 +567,99 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
 }
 
 #[tokio::test]
+async fn disabled_acquisition_policy_retains_one_shot_content_launch_coordinates() {
+    let fixture = fixture(false, 4096, true);
+    let launch_id = format!("L-{}", "b".repeat(32));
+    let parameters = json!({
+        "launch_id": launch_id,
+        "activation_ref": "config:fixture/missing-activation",
+        "declaration_id": "runtime"
+    });
+    let descriptor = product_qualification_launch::CONTENT_DESCRIPTOR;
+    let first = (descriptor.handler)(
+        parameters.clone(),
+        fixture.context.clone(),
+        Arc::clone(&fixture.state),
+    )
+    .await;
+    let error = first.expect_err("disabled acquisition policy cannot launch a verifier");
+    assert!(
+        format!("{error:#}").contains("disabled"),
+        "fixture must refuse at the disabled managed-acquisition policy boundary: {error:#}"
+    );
+    let status = fixture
+        .state
+        .state_store
+        .launch_planning_status(&launch_id, &fixture.context.fingerprint)
+        .unwrap()
+        .expect("accepted content coordinate must remain owner-queryable");
+    assert_eq!(status.status, "failed");
+    assert!(status.thread_id.is_none());
+    let second = (descriptor.handler)(
+        parameters,
+        fixture.context.clone(),
+        Arc::clone(&fixture.state),
+    )
+    .await;
+    assert!(
+        second.is_err(),
+        "refused accepted coordinate must not relaunch"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .state_store
+            .launch_planning_status(&launch_id, &fixture.context.fingerprint,)
+            .unwrap()
+            .unwrap(),
+        status
+    );
+}
+
+#[tokio::test]
+async fn product_launch_scope_cannot_reserve_acquired_content_work() {
+    let fixture = fixture(false, 4096, true);
+    let mut context = fixture.context.clone();
+    context.scopes.retain(|scope| {
+        scope != "ryeos.execute.service.external-content/launch-content-qualification"
+    });
+    let launch_id = format!("L-{}", "c".repeat(32));
+    let error = (product_qualification_launch::CONTENT_DESCRIPTOR.handler)(
+        json!({
+            "launch_id": launch_id,
+            "activation_ref": "config:fixture/missing-activation",
+            "declaration_id": "runtime"
+        }),
+        context,
+        Arc::clone(&fixture.state),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("missing required capability"));
+    assert!(
+        fixture
+            .state
+            .state_store
+            .launch_planning_status(&launch_id, &fixture.context.fingerprint,)
+            .unwrap()
+            .is_none(),
+        "authorization refusal must precede reservation"
+    );
+}
+
+#[tokio::test]
 async fn qualification_launch_reservation_is_one_shot_when_signed_relationship_refuses() {
     let fixture = fixture(false, 4096, true);
     let launch_id = format!("L-{}", "a".repeat(32));
     let request = product_qualification_launch::Request {
+        consumer_invocation: None,
         launch_id: launch_id.clone(),
         witness_hash: fixture.witness_hash.clone(),
         witness_source:
             ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
         relationship_name: "missing_qualification_relationship".to_owned(),
+        project_context: None,
+        auxiliary_product_selections: Vec::new(),
     };
     let first = product_qualification_launch::handle(
         request.clone(),
@@ -517,7 +716,7 @@ async fn admitted_remote_owner_reads_and_stages_own_product_without_ambient_auth
     .unwrap();
     assert_eq!(
         admitted.principal_class,
-        AuthorizedKeyPrincipalClass::RemoteOperator
+        AuthorizedKeyPrincipalClass::RemotePrincipal
     );
     assert!(
         ryeos_app::operator_authority::retained_admitted_operator_authority(
@@ -558,7 +757,10 @@ async fn admitted_remote_owner_reads_and_stages_own_product_without_ambient_auth
             .unwrap();
         assert!(stage.admitted_target_hash().is_none());
     }
-    let local = NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+    let local = ryeos_node_runtime::operator_identity::test_support::load_operator(
+        &fixture.state.config.app_root,
+    )
+    .unwrap();
     let foreign = HandlerContext::new_with_authority(
         local.principal_id(),
         remote.scopes.clone(),
@@ -581,6 +783,7 @@ async fn admitted_remote_owner_reads_and_stages_own_product_without_ambient_auth
             storage: ImportStorage::Content,
             maximum_bytes: 11,
             expected_file_sha256: None,
+            hold: None,
         }),
         remote.clone(),
         Arc::clone(&fixture.state),
@@ -614,7 +817,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
     let fixture = fixture_with_remote_owner(false, 4096, true, true);
     let operator =
         NodeIdentity::load(&fixture._directory.path().join("source-operator.pem")).unwrap();
-    let grant = ryeos_app::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
         &fixture.state.config.authorized_keys_dir,
         &fixture.state.identity,
@@ -631,7 +834,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
     assert_eq!(product_authority.origin_site_id, REMOTE_ORIGIN);
     assert_eq!(
         product_authority.principal_class,
-        AuthorizedKeyPrincipalClass::RemoteOperator
+        AuthorizedKeyPrincipalClass::RemotePrincipal
     );
     assert_eq!(product_authority.grant_digest, grant.source_file_hash);
     let consumer = ExternalContentConsumerAuthority::installed_bundle(
@@ -678,7 +881,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
         )
     };
     read().unwrap();
-    let (grant_path, _, _) = ryeos_app::identity::reconcile_authorized_key_toml_scopes(
+    let (grant_path, _, _) = ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &fixture.state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -686,6 +889,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
         "narrowed remote operator",
         fixture.state.identity.fingerprint(),
         "2026-09-10T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &fixture.state.identity,
         WildcardPolicy::Reject,
         false,
@@ -713,7 +917,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
 }
 
 #[test]
-fn selected_launch_is_target_local_without_erasing_remote_operator_origin() {
+fn selected_launch_is_target_local_without_erasing_remote_principal_origin() {
     use ryeos_app::operator_external_content::product_composition::admit_root_product_selections;
     use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace, SubjectResolutionAuthority};
     use ryeos_engine::resolution::{
@@ -771,6 +975,7 @@ fn selected_launch_is_target_local_without_erasing_remote_operator_origin() {
         witness_source:
             ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
         qualification_hash: None,
+        remote_testimony: None,
     };
     for target in [
         ProductSelectionTarget::Root {},
@@ -957,7 +1162,10 @@ async fn published_retry_survives_abandoned_upload_retirement() {
     let staging_id = {
         let authority = fixture.state.state_store.pinned_state_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
-        let operator = NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &fixture.state.config.app_root,
+        )
+        .unwrap();
         let mut stage = authority
             .require_recovery()
             .unwrap()
@@ -1002,7 +1210,10 @@ async fn published_retry_survives_abandoned_upload_retirement() {
                 .unwrap(),
             1,
         );
-        let operator = NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &fixture.state.config.app_root,
+        )
+        .unwrap();
         assert!(
             recovery
                 .open_durable_cas_upload_admitted(&guard, &staging_id, operator.fingerprint())
@@ -1021,4 +1232,114 @@ async fn published_retry_survives_abandoned_upload_retirement() {
         import(&fixture, &fixture.witness_hash, 11).await.unwrap()["manifest_hash"],
         fixture.evidence.manifest_hash,
     );
+}
+
+/// Publish the generic origin admission of `witness_hash` signed by this
+/// node, standing in for an admission imported from the origin.
+fn origin_admission(fixture: &Fixture) -> String {
+    let state = &fixture.state;
+    let limits = state
+        .node_policy
+        .require::<NodeObjectClosurePolicy>()
+        .unwrap()
+        .closure_limits()
+        .unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
+    let signer = NodeIdentitySigner::from_identity(&state.identity);
+    let mut request = ryeos_state::AdmissionRequest::accepted(
+        fixture.witness_hash.clone(),
+        ryeos_state::admission::LOCAL_ADMISSION_POLICY,
+    );
+    request.limits = limits;
+    state
+        .state_store
+        .with_state_db(|db| {
+            ryeos_state::admit_root(
+                db,
+                &request,
+                &signer,
+                state.identity.verifying_key(),
+                &guard,
+            )
+        })
+        .unwrap()
+        .attestation_hash
+}
+
+fn accept_for(
+    fixture: &Fixture,
+    owner: &str,
+    admission_hash: &str,
+) -> anyhow::Result<(
+    ryeos_state::AdmissionResult,
+    ryeos_state::external_content::products::publication::VerifiedProductWitness,
+)> {
+    ryeos_app::operator_external_content::product_receipt::accept_product_for_owner(
+        &fixture.state,
+        owner,
+        admission_hash,
+        &fixture.witness_hash,
+        fixture.state.identity.verifying_key(),
+        4096,
+    )
+}
+
+#[test]
+fn acceptance_core_accepts_for_an_explicit_remote_owner_and_is_idempotent() {
+    let fixture = fixture_with_remote_owner(false, 4096, true, true);
+    let local_operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+        &fixture.state.config.app_root,
+    )
+    .unwrap();
+    assert_ne!(fixture.context.fingerprint, local_operator.principal_id());
+    let admission = origin_admission(&fixture);
+    let (first, witness) = accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap();
+    assert!(!first.reused_existing);
+    assert_eq!(witness.attestation_hash, fixture.witness_hash);
+    assert_eq!(
+        witness.evidence.owner_principal,
+        fixture.context.fingerprint
+    );
+    let (second, _) = accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap();
+    assert!(second.reused_existing);
+    assert_eq!(second.attestation_hash, first.attestation_hash);
+}
+
+#[test]
+fn acceptance_core_refuses_a_principal_that_does_not_own_the_witness() {
+    let fixture = fixture_with_remote_owner(false, 4096, true, true);
+    let admission = origin_admission(&fixture);
+    let stranger = format!("fp:{}", "f".repeat(64));
+    let error = accept_for(&fixture, &stranger, &admission).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("same configured operator"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn acceptance_core_accepts_a_large_content_product_whose_object_is_resident() {
+    let fixture = build_fixture(true, 4096, true, true, LargeObjectState::Resident);
+    let admission = origin_admission(&fixture);
+    let (accepted, witness) =
+        accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap();
+    assert!(!accepted.reused_existing);
+    assert_eq!(witness.attestation_hash, fixture.witness_hash);
+}
+
+#[test]
+fn acceptance_core_refuses_a_large_content_product_without_its_object_or_sidecar_match() {
+    for (state, expected) in [
+        (LargeObjectState::Absent, "is absent"),
+        (
+            LargeObjectState::SidecarMismatch,
+            "contradicts its admitted manifest",
+        ),
+    ] {
+        let fixture = build_fixture(true, 4096, false, true, state);
+        let admission = origin_admission(&fixture);
+        let error = accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }

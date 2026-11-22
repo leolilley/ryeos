@@ -6,7 +6,7 @@
 //! The daemon's auth loader reads these files at startup (and on hot-reload).
 //! Each file must be signed by the node identity key.
 //!
-//! Delegates to the canonical `ryeos_app::identity::write_authorized_key_toml`
+//! Delegates to the canonical `ryeos_node_runtime::identity::write_authorized_key_toml`
 //! so there is exactly one TOML emitter.
 
 use std::path::PathBuf;
@@ -17,9 +17,14 @@ use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use rand::RngCore;
 
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
+
 use crate::actions::hosted_policy::load_hosted_policy;
 
 const DEFAULT_ADMISSION_TOKEN_TTL_SECS: u64 = 600;
+/// Format version of stored admission tokens. The admission claim handler
+/// refuses every other version and names re-minting as the cure.
+pub const ADMISSION_TOKEN_FORMAT_VERSION: u32 = 2;
 
 /// Shared input for node-owned grant reconciliation. The target app root and
 /// signing authority come from the host entrypoint, never from this payload.
@@ -41,6 +46,10 @@ pub struct AuthorizeClientRequest {
     pub remote_node_origin_site_id: Option<String>,
     #[serde(default)]
     pub allow_semantic_conversion: bool,
+    /// Requested grant lifetime in seconds. Absent: the class maximum from the
+    /// node's authorization policy. Above that maximum: refused.
+    #[serde(default)]
+    pub lifetime_secs: Option<u64>,
 }
 
 fn default_authorize_client_label() -> String {
@@ -48,7 +57,25 @@ fn default_authorize_client_label() -> String {
 }
 
 impl AuthorizeClientRequest {
+    /// Parameters for a grant written on behalf of anyone but the node's local
+    /// operator: no scope under the offline-operation prefix may be granted.
     pub fn into_params(self, app_root: PathBuf) -> Result<AuthorizeClientParams> {
+        self.build_params(app_root, false)
+    }
+
+    /// Parameters for a grant the node's local operator asks for, either on
+    /// the volume itself or through the daemon after it proved the caller is
+    /// the configured local operator. Exact offline-operation scopes may be
+    /// granted this way, and only this way; wildcards under the prefix never.
+    pub fn into_params_as_local_operator(self, app_root: PathBuf) -> Result<AuthorizeClientParams> {
+        self.build_params(app_root, true)
+    }
+
+    fn build_params(
+        self,
+        app_root: PathBuf,
+        local_operator: bool,
+    ) -> Result<AuthorizeClientParams> {
         if self.origin_site_id.is_some() && self.remote_node_origin_site_id.is_some() {
             bail!("origin_site_id and remote_node_origin_site_id are mutually exclusive");
         }
@@ -76,9 +103,13 @@ impl AuthorizeClientRequest {
             ryeos_runtime::authorizer::validate_scope_pattern(scope)
                 .map_err(|error| anyhow::anyhow!("invalid scope: {error}"))?;
         }
+        ryeos_node_runtime::identity::reject_offline_scope_wildcards(&scopes)?;
+        if !local_operator {
+            ryeos_node_runtime::identity::reject_offline_scopes(&scopes)?;
+        }
         let subject = match (self.origin_site_id, self.remote_node_origin_site_id) {
             (Some(origin_site_id), None) => {
-                AuthorizeClientSubject::RemoteOperator { origin_site_id }
+                AuthorizeClientSubject::RemotePrincipal { origin_site_id }
             }
             (None, Some(origin_site_id)) => AuthorizeClientSubject::RemoteNode { origin_site_id },
             (None, None) => AuthorizeClientSubject::LocalClient,
@@ -101,7 +132,7 @@ impl AuthorizeClientRequest {
 pub enum AuthorizeClientSubject {
     LocalClient,
     RemoteNode { origin_site_id: String },
-    RemoteOperator { origin_site_id: String },
+    RemotePrincipal { origin_site_id: String },
 }
 
 /// Parameters for the authorize-client action.
@@ -130,6 +161,42 @@ pub struct AuthorizeClientParams {
     /// origin constraint. Operationally this is valid only with the daemon
     /// stopped; ordinary scope updates leave it false.
     pub allow_semantic_conversion: bool,
+}
+
+impl AuthorizeClientParams {
+    /// The principal class this grant will carry.
+    pub fn principal_class(&self) -> ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass {
+        use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass as Class;
+        match self.subject {
+            AuthorizeClientSubject::LocalClient => Class::LocalClient,
+            AuthorizeClientSubject::RemoteNode { .. } => Class::RemoteNode,
+            AuthorizeClientSubject::RemotePrincipal { .. } => Class::RemotePrincipal,
+        }
+    }
+}
+
+/// The lifetime and provenance an authorize-client grant is issued with:
+/// `lifetime_secs` (or the class maximum) judged against the node's
+/// authorization `policy`, attributed to `authorized_by`. A lifetime above
+/// the class maximum fails with a typed
+/// [`ryeos_node_runtime::identity::GrantLifetimeError`].
+pub fn authorize_client_terms(
+    params: &AuthorizeClientParams,
+    lifetime_secs: Option<u64>,
+    policy: &ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy,
+    authorized_by: ryeos_node_runtime::identity::AuthorizedBy,
+) -> Result<
+    ryeos_node_runtime::identity::GrantTerms,
+    ryeos_node_runtime::identity::GrantLifetimeError,
+> {
+    Ok(ryeos_node_runtime::identity::GrantTerms {
+        expires_at: policy.expiry_for(
+            params.principal_class(),
+            lifetime_secs,
+            lillux::time::unix_secs_now(),
+        )?,
+        authorized_by,
+    })
 }
 
 /// Result of a successful authorize-client run.
@@ -195,6 +262,14 @@ pub struct MintAdmissionTokenParams {
     pub label: Option<String>,
     /// Token lifetime in seconds.
     pub ttl_secs: u64,
+    /// Class of the grant redeeming this token writes.
+    pub class: AuthorizedKeyPrincipalClass,
+    /// Site the redeemed grant is bound to. Required for `remote_principal`,
+    /// whose claim a node of this site must co-sign; refused for other classes.
+    pub origin_site_id: Option<String>,
+    /// Lifetime of the grant redeeming this token writes, bounded at claim
+    /// time by the node's authorization policy. Absent: the class maximum.
+    pub grant_lifetime_secs: Option<u64>,
 }
 
 /// Signed-service input for minting one target-local admission token.
@@ -209,6 +284,15 @@ pub struct MintAdmissionTokenRequest {
     pub label: Option<String>,
     #[serde(default = "default_admission_token_ttl_secs")]
     pub ttl_secs: u64,
+    /// Class of the grant the token admits: `local_client`, `remote_node` or
+    /// `remote_principal`.
+    pub class: AuthorizedKeyPrincipalClass,
+    /// Origin site of a `remote_principal` token (`site:<name>`).
+    #[serde(default)]
+    pub origin_site_id: Option<String>,
+    /// Requested lifetime of the admitted grant, in seconds.
+    #[serde(default)]
+    pub grant_lifetime_secs: Option<u64>,
 }
 
 fn default_admission_token_ttl_secs() -> u64 {
@@ -223,12 +307,18 @@ impl MintAdmissionTokenRequest {
             .map(str::trim)
             .filter(|scope| !scope.is_empty())
             .map(str::to_owned)
-            .collect();
+            .collect::<Vec<String>>();
+        // An admission token is redeemed by the party being admitted, never by
+        // the local operator, so it cannot carry an offline-operation scope.
+        ryeos_node_runtime::identity::reject_offline_scopes(&scopes)?;
         Ok(MintAdmissionTokenParams {
             app_root,
             scopes,
             label: self.label,
             ttl_secs: self.ttl_secs,
+            class: self.class,
+            origin_site_id: self.origin_site_id,
+            grant_lifetime_secs: self.grant_lifetime_secs,
         })
     }
 }
@@ -251,8 +341,16 @@ pub struct MintAdmissionTokenResult {
     pub scopes: Vec<String>,
     /// Optional default label stored in the token file.
     pub label: Option<String>,
+    /// Class of the grant the token admits.
+    pub class: AuthorizedKeyPrincipalClass,
+    /// Origin site a `remote_principal` token is bound to.
+    pub origin_site_id: Option<String>,
+    /// Lifetime requested for the admitted grant, in seconds.
+    pub grant_lifetime_secs: Option<u64>,
 }
 
+/// Stored admission token format. Version 2 carries the class of the grant it
+/// admits; the claim side refuses any other version as stale.
 #[derive(serde::Serialize)]
 struct AdmissionTokenFile<'a> {
     version: u32,
@@ -263,6 +361,11 @@ struct AdmissionTokenFile<'a> {
     issued_at_unix: u64,
     ttl_secs: u64,
     expires_at_unix: u64,
+    class: AuthorizedKeyPrincipalClass,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_site_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant_lifetime_secs: Option<u64>,
 }
 
 /// Authorize a client by writing a node-signed authorized-key TOML.
@@ -270,17 +373,22 @@ struct AdmissionTokenFile<'a> {
 /// Reconciles an existing fingerprint only within the explicitly selected
 /// same-class or stopped-node semantic-transition contract.
 ///
-/// Delegates to the canonical writer in `ryeos_app::identity` so the
+/// Delegates to the canonical writer in `ryeos_node_runtime::identity` so the
 /// TOML format is identical to what the daemon's own handler produces.
-pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeClientResult> {
+pub fn run_authorize_client(
+    params: AuthorizeClientParams,
+    terms: &ryeos_node_runtime::identity::GrantTerms,
+) -> Result<AuthorizeClientResult> {
     // Explicit pre-node bootstrap entry only. A confined Tool must never
     // reopen node private state; normal CLI use goes through the node-owned
     // identity/authorize-client service and its retained identity instead.
     let _stopped_node_lock = acquire_semantic_conversion_lock(&params)?;
     let root = ryeos_engine::roots::RuntimeRoot::new(params.app_root.clone());
-    let node_identity = ryeos_app::identity::NodeIdentity::load(&root.node_signing_key_path())?;
+    let node_identity =
+        ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
     run_authorize_client_with_authority(
         params,
+        terms,
         &node_identity,
         &root.authorized_keys_dir(),
         _stopped_node_lock.as_ref(),
@@ -291,21 +399,22 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
 /// authority. This is a local operator operation, not a worker permission.
 pub fn run_authorize_client_with_authority(
     params: AuthorizeClientParams,
-    node_identity: &ryeos_app::identity::NodeIdentity,
+    terms: &ryeos_node_runtime::identity::GrantTerms,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
     auth_dir: &std::path::Path,
-    stopped_node_authority: Option<&ryeos_app::state_lock::StateLock>,
+    stopped_node_authority: Option<&ryeos_node_runtime::state_lock::StateLock>,
 ) -> Result<AuthorizeClientResult> {
     if params.allow_semantic_conversion {
         stopped_node_authority
             .context("semantic authorized-key conversion requires stopped-node authority")?
             .ensure_protects_app_root(&params.app_root)?;
     }
-    reconcile_client_grant(params, node_identity, auth_dir)
+    reconcile_client_grant(params, terms, node_identity, auth_dir)
 }
 
 fn acquire_semantic_conversion_lock(
     params: &AuthorizeClientParams,
-) -> Result<Option<ryeos_app::state_lock::StateLock>> {
+) -> Result<Option<ryeos_node_runtime::state_lock::StateLock>> {
     // Principal-class and origin changes alter the meaning of an existing
     // fingerprint. Prove stopped-node ownership and retain it through the
     // read/verify/sign/publish transaction instead of treating the CLI flag
@@ -314,8 +423,8 @@ fn acquire_semantic_conversion_lock(
     params
         .allow_semantic_conversion
         .then(|| {
-            let lock_path = ryeos_app::state_lock::default_lock_path(&params.app_root);
-            ryeos_app::state_lock::StateLock::acquire(&lock_path).with_context(
+            let lock_path = ryeos_node_runtime::state_lock::default_lock_path(&params.app_root);
+            ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).with_context(
                 || "semantic authorized-key conversion requires stopped-node authority",
             )
         })
@@ -324,7 +433,8 @@ fn acquire_semantic_conversion_lock(
 
 fn reconcile_client_grant(
     params: AuthorizeClientParams,
-    node_identity: &ryeos_app::identity::NodeIdentity,
+    terms: &ryeos_node_runtime::identity::GrantTerms,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
     auth_dir: &std::path::Path,
 ) -> Result<AuthorizeClientResult> {
     if params.subject != AuthorizeClientSubject::LocalClient && params.allow_wildcard {
@@ -336,9 +446,9 @@ fn reconcile_client_grant(
     let now = lillux::time::iso8601_now();
 
     let wildcard = if params.allow_wildcard {
-        ryeos_app::identity::WildcardPolicy::AllowBootstrap
+        ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap
     } else {
-        ryeos_app::identity::WildcardPolicy::Reject
+        ryeos_node_runtime::identity::WildcardPolicy::Reject
     };
 
     // Verified load, scope reconciliation, signing, and conditional
@@ -346,24 +456,25 @@ fn reconcile_client_grant(
     // merge can therefore never silently lose scopes.
     let identity_subject = match &params.subject {
         AuthorizeClientSubject::LocalClient => {
-            ryeos_app::identity::AuthorizedKeySubject::LocalClient
+            ryeos_node_runtime::identity::AuthorizedKeySubject::LocalClient
         }
         AuthorizeClientSubject::RemoteNode { origin_site_id } => {
-            ryeos_app::identity::AuthorizedKeySubject::RemoteNode { origin_site_id }
+            ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteNode { origin_site_id }
         }
-        AuthorizeClientSubject::RemoteOperator { origin_site_id } => {
-            ryeos_app::identity::AuthorizedKeySubject::RemoteOperator { origin_site_id }
+        AuthorizeClientSubject::RemotePrincipal { origin_site_id } => {
+            ryeos_node_runtime::identity::AuthorizedKeySubject::RemotePrincipal { origin_site_id }
         }
     };
     let (path, dropped_scopes, transition) =
-        ryeos_app::identity::reconcile_authorized_key_toml_scopes_for_subject(
+        ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes_for_subject(
             auth_dir,
             &fp,
             &key_b64,
             &params.scopes,
             &params.label,
-            "cli-authorize-key",
+            &terms.authorized_by.principal,
             &now,
+            terms,
             node_identity,
             wildcard,
             params.merge,
@@ -401,7 +512,7 @@ pub fn run_mint_admission_token(
 /// state from a confined subprocess Tool.
 pub fn mint_admission_token_with_policy(
     params: MintAdmissionTokenParams,
-    policy: &ryeos_app::node_policy::sections::hosted::HostedNodePolicy,
+    policy: &ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy,
     policy_source: &std::path::Path,
 ) -> Result<MintAdmissionTokenResult> {
     if params.ttl_secs == 0 {
@@ -444,6 +555,25 @@ pub fn mint_admission_token_with_policy(
             .map_err(|e| anyhow::anyhow!("invalid scope: {e}"))?;
     }
 
+    match (params.class, params.origin_site_id.as_deref()) {
+        (AuthorizedKeyPrincipalClass::RemotePrincipal, None) => bail!(
+            "a remote_principal admission token requires --origin-site-id <site:name>, the site \
+             whose node must co-sign the principal's claim"
+        ),
+        (AuthorizedKeyPrincipalClass::RemotePrincipal, Some(site)) => {
+            ryeos_node_runtime::identity::validate_canonical_site_id(site)
+                .context("origin_site_id must use the canonical `site:<name>` form")?;
+        }
+        (class, Some(_)) => bail!(
+            "an origin site binds only a remote_principal token; drop --origin-site-id for class {}",
+            class.as_str()
+        ),
+        (_, None) => {}
+    }
+    if params.grant_lifetime_secs == Some(0) {
+        bail!("grant_lifetime_secs must be greater than zero");
+    }
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -472,13 +602,16 @@ pub fn mint_admission_token_with_policy(
     let path = token_dir.join(format!("{token_hash}.toml"));
 
     let doc = toml::to_string(&AdmissionTokenFile {
-        version: 1,
+        version: ADMISSION_TOKEN_FORMAT_VERSION,
         token_hash: &token_hash,
         label: label.as_deref(),
         scopes: &scopes,
         issued_at_unix: now,
         ttl_secs: params.ttl_secs,
         expires_at_unix,
+        class: params.class,
+        origin_site_id: params.origin_site_id.as_deref(),
+        grant_lifetime_secs: params.grant_lifetime_secs,
     })?;
     let token_dir = lillux::PinnedDirectory::open(&token_dir)?
         .ok_or_else(|| anyhow::anyhow!("admission token directory is unavailable"))?;
@@ -488,6 +621,7 @@ pub fn mint_admission_token_with_policy(
             None,
             doc.as_bytes(),
             0o600,
+            crate::TOOLS_TEMP_PURPOSE,
         )
         .with_context(|| format!("failed to install admission token file {}", path.display()))?;
     token_dir.ensure_path_binding()?;
@@ -501,6 +635,9 @@ pub fn mint_admission_token_with_policy(
         expires_at_unix,
         scopes,
         label,
+        class: params.class,
+        origin_site_id: params.origin_site_id,
+        grant_lifetime_secs: params.grant_lifetime_secs,
     })
 }
 
@@ -510,23 +647,14 @@ mod tests {
     use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
     struct HostedPolicyFixture {
-        _user: std::path::PathBuf,
         key: lillux::crypto::SigningKey,
     }
 
     impl HostedPolicyFixture {
         fn new(root: &std::path::Path) -> Self {
-            let user = root.join("user");
-            let trust_dir = user
-                .join(ryeos_engine::AI_DIR)
-                .join("config")
-                .join("keys")
-                .join("trusted");
-            std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
-            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            write_node_bootstrap(root, &trust_dir, &key);
-            Self { _user: user, key }
+            write_node_bootstrap(root, &key);
+            Self { key }
         }
     }
 
@@ -538,9 +666,11 @@ mod tests {
     ) {
         let path = app_root.join(".ai/node/policies/hosted.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let ttl = admission_enabled
-            .then(|| format!("admission_token_ttl_secs: {token_ttl_secs}\n"))
-            .unwrap_or_default();
+        let ttl = if admission_enabled {
+            format!("admission_token_ttl_secs: {token_ttl_secs}\n")
+        } else {
+            Default::default()
+        };
         let body = format!(
             r#"
 schema: 1
@@ -551,21 +681,12 @@ admission_enabled: {admission_enabled}
         std::fs::write(path, lillux::signature::sign_content(&body, key, "#", None)).unwrap();
     }
 
-    fn write_node_bootstrap(
-        app_root: &std::path::Path,
-        trust_dir: &std::path::Path,
-        fallback_key: &lillux::crypto::SigningKey,
-    ) {
-        let app_trust_dir = app_root.join(".ai/config/keys/trusted");
-        std::fs::create_dir_all(&app_trust_dir).unwrap();
-        ryeos_engine::trust::pin_key(&fallback_key.verifying_key(), "test", &app_trust_dir, None)
-            .unwrap();
-
+    fn write_node_bootstrap(app_root: &std::path::Path, fallback_key: &lillux::crypto::SigningKey) {
         let identity_dir = app_root.join(".ai/node/identity");
         std::fs::create_dir_all(&identity_dir).unwrap();
         let identity_path = identity_dir.join("private_key.pem");
         let node_identity = if identity_path.exists() {
-            ryeos_app::identity::NodeIdentity::load(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         } else {
             std::fs::write(
                 &identity_path,
@@ -575,11 +696,10 @@ admission_enabled: {admission_enabled}
                     .as_bytes(),
             )
             .unwrap();
-            ryeos_app::identity::NodeIdentity::load(&identity_path).unwrap()
+            ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         };
-        ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", trust_dir, None)
-            .unwrap();
-        ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", &app_trust_dir, None)
+        node_identity
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(app_root))
             .unwrap();
 
         crate::actions::hosted_policy::write_required_non_hosted_test_policies(
@@ -621,7 +741,8 @@ admission_enabled: {admission_enabled}
     #[test]
     fn admission_token_request_has_no_node_root_input() {
         let request: MintAdmissionTokenRequest = serde_json::from_value(serde_json::json!({
-            "scopes": "ryeos.attest.request.forwarded-operator"
+            "scopes": "ryeos.attest.request.forwarded-operator",
+            "class": "remote_node"
         }))
         .expect("signed service input must decode");
         let params = request.into_params(PathBuf::from("/node")).unwrap();
@@ -641,27 +762,30 @@ admission_enabled: {admission_enabled}
     }
 
     #[test]
-    fn authorize_client_can_emit_exact_scope_remote_operator_grant() {
+    fn authorize_client_can_emit_exact_scope_remote_principal_grant() {
         let tmp = tempfile::tempdir().unwrap();
         let _fixture = HostedPolicyFixture::new(tmp.path());
         let client = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
-        let result = run_authorize_client(AuthorizeClientParams {
-            app_root: tmp.path().to_path_buf(),
-            public_key: client,
-            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
-            label: "forwarded operator".to_owned(),
-            allow_wildcard: false,
-            merge: false,
-            subject: AuthorizeClientSubject::RemoteOperator {
-                origin_site_id: "site:source".to_owned(),
+        let result = run_authorize_client(
+            AuthorizeClientParams {
+                app_root: tmp.path().to_path_buf(),
+                public_key: client,
+                scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+                label: "forwarded operator".to_owned(),
+                allow_wildcard: false,
+                merge: false,
+                subject: AuthorizeClientSubject::RemotePrincipal {
+                    origin_site_id: "site:source".to_owned(),
+                },
+                allow_semantic_conversion: false,
             },
-            allow_semantic_conversion: false,
-        })
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        )
         .unwrap();
 
         assert_eq!(result.origin_site_id.as_deref(), Some("site:source"));
         let signed = std::fs::read_to_string(result.path).unwrap();
-        assert!(signed.contains("principal_class = \"remote_operator\""));
+        assert!(signed.contains("principal_class = \"remote_principal\""));
         assert!(signed.contains("origin_site_id = \"site:source\""));
     }
 
@@ -670,71 +794,84 @@ admission_enabled: {admission_enabled}
         let tmp = tempfile::tempdir().unwrap();
         let _fixture = HostedPolicyFixture::new(tmp.path());
         let client = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
-        let local = run_authorize_client(AuthorizeClientParams {
-            app_root: tmp.path().to_path_buf(),
-            public_key: client,
-            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
-            label: "operator".to_owned(),
-            allow_wildcard: false,
-            merge: false,
-            subject: AuthorizeClientSubject::LocalClient,
-            allow_semantic_conversion: false,
-        })
+        let local = run_authorize_client(
+            AuthorizeClientParams {
+                app_root: tmp.path().to_path_buf(),
+                public_key: client,
+                scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+                label: "operator".to_owned(),
+                allow_wildcard: false,
+                merge: false,
+                subject: AuthorizeClientSubject::LocalClient,
+                allow_semantic_conversion: false,
+            },
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        )
         .unwrap();
         assert_eq!(local.principal_class, "local_client");
         assert_eq!(local.previous_principal_class, None);
 
-        let denied = run_authorize_client(AuthorizeClientParams {
-            app_root: tmp.path().to_path_buf(),
-            public_key: client,
-            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
-            label: "operator".to_owned(),
-            allow_wildcard: false,
-            merge: false,
-            subject: AuthorizeClientSubject::RemoteOperator {
-                origin_site_id: "site:source".to_owned(),
+        let denied = run_authorize_client(
+            AuthorizeClientParams {
+                app_root: tmp.path().to_path_buf(),
+                public_key: client,
+                scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+                label: "operator".to_owned(),
+                allow_wildcard: false,
+                merge: false,
+                subject: AuthorizeClientSubject::RemotePrincipal {
+                    origin_site_id: "site:source".to_owned(),
+                },
+                allow_semantic_conversion: false,
             },
-            allow_semantic_conversion: false,
-        })
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        )
         .expect_err("class conversion must require explicit authorization");
         assert!(
             format!("{denied:#}").contains("semantic-conversion"),
             "got: {denied:#}"
         );
 
-        let converted = run_authorize_client(AuthorizeClientParams {
-            app_root: tmp.path().to_path_buf(),
-            public_key: client,
-            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
-            label: "operator".to_owned(),
-            allow_wildcard: false,
-            merge: false,
-            subject: AuthorizeClientSubject::RemoteOperator {
-                origin_site_id: "site:source".to_owned(),
+        let converted = run_authorize_client(
+            AuthorizeClientParams {
+                app_root: tmp.path().to_path_buf(),
+                public_key: client,
+                scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+                label: "operator".to_owned(),
+                allow_wildcard: false,
+                merge: false,
+                subject: AuthorizeClientSubject::RemotePrincipal {
+                    origin_site_id: "site:source".to_owned(),
+                },
+                allow_semantic_conversion: true,
             },
-            allow_semantic_conversion: true,
-        })
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        )
         .unwrap();
         assert_eq!(
             converted.previous_principal_class.as_deref(),
             Some("local_client")
         );
         assert_eq!(converted.previous_origin_site_id, None);
-        assert_eq!(converted.principal_class, "remote_operator");
+        assert_eq!(converted.principal_class, "remote_principal");
         assert_eq!(converted.origin_site_id.as_deref(), Some("site:source"));
 
-        let lock_path = ryeos_app::state_lock::default_lock_path(tmp.path());
-        let _live_daemon_lock = ryeos_app::state_lock::StateLock::acquire(&lock_path).unwrap();
-        let while_live = run_authorize_client(AuthorizeClientParams {
-            app_root: tmp.path().to_path_buf(),
-            public_key: client,
-            scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
-            label: "operator".to_owned(),
-            allow_wildcard: false,
-            merge: false,
-            subject: AuthorizeClientSubject::LocalClient,
-            allow_semantic_conversion: true,
-        })
+        let lock_path = ryeos_node_runtime::state_lock::default_lock_path(tmp.path());
+        let _live_daemon_lock =
+            ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let while_live = run_authorize_client(
+            AuthorizeClientParams {
+                app_root: tmp.path().to_path_buf(),
+                public_key: client,
+                scopes: vec!["ryeos.execute.service.remote/run".to_owned()],
+                label: "operator".to_owned(),
+                allow_wildcard: false,
+                merge: false,
+                subject: AuthorizeClientSubject::LocalClient,
+                allow_semantic_conversion: true,
+            },
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        )
         .expect_err("semantic conversion must prove stopped-node ownership");
         assert!(
             format!("{while_live:#}").contains("stopped-node authority"),
@@ -750,29 +887,35 @@ admission_enabled: {admission_enabled}
         let subject = AuthorizeClientSubject::RemoteNode {
             origin_site_id: "site:source".to_owned(),
         };
-        let first = run_authorize_client(AuthorizeClientParams {
-            app_root: tmp.path().to_path_buf(),
-            public_key: client,
-            scopes: vec!["ryeos.attest.request.forwarded-operator".to_owned()],
-            label: "remote node".to_owned(),
-            allow_wildcard: false,
-            merge: false,
-            subject: subject.clone(),
-            allow_semantic_conversion: false,
-        })
+        let first = run_authorize_client(
+            AuthorizeClientParams {
+                app_root: tmp.path().to_path_buf(),
+                public_key: client,
+                scopes: vec!["ryeos.attest.request.forwarded-operator".to_owned()],
+                label: "remote node".to_owned(),
+                allow_wildcard: false,
+                merge: false,
+                subject: subject.clone(),
+                allow_semantic_conversion: false,
+            },
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        )
         .unwrap();
         assert_eq!(first.principal_class, "remote_node");
 
-        let maintained = run_authorize_client(AuthorizeClientParams {
-            app_root: tmp.path().to_path_buf(),
-            public_key: client,
-            scopes: vec!["ryeos.execute.service.objects/has".to_owned()],
-            label: "remote node".to_owned(),
-            allow_wildcard: false,
-            merge: true,
-            subject,
-            allow_semantic_conversion: false,
-        })
+        let maintained = run_authorize_client(
+            AuthorizeClientParams {
+                app_root: tmp.path().to_path_buf(),
+                public_key: client,
+                scopes: vec!["ryeos.execute.service.objects/has".to_owned()],
+                label: "remote node".to_owned(),
+                allow_wildcard: false,
+                merge: true,
+                subject,
+                allow_semantic_conversion: false,
+            },
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        )
         .unwrap();
         assert_eq!(
             maintained.previous_principal_class.as_deref(),
@@ -785,18 +928,21 @@ admission_enabled: {admission_enabled}
         assert!(signed.contains("ryeos.attest.request.forwarded-operator"));
         assert!(signed.contains("ryeos.execute.service.objects/has"));
 
-        let wrong_origin = run_authorize_client(AuthorizeClientParams {
-            app_root: tmp.path().to_path_buf(),
-            public_key: client,
-            scopes: vec!["ryeos.execute.service.objects/get".to_owned()],
-            label: "remote node".to_owned(),
-            allow_wildcard: false,
-            merge: true,
-            subject: AuthorizeClientSubject::RemoteNode {
-                origin_site_id: "site:different".to_owned(),
+        let wrong_origin = run_authorize_client(
+            AuthorizeClientParams {
+                app_root: tmp.path().to_path_buf(),
+                public_key: client,
+                scopes: vec!["ryeos.execute.service.objects/get".to_owned()],
+                label: "remote node".to_owned(),
+                allow_wildcard: false,
+                merge: true,
+                subject: AuthorizeClientSubject::RemoteNode {
+                    origin_site_id: "site:different".to_owned(),
+                },
+                allow_semantic_conversion: false,
             },
-            allow_semantic_conversion: false,
-        })
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        )
         .expect_err("scope merge must not conceal a remote-node origin change");
         assert!(format!("{wrong_origin:#}").contains("cannot merge scopes"));
     }
@@ -812,6 +958,9 @@ admission_enabled: {admission_enabled}
             scopes: vec!["ryeos.execute.service.threads".into()],
             label: None,
             ttl_secs: 600,
+            class: AuthorizedKeyPrincipalClass::RemoteNode,
+            origin_site_id: None,
+            grant_lifetime_secs: None,
         }) {
             Ok(_) => panic!("minting should reject TTL above hosted policy"),
             Err(err) => err,
@@ -834,12 +983,170 @@ admission_enabled: {admission_enabled}
             scopes: vec!["ryeos.execute.service.threads".into()],
             label: None,
             ttl_secs: 60,
+            class: AuthorizedKeyPrincipalClass::RemoteNode,
+            origin_site_id: None,
+            grant_lifetime_secs: None,
         })
         .expect_err("explicitly disabled hosted admission must block token minting");
 
         assert!(
             format!("{err:#}").contains("hosted-node admission is disabled"),
             "got: {err:#}"
+        );
+    }
+
+    fn offline_scope_request(scopes: &str) -> AuthorizeClientRequest {
+        let key = lillux::crypto::SigningKey::generate(&mut OsRng);
+        AuthorizeClientRequest {
+            public_key: base64::engine::general_purpose::STANDARD
+                .encode(key.verifying_key().as_bytes()),
+            scopes: scopes.to_owned(),
+            label: "remote operator".to_owned(),
+            merge_scopes: false,
+            origin_site_id: Some("site:origin".to_owned()),
+            remote_node_origin_site_id: None,
+            allow_semantic_conversion: false,
+            lifetime_secs: None,
+        }
+    }
+
+    #[test]
+    fn authorize_client_refuses_offline_operation_wildcards() {
+        for scopes in [
+            "ryeos.offline.*",
+            "ryeos.offline.node.*",
+            "ryeos.execute.service.remote/run,ryeos.offline.node.reset.*",
+        ] {
+            let error = offline_scope_request(scopes)
+                .into_params(std::path::PathBuf::from("/nonexistent"))
+                .err()
+                .unwrap_or_else(|| panic!("{scopes} was accepted"));
+            assert!(
+                format!("{error:#}").contains("wildcard"),
+                "{scopes}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_local_operator_may_grant_an_exact_offline_operation_scope() {
+        let scopes =
+            "ryeos.offline.node.external-execution.compose,ryeos.execute.service.remote/run";
+        let params = offline_scope_request(scopes)
+            .into_params_as_local_operator(std::path::PathBuf::from("/nonexistent"))
+            .unwrap();
+        assert_eq!(params.scopes.len(), 2);
+        let error = offline_scope_request(scopes)
+            .into_params(std::path::PathBuf::from("/nonexistent"))
+            .err()
+            .expect("an offline scope was granted on behalf of someone else");
+        assert!(format!("{error:#}").contains("local operator"), "{error:#}");
+        // Wildcards under the prefix are refused even for the local operator.
+        assert!(
+            offline_scope_request("ryeos.offline.*")
+                .into_params_as_local_operator(std::path::PathBuf::from("/nonexistent"))
+                .is_err()
+        );
+    }
+
+    fn mint_for(
+        tmp: &std::path::Path,
+        class: AuthorizedKeyPrincipalClass,
+        origin_site_id: Option<&str>,
+    ) -> Result<MintAdmissionTokenResult> {
+        let fixture = HostedPolicyFixture::new(tmp);
+        write_hosted_policy(tmp, true, 600, &fixture.key);
+        run_mint_admission_token(MintAdmissionTokenParams {
+            app_root: tmp.to_path_buf(),
+            scopes: vec!["ryeos.execute.service.threads".into()],
+            label: None,
+            ttl_secs: 60,
+            class,
+            origin_site_id: origin_site_id.map(str::to_owned),
+            grant_lifetime_secs: None,
+        })
+    }
+
+    #[test]
+    fn minted_token_records_its_class_and_origin_site() {
+        let tmp = tempfile::tempdir().unwrap();
+        let minted = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            Some("site:home"),
+        )
+        .unwrap();
+        let stored = std::fs::read_to_string(&minted.path).unwrap();
+        assert!(stored.contains("version = 2"), "{stored}");
+        assert!(stored.contains("class = \"remote_principal\""), "{stored}");
+        assert!(
+            stored.contains("origin_site_id = \"site:home\""),
+            "{stored}"
+        );
+    }
+
+    #[test]
+    fn principal_token_requires_an_origin_site_and_others_refuse_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            None,
+        )
+        .expect_err("a principal token must name its origin site");
+        assert!(
+            format!("{missing:#}").contains("--origin-site-id"),
+            "{missing:#}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let unexpected = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemoteNode,
+            Some("site:home"),
+        )
+        .expect_err("only a principal token binds an origin site");
+        assert!(
+            format!("{unexpected:#}").contains("drop --origin-site-id"),
+            "{unexpected:#}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let malformed = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            Some("home"),
+        )
+        .expect_err("the origin site must be canonical");
+        assert!(
+            format!("{malformed:#}").contains("site:<name>"),
+            "{malformed:#}"
+        );
+    }
+
+    #[test]
+    fn token_request_requires_a_class() {
+        let error = serde_json::from_value::<MintAdmissionTokenRequest>(serde_json::json!({
+            "scopes": "ryeos.execute.service.threads"
+        }))
+        .expect_err("a token without a class must not decode");
+        assert!(error.to_string().contains("class"), "{error}");
+    }
+
+    #[test]
+    fn an_admission_token_cannot_carry_an_offline_operation_scope() {
+        let request = MintAdmissionTokenRequest {
+            scopes: "ryeos.offline.node.allow-restart".to_owned(),
+            label: None,
+            ttl_secs: 60,
+            class: AuthorizedKeyPrincipalClass::RemoteNode,
+            origin_site_id: None,
+            grant_lifetime_secs: None,
+        };
+        assert!(
+            request
+                .into_params(std::path::PathBuf::from("/nonexistent"))
+                .is_err()
         );
     }
 }

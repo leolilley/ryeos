@@ -1,0 +1,16 @@
+# ryeos:signed:2026-10-15T23:06:49Z:d22494d9849ed8ad9c4b55fcd9bb8ecc660ca8da0c26d38b82336dfd77738ac7:0pijFQ3q5YHa45gInOGY0zHs7SbZQRuVwlb1Pod4D9QT+qdPEJ7aWhXH6sRN7sZsN9rYMDjFej2pXHguKQS7CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: bundle-release
+version: "1.0.0"
+description: Which signer fingerprints may sign a release candidate claiming each authority class.
+candidate_authority:
+  schema: ryeos.release_candidate_authority.v1
+  # Class names are plain data. A candidate claiming a class absent here, or
+  # signed by a fingerprint not listed under that class, is refused. The
+  # official class has no signer until the official publisher key is enrolled
+  # through the signing request step.
+  classes:
+    dev:
+      signers:
+        - 741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+    official:
+      signers: []

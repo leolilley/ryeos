@@ -1,6 +1,6 @@
 //! Web UI static asset provider.
 //!
-//! Embeds files from `crates/clients/web/pkg/` at compile time via
+//! Embeds files from `crates/clients/rune/pkg/` at compile time via
 //! `include_bytes!`. Implements the `StaticAssetProvider` trait defined
 //! in `ryeos-api` so that generic static mode can resolve web assets
 //! without the API crate knowing about web-specific paths.
@@ -32,6 +32,8 @@ pub(super) struct WebAssetEntry {
     content_type: &'static str,
     cache_control: &'static str,
     sha256: &'static str,
+    /// `Some("gzip")` when `bytes` are stored gzip-encoded and served so.
+    encoding: Option<&'static str>,
     imports: &'static [&'static str],
     bytes: &'static [u8],
 }
@@ -63,8 +65,9 @@ impl StaticAssetProvider for WebAssetProvider {
             return dev_asset(&root, entry);
         }
         Some(StaticAsset {
-            bytes: entry.bytes.to_vec(),
+            bytes: std::borrow::Cow::Borrowed(entry.bytes),
             content_type: entry.content_type,
+            content_encoding: entry.encoding,
             etag: format!("\"{}\"", entry.sha256),
             cache_control: entry.cache_control,
         })
@@ -73,7 +76,7 @@ impl StaticAssetProvider for WebAssetProvider {
 
 /// Optional local development override for browser UI assets.
 ///
-/// Set `RYEOS_UI_ASSET_DIR=/path/to/crates/clients/web/pkg` before starting
+/// Set `RYEOS_UI_ASSET_DIR=/path/to/crates/clients/rune/pkg` before starting
 /// `ryeosd`, then `/ui` and `/ui/assets/*` are served from that directory
 /// instead of the compile-time embedded bytes. Only filenames admitted by the
 /// compiled manifest can be served. Selecting an override is generation-wide:
@@ -85,8 +88,9 @@ fn dev_asset(root: &Path, entry: &WebAssetEntry) -> Option<StaticAsset> {
     let bytes = std::fs::read(&path).ok()?;
     let etag = compute_etag(&bytes);
     Some(StaticAsset {
-        bytes,
+        bytes: std::borrow::Cow::Owned(bytes),
         content_type: entry.content_type,
+        content_encoding: entry.encoding,
         etag,
         cache_control: "no-store",
     })
@@ -142,6 +146,8 @@ mod tests {
         mime: String,
         cache: String,
         sha256: String,
+        #[serde(default)]
+        encoding: Option<String>,
         imports: Vec<String>,
     }
 
@@ -173,41 +179,50 @@ mod tests {
     #[test]
     fn get_compiled_browser_assets() {
         let provider = WebAssetProvider;
-        let css = provider
-            .get("ryeos_ui.css")
-            .expect("ryeos_ui.css must be embedded");
-        assert!(!css.bytes.is_empty());
-        assert!(css.content_type.contains("css"));
+        let boot = provider
+            .get("ui/assets/ryeos_boot.js")
+            .expect("ryeos_boot.js must be embedded");
+        assert!(!boot.bytes.is_empty());
+        assert!(boot.content_type.contains("javascript"));
 
-        let ryeos_ui = provider
-            .get("ui/assets/ryeos_ui.js")
-            .expect("ryeos_ui.js must be embedded");
-        assert!(!ryeos_ui.bytes.is_empty());
-        assert!(ryeos_ui.content_type.contains("javascript"));
+        let glue = provider
+            .get("ui/assets/ryeos_rune.js")
+            .expect("ryeos_rune.js must be embedded");
+        assert!(!glue.bytes.is_empty());
+        assert!(glue.content_type.contains("javascript"));
 
-        let three = provider
-            .get("ui/assets/ryeos_three.js")
-            .expect("ryeos_three.js must be embedded");
-        assert!(!three.bytes.is_empty());
-        assert!(three.content_type.contains("javascript"));
-
+        // The renderer and the coverage fonts are stored and served gzip-encoded.
         let wasm = provider
-            .get("ui/assets/ryeos_web_bg.wasm")
-            .expect("ryeos_web_bg.wasm must be embedded");
-        assert!(!wasm.bytes.is_empty());
+            .get("ui/assets/ryeos_rune_bg.wasm")
+            .expect("ryeos_rune_bg.wasm must be embedded");
         assert!(wasm.content_type.contains("wasm"));
+        assert_eq!(wasm.content_encoding, Some("gzip"));
+        assert!(wasm.bytes.starts_with(&[0x1f, 0x8b]));
+        // The coverage fonts the boot module hands over, and the full Inter
+        // faces the renderer fetches after its first frame.
+        for font in [
+            "ui/assets/ryeos-cjk.ttf",
+            "ui/assets/ryeos-emoji.ttf",
+            "ui/assets/Inter-Regular.ttf",
+            "ui/assets/Inter-Medium.ttf",
+            "ui/assets/Inter-SemiBold.ttf",
+        ] {
+            let font = provider.get(font).expect("font must be embedded");
+            assert_eq!(font.content_type, "font/ttf");
+            assert_eq!(font.content_encoding, Some("gzip"));
+        }
     }
 
     #[test]
     fn packaged_asset_inventory_equals_the_closed_registry() {
-        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/web/pkg");
+        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/rune/pkg");
         let mut packaged = std::fs::read_dir(package)
             .expect("read authored web package")
             .map(|entry| entry.expect("read authored web package entry").path())
             .filter(|path| {
                 matches!(
                     path.extension().and_then(|value| value.to_str()),
-                    Some("html" | "js" | "css" | "wasm" | "png" | "svg" | "ico")
+                    Some("html" | "js" | "css" | "wasm" | "png" | "svg" | "ico" | "ttf" | "gz")
                 )
             })
             .map(|path| {
@@ -238,6 +253,7 @@ mod tests {
             assert_eq!(source.mime, generated.content_type);
             assert_eq!(source.cache, generated.cache_control);
             assert_eq!(source.sha256, generated.sha256);
+            assert_eq!(source.encoding.as_deref(), generated.encoding);
             assert_eq!(
                 source
                     .imports
@@ -285,25 +301,25 @@ mod tests {
         std::fs::write(directory.path().join(index.filename), b"development index")
             .expect("write staged index");
         let staged = dev_asset(directory.path(), index).expect("read admitted staged asset");
-        assert_eq!(staged.bytes, b"development index");
+        assert_eq!(&*staged.bytes, b"development index");
         assert_eq!(staged.cache_control, "no-store");
     }
 
     #[test]
     fn generated_wasm_glue_exports_the_compiled_runtime_surface() {
-        // wasm.rs and the checked-in wasm-bindgen outputs are one compiled
-        // browser contract. If Rust gains an export without regenerating the
-        // JS/WASM pair, the compiled runtime fails before entering the app.
-        // The runtime performs the complete export-inventory check; keep this
-        // provider test focused on representative generated entry points.
-        let generated = std::str::from_utf8(embedded("ryeos_web.js"))
+        // The boot module initialises the wasm-bindgen glue, hands it the
+        // coverage fonts and calls its start export. If the glue and the boot
+        // module drift apart, the page fails before drawing anything.
+        let glue = std::str::from_utf8(embedded("ryeos_rune.js"))
             .expect("generated wasm glue must be UTF-8");
-        for imported in ["ryeos_start", "ryeos_dispatch", "ryeos_key"] {
-            assert!(
-                generated.contains(&format!("export function {imported}(")),
-                "generated wasm glue does not export `{imported}`"
-            );
-        }
+        assert!(
+            glue.contains("export function start("),
+            "generated wasm glue does not export `start`"
+        );
+        assert!(glue.contains("export function add_font("));
+        assert!(glue.contains("__wbg_init as default"));
+        let boot = std::str::from_utf8(embedded("ryeos_boot.js")).expect("boot module is UTF-8");
+        assert!(boot.contains(r#"import init, { add_font, start } from "./ryeos_rune.js";"#));
     }
 
     #[test]

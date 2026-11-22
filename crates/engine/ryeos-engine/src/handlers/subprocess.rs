@@ -78,6 +78,45 @@ pub(crate) fn run_handler_subprocess_bounded(
     launch: &HandlerLaunchRuntime,
     maximum_stdout_bytes: Option<usize>,
 ) -> Result<HandlerResponse, EngineError> {
+    let started = std::time::Instant::now();
+    let outcome = launch_handler(handler, request, timeout, launch, maximum_stdout_bytes);
+    let elapsed = started.elapsed();
+    crate::work_tally::HANDLER_LAUNCHES.record(elapsed);
+    tracing::debug!(
+        target: "ryeos_engine::timing",
+        work = "handler_launch",
+        handler = %handler.canonical_ref(),
+        operation = handler_operation(request),
+        succeeded = outcome.is_ok(),
+        elapsed_us = elapsed.as_micros() as u64,
+        "engine work timing"
+    );
+    outcome
+}
+
+/// The operation a handler request asks for, as a fixed word for timing lines.
+fn handler_operation(request: &HandlerRequest) -> &'static str {
+    match request {
+        HandlerRequest::Parse(_) => "parse",
+        HandlerRequest::EditSource(_) => "edit_source",
+        HandlerRequest::ValidateParserConfig(_) => "validate_parser_config",
+        HandlerRequest::Compose(_) => "compose",
+        HandlerRequest::ValidateComposerConfig(_) => "validate_composer_config",
+        HandlerRequest::LaunchPrepare(_) => "launch_prepare",
+        HandlerRequest::ValidateLaunchPreparerConfig(_) => "validate_launch_preparer_config",
+        HandlerRequest::EffectiveValidate(_) => "effective_validate",
+        HandlerRequest::ExecutionEvidenceDescribe(_) => "execution_evidence_describe",
+        HandlerRequest::ExecutionEvidenceProject(_) => "execution_evidence_project",
+    }
+}
+
+fn launch_handler(
+    handler: &VerifiedHandler,
+    request: &HandlerRequest,
+    timeout: Duration,
+    launch: &HandlerLaunchRuntime,
+    maximum_stdout_bytes: Option<usize>,
+) -> Result<HandlerResponse, EngineError> {
     let (canonical_ref, binary_path, binary_hash, bundle_root) = match handler {
         VerifiedHandler::Resolved {
             canonical_ref,
@@ -134,7 +173,7 @@ pub(crate) fn run_handler_subprocess_bounded(
         source_path: binary_path,
         content_hash: binary_hash,
     }];
-    let req = launch.isolation.apply(
+    let req = launch.isolation.apply_handler_launch(
         req,
         IsolationLaunchContext {
             immutable_project: None,
@@ -147,19 +186,22 @@ pub(crate) fn run_handler_subprocess_bounded(
                 crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: &launch.bundle_roots,
-            node_trusted_keys_dir: None,
             verified_code: &verified_code,
             verified_command: Some(&verified_code[0]),
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: &canonical_ref,
             thread_id: "handler",
+            verbatim_env_names: &[],
         },
     )?;
 
@@ -169,6 +211,12 @@ pub(crate) fn run_handler_subprocess_bounded(
             return Err(EngineError::HandlerSpawnFailed {
                 handler: canonical_ref.clone(),
                 detail: format!("isolation adapter refused launch: {refusal}"),
+            });
+        }
+        if let Some(busy) = output.process_creation_busy {
+            return Err(EngineError::ProcessCreationBusy {
+                subject: canonical_ref.clone(),
+                detail: busy.to_string(),
             });
         }
         if output.timed_out {
@@ -192,6 +240,28 @@ pub(crate) fn run_handler_subprocess_bounded(
             detail: format!(
                 "handler response is {} bytes (max {maximum})",
                 output.stdout.len()
+            ),
+        });
+    }
+
+    if output.stdout.trim().is_empty() {
+        let stderr = output.stderr.trim();
+        let tail_start = stderr
+            .char_indices()
+            .rev()
+            .nth(2047)
+            .map_or(0, |(index, _)| index);
+        return Err(EngineError::HandlerProtocolViolation {
+            handler: canonical_ref,
+            detail: format!(
+                "handler exited {} after {:.0} ms without a response; stderr: {}",
+                output.exit_code,
+                output.duration_ms,
+                if stderr.is_empty() {
+                    "(empty)"
+                } else {
+                    &stderr[tail_start..]
+                }
             ),
         });
     }

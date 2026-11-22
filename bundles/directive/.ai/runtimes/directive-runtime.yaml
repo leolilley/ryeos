@@ -1,0 +1,179 @@
+# ryeos:signed:2026-11-18T05:09:15Z:70d403ceae003764d2125d594fb78ebd92950d13260ad48386fcd2d244af0b11:nhReEjRDprNNiNQ0mIfFvoVTOYXtQCdyTnI8ww4W9fZoQjPjcSFDjLVskO1OFmxA7HHI8/xzz/P2TfXx+EX+DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: runtime
+serves: directive
+default: true
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-directive-runtime
+abi_version: "v3"
+native_resume: true
+replay_continuation: true
+required_caps:
+  - runtime.execute
+launch_contract:
+  primary_allowed_kinds:
+    - directive
+  primary_allowed_spaces:
+    - bundle
+    - project
+  primary_allowed_trust:
+    - trusted_bundle
+    - trusted_project
+  ref_bindings:
+    model:
+      required: true
+      project_result_requirement: none
+      # An explicit caller binding wins; otherwise the directive models itself.
+      source:
+        kind: caller_or_primary_ref
+      # An operator continuation may bind a different model directive; every
+      # other continuation inherits the binding sealed in its predecessor.
+      continuation_rebind: operator
+      allowed_kinds:
+        - directive
+      allowed_spaces:
+        - bundle
+        - project
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
+  preparation:
+    kind: handler
+    handler: handler:ryeos/standard/directive-launch
+    config: {}
+    execution_cache: content_addressed
+  config_inputs:
+    model_routing:
+      kind: item
+      id: ryeos-runtime/model_routing
+      required: false
+      merge: deep_merge
+      allowed_spaces:
+        - bundle
+        - project
+        - node
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
+        - trusted_node
+    model_providers:
+      kind: catalog
+      prefix: ryeos-runtime/model-providers
+      required: true
+      entry_merge: deep_merge
+      allowed_spaces:
+        - bundle
+        - node
+      allowed_trust:
+        - trusted_bundle
+        - trusted_node
+    execution:
+      kind: item
+      id: ryeos-runtime/execution
+      required: false
+      merge: deep_merge
+      allowed_spaces:
+        - bundle
+        - project
+        - node
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
+        - trusted_node
+  execution_dependencies:
+    max_dependencies: 1
+    allowed_kinds:
+      - worker
+    allowed_spaces:
+      - bundle
+    allowed_trust:
+      - trusted_bundle
+  content_dependencies:
+    max_dependencies: 0
+    allowed_bindings: []
+    max_targets_per_dependency: 0
+    max_executable_search_entries: 0
+    external_content: null
+  evidence_attachments:
+    max_attachments: 0
+    max_total_bytes: 0
+    target: null
+    destination_prefix: null
+    allowed_access: []
+  environment_contributions:
+    max_contributions: 0
+    max_targets_per_contribution: 0
+    max_variables_per_contribution: 0
+    max_delivered_secrets: 0
+  financial_authority:
+    kind: accounting
+  external_effect_authority:
+    kind: external
+  secret_policy:
+    max_requirements: 4
+    allowed_names:
+      - ANTHROPIC_API_KEY
+      - DEEPSEEK_API_KEY
+      - GEMINI_API_KEY
+      - OPENAI_API_KEY
+      - OPENROUTER_API_KEY
+      - ZAI_API_KEY
+      - ZEN_API_KEY
+  required_runtime_data:
+    - provider_snapshot
+  runtime_facts:
+    # The record of an operator rebind carries the three facts marked
+    # rebind_record, before and after; no other fact is written to it.
+    provider_id: {required: true, kind: string, max_bytes: 128, rebind_record: true}
+    model_name: {required: true, kind: string, max_bytes: 256, rebind_record: true}
+    # An operator rebind is refused below the token budget of the
+    # conversation a successor starts from.
+    context_window: {required: true, kind: integer, max_bytes: 32, rebind_minimum: 16000, rebind_record: true}
+    sampling: {required: true, kind: json, max_bytes: 4096}
+    reasoning: {required: true, kind: json, max_bytes: 4096}
+    request_url: {required: false, kind: string, max_bytes: 2048}
+    matched_profile: {required: false, kind: string, max_bytes: 128}
+    # Limits cover canonical JSON, including the two quotes around each 64-byte digest.
+    config_hash: {required: true, kind: string, max_bytes: 66}
+    config_value_digest: {required: true, kind: string, max_bytes: 66}
+    config_sources: {required: true, kind: json, max_bytes: 4096}
+    authority_digest: {required: true, kind: string, max_bytes: 66}
+    spend_bound: {required: true, kind: string, max_bytes: 32}
+limits:
+  config_identity: directive-runtime/limits
+  contract: directive-runtime/v1
+  dimensions:
+    tool_calls: 4294967295
+    provider_request_body_bytes: 1073741824
+    wrap_up_seconds: 4294967295
+observability:
+  child_records:
+    latency_profiling_enabled:
+      schema_version: 1
+      clock_domain: directive_process_monotonic
+      max_records: 1
+      max_record_bytes: 4096
+    directive_context_composition:
+      schema_version: 1
+      clock_domain: directive_process_monotonic
+      max_records: 1
+      max_record_bytes: 65536
+    directive_prompt_source_composition:
+      schema_version: 1
+      clock_domain: directive_process_monotonic
+      max_records: 1
+      max_record_bytes: 65536
+    directive_provider_call_timing:
+      schema_version: 5
+      clock_domain: directive_process_monotonic
+      max_records: 127
+      max_record_bytes: 65536
+    directive_runtime_stage_timing:
+      schema_version: 6
+      clock_domain: directive_process_monotonic
+      max_records: 1
+      max_record_bytes: 65536
+    directive_provider_request_profile:
+      schema_version: 1
+      clock_domain: directive_process_monotonic
+      max_records: 127
+      max_record_bytes: 65536
+description: "Interprets directive workflows by orchestrating LLM threads"

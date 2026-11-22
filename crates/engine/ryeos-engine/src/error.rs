@@ -23,6 +23,12 @@ pub enum EngineError {
     InvalidSuffix { input: String, reason: String },
 
     // ── Resolution ───────────────────────────────────────────────────
+    #[error("registered bundle `{name}` cannot be selected: {refusal}")]
+    RegisteredBundleSelectionRefused {
+        name: String,
+        refusal: crate::item_resolution::RegisteredBundleSelectionRefusal,
+    },
+
     #[error("item not found: `{canonical_ref}` (searched: {searched_spaces:?})")]
     ItemNotFound {
         canonical_ref: String,
@@ -44,6 +50,30 @@ pub enum EngineError {
         canonical_ref: String,
         space: String,
         candidates: Vec<PathBuf>,
+    },
+
+    #[error(
+        "project item `{canonical_ref}` at {project_path} is inside namespace `{namespace}` owned by (or named for) installed bundle `{bundle}`; a project cannot shadow an installed bundle's namespace or name"
+    )]
+    ReservedNamespaceShadow {
+        canonical_ref: String,
+        namespace: String,
+        bundle: String,
+        project_path: PathBuf,
+    },
+
+    /// A project file and an installed bundle file answer for one ref of a
+    /// kind whose signed schema declares `project_shadowing: refuse`. Neither
+    /// is served: the ref is unavailable until the project file moves.
+    #[error(
+        "project item `{canonical_ref}` at {project_path} shadows the item of the same ref supplied by installed bundle `{bundle}` at {bundle_path}; the `{kind}` kind does not let a project replace a bundle item, so `{canonical_ref}` is unavailable until the project file is renamed or removed"
+    )]
+    ProjectShadowsBundleItem {
+        canonical_ref: String,
+        kind: String,
+        bundle: String,
+        project_path: PathBuf,
+        bundle_path: PathBuf,
     },
 
     #[error("pinned version not found for `{canonical_ref}`: {reason}")]
@@ -99,6 +129,11 @@ pub enum EngineError {
         canonical_ref: String,
         fingerprint: String,
     },
+
+    /// A typed signer-registry refusal (unsigned or tampered record, revoked
+    /// signer, signer outside its scope). The code and cure ride in the text.
+    #[error("{0}")]
+    Trust(#[from] crate::trust::TrustError),
 
     #[error("content hash mismatch for `{canonical_ref}`: expected {expected}, got {actual}")]
     ContentHashMismatch {
@@ -363,6 +398,15 @@ pub enum EngineError {
     #[error("isolation policy refused execution: {reason}")]
     IsolationPolicyRefused { reason: String },
 
+    #[error(
+        "isolation policy field `{field}` is {value_ms} ms, above the maximum of {maximum_ms} ms"
+    )]
+    IsolationPolicyValueAboveMaximum {
+        field: &'static str,
+        value_ms: u64,
+        maximum_ms: u64,
+    },
+
     // ── Lifecycle ────────────────────────────────────────────────────
     #[error("invalid state transition from `{from}` on event `{event}`")]
     InvalidStateTransition { from: String, event: String },
@@ -448,6 +492,13 @@ pub enum EngineError {
     #[error("handler `{handler}` spawn failed: {detail}")]
     HandlerSpawnFailed { handler: String, detail: String },
 
+    /// The handler process could not be created because fork-sensitive
+    /// descriptor authority stayed retained past the setup deadline. No
+    /// process ran; the same request may succeed once the holders release.
+    /// `detail` names the holder sites for the daemon log only.
+    #[error("process creation is busy for `{subject}`: {detail}")]
+    ProcessCreationBusy { subject: String, detail: String },
+
     #[error("handler `{handler}` exited with code {exit_code}; stderr: {stderr}")]
     HandlerExitNonZero {
         handler: String,
@@ -498,6 +549,19 @@ pub enum EngineError {
         #[source]
         source: Box<crate::protocols::ProtocolError>,
     },
+}
+
+impl EngineError {
+    /// Whether this failure, or the engine failure it shares or wraps, is the
+    /// transient process-creation refusal.
+    pub fn is_process_creation_busy(&self) -> bool {
+        match self {
+            Self::ProcessCreationBusy { .. } => true,
+            Self::Shared(error) => error.is_process_creation_busy(),
+            Self::InventoryItemFailed { source, .. } => source.is_process_creation_busy(),
+            _ => false,
+        }
+    }
 }
 
 impl From<crate::handlers::HandlerError> for EngineError {

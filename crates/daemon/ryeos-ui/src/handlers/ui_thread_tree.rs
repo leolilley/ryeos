@@ -66,10 +66,13 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         &caller,
         &[thread_id],
     )?;
-    let tree = state.threads.execution_tree(
-        thread_id,
-        request.max_depth.clamp(1, MAX_DEPTH),
-        request.max_nodes.clamp(1, MAX_NODES),
+    let max_depth = request.max_depth.clamp(1, MAX_DEPTH);
+    let max_nodes = request.max_nodes.clamp(1, MAX_NODES);
+    let mut tree = state
+        .threads
+        .execution_tree(thread_id, max_depth, max_nodes)?;
+    crate::thread_authorization::authorize_execution_tree_subjects(
+        &ctx, &state, &caller, &mut tree, thread_id, max_depth, max_nodes,
     )?;
     let mut response = serde_json::to_value(tree)?;
     let truncated = response
@@ -86,8 +89,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .insert(
             "coverage".into(),
             serde_json::json!([{
-                "state": if truncated { "truncated" } else { "complete" },
-                "reason": if truncated { "bounded_tree_limit" } else { "full_bounded_closure" },
+                "state": if truncated { "truncated" } else { "observed" },
+                "reason": if truncated { "bounded_tree_limit" } else { "projection_located_signed_edges" },
                 "root_thread_id": thread_id,
                 "retained": retained,
                 "truncated": truncated,

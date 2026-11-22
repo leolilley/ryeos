@@ -1,0 +1,230 @@
+<!-- ryeos:signed:2026-11-15T02:27:40Z:908b4e07c67d6e9ef311e43d6a9fce379d337978ab522e41afb715721cd7fd2d:dKsgmY2roEB9Q7PwsxRXqqHrYx+8oHhzerMiRmWJqSDqixYy9h4TxHnuBWdk5kRwZUFB3D7Tpb6PV3GXMWnZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+---
+category: ryeos/core/node
+tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
+version: "1.4.3"
+description: >
+  Operator initialization contract implemented by ryeos-node: keys,
+  trust, bundle discovery, bundle planning, install, and post-init checks.
+---
+
+# Operator Init (`ryeos init`)
+
+`ryeos init` is implemented by `ryeos-node` (`init::run_init`) and is
+the authoritative path for operator-owned artifacts and installed bundle
+registrations. The daemon must not substitute for it.
+
+## Inputs
+
+```bash
+ryeos init [--source <dir>] [--app-root <dir>] [--trust-file <file>...] [--node-profile <name> --host-class <class>]
+```
+
+Defaults are `/usr/share/ryeos` for source and the XDG data dir
+(`~/.local/share/ryeos`) for the app root, overridable via `--app-root`
+or `RYEOS_APP_ROOT`. Every fresh initialization requires
+`--node-profile <name>` to select a complete publisher-signed init profile from
+`<source>/.ai/node/init/profiles/<name>.yaml`. Packaged installs use
+`--node-profile standard --host-class local`; each lean distribution uses its exact
+same-named profile. `--host-class <class>` names which of the profile's
+declared host classes the node runs under (`local` on a host the operator
+runs, with enforced isolation; `local_unconfined` on that host with no
+sandbox, an explicit opt-out init never selects for you; `hosted` in a hosting
+provider's container); the node holds that class's
+signed capability floor and isolation lane, and keeps the class for life.
+Neither selection is inferred from the bundles present in the source or from
+what the host proves, and absence fails rather than manufacturing an implicit
+default.
+
+## Init sequence
+
+1. Validate the bundle source directory exists.
+2. Create the app-root layout (`<app_root>/.ai/{node,state,bundles,config}`).
+3. Load-or-create the operator Ed25519 signing key.
+4. Load-or-create the node Ed25519 signing key.
+5. Initialize the signer registry under `<app_root>/.ai/node/trust/` and
+   write the node-signed signer record for the operator key (the node key is
+   the implicit root and needs no record).
+6. Pin the official publisher key from hardcoded public key bytes.
+7. Pin any additional `--trust-file` publisher docs (role publisher, space
+   bundle).
+8. Discover bundles in the source directory.
+9. Build the bundle plan and verify manifest dependency policy.
+10. If a node init profile was selected, verify its publisher signature, use
+    its sorted `exact_bundles` as the prospective complete installed inventory,
+    require every selected bundle to exist in the discovered source, validate
+    every typed policy section, and refuse a conflict with an existing
+    nonempty policy generation unless the explicit schema-cut flags were
+    supplied.
+11. Compose and admit the exact prospective source generation. An existing
+    enforced policy must resolve and inspect its selected backend here even
+    when ordinary test preflight is skipped.
+12. Preflight-verify source bundles unless explicitly skipped by tests.
+13. Install/replace selected bundles and remove registrations outside the
+    prospective exact inventory under the same locked init. Installed bundle
+    roots live beneath `<system>/.ai/bundles/<name>/`; signed registrations
+    live beneath `<system>/.ai/node/bundles/`.
+    Before selected-backend activation, resolve and inspect its exact completed
+    staging tree.
+14. Create/load the vault X25519 keypair.
+15. When no generation exists, require the selected node init profile and
+    publish all of its policies beneath
+    `<system>/.ai/node/policies/`, signed by the node key. With an existing
+    generation, an omitted selection preserves it and an explicit selection
+    must be identical unless explicit replacement is selected. Init authors no
+    implicit isolation, ingest-ignore, or other policy fallback. The
+    `ingest_ignore` member carries its complete canonical pattern set; RyeOS
+    adds only its separately documented structural snapshot floor. Materialize
+    only the read-only sync view derived from the admitted generation.
+16. Write the signed init-completion fence only after the intended bundle
+    registration inventory and policy generation have completed. The prior
+    fence is durably absent throughout every bundle/policy mutation. Daemon
+    startup re-verifies it after the state lock and any interrupted per-bundle
+    reconciliation, refusing partial crash results.
+17. Reload trust and verify official publisher, user key, and node key
+    are trusted.
+
+The init report includes the app root, operator/node key fingerprints,
+official publisher fingerprint, vault public-key fingerprint, and
+installed bundle names. It also names the explicitly selected node init profile,
+when present.
+
+## Official publisher trust
+
+`ryeos init` pins the official publisher key without trusting any bundle
+file. The compiled `OFFICIAL_PUBLISHER_PUBKEY` bytes must hash to the
+compiled `OFFICIAL_PUBLISHER_FP`:
+
+```text
+c9d7301fba468b669d91a6000e9b6a4158c0e615dea4fe1f99906b8c9214bc28
+```
+
+Rotation requires a coordinated `ryeos` binary release. Development
+bundles are signed with `.dev-keys/PUBLISHER_DEV.pem` and trusted with
+`--trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml`.
+
+A packaged `PUBLISHER_TRUST.toml` is only a trust pointer. Its location beside
+a bundle, package, or container never grants authority by itself. Additional
+publishers enter the node trust store only through an explicit trust
+choice:
+
+- `ryeos init --trust-file <PUBLISHER_TRUST.toml>` pins a named publisher;
+- on an existing node, `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role
+  publisher` pins one while the node is stopped;
+- development/custom containers may opt in to their baked publisher set with
+  `RYEOS_TRUST_BAKED_PUBLISHERS=1`; and
+- the local source installer may opt in with `--trust-source-publishers`.
+
+Persisted container nodes preserve their complete signed policy generation.
+When a release intentionally cuts that policy schema or changes the image's
+exact init-profile bundle inventory, the operator signs the offline operation
+`node.reset.policy-generation`. It is applied from the image seed at the top of
+the next startup, in one locked init transaction that aligns the prospective
+exact bundle inventory and publishes the completion fence. The request names
+the seed's measured digest, the node profile, the host class and the substrate
+image digest, so it applies only on the image it was signed for. All other node
+state is preserved. The retired variables `RYEOS_RESET_NODE_POLICY_GENERATION`
+and `RYEOS_EXECUTION_HISTORY_SCHEMA_CUT` refuse the start when set: the
+environment no longer changes node state.
+
+An execution-history schema cut is the offline operation
+`node.reset.execution-history` with the exact `from` and `to` runtime epochs
+the startup refusal reports. It runs only when the retained database is
+exactly `from` and the installed binary owns exactly `to`; every other pairing
+refuses. Project HEADs, node identity, trust, vault and stable credential
+profiles remain preserved. Rerunning it once the database is already `to`
+reports `already_current`, changes nothing and inspects no history. A cut that
+would retire history refuses with `execution_history_scopes_unretired` while a
+process-scope obligation is unretired; start the node once so its recovery
+retires it, stop it, then rerun the cut.
+
+A startup does not re-seed a volume that is not fresh: when the installed
+bundle generation is absent but the app root holds a node identity or a
+completed init, the entrypoint refuses instead of initializing it again under
+the image's profile. Signed offline operations on a hosted container are
+described in `deploy/composition-images.md`.
+
+A remote operator may sign only the offline operations the node's signed
+profile delegates (`maintenance.remote_offline_operations`); every other
+authority-bearing operation is refused `not_delegable`. Only the
+`hosted-controller` profile delegates any: `node.external-execution.compose`,
+`node.authorize-client`, `node.remote.pin` and `node.bundle.replace`. See
+"Wiring a hosted node without a shell" in `remote/remote-operations.md`.
+
+Release containers pass no packaged trust documents to `ryeos init`.
+Development opt-ins trust every publisher document in the selected source
+boundary, so use them only after independently verifying that source. The
+loader validates each document's decoded key and fingerprint before pinning it,
+and bundle preflight still fails closed when content is not signed by a pinned
+publisher.
+
+## Bundle discovery and planning
+
+The source directory is scanned only for immediate child directories that
+contain `.ai/`. Hidden directories and invalid bundle names are skipped;
+there are no hardcoded bundle names. Planning checks provider/consumer
+relationships, duplicate providers, cycles, and install order. Existing
+installed bundles are atomically replaced with staging → swap and a
+one-generation backup.
+
+## What init does not do
+
+`ryeos init` does not start the daemon and does not depend on it. Runtime
+startup may repair daemon-local public identity, daemon config, vault
+public key output, and local authorized-key entry, but only after
+init-state verification succeeds. Init never authors an implicit policy
+fallback or overwrites a different existing node-signed generation. Stopped
+node policy changes use the typed `ryeos node policy-apply` boundary. See
+[Execution Isolation](execution-isolation.md) for the isolation section's
+complete accepted body.
+
+When the current registry adds or removes a mandatory section, the predecessor
+generation is intentionally undecodable and `policy-apply` cannot treat it as
+current authority. Use the explicit stopped-node
+`ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm` cutover
+against the trusted packaged source. There is no implicit migration or
+fallback. The cutover takes every section from the profile except those an
+operator applied, which carry forward after they are checked under the new
+schema; one that no longer validates refuses the cut by name until it is fixed
+or named with `--reset-section`. On a node whose generation predates the
+operator record, the cutover lists every section that differs from the
+profile and needs each named with `--keep-section` or `--reset-section`.
+
+A cutover whose `native_capacity` differs from the capacity issuance in force
+amends the issuance in the same step. It refuses, before changing anything,
+while an incarnation debit is outstanding or the account's image does not fit
+the new policy; `ryeos node capacity reissue --reason "..."` settles the
+account, then the cutover is rerun.
+
+A node whose generation lacks a mandatory section does not start, and
+`ryeos node doctor` reports `node_policy_section_missing` with the section's
+name. The `event_storage` section is one such addition. Its replacement needs
+no other choice on a node with the operator record, because a section the
+installed generation lacks always comes from the profile:
+
+```bash
+ryeos node reset policy-generation --node-profile <name> --host-class <class> \
+  --source <source> --reset-section event_storage --confirm
+```
+
+`--reset-section event_storage` states that choice explicitly; the cut takes
+the profile's body without it too. `--keep-section event_storage` is refused,
+because there is no installed section to keep. On a node without the record,
+any other section that differs from the profile still needs its own choice.
+
+The `ingest_ignore` schema-1 to schema-2 change is another such clean cut. Schema 1
+only carried `additional_patterns`; schema 2 carries the complete canonical
+`patterns` policy. During a package-source installation of this cut, use:
+
+```bash
+sudo scripts/pkg/install-local-direct.sh \
+  --populate --all \
+  --trust-source-publishers \
+  --reset-node-policy-generation
+```
+
+The installer maps the installed bundle set to its exact signed node profile
+and invokes the same explicit replacement boundary, passing through any
+`--keep-section`/`--reset-section` choices. It preserves node, operator, and
+vault identities, operator-applied policy sections, and all non-policy state. Do not use the reset
+flag on a fresh node or a node whose generation is already current.

@@ -122,26 +122,10 @@ where
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
-/// v11 additionally seals the optional ingress-authenticated handler context.
-/// Its absence is meaningful: node-internal execution must not manufacture a
-/// verified transport principal during recovery or callback dispatch.
-/// v12 carries flat exact node-history policy provenance instead of the
-/// predecessor tagged config wrapper. v13 binds remotely adopted execution
-/// to the exact target-node operator grant generation. v14 seals the optional
-/// daemon-authored scheduled-fire coordinate. v15 seals the narrow
-/// independently-evaluated-candidate purpose and its exact base/candidate
-/// authority.
-/// v16 combines candidate/scheduler authority with the current exact
-/// filesystem/network and realization-root execution contract.
-/// v17 seals fixed-parent live confinement and explicit namespace symlink
-/// semantics. Old path-mask claims cannot be decoded as this authority.
-/// v19 retains the exact invocation product selector map. Predecessor sealed
-/// requests cannot prove whether a selected witness was omitted during
-/// persistence, so they are classified before nested decoding.
-/// v20 requires the exact local-or-received product witness source proof.
-/// v21 seals the daemon-derived product-qualification launch purpose. Absent
-/// remains meaningful for ordinary execution; it cannot be inferred on replay.
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 21;
+/// Exact sealed root execution request contract. Absent optional fields are
+/// meaningful and are never inferred on recovery; a stored request of any
+/// other version is refused before nested decoding.
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 23;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -323,27 +307,27 @@ impl SealedResolvedItem {
         pinned_capsule_root.set_mode(0o700)?;
         pinned_capsule_root.ensure_path_binding()?;
         let source_name = std::ffi::OsStr::new("subject.source");
-        let mut materialized_source_file =
-            match pinned_capsule_root.open_regular(source_name, false)? {
-                Some(existing) => existing,
-                None => match pinned_capsule_root.atomic_create_regular(
-                    source_name,
-                    &source_bytes,
-                    0o600,
-                )? {
-                    Some(created) => created,
-                    None => pinned_capsule_root
-                        .open_regular(source_name, false)?
-                        .ok_or_else(|| {
-                            anyhow!("admitted launch capsule source disappeared during create race")
-                        })?,
-                },
-            };
+        let materialized_source_file = match pinned_capsule_root.open_regular(source_name, false)? {
+            Some(existing) => existing,
+            None => match pinned_capsule_root.atomic_create_regular(
+                source_name,
+                &source_bytes,
+                0o600,
+                crate::APP_TEMP_PURPOSE,
+            )? {
+                Some(created) => created,
+                None => pinned_capsule_root
+                    .open_regular(source_name, false)?
+                    .ok_or_else(|| {
+                        anyhow!("admitted launch capsule source disappeared during create race")
+                    })?,
+            },
+        };
         let expected_source_len = u64::try_from(source_bytes.len())
             .context("admitted launch capsule source length exceeds u64")?;
         let (materialized_source_hash, materialized_source_metadata) =
             lillux::digest_open_regular_file_stable_exact(
-                &mut materialized_source_file,
+                &materialized_source_file,
                 expected_source_len,
             )?;
         if materialized_source_hash != self.content_hash
@@ -357,6 +341,7 @@ impl SealedResolvedItem {
         pinned_capsule_root.ensure_path_binding()?;
         let materialized_source = capsule_root.join(source_name);
         Ok(ResolvedItem {
+            logical_project_root: None,
             canonical_ref,
             kind: self.kind.clone(),
             source_path: materialized_source,
@@ -455,7 +440,6 @@ impl SealedResolvedItem {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 // This exact durable wire shape keeps delegated-principal fields flattened.
 // Adding indirection would change the sealed request representation.
-#[allow(clippy::large_enum_variant)]
 enum SealedPrincipal {
     Local {
         fingerprint: String,
@@ -568,7 +552,7 @@ pub struct SealedRootExecutionRequest {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     candidate_evaluation: Option<CandidateEvaluationAuthority>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    product_qualification: Option<ProductQualificationLaunchPurpose>,
+    qualification: Option<QualificationLaunchPurpose>,
     execution_hints: HashMap<String, Value>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     scheduled_fire: Option<ryeos_engine::contracts::ScheduledFireContext>,
@@ -601,7 +585,7 @@ impl SealedRootExecutionRequest {
                 .validate()
                 .context("validate sealed candidate-evaluation authority")?;
         }
-        sealed.validate_product_qualification_purpose()?;
+        sealed.validate_qualification_purpose()?;
         sealed.validate_handler_context()?;
         sealed.validate_executor_route_against_capsule(capsule)?;
         if sealed.admitted_program_value()? != capsule.exact_program
@@ -663,6 +647,7 @@ impl SealedRootExecutionRequest {
             anyhow!("cannot seal a root execution request without root admission")
         })?;
         admission.validate()?;
+        admission.require_fresh_qualification_attachment()?;
         admission.ensure_matches_request(request)?;
         let (principal, scopes) = match &admission.plan_context.requested_by {
             EffectivePrincipal::Local(principal) => {
@@ -789,7 +774,7 @@ impl SealedRootExecutionRequest {
             candidate_evaluation: admission
                 .candidate_evaluation_scope()
                 .map(|scope| scope.authority().clone()),
-            product_qualification: admission.product_qualification_purpose().cloned(),
+            qualification: admission.qualification_purpose().cloned(),
             execution_hints: admission.plan_context.execution_hints.values.clone(),
             scheduled_fire: admission.plan_context.scheduled_fire.clone(),
             validate_only: admission.plan_context.validate_only,
@@ -797,7 +782,7 @@ impl SealedRootExecutionRequest {
             resolved_result_policy: admission.resolved_result_policy.clone(),
             captured_history_policy: admission.captured_history_policy.clone(),
         };
-        sealed.validate_product_qualification_purpose()?;
+        sealed.validate_qualification_purpose()?;
         Ok(sealed)
     }
 
@@ -809,24 +794,73 @@ impl SealedRootExecutionRequest {
         &self.executor_ref
     }
 
-    pub fn product_qualification_purpose(&self) -> Option<&ProductQualificationLaunchPurpose> {
-        self.product_qualification.as_ref()
+    pub fn qualification_purpose(&self) -> Option<&QualificationLaunchPurpose> {
+        self.qualification.as_ref()
     }
 
-    /// A claim-bearing verifier must get an actual process scope when its
-    /// admitted signed policy demands whole-descendant natural emptiness.
-    /// This is read from the sealed root, never a later policy lookup or an
-    /// executor-selected optional resource.
+    /// A claim-bearing verifier must run under an actual retained containment
+    /// when its admitted signed policy demands whole-descendant emptiness:
+    /// `scope_empty` demands a cgroup scope, `containment_empty` demands any
+    /// qualified mechanism (cgroup scope or PID-namespace init). The weaker
+    /// `trusted_process_group_absent` demands none. This is read from the
+    /// sealed root, never a later policy lookup or an executor-selected
+    /// optional resource. A policy that names no minimum settlement (a consumer
+    /// policy) takes its requirement from the selected protocol's holding, so
+    /// this form refuses it: use
+    /// [`Self::process_containment_for_qualification_under`].
+    pub fn process_containment_for_qualification(
+        &self,
+    ) -> Result<super::ProcessContainmentRequirement> {
+        self.process_containment_for_qualification_under(None, false)
+    }
+
+    /// The containment a qualification verifier must run under, given the
+    /// holding of the protocol the node selected for it. A policy minimum and
+    /// the selected holding's root settlement each name a requirement; the
+    /// stricter stands, so neither can weaken the other. A policy with no
+    /// minimum is held to the holding alone, and is refused without one.
+    ///
+    /// A policy minimum is a floor. On an enforced node the node's own
+    /// retained containment always answers, so the requirement is at least
+    /// any qualified containment whatever the minimum (including
+    /// `trusted_process_group_absent`); the signed policy is not rewritten.
+    pub fn process_containment_for_qualification_under(
+        &self,
+        selected_holding: Option<&ryeos_engine::protocols::ProtocolHolding>,
+        enforced: bool,
+    ) -> Result<super::ProcessContainmentRequirement> {
+        use super::ProcessContainmentRequirement as Requirement;
+        self.validate_qualification_purpose()?;
+        let Some(purpose) = self.qualification.as_ref() else {
+            return Ok(Requirement::None);
+        };
+        let from_holding =
+            selected_holding.map(|holding| Requirement::for_settlement(holding.root_settlement));
+        let requirement = match (
+            purpose
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement,
+            from_holding,
+        ) {
+            (Some(minimum), from_holding) => Requirement::for_settlement(minimum)
+                .at_least(from_holding.unwrap_or(Requirement::None)),
+            (None, Some(from_holding)) => from_holding,
+            (None, None) => bail!(
+                "a qualification policy that names no minimum settlement takes its containment from the selected protocol's holding, and none was supplied"
+            ),
+        };
+        Ok(requirement.with_enforced_floor(enforced))
+    }
+
+    /// Whether the sealed root demands any retained containment.
     pub fn requires_process_scope_for_qualification(&self) -> Result<bool> {
-        self.validate_product_qualification_purpose()?;
-        Ok(self.product_qualification.as_ref().is_some_and(|purpose| {
-            purpose.policy_source.policy.minimum_verifier_process_settlement
-                == ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::ScopeEmpty
-        }))
+        Ok(self.process_containment_for_qualification()?
+            != super::ProcessContainmentRequirement::None)
     }
 
-    fn validate_product_qualification_purpose(&self) -> Result<()> {
-        let Some(purpose) = &self.product_qualification else {
+    fn validate_qualification_purpose(&self) -> Result<()> {
+        let Some(purpose) = &self.qualification else {
             return Ok(());
         };
         purpose.validate()?;
@@ -921,23 +955,26 @@ impl SealedRootExecutionRequest {
         if let Some((name, _)) = checks.iter().find(|(_, matches)| !matches) {
             bail!("sealed qualification purpose contradicts admitted verifier root: {name}");
         }
-        let is_exact_root_subject = |selected: &ryeos_state::external_content::products::composition::ProductSelectionInput| {
-            matches!(
-                selected.target,
-                ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
-            ) && selected.selection.declaration_id == purpose.subject_declaration_id
-                && selected.selection.witness_hash == purpose.product_witness_hash
-                && selected.selection.witness_source == purpose.witness_source
-                && selected.selection.qualification_hash.is_none()
-        };
-        match (pinned_lane, self.product_selections.as_slice()) {
-            (true, [selected]) if is_exact_root_subject(selected) => {}
-            // Preserve the legacy projectless fixed-pin lane (with its
-            // optional pre-existing selected-root admission form).
-            (false, []) => {}
-            (false, [selected]) if is_exact_root_subject(selected) => {}
-            _ => bail!("sealed qualification subject selection differs from launch purpose"),
+        if let ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { content } = &purpose.subject {
+            if !projectless_lane || !self.product_selections.is_empty()
+                || purpose.policy_source.policy.consumer_execution_context.is_some()
+                || purpose.consumer_content.is_some() || purpose.consumer_definitions.is_some()
+            {
+                bail!("sealed content qualification lacks supported fixed-pin source context");
+            }
+            let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
+                self.resolution_output.composed.derived.get(
+                    ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY
+                ).context("sealed content verifier has no exact realization set")?
+            )?;
+            content.verify_verifier_realizations(&realizations, &purpose.subject_declaration_id)?;
+            return Ok(());
         }
+        super::validate_qualification_root_selections(
+            purpose,
+            &self.product_selections,
+            pinned_lane,
+        )?;
         Ok(())
     }
 
@@ -991,6 +1028,12 @@ impl SealedRootExecutionRequest {
         &self.item_ref
     }
 
+    /// The admitted thread profile name, distinct from the source item kind.
+    /// Runtime terminal snapshots retain this profile (for example graph_run).
+    pub fn thread_profile(&self) -> &str {
+        &self.kind
+    }
+
     /// Exact caller-authored reference bindings sealed at admission. Recovery
     /// consumers use this typed projection rather than reaching into capsule
     /// JSON and thereby becoming coupled to the sealed wire layout.
@@ -1039,14 +1082,29 @@ impl SealedRootExecutionRequest {
     /// verifier's sealed parameters or receive a second input authority.
     pub(crate) fn admitted_qualification_producer_stdin(
         &self,
-        expected: &ProductQualificationLaunchPurpose,
+        expected: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
     ) -> Result<String> {
-        self.validate_product_qualification_purpose()?;
-        if self.product_qualification.as_ref() != Some(expected) {
-            bail!("producer input requires the exact admitted qualification purpose");
-        }
+        self.require_qualification_execution_purpose(expected)?;
         lillux::canonical_json(&self.parameters)
             .context("encode exact admitted qualification producer input")
+    }
+
+    /// Corroborate the execution view against the complete sealed purpose,
+    /// retaining all source-specific admission checks at their existing owner.
+    pub(crate) fn require_qualification_execution_purpose(
+        &self,
+        expected: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
+    ) -> Result<()> {
+        self.validate_qualification_purpose()?;
+        let sealed = self
+            .qualification
+            .as_ref()
+            .context("execution has no admitted qualification purpose")?
+            .execution_view()?;
+        if !expected.has_same_enclosing_purpose(&sealed) {
+            bail!("execution requires the exact admitted qualification purpose");
+        }
+        Ok(())
     }
 
     /// Verify and expose the immutable effective resolution for sanitized
@@ -1113,6 +1171,9 @@ impl SealedRootExecutionRequest {
             }
         };
         let plan_context = PlanContext {
+            logical_project_root: self
+                .project_authority
+                .logical_project_root(&self.current_site_id),
             requested_by,
             project_context,
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1262,12 +1323,88 @@ impl SealedRootExecutionRequest {
         self.rebind_continuation_invocation(resume, Some(handler_context.clone()))
     }
 
+    /// Rebind an operator continuation that also names a different item at
+    /// each ref binding in `names`. Every check of the ordinary operator
+    /// continuation applies unchanged; the one difference is that the stated
+    /// `ref_bindings` may differ from the sealed ones at exactly those names.
+    ///
+    /// The result is a preparation seed, not a sealable invocation: the
+    /// resolved binding record at each rebound name is removed, because the
+    /// source's record describes the item that is being replaced. No capsule
+    /// validates until launch preparation has resolved the new items and
+    /// [`Self::seal_rebound_ref_bindings`] installs their records.
+    ///
+    /// The caller separately proves that the admitted runtime contract lets
+    /// an operator rebind each name.
+    pub fn for_operator_rebind_invocation(
+        &self,
+        resume: &crate::launch_metadata::ResumeContext,
+        handler_context: &crate::handler_context::HandlerContext,
+        names: &std::collections::BTreeSet<String>,
+    ) -> Result<Self> {
+        if names.is_empty() {
+            bail!("an operator rebind continuation names no ref binding");
+        }
+        let mut rebased = self.clone();
+        for name in names {
+            let rebound = resume.ref_bindings.get(name).ok_or_else(|| {
+                anyhow!("operator rebind continuation states no ref binding `{name}`")
+            })?;
+            if !self.resolved_ref_bindings.contains_key(name) {
+                bail!(
+                    "operator rebind continuation names ref binding `{name}`, which the admitted program does not bind"
+                );
+            }
+            if self.ref_bindings.get(name) == Some(rebound) {
+                bail!("operator rebind continuation leaves ref binding `{name}` unchanged");
+            }
+            rebased.ref_bindings.insert(name.clone(), rebound.clone());
+            rebased.resolved_ref_bindings.remove(name);
+        }
+        // With the named entries moved to the stated values, the ordinary
+        // rebind holds every other binding and every other field of the
+        // admitted program equal, and refuses a qualification purpose or
+        // product selections exactly as it does for any continuation.
+        rebased.rebind_continuation_invocation(resume, Some(handler_context.clone()))
+    }
+
+    /// Install the binding records launch preparation resolved for a rebound
+    /// continuation seed. `records` is the complete record set of the
+    /// re-prepared launch: it must supply each rebound name, and agree exactly
+    /// with every record this invocation already seals.
+    pub fn seal_rebound_ref_bindings(
+        mut self,
+        names: &std::collections::BTreeSet<String>,
+        records: &BTreeMap<String, Value>,
+    ) -> Result<Self> {
+        if names.is_empty() {
+            bail!("an operator rebind continuation names no ref binding");
+        }
+        for name in names {
+            if !self.ref_bindings.contains_key(name) {
+                bail!("rebound invocation states no ref binding `{name}`");
+            }
+            if self.resolved_ref_bindings.contains_key(name) {
+                bail!("rebound invocation already seals a record for ref binding `{name}`");
+            }
+            let record = records.get(name).ok_or_else(|| {
+                anyhow!("launch preparation resolved no record for rebound ref binding `{name}`")
+            })?;
+            self.resolved_ref_bindings
+                .insert(name.clone(), record.clone());
+        }
+        if &self.resolved_ref_bindings != records {
+            bail!("launch preparation changed a ref binding record outside the rebound names");
+        }
+        Ok(self)
+    }
+
     fn rebind_continuation_invocation(
         &self,
         resume: &crate::launch_metadata::ResumeContext,
         handler_context: Option<crate::handler_context::HandlerContext>,
     ) -> Result<Self> {
-        if self.product_qualification.is_some() {
+        if self.qualification.is_some() {
             bail!("qualification verifier purpose cannot continue into a new invocation");
         }
         if !self.product_selections.is_empty() || !resume.product_selections.is_empty() {
@@ -1534,7 +1671,7 @@ impl SealedRootExecutionRequest {
             resolution_subject_authority:
                 ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
             candidate_evaluation: None,
-            product_qualification: None,
+            qualification: None,
             execution_hints: HashMap::new(),
             scheduled_fire: None,
             validate_only: false,
@@ -1602,6 +1739,21 @@ impl SealedRootExecutionRequest {
         engine: &Arc<Engine>,
         capsule_root: &Path,
     ) -> Result<ResolvedExecutionRequest> {
+        self.restore_with_content_attachment(engine, capsule_root, None)
+    }
+
+    fn restore_with_content_attachment(
+        &self,
+        engine: &Arc<Engine>,
+        capsule_root: &Path,
+        content_attachment: Option<ContentQualificationAttachment>,
+    ) -> Result<ResolvedExecutionRequest> {
+        if self.qualification.as_ref().is_some_and(|purpose| matches!(
+            purpose.subject,
+            ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { .. }
+        )) && content_attachment.is_none() {
+            bail!("content qualification restoration requires authoritative retained-root recovery");
+        }
         if self.schema_version != SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION {
             bail!(
                 "sealed root execution request schema mismatch: persisted={}, expected={}",
@@ -1609,7 +1761,7 @@ impl SealedRootExecutionRequest {
                 SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION
             );
         }
-        self.validate_product_qualification_purpose()?;
+        self.validate_qualification_purpose()?;
         if self.validate_only {
             bail!("persisted root execution request cannot be validate-only");
         }
@@ -1644,7 +1796,10 @@ impl SealedRootExecutionRequest {
         CanonicalRef::parse(&self.runtime_ref).map_err(|error| {
             anyhow!("invalid sealed runtime ref `{}`: {error}", self.runtime_ref)
         })?;
-        let resolved_item = self.verified_subject.restore(capsule_root)?;
+        let mut resolved_item = self.verified_subject.restore(capsule_root)?;
+        resolved_item.logical_project_root = self
+            .project_authority
+            .logical_project_root(&self.current_site_id);
         let verified_subject = VerifiedItem {
             resolved: resolved_item.clone(),
             signer: self
@@ -1655,6 +1810,9 @@ impl SealedRootExecutionRequest {
             pinned_version: self.verified_pinned_version.clone(),
         };
         let plan_context = PlanContext {
+            logical_project_root: self
+                .project_authority
+                .logical_project_root(&self.current_site_id),
             requested_by,
             project_context: self.project_context.clone(),
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1703,9 +1861,12 @@ impl SealedRootExecutionRequest {
             captured_history_policy: self.captured_history_policy.clone(),
             project_binding,
             candidate_evaluation: None,
-            product_qualification: self.product_qualification.clone(),
+            qualification: self.qualification.clone(),
+            // Retained data cannot recreate a fresh source-admission witness.
+            authenticated_content_qualification_digest: content_attachment,
             admitted_request_snapshot: None,
             selected_executor_route: None,
+            request_trust: engine.trust_store.snapshot(),
         };
         if self.executor_route.executor_ref() != self.executor_ref {
             bail!(
@@ -1763,6 +1924,16 @@ impl SealedRootExecutionRequest {
         capsule_root: &Path,
         provenance: &crate::execution_provenance::ExecutionProvenance,
     ) -> Result<ResolvedExecutionRequest> {
+        self.restore_with_provenance_and_content_attachment(engine, capsule_root, provenance, None)
+    }
+
+    fn restore_with_provenance_and_content_attachment(
+        &self,
+        engine: &Arc<Engine>,
+        capsule_root: &Path,
+        provenance: &crate::execution_provenance::ExecutionProvenance,
+        content_attachment: Option<ContentQualificationAttachment>,
+    ) -> Result<ResolvedExecutionRequest> {
         if let Some(expected) = self.candidate_evaluation.as_ref() {
             let scope = provenance.candidate_evaluation_scope().ok_or_else(|| {
                 anyhow!("candidate evaluator recovery has no dual-generation execution scope")
@@ -1816,11 +1987,28 @@ impl SealedRootExecutionRequest {
 
         // Validate the exact persisted invocation before rebinding its
         // disposable operational workspace.
-        let mut request = self.restore(engine, capsule_root)?;
+        let mut request =
+            self.restore_with_content_attachment(engine, capsule_root, content_attachment)?;
+        let protected_qualification = request
+            .root_admission
+            .as_ref()
+            .is_some_and(|admission| admission.qualification_purpose().is_some());
         let rebound_project_context = match provenance {
             crate::execution_provenance::ExecutionProvenance::Projectless { .. } => {
                 ProjectContext::None
             }
+            crate::execution_provenance::ExecutionProvenance::RootPinnedGeneration { .. }
+            | crate::execution_provenance::ExecutionProvenance::ChildPinnedGeneration { .. }
+            | crate::execution_provenance::ExecutionProvenance::ChildImmutableWorkspaceInput {
+                ..
+            } if protected_qualification => match &request.plan_context.project_context {
+                ProjectContext::SnapshotHash { hash }
+                    if provenance.pinned_snapshot_hash() == Some(hash.as_str()) =>
+                {
+                    ProjectContext::SnapshotHash { hash: hash.clone() }
+                }
+                _ => bail!("recovered qualification lost its sealed pinned snapshot context"),
+            },
             crate::execution_provenance::ExecutionProvenance::RootLiveProject { .. }
             | crate::execution_provenance::ExecutionProvenance::ChildLiveProject { .. }
             | crate::execution_provenance::ExecutionProvenance::RootPinnedGeneration { .. }
@@ -1832,9 +2020,11 @@ impl SealedRootExecutionRequest {
             },
         };
         let mut rebound_plan_context = request.plan_context.clone();
+        let site_id = rebound_plan_context.current_site_id.clone();
         rebound_plan_context.project_context = rebound_project_context;
         rebound_plan_context.subject_resolution_authority =
             provenance.subject_resolution_authority();
+        rebound_plan_context.logical_project_root = provenance.logical_project_root(&site_id);
         let rebound_binding =
             AdmittedProjectBinding::from_provenance(engine, &rebound_plan_context, provenance)?;
         let rebound_materialized_project_root = match provenance {
@@ -1848,6 +2038,7 @@ impl SealedRootExecutionRequest {
             } => Some(provenance.subject_effective_path().to_path_buf()),
         };
         request.resolved_item.materialized_project_root = rebound_materialized_project_root.clone();
+        request.resolved_item.logical_project_root = provenance.logical_project_root(&site_id);
         {
             let admission = request
                 .root_admission
@@ -1859,6 +2050,8 @@ impl SealedRootExecutionRequest {
                 .verified_subject
                 .resolved
                 .materialized_project_root = rebound_materialized_project_root;
+            admission.verified_subject.resolved.logical_project_root =
+                provenance.logical_project_root(&site_id);
             // Complete request snapshots include parser/kind registry
             // semantics and belong only to fresh admission. Recovered paths
             // use the sealed execution closure plus a trust-only current
@@ -1891,6 +2084,48 @@ impl SealedRootExecutionRequest {
     ) -> Result<ResolvedExecutionRequest> {
         let sealed = Self::decode_from_admitted_capsule(capsule)?;
         sealed.restore_for_reconstructed_provenance(engine, capsule_root, provenance)
+    }
+
+    /// Restore only the already-born root whose exact capsule is owned by
+    /// state. Retained provenance is not fresh admission and cannot reseal.
+    pub fn restore_for_authoritative_root(
+        &self,
+        state: &crate::state::AppState,
+        root_thread_id: &str,
+        engine: &Arc<Engine>,
+        capsule_root: &Path,
+        provenance: &crate::execution_provenance::ExecutionProvenance,
+    ) -> Result<ResolvedExecutionRequest> {
+        let (chain_root_id, capsule_hash, capsule) = state
+            .state_store
+            .admitted_launch_capsule_with_coordinates(root_thread_id)?
+            .context("retained qualification root has no authoritative capsule")?;
+        anyhow::ensure!(
+            chain_root_id == root_thread_id,
+            "qualification restoration requires its exact born root"
+        );
+        let authoritative = Self::decode_from_admitted_capsule(&capsule)?;
+        anyhow::ensure!(
+            serde_json::to_value(self)? == serde_json::to_value(&authoritative)?,
+            "sealed request differs from authoritative root capsule"
+        );
+        authoritative.validate_current_operator_authority(state)?;
+        let attachment = match authoritative.qualification.as_ref() {
+            Some(purpose) if matches!(purpose.subject,
+                ryeos_state::external_content::qualification_purpose::QualificationSubject::ActivatedContent { .. }) => {
+                Some(ContentQualificationAttachment::Retained {
+                    purpose_digest: ryeos_state::objects::canonical_value_digest(&serde_json::to_value(purpose)?)?,
+                    root_thread_id: root_thread_id.to_owned(), capsule_hash,
+                })
+            }
+            _ => None,
+        };
+        authoritative.restore_with_provenance_and_content_attachment(
+            engine,
+            capsule_root,
+            provenance,
+            attachment,
+        )
     }
 
     /// Rebind an admitted worker invocation directly from capsule authority
@@ -2278,25 +2513,26 @@ mod authority_tests {
     #[test]
     fn sealed_qualification_purpose_is_explicit_and_cannot_upgrade_ordinary_root() {
         let fixture = SealedRootExecutionRequest::storage_test_fixture();
-        assert!(fixture.product_qualification_purpose().is_none());
+        assert!(fixture.qualification_purpose().is_none());
         assert!(!fixture.requires_process_scope_for_qualification().unwrap());
         let mut missing = serde_json::to_value(&fixture).unwrap();
-        missing
-            .as_object_mut()
-            .unwrap()
-            .remove("product_qualification");
+        missing.as_object_mut().unwrap().remove("qualification");
         assert!(serde_json::from_value::<SealedRootExecutionRequest>(missing).is_err());
 
         let parameters_digest = fixture.admitted_parameters_digest().unwrap();
         let mut injected = serde_json::to_value(&fixture).unwrap();
-        injected["product_qualification"] = json!({
-            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+        injected["qualification"] = json!({
+            "schema": ryeos_state::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
             "launch_id": format!("L-{}", "a".repeat(32)),
             "owner_fingerprint": "session:test",
-            "product_witness_hash": "b".repeat(64),
-            "witness_source": {"kind":"local_capture"},
-            "relationship_name": "runtime_to_worker",
+            "subject": {
+                "kind": "captured_product",
+                "product_witness_hash": "b".repeat(64),
+                "witness_source": {"kind":"local_capture"},
+                "relationship_name": "runtime_to_worker"
+            },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2320,21 +2556,25 @@ mod authority_tests {
             "verifier_realized_definition_digest": "2".repeat(64)
         });
         let sealed: SealedRootExecutionRequest = serde_json::from_value(injected).unwrap();
+        assert!(sealed.qualification_purpose().unwrap().validate().is_ok());
+        assert!(sealed.validate_qualification_purpose().is_err());
+        let view = sealed
+            .qualification_purpose()
+            .unwrap()
+            .execution_view()
+            .unwrap();
         assert!(
             sealed
-                .product_qualification_purpose()
-                .unwrap()
-                .validate()
-                .is_ok()
+                .require_qualification_execution_purpose(&view)
+                .is_err()
         );
-        assert!(sealed.validate_product_qualification_purpose().is_err());
+        assert!(sealed.admitted_qualification_producer_stdin(&view).is_err());
         assert!(sealed.requires_process_scope_for_qualification().is_err());
         let root = tempfile::tempdir().unwrap();
         assert!(sealed.restore(&empty_engine(), root.path()).is_err());
     }
 
-    #[test]
-    fn sealed_qualification_checks_realized_not_pre_realization_definition() {
+    fn qualified_product_sealed_fixture() -> SealedRootExecutionRequest {
         let mut sealed = SealedRootExecutionRequest::storage_test_fixture();
         let verifier_ref = "tool:test/qualify_runtime";
         sealed.item_ref = verifier_ref.to_owned();
@@ -2359,14 +2599,18 @@ mod authority_tests {
         let admitted = "1".repeat(64);
         assert_ne!(admitted, realized.as_str());
         let parameters_digest = sealed.admitted_parameters_digest().unwrap();
-        sealed.product_qualification = Some(serde_json::from_value(json!({
-            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+        sealed.qualification = Some(serde_json::from_value(json!({
+            "schema": ryeos_state::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
             "launch_id": format!("L-{}", "a".repeat(32)),
             "owner_fingerprint": "session:test",
-            "product_witness_hash": "b".repeat(64),
-            "witness_source": {"kind":"local_capture"},
-            "relationship_name": "runtime_to_worker",
+            "subject": {
+                "kind": "captured_product",
+                "product_witness_hash": "b".repeat(64),
+                "witness_source": {"kind":"local_capture"},
+                "relationship_name": "runtime_to_worker"
+            },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2389,16 +2633,169 @@ mod authority_tests {
             "verifier_effective_definition_digest": admitted,
             "verifier_realized_definition_digest": realized.as_str()
         })).unwrap());
-        sealed.validate_product_qualification_purpose().unwrap();
+        sealed.validate_qualification_purpose().unwrap();
+        sealed
+    }
+
+    #[test]
+    fn sealed_verifier_containment_follows_the_signed_minimum_settlement() {
+        use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        let mut sealed = qualified_product_sealed_fixture();
+        // (signed minimum, containment the launch must run under)
+        for (minimum, expected) in [
+            (Settlement::ScopeEmpty, Requirement::CgroupScope),
+            (
+                Settlement::ContainmentEmpty,
+                Requirement::AnyQualifiedContainment,
+            ),
+            (Settlement::TrustedProcessGroupAbsent, Requirement::None),
+        ] {
+            sealed
+                .qualification
+                .as_mut()
+                .unwrap()
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement = Some(minimum);
+            assert_eq!(
+                sealed.process_containment_for_qualification().unwrap(),
+                expected,
+                "{minimum:?}"
+            );
+            assert_eq!(
+                sealed.requires_process_scope_for_qualification().unwrap(),
+                expected != Requirement::None
+            );
+        }
+        // An ordinary root demands none.
+        assert_eq!(
+            SealedRootExecutionRequest::storage_test_fixture()
+                .process_containment_for_qualification()
+                .unwrap(),
+            Requirement::None
+        );
+    }
+
+    #[test]
+    fn enforced_node_raises_a_trusted_process_group_floor_to_containment() {
+        use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        let mut sealed = qualified_product_sealed_fixture();
+        sealed
+            .qualification
+            .as_mut()
+            .unwrap()
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = Some(Settlement::TrustedProcessGroupAbsent);
+        let under = |sealed: &SealedRootExecutionRequest, enforced| {
+            sealed
+                .process_containment_for_qualification_under(None, enforced)
+                .unwrap()
+        };
+        assert_eq!(under(&sealed, false), Requirement::None);
+        assert_eq!(under(&sealed, true), Requirement::AnyQualifiedContainment);
+        sealed
+            .qualification
+            .as_mut()
+            .unwrap()
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = Some(Settlement::ScopeEmpty);
+        assert_eq!(under(&sealed, true), Requirement::CgroupScope);
+    }
+
+    #[test]
+    fn selected_holding_cannot_weaken_the_signed_minimum_and_can_strengthen_it() {
+        use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        let holding = |settlement: &str| -> ryeos_engine::protocols::ProtocolHolding {
+            serde_json::from_value(json!({
+                "requires_guarantees": ["isolation:enforced"],
+                "filesystem_authority": "captured_execution",
+                "root_settlement": settlement,
+            }))
+            .unwrap()
+        };
+        let mut sealed = qualified_product_sealed_fixture();
+        // (signed minimum, selected holding, containment the launch must run under)
+        for (minimum, selected, expected) in [
+            (
+                Settlement::TrustedProcessGroupAbsent,
+                "containment_empty",
+                Requirement::AnyQualifiedContainment,
+            ),
+            (
+                Settlement::ScopeEmpty,
+                "trusted_process_group_absent",
+                Requirement::CgroupScope,
+            ),
+            (
+                Settlement::ContainmentEmpty,
+                "scope_empty",
+                Requirement::CgroupScope,
+            ),
+            (
+                Settlement::TrustedProcessGroupAbsent,
+                "trusted_process_group_absent",
+                Requirement::None,
+            ),
+        ] {
+            sealed
+                .qualification
+                .as_mut()
+                .unwrap()
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement = Some(minimum);
+            assert_eq!(
+                sealed
+                    .process_containment_for_qualification_under(Some(&holding(selected)), false)
+                    .unwrap(),
+                expected,
+                "{minimum:?} under {selected}"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_qualification_checks_realized_not_pre_realization_definition() {
+        let mut sealed = qualified_product_sealed_fixture();
+        let purpose = sealed.qualification_purpose().unwrap().clone();
+        let view = purpose.execution_view().unwrap();
+        sealed
+            .require_qualification_execution_purpose(&view)
+            .unwrap();
+        assert_eq!(
+            sealed.admitted_qualification_producer_stdin(&view).unwrap(),
+            "{}"
+        );
+        let mut different_source = purpose;
+        match &mut different_source.subject {
+            ryeos_state::external_content::qualification_purpose::QualificationSubject::CapturedProduct { product_witness_hash, .. } => *product_witness_hash = "9".repeat(64),
+            _ => panic!("fixture is not a captured product"),
+        }
+        let different_view = different_source.execution_view().unwrap();
+        assert!(
+            sealed
+                .require_qualification_execution_purpose(&different_view)
+                .is_err()
+        );
+        assert!(
+            sealed
+                .admitted_qualification_producer_stdin(&different_view)
+                .is_err()
+        );
 
         sealed
-            .product_qualification
+            .qualification
             .as_mut()
             .unwrap()
             .verifier_realized_definition_digest = "2".repeat(64);
         assert!(
             sealed
-                .validate_product_qualification_purpose()
+                .validate_qualification_purpose()
                 .unwrap_err()
                 .to_string()
                 .contains("verifier definition")
@@ -2406,7 +2803,95 @@ mod authority_tests {
     }
 
     #[test]
-    fn pinned_qualification_requires_exact_snapshot_and_one_root_subject_selection() {
+    fn sealed_content_checks_exact_fixed_subject_without_granting_plain_restore() {
+        use ryeos_state::external_content::qualification_purpose::QualificationSubject;
+        use ryeos_state::external_content::qualification_subject::{
+            CONTENT_QUALIFICATION_SUBJECT_SCHEMA, ContentQualificationSubject,
+        };
+        use ryeos_state::objects::{
+            ExternalContentKind, ExternalContentMode, ExternalContentMountRoot,
+            ExternalContentRealization, ExternalContentRealizationSet,
+        };
+        let mut sealed = qualified_product_sealed_fixture();
+        let realization = ExternalContentRealization {
+            id: "runtime".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: "f".repeat(64),
+            entry_count: 2,
+            total_bytes: 42,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "runtime".into(),
+        };
+        let content = ContentQualificationSubject {
+            schema: CONTENT_QUALIFICATION_SUBJECT_SCHEMA,
+            activation_receipt_hash: "a".repeat(64),
+            activation_program_digest: "b".repeat(64),
+            binding_hash: "c".repeat(64),
+            consumer_ref: "worker:test/hosted".into(),
+            declaration_id: "runtime".into(),
+            manifest_hash: realization.manifest_hash.clone(),
+            manifest_kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into(),
+            target_node_fingerprint: "d".repeat(64),
+            realization: realization.clone(),
+        };
+        sealed.resolution_output.composed.derived.insert(
+            ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY.into(),
+            ExternalContentRealizationSet::new(vec![realization])
+                .unwrap()
+                .to_value()
+                .unwrap(),
+        );
+        let d2 = sealed
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap();
+        sealed.effective_definition_digest = d2.clone();
+        let purpose = sealed.qualification.as_mut().unwrap();
+        purpose.subject = QualificationSubject::ActivatedContent { content };
+        purpose.verifier_realized_definition_digest = d2.as_str().into();
+        sealed.validate_qualification_purpose().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let error = sealed
+            .restore(&empty_engine(), root.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("authoritative retained-root recovery"));
+        let mut changed = sealed.clone();
+        if let QualificationSubject::ActivatedContent { content } =
+            &mut changed.qualification.as_mut().unwrap().subject
+        {
+            content.realization.total_bytes += 1;
+        }
+        assert!(changed.validate_qualification_purpose().is_err());
+        changed = sealed.clone();
+        changed
+            .qualification
+            .as_mut()
+            .unwrap()
+            .verifier_realized_definition_digest = "9".repeat(64);
+        assert!(changed.validate_qualification_purpose().is_err());
+    }
+
+    #[test]
+    fn retained_content_provenance_never_authorizes_fresh_sealing_or_birth() {
+        let digest = "a".repeat(64);
+        let fresh = ContentQualificationAttachment::Fresh {
+            purpose_digest: digest.clone(),
+        };
+        fresh.require_fresh().unwrap();
+        let retained = ContentQualificationAttachment::Retained {
+            purpose_digest: digest,
+            root_thread_id: "T-00000000-0000-0000-0000-000000000001".into(),
+            capsule_hash: "b".repeat(64),
+        };
+        assert_eq!(fresh.purpose_digest(), retained.purpose_digest());
+        assert!(retained.require_fresh().is_err());
+        assert!(retained.clone().require_fresh().is_err());
+    }
+
+    #[test]
+    fn pinned_qualification_requires_exact_snapshot_and_subject_among_root_inputs() {
         use ryeos_state::objects::{
             EnvironmentAuthority, PinnedProjectRealization, PinnedTerminalPublication,
         };
@@ -2459,14 +2944,18 @@ mod authority_tests {
             .unwrap()
             .as_str()
             .to_owned();
-        sealed.product_qualification = Some(serde_json::from_value(json!({
-            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+        sealed.qualification = Some(serde_json::from_value(json!({
+            "schema": ryeos_state::external_content::qualification_purpose::QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
             "launch_id": format!("L-{}", "a".repeat(32)),
             "owner_fingerprint": "session:test",
-            "product_witness_hash": "b".repeat(64),
-            "witness_source": {"kind":"local_capture"},
-            "relationship_name": "runtime_to_qualified_runtime",
+            "subject": {
+                "kind": "captured_product",
+                "product_witness_hash": "b".repeat(64),
+                "witness_source": {"kind":"local_capture"},
+                "relationship_name": "runtime_to_qualified_runtime"
+            },
             "consumer_content": null,
+            "consumer_invocation": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2497,15 +2986,37 @@ mod authority_tests {
                     witness_hash: "b".repeat(64),
                     witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                     qualification_hash: None,
+                    remote_testimony: None,
                 },
             },
         ];
 
-        sealed.validate_product_qualification_purpose().unwrap();
+        sealed.validate_qualification_purpose().unwrap();
+
+        let mut with_auxiliary = sealed.clone();
+        let mut auxiliary = with_auxiliary.product_selections[0].clone();
+        auxiliary.selection.declaration_id = "verifier-platform".into();
+        auxiliary.selection.witness_hash = "7".repeat(64);
+        auxiliary.selection.qualification_hash = Some("8".repeat(64));
+        with_auxiliary.product_selections.push(auxiliary);
+        with_auxiliary.validate_qualification_purpose().unwrap();
+
+        let mut replaced_subject = with_auxiliary.clone();
+        replaced_subject.product_selections[0]
+            .selection
+            .witness_hash = "9".repeat(64);
+        assert!(replaced_subject.validate_qualification_purpose().is_err());
+
+        let mut non_root_auxiliary = with_auxiliary.clone();
+        non_root_auxiliary.product_selections[1].target =
+            ryeos_state::external_content::products::composition::ProductSelectionTarget::ContentDependency {
+                binding: "environment".into(),
+            };
+        assert!(non_root_auxiliary.validate_qualification_purpose().is_err());
 
         let mut empty = sealed.clone();
         empty.product_selections.clear();
-        assert!(empty.validate_product_qualification_purpose().is_err());
+        assert!(empty.validate_qualification_purpose().is_err());
 
         let mut mismatched_snapshot = sealed.clone();
         mismatched_snapshot.project_context = ProjectContext::SnapshotHash {
@@ -2513,7 +3024,7 @@ mod authority_tests {
         };
         assert!(
             mismatched_snapshot
-                .validate_product_qualification_purpose()
+                .validate_qualification_purpose()
                 .is_err()
         );
 
@@ -2521,7 +3032,7 @@ mod authority_tests {
         live.project_context = ProjectContext::LocalPath {
             path: PathBuf::from("/project"),
         };
-        assert!(live.validate_product_qualification_purpose().is_err());
+        assert!(live.validate_qualification_purpose().is_err());
 
         let mut cow = sealed.clone();
         cow.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
@@ -2535,20 +3046,20 @@ mod authority_tests {
             Vec::new(),
         )
         .unwrap();
-        assert!(cow.validate_product_qualification_purpose().is_err());
+        assert!(cow.validate_qualification_purpose().is_err());
 
         let mut extra = sealed.clone();
         extra
             .product_selections
             .push(extra.product_selections[0].clone());
-        assert!(extra.validate_product_qualification_purpose().is_err());
+        assert!(extra.validate_qualification_purpose().is_err());
 
         let mut non_root = sealed.clone();
         non_root.product_selections[0].target =
             ryeos_state::external_content::products::composition::ProductSelectionTarget::ContentDependency {
                 binding: "subject".to_owned(),
             };
-        assert!(non_root.validate_product_qualification_purpose().is_err());
+        assert!(non_root.validate_qualification_purpose().is_err());
 
         let mut output_bearing = sealed;
         let mut authority = serde_json::to_value(&output_bearing.project_authority).unwrap();
@@ -2568,11 +3079,7 @@ mod authority_tests {
             "capture_hash": null
         });
         output_bearing.project_authority = serde_json::from_value(authority).unwrap();
-        assert!(
-            output_bearing
-                .validate_product_qualification_purpose()
-                .is_err()
-        );
+        assert!(output_bearing.validate_qualification_purpose().is_err());
     }
 
     #[test]
@@ -2676,7 +3183,7 @@ mod authority_tests {
                 "declaration_id": "runtime",
                 "witness_hash": "a".repeat(64),
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": null,
+                "qualification_hash": null, "remote_testimony": null,
             }
             }]))
             .unwrap();
@@ -2727,7 +3234,7 @@ mod authority_tests {
     }
 
     #[test]
-    fn sealed_remote_operator_handler_authority_round_trips_exactly() {
+    fn sealed_remote_principal_handler_authority_round_trips_exactly() {
         let mut fixture = SealedRootExecutionRequest::storage_test_fixture();
         fixture.current_site_id = "site:target".to_string();
         fixture.origin_site_id = "site:source".to_string();
@@ -2735,7 +3242,7 @@ mod authority_tests {
             "session:test".to_string(),
             Vec::new(),
             true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_string()),
         ));
         fixture.validate_handler_context().unwrap();
@@ -2820,7 +3327,7 @@ mod authority_tests {
             "session:operator".to_string(),
             vec!["threads.execute".to_string()],
             true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
             None,
         );
 
@@ -2835,6 +3342,387 @@ mod authority_tests {
                 fingerprint: "session:operator".to_string(),
                 scopes: vec!["threads.execute".to_string()],
             }
+        );
+    }
+
+    /// A sealed fixture that binds `model` and `guard`, the operator resume
+    /// that rebinds `model` to a second item, and the operator's handler.
+    fn operator_rebind_fixture() -> (
+        SealedRootExecutionRequest,
+        crate::launch_metadata::ResumeContext,
+        crate::handler_context::HandlerContext,
+    ) {
+        let bindings = |model: &str| {
+            BTreeMap::from([
+                ("guard".to_string(), "directive:test/guard".to_string()),
+                ("model".to_string(), model.to_string()),
+            ])
+        };
+        let records = |model: &str| {
+            BTreeMap::from([
+                (
+                    "guard".to_string(),
+                    json!({"canonical_ref": "directive:test/guard"}),
+                ),
+                ("model".to_string(), json!({"canonical_ref": model})),
+            ])
+        };
+        let fixture = SealedRootExecutionRequest::storage_test_fixture()
+            .with_storage_test_ref_bindings(
+                bindings("directive:test/models/first"),
+                records("directive:test/models/first"),
+            );
+        let mut resume = continuation_resume(
+            "/unused",
+            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+        );
+        resume.project_context = ProjectContext::None;
+        resume.ref_bindings = bindings("directive:test/models/second");
+        resume.requested_by = EffectivePrincipal::Local(Principal {
+            fingerprint: "session:operator".to_string(),
+            scopes: vec!["threads.execute".to_string()],
+        });
+        let handler = crate::handler_context::HandlerContext::new_with_authority(
+            "session:operator".to_string(),
+            vec!["threads.execute".to_string()],
+            true,
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        );
+        (fixture, resume, handler)
+    }
+
+    fn rebound_names(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn operator_rebind_changes_the_named_binding_and_withholds_its_stale_record() {
+        let (fixture, resume, handler) = operator_rebind_fixture();
+        let model = rebound_names(&["model"]);
+
+        // The ordinary operator continuation still refuses the changed binding.
+        assert!(
+            fixture
+                .for_operator_continuation_invocation(&resume, &handler)
+                .unwrap_err()
+                .to_string()
+                .contains("program identity")
+        );
+
+        let seed = fixture
+            .for_operator_rebind_invocation(&resume, &handler, &model)
+            .unwrap();
+        assert_eq!(seed.ref_bindings, resume.ref_bindings);
+        assert_eq!(seed.handler_context(), Some(&handler));
+        assert_eq!(seed.requested_by.as_deref(), Some("session:operator"));
+        // The replaced item's record is gone; the untouched binding keeps its own.
+        assert!(!seed.resolved_ref_bindings.contains_key("model"));
+        assert_eq!(
+            seed.resolved_ref_bindings.get("guard"),
+            fixture.resolved_ref_bindings.get("guard")
+        );
+
+        let prepared = BTreeMap::from([
+            (
+                "guard".to_string(),
+                json!({"canonical_ref": "directive:test/guard"}),
+            ),
+            (
+                "model".to_string(),
+                json!({"canonical_ref": "directive:test/models/second"}),
+            ),
+        ]);
+        let sealed = seed
+            .clone()
+            .seal_rebound_ref_bindings(&model, &prepared)
+            .unwrap();
+        assert_eq!(sealed.resolved_ref_bindings, prepared);
+
+        // Preparation that also moved an untouched binding's record, or that
+        // resolved nothing at the rebound name, cannot be sealed.
+        let mut moved = prepared.clone();
+        moved.insert(
+            "guard".to_string(),
+            json!({"canonical_ref": "directive:test/other-guard"}),
+        );
+        assert!(
+            seed.clone()
+                .seal_rebound_ref_bindings(&model, &moved)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the rebound names")
+        );
+        let mut missing = prepared.clone();
+        missing.remove("model");
+        assert!(
+            seed.clone()
+                .seal_rebound_ref_bindings(&model, &missing)
+                .is_err()
+        );
+        // A record can be installed once only.
+        assert!(
+            sealed
+                .seal_rebound_ref_bindings(&model, &prepared)
+                .unwrap_err()
+                .to_string()
+                .contains("already seals")
+        );
+    }
+
+    /// Launch metadata whose capsule validates and binds `model` and `guard`,
+    /// with the operator resume that rebinds `model` and the operator's handler.
+    fn admitted_rebind_source() -> (
+        crate::launch_metadata::RuntimeLaunchMetadata,
+        crate::launch_metadata::ResumeContext,
+        crate::handler_context::HandlerContext,
+    ) {
+        let project = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:rebind-seed".into(),
+            None,
+            "b".repeat(64),
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut source = crate::state_store::external_fixture_launch_metadata(
+            project,
+            json!({"binding_records": {
+                "guard": {"canonical_ref": "directive:test/guard"},
+                "model": {"canonical_ref": "directive:test/models/first"},
+            }}),
+            json!({}),
+        );
+        source.accounting_scope = Some(ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: "S-test".to_string(),
+            ledger_epoch: 1,
+            execution_budget_id: "B-source".to_string(),
+            directive_budget_id: Some("D-source".to_string()),
+        });
+        source.deadline_hold_back_ms = Some(40_000);
+        source.validate().expect("admitted rebind source fixture");
+
+        let mut resume = source.resume_context.clone().unwrap();
+        resume.parameters = json!({"input": "continue"});
+        resume.ref_bindings.insert(
+            "model".to_string(),
+            "directive:test/models/second".to_string(),
+        );
+        resume.requested_by = EffectivePrincipal::Local(Principal {
+            fingerprint: "session:operator".to_string(),
+            scopes: vec!["threads.execute".to_string()],
+        });
+        let handler = crate::handler_context::HandlerContext::new_with_authority(
+            "session:operator".to_string(),
+            vec!["threads.execute".to_string()],
+            true,
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        );
+        (source, resume, handler)
+    }
+
+    #[test]
+    fn operator_rebind_successor_seed_copies_what_every_continuation_copies() {
+        let (source, resume, handler) = admitted_rebind_source();
+        let capsule = source.admitted_launch_capsule().unwrap().unwrap();
+        let model = rebound_names(&["model"]);
+
+        let seed = source
+            .operator_rebind_successor_seed("T-source", &capsule, resume.clone(), &handler, &model)
+            .unwrap();
+        // A rebound successor is another segment of the same execution: it
+        // keeps the budget scope and the deadline window its source sealed.
+        assert_eq!(seed.deadline_hold_back_ms, Some(40_000));
+        assert_eq!(seed.accounting_scope, source.accounting_scope);
+        assert!(seed.accounting_scope.is_some());
+        assert_eq!(
+            seed.execution_realization_hash,
+            source.execution_realization_hash
+        );
+        assert_eq!(seed.launch_driver, source.launch_driver);
+        assert_eq!(
+            seed.admitted_execution_closure.is_some(),
+            source.admitted_execution_closure.is_some()
+        );
+        assert_eq!(
+            seed.continuation_source_thread_id.as_deref(),
+            Some("T-source")
+        );
+        assert_eq!(seed.resume_context.as_ref(), Some(&resume));
+        let sealed = seed.sealed_root_request.as_ref().unwrap();
+        assert_eq!(sealed.ref_bindings, resume.ref_bindings);
+        assert!(!sealed.resolved_ref_bindings.contains_key("model"));
+        assert!(sealed.resolved_ref_bindings.contains_key("guard"));
+    }
+
+    #[test]
+    fn operator_rebind_derives_no_seed_from_metadata_its_capsule_did_not_admit() {
+        let (source, resume, handler) = admitted_rebind_source();
+        let capsule = source.admitted_launch_capsule().unwrap().unwrap();
+        let model = rebound_names(&["model"]);
+        source.require_admitted_by(&capsule).unwrap();
+
+        // Operational metadata that drifted from the rooted capsule: wider
+        // capabilities, another budget scope, another realization, or a
+        // binding the capsule never sealed. Nothing downstream of the seed
+        // (launch preparation, secret delivery) can run, because there is
+        // no seed.
+        let mut wider_caps = source.clone();
+        wider_caps
+            .resume_context
+            .as_mut()
+            .unwrap()
+            .effective_caps
+            .push("ryeos.execute.tool.test/other".to_string());
+        let mut other_scope = source.clone();
+        other_scope
+            .accounting_scope
+            .as_mut()
+            .unwrap()
+            .execution_budget_id = "B-other".to_string();
+        let mut other_realization = source.clone();
+        other_realization.execution_realization_hash = Some("c".repeat(64));
+        let mut other_binding = crate::state_store::external_fixture_launch_metadata(
+            capsule.project_authority.clone(),
+            json!({"binding_records": {
+                "guard": {"canonical_ref": "directive:test/guard"},
+                "model": {"canonical_ref": "directive:test/models/planted"},
+            }}),
+            json!({}),
+        );
+        other_binding.accounting_scope = source.accounting_scope.clone();
+        for (label, drifted) in [
+            ("capabilities", wider_caps),
+            ("accounting scope", other_scope),
+            ("realization", other_realization),
+            ("binding", other_binding),
+        ] {
+            let mut drifted_resume = resume.clone();
+            drifted_resume.effective_caps = drifted
+                .resume_context
+                .as_ref()
+                .unwrap()
+                .effective_caps
+                .clone();
+            assert!(
+                drifted.require_admitted_by(&capsule).is_err(),
+                "{label}: drifted metadata must not pass for the admitted capsule"
+            );
+            let error = drifted
+                .operator_rebind_successor_seed(
+                    "T-source",
+                    &capsule,
+                    drifted_resume,
+                    &handler,
+                    &model,
+                )
+                .expect_err("no seed is derived from drifted metadata");
+            if matches!(label, "accounting scope" | "realization") {
+                assert!(
+                    format!("{error:#}").contains("authoritative CAS admission"),
+                    "{label}: {error:#}"
+                );
+            }
+        }
+
+        // A source with no sealed request has nothing to rebase.
+        assert!(
+            crate::launch_metadata::RuntimeLaunchMetadata::default()
+                .operator_rebind_successor_seed("T-source", &capsule, resume, &handler, &model)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn operator_rebind_keeps_every_other_continuation_check() {
+        let (fixture, resume, handler) = operator_rebind_fixture();
+        let model = rebound_names(&["model"]);
+
+        // Naming nothing, an unchanged binding, or a binding the admitted
+        // program does not bind.
+        for (names, expected) in [
+            (&[][..], "names no ref binding"),
+            (&["guard"][..], "unchanged"),
+            (&["guard", "model"][..], "unchanged"),
+            (&["absent"][..], "states no ref binding"),
+        ] {
+            let error = fixture
+                .for_operator_rebind_invocation(&resume, &handler, &rebound_names(names))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{names:?}: {error}");
+        }
+        let mut unbound = resume.clone();
+        unbound.ref_bindings.insert(
+            "extra".to_string(),
+            "directive:test/models/second".to_string(),
+        );
+        assert!(
+            fixture
+                .for_operator_rebind_invocation(&unbound, &handler, &rebound_names(&["extra"]))
+                .unwrap_err()
+                .to_string()
+                .contains("does not bind")
+        );
+
+        // A binding outside the named set, or any other identity field,
+        // cannot change with the rebind.
+        let mut widened = resume.clone();
+        widened.ref_bindings.insert(
+            "guard".to_string(),
+            "directive:test/other-guard".to_string(),
+        );
+        let mut other_item = resume.clone();
+        other_item.item_ref = "graph:test/other".to_string();
+        let mut other_mode = resume.clone();
+        other_mode.launch_mode = "wait".to_string();
+        let mut other_runtime = resume.clone();
+        other_runtime.runtime_ref = Some("runtime:other".to_string());
+        for changed in [widened, other_item, other_mode, other_runtime] {
+            assert!(
+                fixture
+                    .for_operator_rebind_invocation(&changed, &handler, &model)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("program identity")
+            );
+        }
+
+        // A qualification purpose cannot continue, rebound or not.
+        let mut qualification = fixture.clone();
+        qualification.qualification = qualified_product_sealed_fixture().qualification;
+        assert!(
+            qualification
+                .for_operator_rebind_invocation(&resume, &handler, &model)
+                .unwrap_err()
+                .to_string()
+                .contains("qualification verifier purpose cannot continue")
+        );
+
+        // Nor can a thread that carries product selections.
+        let selections: ryeos_state::external_content::products::composition::ProductSelectionInputs =
+            serde_json::from_value(serde_json::json!([{
+                "target": {"kind": "root"},
+                "selection": {
+                    "declaration_id": "runtime",
+                    "witness_hash": "a".repeat(64),
+                    "witness_source": {"kind": "local_capture"},
+                    "qualification_hash": null, "remote_testimony": null,
+                }
+            }]))
+            .unwrap();
+        let mut selected = fixture.clone();
+        selected.product_selections = selections.clone();
+        let mut selected_resume = resume.clone();
+        selected_resume.product_selections = selections;
+        assert!(
+            selected
+                .for_operator_rebind_invocation(&selected_resume, &handler, &model)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot carry product selectors")
         );
     }
 
@@ -3005,7 +3893,7 @@ mod authority_tests {
             owner.clone(),
             vec!["*".to_string()],
             true,
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_string()),
         ));
         fixture.validate_handler_context().unwrap();
@@ -3077,7 +3965,8 @@ mod authority_tests {
             target_operator_authority: crate::operator_authority::AdmittedOperatorAuthority {
                 owner_principal: owner,
                 origin_site_id: "site:source".to_string(),
-                principal_class: crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                principal_class:
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "f".repeat(64),
                 scopes: vec!["*".to_string()],
             },
@@ -3176,7 +4065,7 @@ mod authority_tests {
             capsule_target
                 .handler_context()
                 .and_then(|context| context.authorized_key_class),
-            Some(crate::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal)
         );
         assert_eq!(capsule_target.parameters, capsule_resume.parameters);
     }

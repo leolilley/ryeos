@@ -7,23 +7,97 @@ use ryeos_engine::resolution::{KindComposedView, ResolutionStepName, ResolvedAnc
 use serde_json::json;
 
 #[test]
-fn zero_participant_qualification_requires_exact_scoped_witness_shape() {
-    use ryeos_engine::protocol_vocabulary::CallbackChannel;
+fn q_issuance_joins_actual_bound_turn_instead_of_signed_template() {
+    use ryeos_external_execution_contract::qualification_request_binding::{
+        QualificationRequestBindingInput, QualificationRequestBindingOutput,
+    };
+    use ryeos_state::external_content::products::qualification::{
+        PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA,
+        ProductQualificationConsumerWorkerRequest,
+    };
+    use ryeos_state::external_execution::qualification_controller_canary::{
+        QControllerCanaryBinding, QControllerCanaryContract, QControllerCanaryEvidence,
+    };
+    // Inert commitment fixture, not a fabricated adapter invocation or file proof.
+    let mut request = ProductQualificationConsumerWorkerRequest {
+        schema: PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA.into(),
+        credential_profile_id: None,
+        fixture: None,
+        controller_canary: Some(QControllerCanaryContract::OriginalControllerReadAndLocalRefusalV1),
+        session_setup: json!({"provider_defined":"setup"}),
+        body: json!({"provider_defined":"template"}),
+    };
+    let input = QualificationRequestBindingInput {
+        schema: 1,
+        template: request.body.clone(),
+        controller_canary_path: "/private/controller-canary/canary".into(),
+    };
+    let output = QualificationRequestBindingOutput {
+        schema: 1,
+        input_digest: input.digest().unwrap(),
+        resolved_body: json!({"provider_defined":"actual bound turn"}),
+    };
+    let binding: QControllerCanaryBinding = serde_json::from_value(json!({
+        "schema":1,"controller_path":input.controller_canary_path,
+        "initial_file":{"directory_identity":{"filesystem": {"device": 1},"inode": 2},
+            "file_identity":{"filesystem": {"device": 1},"inode": 3},
+            "content_sha256":"a".repeat(64),"size_bytes":65,"permission_mode":384},
+        "provider_declaration_id":"provider","configuration_adapter_artifact_hash":"b".repeat(64),
+        "configuration_adapter_artifact_bytes":1,
+        "binding_input_digest":input.digest().unwrap(),"binding_output_digest":output.digest().unwrap(),
+        "template_request_digest":canonical_value_digest(&request.body).unwrap(),
+        "resolved_request_digest":canonical_value_digest(&output.resolved_body).unwrap(),
+        "resolved_body":output.resolved_body,
+    })).unwrap();
+    let evidence = QControllerCanaryEvidence {
+        schema: 1,
+        terminal_file: binding.initial_file.clone(),
+        binding,
+    };
+    let setup = canonical_value_digest(&request.session_setup).unwrap();
+    let template = canonical_value_digest(&request.body).unwrap();
+    let actual = &evidence.binding.resolved_request_digest;
+    require_qualification_worker_request(&request, &setup, actual, Some(&evidence)).unwrap();
+    assert!(
+        require_qualification_worker_request(&request, &setup, &template, Some(&evidence)).is_err()
+    );
+    assert!(require_qualification_worker_request(&request, &setup, actual, None).is_err());
+    assert!(
+        require_qualification_worker_request(&request, &template, actual, Some(&evidence)).is_err()
+    );
+    let mut changed = evidence.clone();
+    changed.terminal_file.content_sha256 = "f".repeat(64);
+    assert!(
+        require_qualification_worker_request(&request, &setup, actual, Some(&changed)).is_err()
+    );
+    request.body = json!({"provider_defined":"another template"});
+    assert!(
+        require_qualification_worker_request(&request, &setup, actual, Some(&evidence)).is_err()
+    );
+    request.controller_canary = None;
+    let literal = canonical_value_digest(&request.body).unwrap();
+    require_qualification_worker_request(&request, &setup, &literal, None).unwrap();
+    assert!(
+        require_qualification_worker_request(&request, &setup, &literal, Some(&evidence)).is_err()
+    );
+}
 
-    assert!(require_zero_participant_lane(false, false, CallbackChannel::None).is_ok());
-    assert!(require_zero_participant_lane(true, true, CallbackChannel::Http).is_ok());
-    for scoped in [false, true] {
-        for purpose in [false, true] {
-            for channel in [CallbackChannel::None, CallbackChannel::Http] {
-                if matches!(
-                    (scoped, purpose, channel),
-                    (false, false, CallbackChannel::None) | (true, true, CallbackChannel::Http)
-                ) {
-                    continue;
-                }
-                assert!(
-                    require_zero_participant_lane(scoped, purpose, channel).is_err(),
-                    "accepted scoped={scoped}, purpose={purpose}, channel={channel:?}"
+#[test]
+fn zero_participant_qualification_requires_exact_subordinate_authority() {
+    use ryeos_engine::protocol_vocabulary::CallbackChannel;
+    use ryeos_engine::protocols::QualificationCallbackAuthority::{RemoteConsumer, ScopedProducer};
+    for subordinate in [None, Some(ScopedProducer), Some(RemoteConsumer)] {
+        for purpose in [None, Some(ScopedProducer), Some(RemoteConsumer)] {
+            for channel in [CallbackChannel::None, CallbackChannel::RuntimeSocket] {
+                let admitted = subordinate == purpose
+                    && matches!(
+                        (subordinate, channel),
+                        (None, CallbackChannel::None) | (Some(_), CallbackChannel::RuntimeSocket)
+                    );
+                assert_eq!(
+                    require_zero_participant_lane(subordinate, purpose, channel).is_ok(),
+                    admitted,
+                    "subordinate={subordinate:?}, purpose={purpose:?}, channel={channel:?}"
                 );
             }
         }
@@ -43,7 +117,7 @@ fn direct_settlement_requires_one_signed_terminal_digest() {
     };
     let exact = event(json!({"process_settlement_witness_digest":"a".repeat(64)}));
     assert_eq!(
-        signed_terminal_process_settlement_digest(&[exact.clone()]).unwrap(),
+        signed_terminal_process_settlement_digest(std::slice::from_ref(&exact)).unwrap(),
         "a".repeat(64)
     );
     assert!(signed_terminal_process_settlement_digest(&[]).is_err());
@@ -97,25 +171,44 @@ fn required_call() -> ExecutionEvidenceRequiredCallWire {
 }
 
 #[test]
-fn inline_participant_is_an_independent_root_not_a_continuation() {
-    let child = ryeos_state::objects::thread_snapshot::ThreadSnapshotBuilder::new(
+fn inline_participant_is_a_same_chain_child_of_its_parent() {
+    use ryeos_state::objects::thread_snapshot::ThreadSnapshotBuilder;
+    let parent = ThreadSnapshotBuilder::new(
+        "T-parent",
+        "T-root",
+        "graph_run",
+        "graph:test/flow",
+        "@graph",
+    )
+    .build();
+    let mut child = ThreadSnapshotBuilder::new(
         "T-child",
-        "T-child",
+        "T-root",
         "tool_run",
         "tool:test/probe",
         "@subprocess",
     )
     .build();
-    require_inline_child_root(&child, "T-child").unwrap();
-    assert!(require_inline_child_root(&child, "T-another-child").is_err());
+    child.upstream_thread_id = Some("T-parent".into());
+    require_inline_child_placement(&child, &parent, "T-child").unwrap();
+    assert!(require_inline_child_placement(&child, &parent, "T-another-child").is_err());
 
-    let mut continuation = child.clone();
-    continuation.chain_root_id = "T-parent".into();
-    assert!(require_inline_child_root(&continuation, "T-child").is_err());
+    let mut independent_root = child.clone();
+    independent_root.chain_root_id = "T-child".into();
+    independent_root.upstream_thread_id = None;
+    assert!(require_inline_child_placement(&independent_root, &parent, "T-child").is_err());
 
-    let mut upstream = child;
-    upstream.upstream_thread_id = Some("T-parent".into());
-    assert!(require_inline_child_root(&upstream, "T-child").is_err());
+    let mut other_chain = child.clone();
+    other_chain.chain_root_id = "T-other-root".into();
+    assert!(require_inline_child_placement(&other_chain, &parent, "T-child").is_err());
+
+    let mut other_upstream = child.clone();
+    other_upstream.upstream_thread_id = Some("T-sibling".into());
+    assert!(require_inline_child_placement(&other_upstream, &parent, "T-child").is_err());
+
+    let mut no_upstream = child;
+    no_upstream.upstream_thread_id = None;
+    assert!(require_inline_child_placement(&no_upstream, &parent, "T-child").is_err());
 }
 
 #[test]
@@ -140,7 +233,7 @@ fn static_action_preserves_inputs_but_refuses_every_unsupported_control() {
                     "declaration_id":"subject",
                     "witness_hash":"b".repeat(64),
                     "witness_source":{"kind":"local_capture"},
-                    "qualification_hash":null
+                    "qualification_hash":null, "remote_testimony": null
                 }
             }]),
         ),
@@ -365,4 +458,34 @@ fn projector_refusal_is_not_an_empty_successful_description() {
         .unwrap()
         .is_empty()
     );
+}
+
+#[test]
+fn probe_evidence_must_report_exactly_the_retained_member_digests() {
+    let supervisor = lillux::sha256_hex(b"supervisor");
+    let launcher = lillux::sha256_hex(b"launcher");
+    let retained = std::collections::BTreeMap::from([
+        ("launcher".to_owned(), launcher.clone()),
+        ("supervisor".to_owned(), supervisor.clone()),
+    ]);
+    let field = ryeos_external_execution::restoration_verifier_delivery::CONSUMER_EVIDENCE_ARCHIVE_MEMBERS_FIELD;
+    let matching = json!({ field: { "launcher": launcher, "supervisor": supervisor } });
+    require_evidence_member_digests(&matching, &retained).unwrap();
+
+    let swapped =
+        json!({ field: { "launcher": lillux::sha256_hex(b"other"), "supervisor": supervisor } });
+    assert!(require_evidence_member_digests(&swapped, &retained).is_err());
+    let missing = json!({ field: { "supervisor": supervisor } });
+    assert!(require_evidence_member_digests(&missing, &retained).is_err());
+    let extra = json!({ field: { "launcher": launcher, "supervisor": supervisor, "planted": lillux::sha256_hex(b"planted") } });
+    assert!(require_evidence_member_digests(&extra, &retained).is_err());
+    assert!(require_evidence_member_digests(&json!({}), &retained).is_err());
+    let malformed = json!({ field: { "launcher": "not-a-digest", "supervisor": supervisor } });
+    assert!(require_evidence_member_digests(&malformed, &retained).is_err());
+    assert!(require_evidence_member_digests(&json!({ field: [] }), &retained).is_err());
+    // No members retained: evidence naming none, or an empty map, is exact.
+    let none = std::collections::BTreeMap::new();
+    require_evidence_member_digests(&json!({}), &none).unwrap();
+    require_evidence_member_digests(&json!({ field: {} }), &none).unwrap();
+    assert!(require_evidence_member_digests(&matching, &none).is_err());
 }

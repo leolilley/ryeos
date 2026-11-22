@@ -55,6 +55,12 @@ pub fn signed_sources(
     profile["auxiliary_configs"] = json!([]);
     profile["runtime_configs"] = json!([]);
     profile["external_candidate"] = Value::Null;
+    // The fixture workload reads no configuration outside its sealed inputs.
+    profile["configuration_absence"] = json!({
+        "absolute_paths": [],
+        "startup_ancestor_paths": [],
+        "route_ancestor_paths": []
+    });
     // Enrollment has no model turn, candidate environment or recovery route.
     profile["route_sets"] = json!({
         "enrollment": ["credential.account.read", "credential.login.start"]
@@ -170,7 +176,7 @@ pub async fn create_profile(harness: &DaemonHarness, profile_id: &str) -> Result
     let result = service(
         harness,
         "service:credential-profiles/create",
-        json!({"profile_id":profile_id}),
+        json!({"profile_id":profile_id,"activation":{"kind":"ceremony"}}),
     )
     .await?;
     ensure!(
@@ -331,7 +337,7 @@ mod tests {
                 let matches = match contract["prim"].as_str().unwrap() {
                     "string" => value.is_string(),
                     "mapping" => value.is_object(),
-                    "array" => value.is_array(),
+                    "sequence" => value.is_array(),
                     primitive => panic!("unhandled current required primitive {primitive}"),
                 };
                 assert!(matches, "{path} required {field} has wrong shape");

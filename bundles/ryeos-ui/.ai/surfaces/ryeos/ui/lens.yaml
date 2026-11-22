@@ -1,12 +1,8 @@
-# ryeos:signed:2026-09-14T10:03:09Z:192abfd53b4672f5251387934db9ab9588a31cb52e3ecdc6c1ce6fb403ef0ea1:TQ3+ilDphZwN8jKaY+ywhanM51iOF7rKhtdhl4RfuZfaeb1wmCeCxQMYUKrwX9Vl2RR0I57394D0iWr78xn4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-20T01:32:56Z:5189008e88b25bb24706af23d2adf1ac01af371fe68cb5721e9efe60424b053c:fY0U+ajQ+yELLoOFT5/hT9v/uJ+qwIREWS75xKTm5Bl7orKFji9YnbEmsmtlWzbjO+JhUbuL6zCeVB99ihWoBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
-version: "1.0.0"
-description: >-
-  The cell-grid single-lens operator surface. One center lens fills the
-  screen at a time; breadth comes from swapping the lens (Ctrl+K view overlay),
-  never from arranging panes. The foot input routes at the directive, so the
-  timeline lens reads as a live cognition feed you talk into. This is the
-  TUI's own composition over the shared model — not the web's tiled RyeOS UI.
+title: Lens
+version: "1.1.0"
+description: Single-lens composition over the shared presentation model
 
 capabilities:
   sources: ["ryeos.execute.service.*"]
@@ -22,28 +18,23 @@ sources:
   projects:
     ref: service:projects/list
     role: projects
-  topology:
-    ref: service:ui/graph/topology
-    role: topology
-  items:
-    ref: service:ui/ryeos-ui/items/list
-    role: items
-    params:
-      limit: 1000
-      project_path: "@session:project_root"
-    dynamic_parameters: [query, kind]
-    requires_project: true
-  file_space:
-    ref: service:ui/ryeos-ui/files/tree
-    role: file_space
-    params:
-      root: project
-      path: ""
-      max_depth: 8
-      max_entries: 3000
-      project_path: "@session:project_root"
-    dynamic_parameters: [root, path]
-    requires_project: true
+  # The bars read their counts from this one queue; the daemon counts it and
+  # the clients add nothing.
+  attention:
+    ref: service:ui/ryeos-ui/work/attention
+    role: attention
+    params: { limit: 25 }
+    refresh: { on_hint: [thread, activity] }
+  # The words for every table's coverage line; the clients hold none of them.
+  coverage_wording:
+    ref: service:ui/ryeos-ui/coverage/wording
+    role: coverage_wording
+  # The principal's stored theme preference; a config/update success reaches
+  # the `service` hint, so a change applies without reopening the seat.
+  theme_preference:
+    ref: service:ui/ryeos-ui/config/get
+    role: theme_preference
+    refresh: { on_hint: [service] }
   file_read:
     ref: service:ui/ryeos-ui/files/read
     role: file_read
@@ -62,28 +53,20 @@ tiling:
   stack: { arrange: vertical }
   insert: end
 
-# Land on a chrome-less splash text view over the prism backdrop until the
-# operator picks a lens (Ctrl+K) or speaks into the foot input. Every lens in
-# the library — the live activity table, a thread's braid, the item space — is
-# one view-overlay stroke away; breadth is swapping the lens, never arranging panes.
-tiles:
-  - "view:ryeos/backdrop/splash"
-
-# Only the foot input and a thin top status strip — no edge panes.
-slots:
-  bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
+# Start empty; opening a View replaces the current lens.
+tiles: []
 
 style:
   border: thin
-
-backdrop: view:ryeos/backdrop/prism-shards
 
 # The full lens set as the launcher's tree — each group a foldable header,
 # every view under it launchable. Ctrl+←/→ cycles the flattened declared
 # order. Views no group lists still surface: the engine appends them under
 # path-derived groups, so nothing is unreachable.
 library:
+  - group: Inspection
+    views:
+      - view:ryeos/node/status
   - group: Threads
     views:
       - view:ryeos/threads/history
@@ -101,36 +84,11 @@ library:
     views:
       - view:ryeos/projects/list
       - view:ryeos/node/events
+      - view:ryeos/node/usage
       - view:ryeos/node/remotes
       - view:ryeos/node/bundles
       - view:ryeos/node/gc
-      - view:ryeos/graph/topology
       - view:ryeos/commands/grammar
-
-overlays:
-  views:
-    title: Views
-    widget: table
-    columns: [View, Description]
-    source: { ref: "runtime:views/launchable" }
-    hint: "type to filter views · enter to open"
-  commands:
-    title: Commands
-    widget: palette
-    source: { ref: "runtime:commands/available" }
-    hint: "type to filter commands · enter to run"
-  help:
-    title: Help
-    widget: table
-    columns: [Topic, Open]
-    source: { ref: "runtime:help" }
-    hint: "type to filter help · esc to close"
-  shortcuts:
-    title: Shortcuts
-    widget: table
-    columns: [Keys, Intent]
-    source: { ref: "runtime:shortcuts" }
-    hint: "type to filter shortcuts · esc to close"
 
 input:
   route:
@@ -148,11 +106,7 @@ input:
         item_ref: directive:ryeos/ops/base
         project_path: "@session:project_root"
         ref_bindings:
-          model: directive:ryeos/ops/base
-
-ambient:
-  show_background: true
-  opacity: 0.35
+          model: directive:ryeos/models/general
 
 affordances:
   - id: view.threads
@@ -166,7 +120,4 @@ affordances:
     category: View
   - id: view.item_inspector
     label: Inspector
-    category: View
-  - id: view.graph
-    label: Graph
     category: View

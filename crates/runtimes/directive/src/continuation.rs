@@ -1,8 +1,12 @@
+use ryeos_directive_definition::ImageAcceptConfig;
+
 use crate::directive::ProviderMessage;
 
 pub struct ContinuationCheck {
     context_window: u64,
     threshold_ratio: f64,
+    /// How the model counts an image, when its entry declares image input.
+    images: Option<ImageAcceptConfig>,
 }
 
 impl ContinuationCheck {
@@ -10,7 +14,15 @@ impl ContinuationCheck {
         Self {
             context_window,
             threshold_ratio,
+            images: None,
         }
+    }
+
+    /// The same check with the model's image cost declaration, so an image
+    /// counts toward the window as the request would carry it.
+    pub fn with_images(mut self, images: Option<ImageAcceptConfig>) -> Self {
+        self.images = images;
+        self
     }
 
     /// Continue when the LIVE context that will be sent on the next provider
@@ -28,31 +40,10 @@ impl ContinuationCheck {
         self.estimate_live_context_tokens(messages) >= self.threshold()
     }
 
-    /// Rough token estimate of the live message window: message content,
-    /// replayed `reasoning_content`, and tool-call names/arguments (tool-result
-    /// content is counted via the tool message's `content`). Character-count /
-    /// 4 — deliberately provider-agnostic; it only needs to track the context
-    /// window, not bill.
+    /// Rough token estimate of the live message window, by the one estimator
+    /// the recovery trim also uses.
     pub fn estimate_live_context_tokens(&self, messages: &[ProviderMessage]) -> u64 {
-        let char_count: usize = messages
-            .iter()
-            .map(|m| {
-                let mut chars = 0;
-                if let Some(ref content) = m.content {
-                    chars += content.to_string().len();
-                }
-                if let Some(ref reasoning) = m.reasoning_content {
-                    chars += reasoning.len();
-                }
-                for tc in m.tool_calls.iter().flatten() {
-                    chars += tc.arguments.to_string().len();
-                    chars += tc.name.len();
-                }
-                chars
-            })
-            .sum();
-
-        (char_count as u64) / 4
+        crate::estimate::estimate_tokens(messages, self.images.as_ref())
     }
 
     pub fn threshold(&self) -> u64 {
@@ -63,15 +54,14 @@ impl ContinuationCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::directive::ProviderMessageExt;
 
     fn make_message(role: &str, content: &str) -> ProviderMessage {
-        ProviderMessage {
-            role: role.to_string(),
-            content: Some(json!(content)),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
+        match role {
+            "system" => ProviderMessage::system(content),
+            "assistant" => ProviderMessage::assistant_text(content),
+            "tool" => ProviderMessage::tool_result("c0", content),
+            _ => ProviderMessage::user(content),
         }
     }
 
@@ -108,12 +98,12 @@ mod tests {
     #[test]
     fn reasoning_content_counts_toward_context() {
         let check = ContinuationCheck::new(200_000, 0.9);
-        let mut with_reasoning = make_message("assistant", "");
-        with_reasoning.reasoning_content = Some("r".repeat(4000));
+        let with_reasoning =
+            ProviderMessage::assistant(Some(String::new()), Vec::new(), Some("r".repeat(4000)));
         let with = check.estimate_live_context_tokens(std::slice::from_ref(&with_reasoning));
         let without = check.estimate_live_context_tokens(&[make_message("assistant", "")]);
         assert!(with > without);
-        assert_eq!(with, 1000); // (2 quotes for empty content + 4000 reasoning) / 4
+        assert_eq!(with, 1000); // 4000 reasoning characters / 4; an empty text adds none
     }
 
     #[test]
@@ -128,9 +118,8 @@ mod tests {
         let a = "a".repeat(400);
         let b = "b".repeat(400);
         let messages = vec![make_message("user", &a), make_message("assistant", &b)];
-        // content is JSON-stringified, so each 400-char string is 402 chars
-        // (surrounding quotes): (402 + 402) / 4 = 201.
+        // Text counts by its length, not its JSON encoding: (400 + 400) / 4.
         let tokens = check.estimate_live_context_tokens(&messages);
-        assert_eq!(tokens, 201);
+        assert_eq!(tokens, 200);
     }
 }

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-28T23:35:24Z:7189124e584d13edd4770f869cc50f4b556cfab78a1eaf2c0ded8e20796d4978:6nd/O5QfwDidFido6hJNNdLBo17e0iARn5e6S9QFzdXEp1tfQTe88zoEYzuXkyPFGGaqVwzh4/HdF/BJ/g8BDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-17T01:54:47Z:b3d4dd7638e90e436263b8d944d4b7e39775b0d1bc31eb3de09267cdfa89299b:DbqMWlvi00Vh4YtJ7EkD7Ob1SB7VEbuH9rBJtFVrY6I84Ls3GqPH7/tIvPkITG+qhlCzG3360HizCYr9AQr8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.9.0"
+version: "1.10.0"
 ```
 
 # RyeOS Release Process
@@ -56,10 +56,10 @@ the external compiler bootstrap for every future bundle change. The intended
 normal path reuses qualified environment products, publishes the changed bundle
 closure to the source node, and activates an admitted selection on consumers.
 
-The remaining native implementation sequence is section 0 of
-`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`:
-finish qualified build inputs, calibrate/apply publication authority, bootstrap
-the catalog, then demonstrate data-only and binary-bearing successor updates.
+Continue the native sequence with qualified build inputs, current-policy
+calibration and publication authority, catalog bootstrap, then data-only and
+binary-bearing successor updates. Retained operational evidence supplies the
+exact live coordinates; these durable gates define the required acceptance.
 Calibration is reused while its measured identities and policy remain valid;
 invalidating changes require recalibration. Portable production itself needs
 only its qualified Python runtime, while native compilation needs the selected
@@ -69,11 +69,47 @@ prerequisite qualification as completion of bundle publication or activation.
 
 ## Critical rules
 
+### Protected release qualification
+
+Release qualifier services use `external-content.launch-product-qualification`
+through its existing owner. Their signed capability declarations and calling
+Graphs explicitly include that capability in addition to their Tool and Config
+requirements. The selected checker and parameters still come from the current
+signed qualification policy; the release stage may only assert the expected
+checker and complete composed inputs.
+
+The stage captures and verifies the signed source/recipe overlay, binds its
+complete subject and qualified Python inputs, then launches the protected
+read-only verifier. Ordinary build/capture Graphs keep writable COW authority.
+Publication consumes the exact retained successful verifier terminal and its
+owner-bound qualification purpose. A direct checker result cannot bypass that
+purpose or the current-policy checks.
+
+Qualification launch IDs are stable for an exact recorded release operation
+and its source tree, capture policy, recipe and selected products. Recapturing
+identical source changes the snapshot creation timestamp but does not authorize
+another launch. The chosen exact snapshot hash remains bound by the protected
+launch. An uncertain acknowledgement reports the exact launch ID: query that
+owner-bound `launch/status` coordinate before proceeding. Repeating it cannot
+start a second verifier. A deliberate new recorded service invocation supplies
+a fresh operation root for a new attempt or changed-policy requalification.
+Internal callers without a recorded root retain one deterministic coordinate
+for the exact stage; mutable policy changes alone do not remint that attempt.
+
+After merging a checker, policy or admission change, assess exact artifact and
+definition identities and requalify affected retained products. Recalibrate
+dependent release authority when its measured inputs change. Preserve existing
+evidence for the artifacts and contracts it actually tested. Source tests do
+not establish installation, live qualification or cross-node activation; record
+those stages and their exact retained evidence during operational integration.
+
 - Release publication does not run repository, runtime, model, or image tests.
   Those belong to independent CI/qualification workflows and may report
   failures without blocking an explicitly authorized release. Publication
   still fails closed on source identity, artifact digests, signatures,
   attestations, immutable-tag conflicts, and required dependency availability.
+- The node-binaries archive is built by the `node-binaries-artifact` Bake target
+  from the `standard-pair` stage in that same solve; do not build it separately.
 - One release uses one BuildKit Bake solve. Its internal, non-installable
   `release-artifacts` publication set compiles and signs the union required by
   the native archive and all release images exactly once. The archive,
@@ -93,9 +129,10 @@ prerequisite qualification as completion of bundle publication or activation.
 - Do **not** confuse a successful long projection rebuild with a daemon startup
   failure.
 - Do **not** treat AUR as part of the release unless explicitly requested. The
-  active release path is GHCR. Do not publish/update AUR from GitHub's raw tag
-  archive unless the AUR artifact flow has been fixed; raw tag archives do not
-  contain ignored, generated bundle artifacts from `scripts/populate-bundles.sh`.
+  active release path is GHCR. If AUR is requested, follow §9: the `ryeos`
+  package needs the signed bundle artifact as well as the tag archive, because
+  raw tag archives do not contain the generated bundle artifacts from
+  `scripts/populate-bundles.sh`.
 - Do **not** stage unrelated untracked files, especially:
   - `.ai/knowledge/ryeos/future/portable-execution-white-paper-thesis.md`
 
@@ -190,11 +227,22 @@ crates/tools/external-candidate-supervisor/Cargo.toml
 crates/tools/external-guest-occurrence-owner/Cargo.toml
 crates/tools/external-guest-restoration-verifier/Cargo.toml
 crates/tools/external-guest-runtime-producer/Cargo.toml
-crates/tools/independent-runtime-verifier/Cargo.toml
+crates/tools/codex-runtime-verifier/Cargo.toml
+crates/tools/guest-wire-verifier/Cargo.toml
+crates/host-adapters/modal-guest-launcher/Cargo.toml
 crates/bin/cli/Cargo.toml
 crates/bin/daemon/Cargo.toml
 Cargo.lock
 ```
+
+`scripts/release/versioned-crates.txt` is the source of truth for this bump
+list: the publish workflow requires every manifest listed there to equal the
+release version and fails if any unlisted workspace crate carries a `0.X.Y`
+version with X >= 5. Add a new release-versioned crate to that file and to the
+list above.
+
+`Cargo.lock` carries 17 entries at the release version, one per bumped
+manifest; `rg "$old" Cargo.lock | wc -l` must drop to zero after the bump.
 
 The root `Cargo.toml` is a workspace manifest and does not currently contain a
 workspace package version. Do not invent one.
@@ -218,7 +266,9 @@ files=(
   crates/tools/external-guest-occurrence-owner/Cargo.toml
   crates/tools/external-guest-restoration-verifier/Cargo.toml
   crates/tools/external-guest-runtime-producer/Cargo.toml
-  crates/tools/independent-runtime-verifier/Cargo.toml
+  crates/tools/codex-runtime-verifier/Cargo.toml
+  crates/tools/guest-wire-verifier/Cargo.toml
+  crates/host-adapters/modal-guest-launcher/Cargo.toml
   crates/bin/cli/Cargo.toml
   crates/bin/daemon/Cargo.toml
 )
@@ -430,21 +480,34 @@ GitHub release assets:
 GHCR image tags:
   ghcr.io/leolilley/ryeos-standard:$new
   ghcr.io/leolilley/ryeos-central-host:$new
+  ghcr.io/leolilley/ryeos-local-inference:$new
   ghcr.io/leolilley/ryeos-hosted-workflow:$new
 ```
 
 The workflow asks BuildKit to construct the bundle archive, standalone static
 workload-client realization, and three image candidates in one Bake invocation.
 Their common published stage performs one host Cargo build, one static-worker
-build closure, and one signed bundle publication. The five outputs then fan out
+build closure, and one signed bundle publication. The six outputs then fan out
 without recompiling RyeOS. The workload-client archive carries canonical build
 testimony both as a sidecar and embedded in the executable; recovery verifies
 their exact equality against the tagged release coordinate. The workflow checks
 provenance and SBOM attestations, verifies keyless signatures, promotes the
-immutable version tags, and only then advances all `latest` tags. Runtime
+immutable version tags, and only then advances all four `latest` tags. Runtime
 qualification is separate and non-gating. Verify the immutable tags, release
 assets, and successful publication workflow run; do not use the mutable tags as
 the release identity.
+
+### Prerelease versions
+
+A version with a prerelease suffix (`X.Y.Z-rc.N`) publishes the same immutable
+version tags, digests, signatures and attestations, but never moves a `latest`
+tag, and its GitHub release is created as a prerelease. Tagging the release
+candidate and the final release on the same commit is recommended, so the final
+publication rebuilds identical source; whether the final tag must reuse the
+candidate's commit is still an open decision.
+
+The `qualify` job also fails the run when any workspace crate's version differs
+from the release version.
 
 The shared GHA BuildKit cache is exported by the archive target only. Attaching
 the same cache export to every image target would upload the common compilation
@@ -457,15 +520,69 @@ published stage.
 AUR is not currently used for shipping RyeOS releases. Do not update AUR as part
 of the standard release flow.
 
-The checked-in AUR PKGBUILDs are not sufficient for an official release as-is
-because they source GitHub's raw tag archive. Raw tag archives omit ignored,
-generated bundle artifacts produced by `scripts/populate-bundles.sh`, including
-bundle-owned binaries, CAS objects/refs, populated manifests, and trust docs.
+The checked-in PKGBUILDs under `deploy/aur/` are templates, not publishable
+metadata: `pkgver` and the checksums are placeholders (`RELEASE_VERSION`,
+`RELEASE_ARCHIVE_SHA256`, `RELEASE_BUNDLE_ARCHIVE_SHA256`). The `ryeos`
+package has two immutable inputs, both listed in its `source=` with a pinned
+`sha256sums` entry each:
 
-Before any future AUR publication, create or automate an official populated
-release tarball, point `source=...` at that artifact instead of the raw tag
-archive, replace `sha256sums=('SKIP')` with a real checksum, and validate with a
-clean `makepkg` build/install/init.
+- the signed-tag source archive (GitHub's tag archive), used to build the host
+  binaries; and
+- `ryeos-bundles-<version>-x86_64.tar.gz`, the release asset produced by the
+  release workflow (`scripts/release/package-bundle-artifact.sh`) after
+  populating and signing the release bundle sets with the official publisher
+  key; the archive carries every bundle of every installable
+  set (the sorted union over `ryeos_bundle_set_ids`; `modal-sandbox`, which
+  no installable set names, is published but not archived).
+
+The tag archive alone is not enough: it omits the ignored, generated bundle
+artifacts produced by `scripts/populate-bundles.sh` (bundle-owned binaries,
+CAS objects/refs, populated manifests, trust docs). The AUR build copies the
+bundle artifact verbatim into `/usr/share/ryeos` and never regenerates or
+re-signs it. `ryeos-mcp` has only the tag archive as input.
+
+If an AUR publication is requested, render the metadata with
+`scripts/release/prepare-aur.sh` (it verifies the signed tag and both archive
+digests and fills in the checksums), publish only the generated package
+directories, and validate with a clean `makepkg` build/install/init. See
+`deploy/aur/README.md` for the full command.
+
+### Installing the node from release files (no Docker, no Rust)
+
+Each release also carries the node pair as a plain archive beside the bundles
+archive:
+
+- `ryeos-node-<version>-x86_64-unknown-linux-gnu.tar.gz`, holding
+  `ryeos-node-<version>-x86_64-unknown-linux-gnu/bin/ryeosd`, `.../bin/ryeos`
+  and `.../LICENSE`; and
+- `ryeos-node-<version>-x86_64-unknown-linux-gnu.tar.gz.sha256`.
+
+They are the very `ryeosd` and `ryeos` the standard image installs, taken from
+the same compiled stage. `ryeos-core-tools` is not in the node archive: it is
+a bundle payload and arrives in the bundles archive under
+`core/.ai/bin/x86_64-unknown-linux-gnu/`. All compile stages use the
+`rust:1.95-slim-bookworm` toolchain, so the dynamically linked pair needs glibc
+2.36 or newer and runs on `debian:bookworm` and later. The release build proves this before
+publishing: its `node-binaries-verify` stage unpacks the archive into a stock
+`debian:bookworm-slim` (no build libraries) and runs both binaries there.
+
+```sh
+V=0.6.0   # the release version, no leading v
+B=https://github.com/leolilley/ryeos/releases/download/v$V
+curl -fLO $B/ryeos-node-$V-x86_64-unknown-linux-gnu.tar.gz
+curl -fLO $B/ryeos-node-$V-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -fLO $B/ryeos-bundles-$V-x86_64.tar.gz
+curl -fLO $B/ryeos-bundles-$V-x86_64.tar.gz.sha256
+sha256sum -c ryeos-node-$V-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+          ryeos-bundles-$V-x86_64.tar.gz.sha256
+tar -xzf ryeos-node-$V-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf ryeos-bundles-$V-x86_64.tar.gz
+export PATH=$PWD/ryeos-node-$V-x86_64-unknown-linux-gnu/bin:$PATH
+ryeos init --source $PWD/ryeos-bundles-$V-x86_64 ...   # remaining flags as for any node
+```
+
+The release signs the bundles with the official publisher key, which the
+binaries already trust, so no trust-file override is needed.
 
 ## 10. Local packaged-layout install validation
 
@@ -474,8 +591,8 @@ intentionally bypasses the package manager/AUR flow while installing the same
 runtime layout:
 
 - binaries to `/usr/bin`;
-- selected bundle sources to `/usr/share/ryeos/<bundle>` (default: the full set
-  defined by `scripts/pkg/bundle-sets.sh`);
+- selected bundle sources to `/usr/share/ryeos/<bundle>` (default: the standard
+  set defined by `scripts/pkg/bundle-sets.sh`);
 - initialized bundles under `~/.local/share/ryeos/.ai/bundles/...` after
   `ryeos init`.
 
@@ -553,9 +670,8 @@ Important caveats:
   release/E2E qualification uses `--populate --all`.
 - `--no-init` leaves initialized user state unchanged.
 - `--no-daemon-restart` leaves any daemon restart to you.
-- `--bundle-set hosted-node` intentionally installs only `core`,
-  `central-auth`, and `hosted-node`; do not use it for full local release
-  validation unless testing that lean layout.
+- `--bundle-set core` intentionally installs only the `core` bundle; do not
+  use it for full local release validation unless testing that lean layout.
 
 ## 11. Bundle signing implications
 
@@ -675,7 +791,9 @@ Before tagging:
   - [ ] `crates/engine/ryeos-runtime/Cargo.toml`
   - [ ] `crates/tools/core-tools/Cargo.toml`
   - [ ] `crates/tools/session-exec/Cargo.toml`
-  - [ ] All `crates/tools/{codex-*,external-*,independent-runtime-verifier}/Cargo.toml` release-version manifests
+  - [ ] All `crates/tools/{codex-*,external-*}/Cargo.toml` release-version manifests
+  - [ ] `crates/tools/guest-wire-verifier/Cargo.toml`
+  - [ ] `crates/host-adapters/modal-guest-launcher/Cargo.toml`
   - [ ] `crates/bin/cli/Cargo.toml`
   - [ ] `crates/bin/daemon/Cargo.toml`
   - [ ] `Cargo.lock`

@@ -74,22 +74,7 @@ impl InheritedPipePair {
         maximum: usize,
         deadline: MonotonicDeadline,
     ) -> io::Result<Self> {
-        use std::os::fd::FromRawFd;
-        let lease = crate::exec::retain_fork_sensitive_descriptors_until(deadline)?;
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let wake = crate::exec::InheritedDescriptorAuthority::from_owned_file(
-            unsafe { std::fs::File::from_raw_fd(fd) },
-            &lease,
-        )
-        .map_err(io::Error::other)?;
-        let interrupt = PipeInterrupt(Arc::new(InterruptState {
-            interrupted: false.into(),
-            wake,
-        }));
-        interrupt.check(Some(deadline))?;
+        let interrupt = PipeInterrupt::new(deadline)?;
         Ok(Self {
             input: InheritedPipeInput {
                 pipe: input,
@@ -112,6 +97,26 @@ impl InheritedPipePair {
 }
 
 impl PipeInterrupt {
+    #[cfg(target_os = "linux")]
+    fn new(deadline: MonotonicDeadline) -> io::Result<Self> {
+        use std::os::fd::FromRawFd;
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(deadline)?;
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let wake = crate::exec::InheritedDescriptorAuthority::from_owned_file(
+            unsafe { std::fs::File::from_raw_fd(fd) },
+            &lease,
+        )
+        .map_err(io::Error::other)?;
+        let interrupt = PipeInterrupt(Arc::new(InterruptState {
+            interrupted: false.into(),
+            wake,
+        }));
+        interrupt.check(Some(deadline))?;
+        Ok(interrupt)
+    }
     /// Sticky broadcast: neither reader nor writer drains the wake descriptor.
     pub fn interrupt(&self) -> io::Result<()> {
         use std::sync::atomic::Ordering;
@@ -310,6 +315,133 @@ impl InheritedPipeInput {
     }
 }
 impl InheritedPipeOutput {
+    /// Adopt one uniquely owned write pipe at exclusive executable startup.
+    /// No stdin requirement is introduced. Invalid bounds/coordinates refuse
+    /// before adoption; later failures consume the selected endpoint.
+    ///
+    /// # Safety
+    /// The process is single-threaded, has not used stdio, and no Rust object
+    /// or other actor aliases this endpoint. The selected FD must be owned by
+    /// this invocation; callers must never reconstruct it after failure.
+    pub unsafe fn take_inherited_output(
+        output_fd: u32,
+        max_chunk_bytes: usize,
+        startup_deadline: MonotonicDeadline,
+    ) -> io::Result<Self> {
+        if max_chunk_bytes == 0 || max_chunk_bytes > isize::MAX as usize {
+            return Err(invalid("invalid inherited output chunk bound"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let pipe =
+                unsafe { crate::invocation::linux::acquire_output(output_fd, startup_deadline) }?;
+            let interrupt = PipeInterrupt::new(startup_deadline)?;
+            Ok(Self {
+                pipe,
+                maximum: max_chunk_bytes,
+                poisoned: false,
+                interrupt,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (output_fd, startup_deadline);
+            Err(unsupported())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_written_prefix(
+        &mut self,
+        count: usize,
+        deadline: MonotonicDeadline,
+    ) -> io::Result<usize> {
+        // A prefix has already reached the pipe. Interruption is terminal and
+        // must preserve poisoning, never masquerade as zero-progress EINTR.
+        self.interrupt.check(Some(deadline)).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("inherited output prefix delivered before terminal interruption: {error}"),
+            )
+        })?;
+        self.poisoned = false;
+        Ok(count)
+    }
+
+    /// Attempts one bounded nonblocking write. Success reports the exact prefix
+    /// delivered, not an application acknowledgement. Only known-zero transient
+    /// failures permit retry on this same owner; uncertain failures poison it.
+    pub fn try_write_chunk(
+        &mut self,
+        bytes: &[u8],
+        deadline: MonotonicDeadline,
+    ) -> io::Result<usize> {
+        if self.poisoned {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "inherited output poisoned",
+            ));
+        }
+        if bytes.len() > self.maximum {
+            return Err(invalid("inherited output chunk exceeds bound"));
+        }
+        self.interrupt.check(Some(deadline)).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("inherited output operation cancelled or expired: {error}"),
+            )
+        })?;
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        self.poisoned = true;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let signal = crate::invocation::linux::BlockedSigpipe::new()?;
+            let result = unsafe {
+                libc::write(
+                    self.pipe.file().as_raw_fd(),
+                    bytes.as_ptr().cast(),
+                    bytes.len().min(8192),
+                )
+            };
+            if result > 0 {
+                // Delivery happened. Cancellation now must not look like a
+                // zero-byte EINTR that the enclosing relay may retry or ignore
+                // while accepting completion. Keep this owner poisoned.
+                return self.finish_written_prefix(result as usize, deadline);
+            }
+            if result == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "inherited output made no progress",
+                ));
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EPIPE) {
+                signal.consume_new_sigpipe();
+            }
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
+                self.interrupt.check(Some(deadline)).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("inherited output retry forbidden after interruption: {error}"),
+                    )
+                })?;
+                self.poisoned = false;
+            }
+            Err(error)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(unsupported())
+        }
+    }
+
     /// Failure after entering an operation permanently poisons this half.
     /// Bytes may already have reached the peer; success is not application ACK.
     pub fn write_all(&mut self, bytes: &[u8], deadline: MonotonicDeadline) -> io::Result<()> {
@@ -410,6 +542,133 @@ mod tests {
             parent_reader,
         )
     }
+    #[test]
+    fn output_only_owner_writes_without_selecting_an_input() {
+        let (mut reader, writer) = pipe();
+        // Test-owned unique endpoint, not adoption of libtest's stdout.
+        let pipe = unsafe {
+            crate::invocation::linux::acquire_output(writer.into_raw_fd() as u32, deadline())
+        }
+        .unwrap();
+        let mut output = InheritedPipeOutput {
+            pipe,
+            maximum: 4,
+            poisoned: false,
+            interrupt: PipeInterrupt::new(deadline()).unwrap(),
+        };
+        assert_eq!(
+            output.write_all(b"extra", deadline()).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        output.write_all(b"done", deadline()).unwrap();
+        drop(output);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"done");
+    }
+
+    #[test]
+    fn output_only_acquisition_refuses_read_endpoint_and_regular_file() {
+        let (reader, _writer) = pipe();
+        assert!(
+            unsafe {
+                crate::invocation::linux::acquire_output(reader.into_raw_fd() as u32, deadline())
+            }
+            .is_err()
+        );
+        let file = tempfile::tempfile().unwrap();
+        assert!(
+            unsafe {
+                crate::invocation::linux::acquire_output(file.into_raw_fd() as u32, deadline())
+            }
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn delivered_prefix_then_cancellation_is_terminal_and_poisoned() {
+        let (pair, _writer, mut reader) = pair(4);
+        let (_, mut output, interrupt) = pair.split();
+        // Deterministically exercise the post-syscall boundary after actual
+        // pipe delivery, without a scheduling-dependent cancellation race.
+        output.poisoned = true;
+        let mut writer = output.pipe.file();
+        writer.write_all(b"sent").unwrap();
+        interrupt.interrupt().unwrap();
+        assert_eq!(
+            output
+                .finish_written_prefix(4, deadline())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(output.poisoned);
+        let mut delivered = [0; 4];
+        reader.read_exact(&mut delivered).unwrap();
+        assert_eq!(&delivered, b"sent");
+        assert_eq!(
+            output
+                .try_write_chunk(b"redo", deadline())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn nonblocking_output_cancellation_is_not_retryable_syscall_interruption() {
+        let (pair, _writer, _reader) = pair(4);
+        let (_, mut output, interrupt) = pair.split();
+        interrupt.interrupt().unwrap();
+        let error = output.try_write_chunk(b"data", deadline()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ));
+    }
+
+    #[test]
+    fn nonblocking_output_reports_prefix_and_recovers_after_backpressure() {
+        let (pair, _writer, mut reader) = pair(8192);
+        let (_, mut output, _) = pair.split();
+        let bytes = [7u8; 8192];
+        let mut delivered = 0usize;
+        loop {
+            match output.try_write_chunk(&bytes, deadline()) {
+                Ok(n) => {
+                    assert!(n > 0 && n <= bytes.len());
+                    delivered += n;
+                    assert!(delivered <= 16 * 1024 * 1024);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                other => panic!("unexpected write: {other:?}"),
+            }
+        }
+        let mut drained = vec![0; delivered];
+        reader.read_exact(&mut drained).unwrap();
+        assert!(drained.iter().all(|byte| *byte == 7));
+        assert_eq!(output.try_write_chunk(b"done", deadline()).unwrap(), 4);
+        let mut tail = [0; 4];
+        reader.read_exact(&mut tail).unwrap();
+        assert_eq!(&tail, b"done");
+        drop(reader);
+        assert_eq!(
+            output
+                .try_write_chunk(b"lost", deadline())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            output
+                .try_write_chunk(b"retry", deadline())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
     #[test]
     fn interactive_chunks_actual_eof_and_bounds() {
         let (pair, mut writer, mut reader) = pair(4);

@@ -117,7 +117,7 @@ pub(crate) fn capsule(
     root["source_content_digest"] = json!(owner.root_source_content_digest);
     root["raw_content_digest"] = json!(owner.root_raw_content_digest);
     root["source_space"] = json!("bundle");
-    root["source_root"] = json!({"kind":"bundle","name":"standard"});
+    root["source_root"] = json!({"kind":"bundle","name":"knowledge"});
     root["trust_class"] = json!("trusted_bundle");
     root["signer_fingerprint"] = json!(owner.signer_fingerprint);
     invocation["resolution_output"]["effective_trust_class"] = json!("trusted_bundle");
@@ -189,6 +189,7 @@ pub(crate) fn capsule(
                     Path::new("/executor"),
                 )
                 .unwrap(),
+                host_origin: None,
             },
             admitted_project_root: None,
         },
@@ -207,12 +208,13 @@ pub(crate) fn capsule(
 #[cfg(target_os = "linux")]
 pub(crate) fn state_and_source() -> (
     tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
     ryeos_app::state::AppState,
     VerifiedAdmittedSourceRecords,
     Vec<u8>,
 ) {
     let root = tempfile::tempdir().unwrap();
-    let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+    let (store_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
     let (records, bytes) = source_records();
     let authority = super::super::super::pinned_state_authority(&state).unwrap();
     let cas = authority.cas_store().unwrap();
@@ -230,14 +232,14 @@ pub(crate) fn state_and_source() -> (
             .unwrap(),
         records.content_manifest_hash()
     );
-    (root, state, records, bytes)
+    (root, store_owner, state, records, bytes)
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 fn external_source_delivery_keeps_b_bytes_and_exact_records_after_live_candidate_changes() {
     use ryeos_external_execution_contract::GuestMountContentAuthority;
-    let (root, state, records, bytes) = state_and_source();
+    let (root, _store_owner, state, records, bytes) = state_and_source();
     let (capsule, mut resolution) = capsule(&records);
     let live = root
         .path()
@@ -330,7 +332,7 @@ fn external_source_delivery_keeps_b_bytes_and_exact_records_after_live_candidate
 #[test]
 #[cfg(target_os = "linux")]
 fn external_source_delivery_refuses_capsule_resolution_disagreement_before_materialization() {
-    let (_root, state, records, _) = state_and_source();
+    let (_root, _store_owner, state, records, _) = state_and_source();
     let (capsule, resolution) = capsule(&records);
     let mut wrong_resolution = resolution.clone();
     wrong_resolution
@@ -363,7 +365,7 @@ fn external_source_delivery_refuses_capsule_resolution_disagreement_before_mater
 #[test]
 #[cfg(target_os = "linux")]
 fn external_source_delivery_retains_original_generation_lease_until_drop() {
-    let (_root, state, records, _) = state_and_source();
+    let (_root, _store_owner, state, records, _) = state_and_source();
     let (capsule, resolution) = capsule(&records);
     let delivery = bind_external_source(&state, &resolution, &capsule)
         .unwrap()

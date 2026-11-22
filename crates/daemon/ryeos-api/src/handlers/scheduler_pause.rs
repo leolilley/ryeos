@@ -26,13 +26,18 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let _mutation_guard = state.scheduler_runtime_gate.clone().write_owned().await;
-    ryeos_scheduler::crontab::validate_schedule_id(&req.schedule_id)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
-    let spec = state
-        .scheduler_db
+    let scheduler = crate::api_state::selected_scheduler(state.as_ref())
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let _mutation_guard = scheduler
+        .acquire_mutation()
+        .await
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    let scheduler_db = scheduler.scheduler_db();
+    ryeos_scheduler_contract::validate_schedule_id(&req.schedule_id)
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
+    let spec = scheduler_db
         .get_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     // Callers control their own schedules. NODE-owned schedules (the
@@ -40,36 +45,29 @@ pub async fn handle(
     // are controllable by any verified local operator: the operator can
     // invoke the scheduled service directly, so gating its cadence tighter
     // than the action itself would be incoherent.
-    if spec.execution.principal_id() == state.identity.principal_id() {
+    if spec.execution.principal_id() == scheduler.identity().principal_id() {
         ctx.require_verified()?;
     } else {
         ctx.require_owner(Some(spec.execution.principal_id()))?;
     }
 
     if !spec.enabled {
-        super::scheduler_register::verify_schedule_enabled(&state, &spec, false)
-            .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        super::scheduler_register::verify_schedule_enabled(&scheduler, &spec, false)
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         return Ok(serde_json::json!({
             "schedule_id": req.schedule_id,
             "enabled": false,
         }));
     }
 
-    let rec = super::scheduler_register::rewrite_schedule_enabled(&state, &spec, false)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    state
-        .scheduler_db
+    let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, false, None)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    scheduler_db
         .upsert_spec(&rec)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     // Ping timer loop
-    if let Some(ref tx) = state.scheduler_reload_tx
-        && let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
-            schedule_id: Some(req.schedule_id.clone()),
-        })
-    {
-        tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
-    }
+    scheduler.notify_reload(Some(req.schedule_id.clone()));
 
     Ok(serde_json::json!({
         "schedule_id": req.schedule_id,

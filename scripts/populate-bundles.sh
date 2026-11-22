@@ -10,20 +10,34 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set standard|development|central-host|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling|test]
 #
 # Bundle sets:
-#   full            core + central-auth + standard + web + browser + ryeos-ui +
-#                   hosted-node + codex + render-sandbox + opencode + local-inference (default)
-#   central-host    core + central-auth + standard + web + tv-tracker-authoring —
-#                   standard node plus the rye/web/search tool and app authoring
-#   standard        core + central-auth + standard — scheduler/graph/directive node
-#   local-inference core + central-auth + standard + local-inference — provider-neutral inference node
-#   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
-#   hosted-workflow core + central-auth + standard + hosted-node + codex + render-sandbox + opencode — hosted
+#   standard        core + scheduling + knowledge + directive + graph + ryeos-docs +
+#                   ryeos-ui + codex + opencode + web + browser — the default
+#                   local node (default)
+#   development     standard + central-auth + environment-qualification +
+#                   render-sandbox + claude-code — a developer's node whose
+#                   local-class origin can author runtime snapshot bindings
+#   central-host    core + central-auth + scheduling + knowledge + directive + graph +
+#                   ryeos-docs + web — workflow node plus the rye/web/search tool and
+#                   app authentication
+#   standard-central-auth core + scheduling + knowledge + directive + graph +
+#                   ryeos-docs + optional web-app authentication
+#   local-inference core + scheduling + knowledge + directive + graph +
+#                   ryeos-docs + local-inference — provider-neutral inference node
+#   hosted-workflow core + scheduling + knowledge + directive + graph +
+#                   ryeos-docs + codex + opencode — hosted
 #                   node that also runs scheduler/graph/directive and hosted workloads
-#   bundle-source   core + central-auth + bundle-source — catalog authority only
-#   release-authority full + bundle-release — isolated release authoring node
+#   bundle-source   core + bundle-source — catalog authority only
+#   core            core — scheduler-free selection
+#   core-scheduling core + scheduling — explicit schedule selection
+#   core-workflow   core + graph — graph workflows without model providers
+#   core-knowledge  core + knowledge — knowledge kind and runtime only
+#   hosted-controller  core + graph + knowledge + codex + render-sandbox — remote Codex
+#                   authoring controller without the scheduler or directive runtime
+#   release-authority core + graph + environment-qualification + bundle-release —
+#                   isolated release authoring node
 #   release-artifacts internal non-installable union used to compile and publish
 #                   the native archive and every release image in one build
 #
@@ -43,12 +57,14 @@ ryeos_term_init
 
 KEY=""
 OWNER=""
-BUNDLE_SET="full"
+BUNDLE_SET="standard"
 JOBS=""            # cargo -j N; empty = cargo default (all cores)
 CRATES_OVERRIDE="" # space-separated Cargo package list; empty = bundle-set default
 POPULATE_ALL=0     # explicit opt-in to rebuild the whole bundle set
 # The build profile is an explicit artifact property, not ambient process
 # configuration. Containers pass the same closed value through this CLI.
+# `test` is release optimisation plus the test-only stub driver in the
+# claude-code adapter; it is only for bundle refreshes that feed the test suite.
 BUILD_PROFILE="release"
 
 while [[ $# -gt 0 ]]; do
@@ -69,8 +85,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$BUILD_PROFILE" in
-  release|latency-profiling) ;;
-  *) ryeos_term_fail "invalid build profile: $BUILD_PROFILE (expected release or latency-profiling)"; exit 2 ;;
+  release|latency-profiling|test) ;;
+  *) ryeos_term_fail "invalid build profile: $BUILD_PROFILE (expected release, latency-profiling or test)"; exit 2 ;;
 esac
 
 # Refuse to build the whole workspace implicitly — that full release build is
@@ -93,7 +109,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source|release-authority|release-artifacts) ;;
+  development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -231,16 +247,21 @@ fi
 ryeos_term_info "target directory $TARGET"
 
 CORE="$ROOT/bundles/core"
-STD="$ROOT/bundles/standard"
+KNOWLEDGE="$ROOT/bundles/knowledge"
+DIRECTIVE="$ROOT/bundles/directive"
+GRAPH="$ROOT/bundles/graph"
+RYEOS_DOCS="$ROOT/bundles/ryeos-docs"
+SCHEDULING="$ROOT/bundles/scheduling"
 WEB="$ROOT/bundles/web"
 BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
-HOSTED_NODE="$ROOT/bundles/hosted-node"
 CODEX="$ROOT/bundles/codex"
 RENDER_SANDBOX="$ROOT/bundles/render-sandbox"
+MODAL_SANDBOX="$ROOT/bundles/modal-sandbox"
 OPENCODE="$ROOT/bundles/opencode"
+CLAUDE_CODE="$ROOT/bundles/claude-code"
 LOCAL_INFERENCE="$ROOT/bundles/local-inference"
-TVTA="$ROOT/bundles/tv-tracker-authoring"
+ENV_QUALIFICATION="$ROOT/bundles/environment-qualification"
 RELEASE_BUNDLE="$ROOT/bundles/bundle-release"
 BUNDLE_SOURCE="$ROOT/bundles/bundle-source"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
@@ -249,14 +270,18 @@ PUBLISHER_PUBKEY_RAW_B64="$(publisher_pubkey_raw_b64)"
 PUBLISHER_FP="$(publisher_fingerprint)"
 assert_node_init_profile_inventory
 
-# Bin-managed bundles for this set come from the shared definition (central-auth
-# is excluded — its Python implementation is tool support rather than a
-# target-triple binary, and it is published unconditionally
-# below, so it must never be cleaned/staged here).
+# Bin-managed bundles come from the explicit set. Optional central-auth is
+# interpreted tool support, not a target-triple executable, and is published
+# separately only when selected.
 BUNDLE_DIRS=()
 while IFS= read -r _bundle_name; do
   BUNDLE_DIRS+=("$ROOT/bundles/$_bundle_name")
 done < <(ryeos_bundle_set_bin_managed_names "$BUNDLE_SET")
+
+# Whether the selected bundle set contains one bundle.
+bundle_in_set() {
+  ryeos_bundle_set_names "$BUNDLE_SET" | grep -Fxq -- "$1"
+}
 
 STATIC_RELEASE="$TARGET/$TRIPLE/release"
 PAYLOAD_STAGE=""
@@ -359,7 +384,7 @@ prepare_bundle_trees() {
     rm -rf "$bundle_dir/.ai/refs"
     rm -f  "$bundle_dir/PUBLISHER_TRUST.toml"
   done
-  if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+  if [[ "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "development" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
     rm -rf "$LOCAL_INFERENCE/.ai/bin"
     rm -rf "$LOCAL_INFERENCE/.ai/objects"
     rm -rf "$LOCAL_INFERENCE/.ai/refs"
@@ -374,43 +399,95 @@ prepare_bundle_trees() {
 
 # Cargo package list per bundle set (the default when --crates is not given).
 case "$BUNDLE_SET" in
-  full|release-authority|release-artifacts)
+  release-authority)
+    pkgs=(lillux ryeosd ryeos-graph-runtime \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
+          ryeos-lillux-isolation-adapter)
+    ;;
+  standard)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
           ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
           ryeos-external-candidate-connector ryeos-codex-external-configuration \
           ryeos-external-guest-occurrence-owner \
           ryeos-external-guest-runtime-producer \
           ryeos-codex-guest-runtime-producer \
+          ryeos-codex-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
-          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
+          ryeos-guest-wire-verifier)
+    ;;
+  development)
+    pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
+          ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
+          ryeos-external-candidate-connector ryeos-codex-external-configuration \
+          ryeos-external-guest-occurrence-owner \
+          ryeos-external-guest-runtime-producer \
+          ryeos-codex-guest-runtime-producer \
+          ryeos-codex-runtime-verifier \
+          ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier \
+          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter \
+          ryeos-claude-code-adapter)
+    ;;
+  release-artifacts)
+    pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
+          ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
+          ryeos-external-candidate-connector ryeos-codex-external-configuration \
+          ryeos-external-guest-occurrence-owner \
+          ryeos-external-guest-runtime-producer \
+          ryeos-codex-guest-runtime-producer \
+          ryeos-codex-runtime-verifier \
+          ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier \
+          ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter \
+          modal-guest-launcher ryeos-modal-sandbox-lifecycle-adapter \
+          ryeos-claude-code-adapter)
     ;;
   central-host)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
     ;;
-  standard|local-inference)
+  standard-central-auth|local-inference)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
     ;;
   hosted-workflow)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter ryeos-external-candidate-connector \
           ryeos-external-guest-occurrence-owner ryeos-codex-external-configuration \
           ryeos-external-guest-runtime-producer \
           ryeos-codex-guest-runtime-producer \
+          ryeos-codex-runtime-verifier \
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier)
+    ;;
+  hosted-controller)
+    pkgs=(lillux ryeosd ryeos-graph-runtime ryeos-knowledge-runtime \
+          ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
+          ryeos-lillux-isolation-adapter ryeos-external-candidate-connector \
+          ryeos-external-guest-occurrence-owner ryeos-codex-external-configuration \
+          ryeos-external-guest-runtime-producer \
+          ryeos-codex-guest-runtime-producer \
+          ryeos-codex-runtime-verifier \
+          ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
+          ryeos-guest-wire-verifier \
           ryeos-external-guest-restoration-verifier ryeos-render-sandbox-lifecycle-adapter)
     ;;
-  hosted-node)
-    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
-          ryeos-structured-session ryeos-lillux-isolation-adapter)
+  core-workflow)
+    pkgs=(lillux ryeosd ryeos-graph-runtime ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools \
+          ryeos-session-exec ryeos-structured-session ryeos-lillux-isolation-adapter)
     ;;
-  bundle-source)
-    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
+  core-knowledge)
+    pkgs=(lillux ryeosd ryeos-knowledge-runtime ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools \
+          ryeos-session-exec ryeos-structured-session ryeos-lillux-isolation-adapter)
+    ;;
+  bundle-source|core|core-scheduling)
+    pkgs=(lillux ryeosd ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
           ryeos-structured-session ryeos-lillux-isolation-adapter)
     ;;
 esac
@@ -440,6 +517,8 @@ if [[ -n "$CRATES_OVERRIDE" ]]; then
   fi
 fi
 
+# Publication builds must use the reviewed lockfile. A required resolution
+# change is reconciled before construction rather than signed implicitly.
 # Static admitted worker packages are built under an explicit target and must
 # not also be compiled through the ordinary host package graph.
 host_pkgs=()
@@ -453,8 +532,13 @@ build_static_external_candidate_supervisor=0
 build_static_external_guest_restoration_verifier=0
 build_static_external_guest_runtime_producer=0
 build_static_render_sandbox_lifecycle_adapter=0
+build_static_modal_guest_launcher=0
+build_static_modal_sandbox_lifecycle_adapter=0
 build_static_codex_external_configuration=0
 build_static_codex_guest_runtime_producer=0
+build_static_codex_runtime_verifier=0
+build_static_claude_code_adapter=0
+build_static_guest_wire_verifier=0
 for p in "${pkgs[@]}"; do
   case "$p" in
     ryeos-session-exec) build_static_session_exec=1 ;;
@@ -467,33 +551,60 @@ for p in "${pkgs[@]}"; do
     ryeos-external-guest-restoration-verifier) build_static_external_guest_restoration_verifier=1 ;;
     ryeos-external-guest-runtime-producer) build_static_external_guest_runtime_producer=1 ;;
     ryeos-render-sandbox-lifecycle-adapter) build_static_render_sandbox_lifecycle_adapter=1 ;;
+    modal-guest-launcher) build_static_modal_guest_launcher=1 ;;
+    ryeos-modal-sandbox-lifecycle-adapter) build_static_modal_sandbox_lifecycle_adapter=1 ;;
     ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
     ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
+    ryeos-codex-runtime-verifier) build_static_codex_runtime_verifier=1 ;;
+    ryeos-claude-code-adapter) build_static_claude_code_adapter=1 ;;
+    ryeos-guest-wire-verifier) build_static_guest_wire_verifier=1 ;;
     *) host_pkgs+=("$p") ;;
   esac
 done
 
-build_args=()
-for p in "${host_pkgs[@]}"; do build_args+=(-p "$p"); done
-feature_args=()
+# Features are selected per package and each featured package is built in its
+# own Cargo invocation with unqualified feature names. One multi-package build
+# with package-qualified features (`-p ryeosd -p ryeos-cli --features
+# ryeosd/scheduling,...`) produced a ryeosd compiled with none of them.
+declare -A package_features=()
+add_package_feature() { # package, feature
+  package_features[$1]="${package_features[$1]:+${package_features[$1]},}$2"
+}
 if [[ "$BUILD_PROFILE" == latency-profiling ]]; then
-  profiling_features=()
   for p in "${host_pkgs[@]}"; do
     case "$p" in
-      ryeosd) profiling_features+=("ryeosd/latency-profiling") ;;
-      ryeos-directive-runtime)
-        profiling_features+=("ryeos-directive-runtime/latency-profiling")
-        ;;
+      ryeosd|ryeos-directive-runtime) add_package_feature "$p" latency-profiling ;;
     esac
   done
-  if (( ${#profiling_features[@]} > 0 )); then
-    feature_list="$(IFS=,; printf '%s' "${profiling_features[*]}")"
-    feature_args=(--features "$feature_list")
-  else
+  if (( ${#package_features[@]} == 0 )); then
     ryeos_term_fail "latency profiling requires ryeosd and/or ryeos-directive-runtime in --crates"
     exit 2
   fi
 fi
+for p in "${host_pkgs[@]}"; do
+  composition_feature="$(ryeos_bundle_set_cargo_features "$BUNDLE_SET" "$p")" || {
+    ryeos_term_fail "cannot select native composition for $BUNDLE_SET/$p"
+    exit 2
+  }
+  IFS=, read -r -a qualified <<<"$composition_feature"
+  for feature in "${qualified[@]}"; do
+    [[ -n "$feature" ]] || continue
+    [[ "$feature" == "$p/"* ]] || {
+      ryeos_term_fail "composition feature $feature does not belong to package $p"
+      exit 2
+    }
+    add_package_feature "$p" "${feature#"$p/"}"
+  done
+done
+plain_build_args=()
+featured_pkgs=()
+for p in "${host_pkgs[@]}"; do
+  if [[ -n "${package_features[$p]:-}" ]]; then
+    featured_pkgs+=("$p")
+  else
+    plain_build_args+=(-p "$p")
+  fi
+done
 jobs_args=()
 [[ -n "$JOBS" ]] && jobs_args=(-j "$JOBS")
 
@@ -502,7 +613,13 @@ if (( ${#host_pkgs[@]} > 0 )); then
   ryeos_term_update "building selected release binaries" "${host_pkgs[*]}"
   ryeos_term_suspend
   ryeos_term_info "host release build: node, CLI, runtimes, tools, and clients"
-  "$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}" "${feature_args[@]}"
+  if (( ${#plain_build_args[@]} > 0 )); then
+    "$CARGO" build --release --locked "${jobs_args[@]}" "${plain_build_args[@]}"
+  fi
+  for p in "${featured_pkgs[@]}"; do
+    ryeos_term_info "host release build: $p with features ${package_features[$p]}"
+    "$CARGO" build --release --locked "${jobs_args[@]}" -p "$p" --features "${package_features[$p]}"
+  done
   ryeos_term_resume "selected release build complete"
 else
   ryeos_term_update "retaining release binaries" "no host packages selected"
@@ -523,20 +640,41 @@ static_build_labels=()
 (( build_static_external_guest_restoration_verifier == 1 )) && static_build_labels+=(ryeos-external-guest-restoration-verifier)
 (( build_static_external_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-external-guest-runtime-producer)
 (( build_static_render_sandbox_lifecycle_adapter == 1 )) && static_build_labels+=(ryeos-render-sandbox-lifecycle-adapter)
+(( build_static_modal_guest_launcher == 1 )) && static_build_labels+=(modal-guest-launcher)
+(( build_static_modal_sandbox_lifecycle_adapter == 1 )) && static_build_labels+=(ryeos-modal-sandbox-lifecycle-adapter)
 (( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
 (( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
+(( build_static_codex_runtime_verifier == 1 )) && static_build_labels+=(ryeos-codex-runtime-verifier)
+(( build_static_claude_code_adapter == 1 )) && static_build_labels+=(ryeos-claude-code-adapter)
+(( build_static_guest_wire_verifier == 1 )) && static_build_labels+=(ryeos-guest-wire-verifier)
 if (( ${#static_build_labels[@]} > 0 )); then
   ryeos_term_update "building selected static worker binaries" "${static_build_labels[*]}"
   ryeos_term_suspend
   # These packages share the same target and flags. One Cargo graph reuses
   # their common dependencies and runs publication only after all succeed.
+  # The test profile builds the claude-code adapter with its stub driver. A
+  # feature is selected per Cargo invocation, so that package builds alone and
+  # every other static package keeps the shared invocation.
   static_build_args=()
+  static_stub_adapter=0
   for package in "${static_build_labels[@]}"; do
-    static_build_args+=(-p "$package")
+    if [[ "$BUILD_PROFILE" == test && "$package" == ryeos-claude-code-adapter ]]; then
+      static_stub_adapter=1
+    else
+      static_build_args+=(-p "$package")
+    fi
   done
   ryeos_term_info "static worker build: ${static_build_labels[*]}"
-  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-    "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
+  if (( ${#static_build_args[@]} > 0 )); then
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
+  fi
+  if (( static_stub_adapter == 1 )); then
+    ryeos_term_info "static worker build: ryeos-claude-code-adapter with features stub-driver"
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" \
+      -p ryeos-claude-code-adapter --features stub-driver
+  fi
   ryeos_term_resume "selected static worker build complete"
 else
   ryeos_term_update "retaining static worker binaries" "no static packages selected"
@@ -552,17 +690,42 @@ require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-launch-prepar
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-runtime"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-structured-session-bridge"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-lillux-isolation-adapter"
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if bundle_in_set codex; then
+  require_static_payload "$PAYLOAD_STAGE/codex/codex-runtime-verifier"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-connector"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-occurrence-owner"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-runtime-producer"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-external-configuration"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-guest-runtime-producer"
-  require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-launcher"
-  require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-candidate-supervisor"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-launcher"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-supervisor"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-guest-wire-verifier"
+fi
+if bundle_in_set claude-code; then
+  require_static_payload "$PAYLOAD_STAGE/claude-code/claude-code-adapter"
+fi
+if bundle_in_set render-sandbox; then
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-external-guest-restoration-verifier"
   require_static_payload "$PAYLOAD_STAGE/render-sandbox/ryeos-render-sandbox-lifecycle-adapter"
 fi
+if bundle_in_set modal-sandbox; then
+  require_static_payload "$PAYLOAD_STAGE/modal-sandbox/ryeos-modal-guest-launcher"
+  require_static_payload "$PAYLOAD_STAGE/modal-sandbox/ryeos-modal-sandbox-lifecycle-adapter"
+fi
+
+# Payloads one bundle builds and other bundles carry are installed from that
+# single build; the staged record holds the one digest every copy must match.
+shared_payload_tool() {
+  "$ROOT/scripts/release/shared-static-payloads.py" --repository-root "$ROOT" "$@" || {
+    ryeos_term_fail "shared static payload staging was rejected"
+    exit 2
+  }
+}
+shared_payload_tool records --bundle-set "$BUNDLE_SET" >/dev/null
+shared_payload_tool stage --bundle-set "$BUNDLE_SET" --stage-dir "$PAYLOAD_STAGE"
+while IFS=$'\t' read -r shared_bundle shared_binary; do
+  require_static_payload "$PAYLOAD_STAGE/$shared_bundle/$shared_binary"
+done < <(shared_payload_tool records --bundle-set "$BUNDLE_SET")
 prepare_bundle_trees
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
@@ -573,6 +736,11 @@ while IFS=$'\t' read -r payload_bundle payload_binary _payload_package _payload_
     "$PAYLOAD_STAGE/$payload_bundle/$payload_binary" \
     "$ROOT/bundles/$payload_bundle/.ai/bin/$TRIPLE/$payload_binary"
 done < <(staged_payload_records_for_set)
+while IFS=$'\t' read -r shared_bundle shared_binary; do
+  install -Dm755 \
+    "$PAYLOAD_STAGE/$shared_bundle/$shared_binary" \
+    "$ROOT/bundles/$shared_bundle/.ai/bin/$TRIPLE/$shared_binary"
+done < <(shared_payload_tool records --bundle-set "$BUNDLE_SET")
 
 # ── Publish ──────────────────────────────────────────────────────────
 
@@ -587,113 +755,76 @@ write_seed_trust_doc
 # a lifecycle-local CLI verb on `next` and would otherwise route through a
 # daemon/initialized-node dispatch path during Docker builds.
 SIGN_APP_ROOT="$(mktemp -d)"
-mkdir -p "$SIGN_APP_ROOT/.ai/config/keys/signing"
-cp "$KEY" "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
-chmod 0600 "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
+mkdir -p "$SIGN_APP_ROOT/.ai/node/operator/signing"
+cp "$KEY" "$SIGN_APP_ROOT/.ai/node/operator/signing/private_key.pem"
+chmod 0600 "$SIGN_APP_ROOT/.ai/node/operator/signing/private_key.pem"
 
 ryeos_term_update "publishing core bundle" "signed manifests"
 RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$CORE" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
-# central-auth ships in the source tree and is discovered/parsed at init, so its
-# manifest must stay current with the manifest schema. It depends only on core's
-# tool + config kinds, so publish it right after core (now that core carries a
-# published refs root) with core as its registry root.
-ryeos_term_update "publishing central-auth bundle" "signed manifests"
-RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$ROOT/bundles/central-auth" \
-  --registry-root "$CORE" \
-  --owner "$OWNER" >/dev/null
+# Application authentication is published only for explicit app compositions.
+# Presence in the repository never makes it a baseline dependency.
+while IFS= read -r selected_bundle; do
+  if [[ "$selected_bundle" == central-auth ]]; then
+    ryeos_term_update "publishing central-auth bundle" "signed manifests"
+    RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$ROOT/bundles/central-auth" \
+      --registry-root "$CORE" \
+      --owner "$OWNER" >/dev/null
+    break
+  fi
+done < <(ryeos_bundle_set_names "$BUNDLE_SET")
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "local-inference" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing standard bundle" "signed manifests"
-  # Standard contains its own kind schemas (directive, graph, knowledge) now.
-  # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$STD" \
-    --registry-root "$CORE" \
-    --owner "$OWNER" >/dev/null
-fi
+# Scheduling owns service/command content, requires only Core kinds, and has
+# no separately staged binary. Publish it according to the shared membership
+# selector rather than inferring it from Standard's presence.
+while IFS= read -r selected_bundle; do
+  if [[ "$selected_bundle" == scheduling ]]; then
+    ryeos_term_update "publishing scheduling bundle" "signed manifests"
+    RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$SCHEDULING" \
+      --registry-root "$CORE" \
+      --owner "$OWNER" >/dev/null
+    break
+  fi
+done < <(ryeos_bundle_set_names "$BUNDLE_SET")
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing web bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$WEB" \
-    --registry-root "$CORE" \
+# Each remaining bundle is published when the selected set contains it. The
+# registry roots are exactly the bundles providing the kinds it uses.
+publish_bundle() {
+  local name="$1" dir="$2" label="$3"
+  shift 3
+  local roots=(--registry-root "$CORE") root
+  for root in "$@"; do
+    roots+=(--registry-root "$root")
+  done
+  bundle_in_set "$name" || return 0
+  ryeos_term_update "publishing $name bundle" "$label"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$dir" \
+    "${roots[@]}" \
     --owner "$OWNER" >/dev/null
-fi
+}
 
-if [[ "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  # tv-tracker-authoring — source-only bundle (tool kind from core); ships the
-  # operator context-doc author/read wrappers. No compiled binary of its own.
-  ryeos_term_update "publishing tv-tracker-authoring bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$TVTA" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
-fi
+publish_bundle knowledge "$KNOWLEDGE" "signed manifests"
+publish_bundle graph "$GRAPH" "signed manifests"
+publish_bundle directive "$DIRECTIVE" "signed manifests" "$KNOWLEDGE"
+publish_bundle ryeos-docs "$RYEOS_DOCS" "signed manifests" "$KNOWLEDGE"
+publish_bundle environment-qualification "$ENV_QUALIFICATION" "signed qualification policies"
+publish_bundle web "$WEB" "signed manifests"
+publish_bundle browser "$BROWSER" "signed manifests"
+publish_bundle ryeos-ui "$RYEOS_UI" "signed manifests" "$DIRECTIVE" "$GRAPH" "$KNOWLEDGE"
+publish_bundle codex "$CODEX" "signed manifests" "$GRAPH" "$KNOWLEDGE"
+publish_bundle render-sandbox "$RENDER_SANDBOX" "signed lifecycle profile" "$GRAPH"
+publish_bundle modal-sandbox "$MODAL_SANDBOX" "signed lifecycle profile" "$GRAPH"
+publish_bundle opencode "$OPENCODE" "signed manifests" "$KNOWLEDGE"
+publish_bundle claude-code "$CLAUDE_CODE" "signed manifests" "$KNOWLEDGE"
+publish_bundle local-inference "$LOCAL_INFERENCE" "signed manifests" "$DIRECTIVE" "$GRAPH" "$KNOWLEDGE"
+publish_bundle bundle-release "$RELEASE_BUNDLE" "signed release-authoring contracts" "$GRAPH"
+publish_bundle bundle-source "$BUNDLE_SOURCE" "signed catalog authority contracts"
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing browser bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$BROWSER" \
-    --registry-root "$CORE" \
-    --owner "$OWNER" >/dev/null
-
-  ryeos_term_update "publishing ryeos-ui bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$RYEOS_UI" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
-fi
-
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing hosted-node bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$HOSTED_NODE" \
-    --registry-root "$CORE" \
-    --owner "$OWNER" >/dev/null
-fi
-
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing codex bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$CODEX" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
-
-  ryeos_term_update "publishing Render Sandbox adapter bundle" "signed lifecycle profile"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$RENDER_SANDBOX" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
-fi
-
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing opencode bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$OPENCODE" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
-fi
-
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "local-inference" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing local-inference bundle" "signed manifests"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$LOCAL_INFERENCE" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
-fi
-
-if [[ "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing bundle-release bundle" "signed release-authoring contracts"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$RELEASE_BUNDLE" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
-fi
-
-if [[ "$BUNDLE_SET" == "bundle-source" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  ryeos_term_update "publishing bundle-source bundle" "signed catalog authority contracts"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$BUNDLE_SOURCE" \
-    --registry-root "$CORE" \
-    --owner "$OWNER" >/dev/null
+if [[ -s "$PAYLOAD_STAGE/shared-payloads.json" && "$(<"$PAYLOAD_STAGE/shared-payloads.json")" != "{}" ]]; then
+  ryeos_term_update "verifying shared static payloads" "one build, one hash"
+  shared_payload_tool verify --triple "$TRIPLE" --stage-dir "$PAYLOAD_STAGE"
 fi
 
 ryeos_term_end success "PUBLISH COMPLETE" "$BUNDLE_SET bundle set"

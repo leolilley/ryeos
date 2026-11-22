@@ -33,7 +33,6 @@ pub struct PlacementTransferManifest {
 }
 
 impl PlacementTransferManifest {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         operation_id: String,
         owner_principal: String,

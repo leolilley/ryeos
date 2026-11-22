@@ -101,6 +101,16 @@ pub(super) fn validate(request: &LinuxSandboxRequest) -> Result<(), String> {
             .filter(|mount| mount.destination != view.destination)
             .map(|mount| mount.source_fd)
             .collect::<BTreeSet<_>>();
+        let destination_of = |fd| {
+            request
+                .mounts
+                .iter()
+                .find(|mount| mount.source_fd == fd && mount.destination != view.destination)
+                .map_or_else(
+                    || "<overlay>".into(),
+                    |m| m.destination.display().to_string(),
+                )
+        };
         if let Some(overlay) = &request.overlay {
             other_sources.insert(
                 overlay
@@ -118,7 +128,15 @@ pub(super) fn validate(request: &LinuxSandboxRequest) -> Result<(), String> {
         for fd in other_sources {
             let stat = mount_source_stat(raw_fd(fd)?)?;
             if (stat.st_dev, stat.st_ino) == (source_stat.st_dev, source_stat.st_ino) {
-                return Err("unfiltered mount aliases a fixed-parent source".into());
+                let alias = std::fs::read_link(format!("/proc/self/fd/{fd}"))
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| "<unlocatable>".into());
+                return Err(format!(
+                    "unfiltered mount aliases a fixed-parent source: {alias} (mounted at {}) aliases {} (mounted at {})",
+                    destination_of(fd),
+                    source_path.display(),
+                    view.destination.display()
+                ));
             }
             if mount_source_is_sealed(raw_fd(fd)?)? {
                 continue;
@@ -177,11 +195,13 @@ pub(super) fn install(
     for (ordinal, (name, branch)) in branches.children.iter().enumerate() {
         let source = source
             .open_child_directory(name)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("{error:#}"))?
             .ok_or("fixed-parent top ancestor must already exist as a real source directory")?;
         let destination = view.destination.join(name);
         let target = open_mount_target_no_symlinks(&destination)?;
-        let expected = source.device_inode().map_err(|error| error.to_string())?;
+        let expected = source
+            .raw_device_inode()
+            .map_err(|error| format!("{error:#}"))?;
         let observed = mount_source_stat(target.as_raw_fd())?;
         if expected != (observed.st_dev, observed.st_ino) {
             return Err("fixed-parent source ancestor changed before view attachment".into());
@@ -211,7 +231,7 @@ pub(super) fn install(
 fn populate(
     source: Option<&crate::PinnedDirectory>,
     branch: &Branch,
-    destination: &PathBuf,
+    destination: &std::path::Path,
     access: LinuxSandboxMountAccess,
     remaining: &mut usize,
 ) -> Result<(), String> {
@@ -229,14 +249,14 @@ fn populate(
     let entries = match source {
         Some(source) => source
             .entries_no_follow_bounded(*remaining)
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| format!("{error:#}"))?,
         None => Vec::new(),
     };
     *remaining = remaining
         .checked_sub(entries.len())
         .ok_or("fixed-parent entries exceed bound")?;
     let private = crate::PinnedDirectory::open(destination)
-        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("{error:#}"))?
         .ok_or("private connector disappeared")?;
     for entry in &entries {
         if branch.children.contains_key(&entry.name) {
@@ -247,16 +267,16 @@ fn populate(
             // PATH_MAX is the kernel's pathname bound, not a RyeOS path rule.
             let target = source
                 .read_symlink_target(&entry.name, libc::PATH_MAX as usize)
-                .map_err(|error| error.to_string())?
+                .map_err(|error| format!("{error:#}"))?
                 .ok_or("source symlink disappeared")?;
             private
                 .create_symlink(&entry.name, &target)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| format!("{error:#}"))?;
             continue;
         }
         let pinned = source
             .open_mount_entry(&entry.name)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("{error:#}"))?
             .ok_or("source entry disappeared during filtered construction")?;
         let stat = mount_source_stat(pinned.as_raw_fd())?;
         if (stat.st_dev, stat.st_ino, stat.st_mode)
@@ -286,20 +306,19 @@ fn populate(
         let original = source
             .map(|source| source.open_child_directory(name))
             .transpose()
-            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("{error:#}"))?
             .flatten();
         let target = destination.join(name);
         mkdir_one(path_string(&target)?, 0o755).map_err(|error| error.to_string())?;
         populate(original.as_ref(), child, &target, access, remaining)?;
     }
-    if let Some(source) = source {
-        if source
+    if let Some(source) = source
+        && source
             .entries_no_follow_bounded(entries.len())
-            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("{error:#}"))?
             != entries
-        {
-            return Err("source topology changed during filtered construction".into());
-        }
+    {
+        return Err("source topology changed during filtered construction".into());
     }
     // Nonrecursive: permitted child binds retain their separately admitted
     // access. Recursive read-only sealing would silently disable live writes.
@@ -315,11 +334,11 @@ pub(super) fn probe() -> Result<(), String> {
     std::fs::write(source_path.join("control/secret"), b"private")
         .map_err(|error| error.to_string())?;
     let source = crate::PinnedDirectory::open(&source_path)
-        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("{error:#}"))?
         .ok_or("probe source missing")?;
     let source = source
         .try_clone_descriptor()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     create_target(&target_path, DescriptorKind::Directory)?;
     let mount = LinuxSandboxMount {
         source_fd: source.as_raw_fd() as u32,

@@ -57,16 +57,18 @@ pub async fn try_offline_dispatch(
     // Freeze one registered generation before consuming command or bundle
     // records. The caller's earlier snapshot is only a fast dispatch hint; a
     // standalone execution re-verifies it with the retained trust snapshot.
-    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })
-    .map_err(local_err)?;
-    let isolation =
-        ryeos_app::engine_init::load_locked_registered_definition_isolation(&node_config.app_root)
-            .map_err(|error| CliError::Local {
-                detail: format!("load node isolation policy: {error:#}"),
-            })?;
+    let node_config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(app_root.to_path_buf()),
+            ..Default::default()
+        })
+        .map_err(local_err)?;
+    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(
+        &node_config.app_root,
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("load node isolation policy: {error:#}"),
+    })?;
     // One generation operation spans descriptor resolution, binary capture,
     // and any direct client/tool exec handoff. A TUI/help launch must never
     // resolve its surface under one installed generation and execute a client
@@ -88,7 +90,7 @@ pub async fn try_offline_dispatch(
         crate::node_descriptors::load_verified_policy_snapshot_with_trust(app_root, node_trust)
             .map_err(local_err)?;
     let command_registration = node_policy
-        .require::<ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority>()
+        .require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()
         .map_err(local_err)?;
 
     // 1. Consume bundle and command records from that same generation.
@@ -142,13 +144,29 @@ pub async fn try_offline_dispatch(
         &bundle_roots,
         std::sync::Arc::clone(&isolation),
         node_policy
-            .require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
             .map_err(local_err)?,
     )?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
-    let tail = &argv[matched.consumed..];
+    // `--live-project` is the same explicit intent the daemon path carries:
+    // strip it from the parameter tail, enforce it where the tool runs.
+    let live_flags: Vec<_> = matched
+        .command
+        .control_flags
+        .iter()
+        .filter(|flag| flag.binding == ryeos_runtime::ControlFlagBinding::LiveProject)
+        .cloned()
+        .collect();
+    let mut stripped_tail = argv[matched.consumed..].to_vec();
+    let demands_live = ryeos_app::command_invocation::strip_declared_control_flags(
+        &mut stripped_tail,
+        &live_flags,
+    )
+    .map_err(|detail| CliError::Local { detail })?
+    .live_project;
+    let tail = &stripped_tail[..];
 
     // Auto commands inherit their resolved service's dual-mode placement.
     // Do not start a standalone state owner while the live daemon owns it.
@@ -176,14 +194,16 @@ pub async fn try_offline_dispatch(
             .is_some()
     {
         let execution_isolation =
-            ryeos_app::engine_init::load_locked_registered_isolation(&node_config.app_root)
-                .map_err(local_err)?;
+            ryeos_node_runtime::engine_init::load_locked_registered_isolation(
+                &node_config.app_root,
+            )
+            .map_err(local_err)?;
         let execution_engine = boot_engine(
             &node_config,
             project_path,
             &bundle_roots,
             std::sync::Arc::clone(&execution_isolation),
-            node_policy.require::<ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            node_policy.require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
                 .map_err(local_err)?,
         )?;
         let execution_item = effective_item(
@@ -197,7 +217,19 @@ pub async fn try_offline_dispatch(
         (engine, isolation, item)
     };
 
+    let refuse_unenforceable_demand = |what: &str| -> Result<(), CliError> {
+        if demands_live {
+            return Err(CliError::Local {
+                detail: format!(
+                    "--live-project is enforced only for offline tool execution; {what} cannot honour it"
+                ),
+            });
+        }
+        Ok(())
+    };
+
     if has_launch_binary_ref(&item.composed_value) {
+        refuse_unenforceable_demand("an offline client launch")?;
         return exec_client(
             &engine,
             item,
@@ -220,6 +252,7 @@ pub async fn try_offline_dispatch(
             app_root,
             project_path,
             &isolation,
+            demands_live,
         )?;
         return match service {
             ServiceDispatchOutcome::Handled(outcome) => Ok(outcome),
@@ -233,6 +266,7 @@ pub async fn try_offline_dispatch(
                 // admission. Retaining the parent's shared registry guard while
                 // waiting for that child would deadlock any standalone service
                 // that reconciles or mutates the registry.
+                refuse_unenforceable_demand("a standalone service")?;
                 drop(engine);
                 drop(_generation_guard);
                 drop(isolation);
@@ -251,6 +285,7 @@ pub async fn try_offline_dispatch(
             app_root,
             project_path,
             &isolation,
+            demands_live,
         )
         .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
@@ -263,11 +298,11 @@ pub async fn try_offline_dispatch(
 // ---------------------------------------------------------------------------
 
 fn boot_engine(
-    config: &ryeos_app::config::Config,
+    config: &ryeos_node_runtime::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
     isolation: std::sync::Arc<ryeos_engine::isolation::IsolationRuntime>,
-    execution_policy: &ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
+    execution_policy: &ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let project_root = if project_path == "." {
         None
@@ -275,11 +310,10 @@ fn boot_engine(
         Some(PathBuf::from(project_path))
     };
 
-    ryeos_app::engine_init::build_registered_engine_for_roots(
+    ryeos_node_runtime::engine_init::build_registered_engine_for_roots(
         config,
         bundle_roots,
         project_root.as_deref(),
-        None, // no trust overlay
         isolation,
         execution_policy,
     )
@@ -302,6 +336,7 @@ fn effective_item_from_project_root(
     execute_ref: &str,
 ) -> Result<EffectiveItem, CliError> {
     let request = ryeos_engine::engine::EffectiveItemRequest {
+        logical_project_root: None,
         item_ref: canonical,
         expected_kind: None,
         subject_resolution_authority:
@@ -515,6 +550,7 @@ struct OfflineProjectIsolationAuthority {
 fn resolve_offline_project_isolation_authority(
     project_path: &Path,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    intent: ryeos_engine::execution_contract::LiveIntent,
 ) -> Result<OfflineProjectIsolationAuthority, CliError> {
     // A foreground offline subprocess is an explicit local-operator action.
     // Preserve the historical mutable-project contract, but express it through
@@ -524,6 +560,7 @@ fn resolve_offline_project_isolation_authority(
         ryeos_app::execution_policy::resolve_offline_local_live_project_authority(
             project_path,
             isolation,
+            intent,
         )
         .map_err(|error| CliError::Local {
             detail: format!("resolve offline project authority: {error:#}"),
@@ -544,6 +581,41 @@ fn resolve_offline_project_isolation_authority(
     })
 }
 
+/// An explicit live demand is refused wherever the tool would not get the
+/// live project, by the same guard the daemon applies. The offline path never
+/// builds a private root, so a tool that retains filesystem bindings is
+/// exactly the case the daemon would have put in one.
+fn enforce_live_demand(
+    derived: &HashMap<String, Value>,
+    tool_ref: &str,
+    executor_id: &str,
+    demands_live: bool,
+) -> Result<(), CliError> {
+    use ryeos_engine::execution_contract::{
+        ProcessInputRootSelection, derived_has_filesystem_bindings, live_project_refusal_applies,
+        live_project_unavailable_error,
+    };
+    let root = if derived_has_filesystem_bindings(derived).map_err(|error| CliError::Local {
+        detail: format!("offline tool `{tool_ref}`: {error:#}"),
+    })? {
+        ProcessInputRootSelection::SparsePrivate
+    } else {
+        ProcessInputRootSelection::Existing
+    };
+    if live_project_refusal_applies(root, demands_live) {
+        return Err(CliError::Local {
+            detail: live_project_unavailable_error(
+                tool_ref,
+                executor_id,
+                derived.contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY),
+                "read_write",
+            )
+            .to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn exec_tool(
     engine: &ryeos_engine::engine::Engine,
     item: &EffectiveItem,
@@ -552,7 +624,28 @@ fn exec_tool(
     app_root: &Path,
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    demands_live: bool,
 ) -> Result<Option<Value>, CliError> {
+    // A host-authority tool runs only through the daemon, under the node
+    // lane, the operator's exact grant and the configured operator. The
+    // offline path admits none of that, so it refuses rather than running the
+    // item confined or on the host.
+    let posture = engine
+        .kinds
+        .get(&item.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .map(|execution| execution.project_execution_posture(&item.composed_value))
+        .transpose()
+        .map_err(|error| CliError::Local {
+            detail: format!("offline tool `{tool_ref_str}`: {error}"),
+        })?;
+    if posture.is_some_and(|posture| posture.is_host_direct()) {
+        return Err(CliError::Local {
+            detail: format!(
+                "offline tool `{tool_ref_str}` declares host_authority: required; start the node and run it as the configured operator under a host_access grant"
+            ),
+        });
+    }
     // Check executor_id
     let executor_id = item
         .composed_value
@@ -579,8 +672,16 @@ fn exec_tool(
         })?;
     let project_path_owned = project_path_buf.to_string_lossy().into_owned();
     let project_path = project_path_owned.as_str();
-    let project_authority =
-        resolve_offline_project_isolation_authority(&project_path_buf, isolation)?;
+    enforce_live_demand(&item.derived, tool_ref_str, executor_id, demands_live)?;
+    let project_authority = resolve_offline_project_isolation_authority(
+        &project_path_buf,
+        isolation,
+        if demands_live {
+            ryeos_engine::execution_contract::LiveIntent::Live
+        } else {
+            ryeos_engine::execution_contract::LiveIntent::Default
+        },
+    )?;
 
     let config = item
         .composed_value
@@ -644,10 +745,13 @@ fn exec_tool(
                 expand_template(&template, &params_json, project_path)
             }
             ryeos_engine::runtime::RuntimeArgument::Literal(literal) => Ok(literal.literal),
-            ryeos_engine::runtime::RuntimeArgument::SourceMember(_) => Err(CliError::Local {
-                detail: "offline execution cannot redeem admitted source member arguments"
-                    .to_owned(),
-            }),
+            ryeos_engine::runtime::RuntimeArgument::SourceMember(_)
+            | ryeos_engine::runtime::RuntimeArgument::ExecutionProjectFile(_) => {
+                Err(CliError::Local {
+                    detail: "offline execution cannot redeem admitted source member arguments"
+                        .to_owned(),
+                })
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -749,15 +853,12 @@ fn exec_tool(
                     ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: project_authority.live_access.as_ref(),
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
+                captured_callback_socket: false,
                 bundle_roots: std::slice::from_ref(bundle_root),
-                node_trusted_keys_dir: Some(
-                    &app_root
-                        .join(ryeos_engine::AI_DIR)
-                        .join("config/keys/trusted"),
-                ),
                 verified_code: &isolation_verified_code,
                 verified_command: Some(&verified_command),
                 // Offline dispatch admits no launch capsule, so there is no
@@ -766,8 +867,10 @@ fn exec_tool(
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
+                verbatim_env_names: &[],
             },
         )
         .map_err(|error| CliError::Local {
@@ -824,6 +927,7 @@ fn dispatch_service(
     app_root: &Path,
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    demands_live: bool,
 ) -> Result<ServiceDispatchOutcome, CliError> {
     // Check availability
     let availability = item
@@ -909,6 +1013,7 @@ fn dispatch_service(
         app_root,
         project_path,
         isolation,
+        demands_live,
     )
     .map(|result| ServiceDispatchOutcome::Handled(result.map(OfflineDispatchOutcome::Json)))
 }
@@ -966,8 +1071,8 @@ fn run_standalone_service(
 }
 
 fn ensure_daemon_stopped_for_standalone(app_root: &Path) -> Result<(), CliError> {
-    let lock_path = ryeos_app::state_lock::default_lock_path(app_root);
-    match ryeos_app::state_lock::StateLock::acquire(&lock_path) {
+    let lock_path = ryeos_node_runtime::state_lock::default_lock_path(app_root);
+    match ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path) {
         Ok(lock) => {
             drop(lock);
             Ok(())
@@ -1173,8 +1278,17 @@ mod tests {
         let authority = resolve_offline_project_isolation_authority(
             project.path(),
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ryeos_engine::execution_contract::LiveIntent::Default,
         )
         .unwrap();
+        assert!(!authority._project_authority.demands_live_project());
+        let demanded = resolve_offline_project_isolation_authority(
+            project.path(),
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            ryeos_engine::execution_contract::LiveIntent::Live,
+        )
+        .unwrap();
+        assert!(demanded._project_authority.demands_live_project());
 
         assert_eq!(
             authority.project,
@@ -1194,6 +1308,7 @@ mod tests {
         project: PathBuf,
         bundle: PathBuf,
         key: SigningKey,
+        node_key: SigningKey,
     }
 
     impl Fixture {
@@ -1207,14 +1322,8 @@ mod tests {
             let system = tmp.path().join("system");
             let project = tmp.path().join("project");
             std::fs::create_dir_all(project.join(ryeos_engine::AI_DIR)).unwrap();
-            let trust_dir = system
-                .join(ryeos_engine::AI_DIR)
-                .join("config")
-                .join("keys")
-                .join("trusted");
-            std::fs::create_dir_all(&trust_dir).unwrap();
             let key = SigningKey::generate(&mut OsRng);
-            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            let node_key = SigningKey::generate(&mut OsRng);
             let node_identity_dir = system
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
@@ -1228,9 +1337,15 @@ mod tests {
                  limits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             )
             .unwrap();
-            std::fs::write(node_identity_dir.join("public-identity.json"), "{}").unwrap();
-            let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+            let pem = node_key.to_pkcs8_pem(Default::default()).unwrap();
             std::fs::write(node_identity_dir.join("private_key.pem"), pem.as_bytes()).unwrap();
+            ryeos_engine::test_support::pin_signer(
+                &system,
+                &key.verifying_key(),
+                "test",
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::everywhere(),
+            );
             let dev_trust = std::fs::read_to_string(
                 workspace_root()
                     .join(".dev-keys")
@@ -1239,7 +1354,13 @@ mod tests {
             .unwrap();
             let dev_trust = ryeos_engine::trust::PublisherTrustDoc::parse(&dev_trust).unwrap();
             let dev_key = dev_trust.decode_verifying_key().unwrap();
-            ryeos_engine::trust::pin_key(&dev_key, "RyeOS Development", &trust_dir, None).unwrap();
+            ryeos_engine::test_support::pin_signer(
+                &system,
+                &dev_key,
+                "RyeOS Development",
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::everywhere(),
+            );
             let core_key_pem = std::fs::read_to_string(
                 workspace_root().join(".dev-keys").join("PUBLISHER_DEV.pem"),
             )
@@ -1267,6 +1388,7 @@ mod tests {
                 project,
                 bundle,
                 key,
+                node_key,
             };
             this.resign_node_commands(&core_bundle, &core_key);
             this.write_signed_with(
@@ -1374,11 +1496,14 @@ mod tests {
 
         fn write_node_policy_generation(&self) {
             let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../bundles/.ai/node/init/profiles/full.yaml");
+                .join("../../../bundles/.ai/node/init/profiles/standard.yaml");
             let raw = std::fs::read_to_string(&source).unwrap();
             let body = lillux::signature::strip_signature_lines(&raw);
-            let profile: ryeos_app::node_policy::generation::NodeInitProfile =
+            let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
                 serde_yaml::from_str(&body).unwrap();
+            // Offline dispatch is not about the sandbox: the node runs under
+            // the profile's unconfined class.
+            let profile = profile.for_host_class("local_unconfined").unwrap();
             for (name, source_policy) in profile.policies() {
                 let mut policy = source_policy.clone();
                 if name == "command_registration" {
@@ -1477,11 +1602,8 @@ mod tests {
             let ref_path = ai_dir.join("refs").join("bundles").join("manifest");
             let mut item_source_hashes = if ref_path.exists() {
                 let signed_ref = std::fs::read_to_string(&ref_path).unwrap();
-                let trust_store = ryeos_engine::trust::TrustStore::load(
-                    None,
-                    &self.system.join(ryeos_engine::AI_DIR).join("config"),
-                )
-                .unwrap();
+                let trust_store =
+                    ryeos_engine::trust::TrustStore::load_node_registry(&self.system).unwrap();
                 let verified_ref =
                     ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
                         &signed_ref,
@@ -1532,7 +1654,7 @@ mod tests {
         fn write_client_kind_schema(&self) {
             let path = workspace_root()
                 .join("bundles")
-                .join("standard")
+                .join("ryeos-ui")
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
                 .join("engine")
@@ -1560,8 +1682,16 @@ mod tests {
             );
         }
 
+        /// Sign node documents (under `<system>/.ai/node/`) with the node key
+        /// and everything else with the fixture publisher key.
         fn write_signed(&self, path: &Path, body: &str) {
-            self.write_signed_with(path, body, &self.key);
+            let node_dir = self.system.join(ryeos_engine::AI_DIR).join("node");
+            let signer = if path.starts_with(&node_dir) {
+                &self.node_key
+            } else {
+                &self.key
+            };
+            self.write_signed_with(path, body, signer);
         }
 
         fn write_signed_with(&self, path: &Path, body: &str, signer: &SigningKey) {
@@ -1688,6 +1818,58 @@ else:
     }
 
     #[test]
+    fn live_project_flag_is_carried_off_the_parameter_tail_and_runs_a_live_tool() {
+        let fixture = Fixture::new();
+        fixture.write_standard_descriptors(Some("local_execute: tool:custom/echo\n"));
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("commands")
+                .join("custom.yaml"),
+            "tokens: [\"custom\"]\ndescription: Custom offline command\nforms:\n  - slots:\n      - field: name\ndispatch:\n  kind: execute_ref\n  execute: service:custom\ncontrol_flags:\n  - flag: live-project\n    help: demand the live project\n    binding: live_project\n",
+        );
+        let argv = vec![
+            "custom".to_string(),
+            "leo".to_string(),
+            "--live-project".to_string(),
+        ];
+        let result = expect_json(
+            try_offline_dispatch_for_test(&argv, &fixture.system, &fixture.project_str())
+                .unwrap()
+                .expect("handled offline"),
+        );
+        assert_eq!(result["name"], "leo");
+        assert!(
+            result.get("live_project").is_none(),
+            "the demand is a control, never a tool parameter: {result}"
+        );
+    }
+
+    #[test]
+    fn explicit_live_demand_is_refused_for_a_tool_that_retains_bindings_and_only_then() {
+        let sourced = HashMap::from([(
+            ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_string(),
+            serde_json::json!({}),
+        )]);
+        let plain = HashMap::new();
+
+        let err = enforce_live_demand(&sourced, "tool:acme/sweep", "tool:py", true).unwrap_err();
+        let CliError::Local { detail } = err else {
+            panic!("typed local refusal")
+        };
+        assert!(
+            detail.starts_with(ryeos_engine::execution_contract::LIVE_PROJECT_UNAVAILABLE_CODE),
+            "{detail}"
+        );
+        assert!(detail.contains("tool:acme/sweep"), "{detail}");
+        // Defaulted request and a live-capable tool are not refused.
+        enforce_live_demand(&sourced, "tool:acme/sweep", "tool:py", false).unwrap();
+        enforce_live_demand(&plain, "tool:acme/sweep", "@subprocess", true).unwrap();
+    }
+
+    #[test]
     fn daemon_only_execute_ref_bypasses_offline_tool_dispatch() {
         let fixture = Fixture::new();
         fixture.write_signed(
@@ -1714,8 +1896,10 @@ else:
     fn registered_definition_discovery_retains_generation_fencing() {
         let fixture = Fixture::new();
         let definitions =
-            ryeos_app::engine_init::load_locked_registered_definition_isolation(&fixture.system)
-                .unwrap();
+            ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(
+                &fixture.system,
+            )
+            .unwrap();
         let guard = definitions.begin_registered_generation_operation().unwrap();
         assert!(definitions.registered_generation_node_trust().is_some());
         assert!(
@@ -1730,7 +1914,8 @@ else:
                 .is_err()
         );
         let execution =
-            ryeos_app::engine_init::load_locked_registered_isolation(&fixture.system).unwrap();
+            ryeos_node_runtime::engine_init::load_locked_registered_isolation(&fixture.system)
+                .unwrap();
         assert_eq!(definitions.digest(), execution.digest());
         definitions.ensure_registered_generation_current().unwrap();
         drop(guard);

@@ -7,6 +7,13 @@
 # runs a production `ryeos init` preflight with no trust-file override. That
 # final check is the security boundary: every seed and bundle signature must
 # validate against the official publisher key compiled into the release binary.
+#
+# Those preflight inits run the real durable-root storage gate, so their app
+# roots must sit on storage that gate accepts. `--verify-root` names a
+# directory on such storage (in the release image build, a cache mount; an
+# overlay or tmpfs scratch directory is refused by the gate). Every verification
+# app root is a fresh subdirectory of it and is removed on exit; the directory
+# itself is never created or defaulted here.
 
 set -euo pipefail
 export LC_ALL=C
@@ -16,7 +23,7 @@ source "$root/scripts/lib/ryeos-terminal.sh"
 ryeos_term_init
 
 usage() {
-    ryeos_term_fail "usage: $0 --version X.Y.Z --source DIR --output FILE --source-date-epoch EPOCH --ryeos-bin PATH [--arch x86_64]"
+    ryeos_term_fail "usage: $0 --version X.Y.Z --source DIR --output FILE --source-date-epoch EPOCH --ryeos-bin PATH --verify-root DIR [--arch x86_64]"
     exit 2
 }
 
@@ -25,6 +32,7 @@ source_dir=""
 output=""
 source_date_epoch=""
 ryeos_bin=""
+verify_root=""
 arch="x86_64"
 while (($#)); do
     case "$1" in
@@ -33,12 +41,13 @@ while (($#)); do
         --output) output="${2:-}"; shift 2 ;;
         --source-date-epoch) source_date_epoch="${2:-}"; shift 2 ;;
         --ryeos-bin) ryeos_bin="${2:-}"; shift 2 ;;
+        --verify-root) verify_root="${2:-}"; shift 2 ;;
         --arch) arch="${2:-}"; shift 2 ;;
         *) usage ;;
     esac
 done
 
-[[ -n "$version" && -n "$source_dir" && -n "$output" && -n "$source_date_epoch" && -n "$ryeos_bin" ]] || usage
+[[ -n "$version" && -n "$source_dir" && -n "$output" && -n "$source_date_epoch" && -n "$ryeos_bin" && -n "$verify_root" ]] || usage
 [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$ ]] || {
     ryeos_term_fail "version is not SemVer: $version"
     exit 2
@@ -57,6 +66,11 @@ done
 }
 [[ -x "$ryeos_bin" ]] || {
     ryeos_term_fail "ryeos release binary is not executable: $ryeos_bin"
+    exit 2
+}
+
+[[ -d "$verify_root" && -w "$verify_root" ]] || {
+    ryeos_term_fail "verification root is not a writable directory: $verify_root"
     exit 2
 }
 
@@ -137,6 +151,7 @@ while IFS= read -r node_init_profile_name; do
 done < <(ryeos_node_init_profile_names)
 
 tmp="$(mktemp -d)"
+verify_tmp="$(mktemp -d "$verify_root/package-verify.XXXXXX")"
 archive_tmp="$output.tmp.$$"
 checksum="$output.sha256"
 checksum_tmp="$checksum.tmp.$$"
@@ -144,7 +159,7 @@ completed=0
 cleanup() {
     local status="$1"
     ryeos_term_handle_exit "$status"
-    rm -rf "$tmp"
+    rm -rf "$tmp" "$verify_tmp"
     rm -f "$archive_tmp" "$checksum_tmp"
     if [[ "$completed" -ne 1 ]]; then
         rm -f "$output" "$checksum"
@@ -162,7 +177,7 @@ while IFS= read -r bundle; do
     [[ -n "$bundle" ]] || continue
     bundle_source="$source_dir/$bundle"
     [[ -d "$bundle_source/.ai" ]] || {
-        ryeos_term_fail "full bundle set is missing $bundle/.ai"
+        ryeos_term_fail "release archive bundle set is missing $bundle/.ai"
         exit 2
     }
     # populate publishes one shared trust doc at the source root (asserted
@@ -172,7 +187,7 @@ while IFS= read -r bundle; do
         assert_official_trust_metadata "$bundle_source/PUBLISHER_TRUST.toml"
     fi
     cp -a "$bundle_source" "$stage/$bundle"
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_release_archive_bundle_names)
 
 if find "$stage" -type l -print -quit | grep -q .; then
     ryeos_term_fail "symbolic links are not allowed in release bundles"
@@ -222,10 +237,10 @@ while IFS= read -r -d '' staged_path; do
 done < <(find "$stage" -print0)
 
 # Do not pass --trust-file here. First prove that a fresh node refuses absence
-# of an explicit init profile; then prove the full distribution's exact
+# of an explicit init profile; then prove the standard distribution's exact
 # same-named profile solely under the official public key embedded in the
 # qualified RyeOS binary.
-verify_app_root="$tmp/verify-app"
+verify_app_root="$verify_tmp/verify-app"
 # This is a disposable verification node, not a deployable substrate. Supply
 # one fixed, syntactically valid identity so init reaches the profile gate.
 verification_substrate_digest="sha256:$(printf '0%.0s' {1..64})"
@@ -241,8 +256,8 @@ if "$ryeos_bin" init \
     exit 2
 fi
 
-node_init_profile="$(ryeos_bundle_set_node_init_profile full)"
-policy_verify_app_root="$tmp/verify-profile-$node_init_profile"
+node_init_profile="$(ryeos_bundle_set_node_init_profile standard)"
+policy_verify_app_root="$verify_tmp/verify-profile-$node_init_profile"
 ryeos_term_update "verifying staged node init profile" "$node_init_profile"
 "$ryeos_bin" init \
     --non-interactive \
@@ -250,13 +265,17 @@ ryeos_term_update "verifying staged node init profile" "$node_init_profile"
     --source "$stage" \
     --substrate-image-digest "$verification_substrate_digest" \
     --substrate-protocol "$verification_substrate_protocol" \
-    --node-profile "$node_init_profile" >/dev/null
+    --node-profile "$node_init_profile" \
+    --host-class local_unconfined >/dev/null
 
 selected_node_init_profile="$stage/.ai/node/init/profiles/$node_init_profile.yaml"
+# Every generation carries its signed operator record beside the sections.
 expected_node_policies="$(
-    ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
-        | sed 's/$/.yaml/' \
-        | sort
+    {
+        ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
+            | sed 's/$/.yaml/'
+        printf '%s\n' _operator-sections.yaml
+    } | sort
 )"
 policy_directory="$policy_verify_app_root/.ai/node/policies"
 [[ -n "$expected_node_policies" && -d "$policy_directory" && ! -L "$policy_directory" ]] || {
@@ -273,6 +292,21 @@ actual_node_policies="$(find "$policy_directory" -mindepth 1 -maxdepth 1 -type f
     ryeos_term_fail "node init profile $node_init_profile produced the wrong policy generation"
     exit 2
 }
+
+# The released archive also feeds the remote-authoring controller image, so
+# its profile gets the same production preflight. The controller runs in a
+# hosting provider's container, which is the `hosted` host class.
+controller_profile=hosted-controller
+controller_verify_app_root="$verify_tmp/verify-profile-$controller_profile"
+ryeos_term_update "verifying staged node init profile" "$controller_profile"
+"$ryeos_bin" init \
+    --non-interactive \
+    --app-root "$controller_verify_app_root" \
+    --source "$stage" \
+    --substrate-image-digest "$verification_substrate_digest" \
+    --substrate-protocol "$verification_substrate_protocol" \
+    --node-profile "$controller_profile" \
+    --host-class hosted >/dev/null
 
 mkdir -p "$(dirname "$output")"
 ryeos_term_update "writing deterministic archive" "$(basename "$output")"

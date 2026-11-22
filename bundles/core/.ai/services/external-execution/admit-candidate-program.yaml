@@ -1,0 +1,12 @@
+# ryeos:signed:2026-10-23T01:55:48Z:bed02f14bd094daee0982df5b572ef963cfd5652a0c1f7a341fb9111db8138ac:b3q5F3szZwM2vE9x2XiyN/lZwYsChc8jivBWAGADs4yRD9C3AOkYJwamnSnMvUG7US9t2y+7e+2+V6pr8+muDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-execution.admit-candidate-program
+required_caps: ["ryeos.execute.service.external-execution/admit-candidate-program"]
+schema:
+  activation_ref: string
+  coordinate_id: string
+  attestation_hash: string
+  runtime_manifest_hash: string
+  required_claims: array
+  remote_testimony: object|null
+description: Derive the admitted external candidate program and the runtime content qualification binding from a published content qualification, or from a remote content testimony when `remote_testimony` names its local acceptance; read-only, requires an admitted operator, and writes no state

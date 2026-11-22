@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T03:41:16Z:4f3a67ebf116c154b067574a1185b41f5c72207076ea3c35aa8742902ff256bf:hy6HqzRs1baZLsFUoWFX5qpWYKZ3nXj6lnpQgkYeMmILjdccTm63mOK2uEcvTsRmTUwTvo74uyYS4r6ZN2QyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T21:12:47Z:4dbb20e634390c9591a8e6ded4ca4f126fc1c94fe0034de45facefbe21d91dbc:rZuL4fFPtDFWFOUd3yDJa6f7HLGUbORd7d63tCe66RSLpZowhJuWd9QNGQqVh1gWKHMJhTa5IHpi98NEHsg1CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime
 title: Externally fenced worker runtime
 description: Generic authority and qualification boundary for single-tenant externally supervised worker sites
 entry_type: implementation_guide
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Externally fenced worker runtime
@@ -22,7 +22,7 @@ Projects may select or narrow a named protected lifecycle profile, slot
 requirement, and budget. Exact provider service IDs, regions, image and public
 configuration ceilings, lifecycle bindings, credential handles, and mutation
 authority belong to protected source-node installation state. They are not
-project authority or RyeOS development constants. Railway, Fly, Modal, a
+project authority or RyeOS development constants. A hosting platform, a
 managed container service, or a future deployment backend can bind this
 contract only after its installed adapter and evidence satisfy the same generic
 authority requirements.
@@ -49,18 +49,21 @@ launch must refuse before model-provider turn contact.
 
 A trusted disposable authoring placement is a fourth, deliberately weaker
 product. Its signed node policy may enable `trusted_process_group_sessions`,
-and its worker selects `cleanup_authority: trusted_process_group`. RyeOS then
+and the session protocol the node then selects declares
+`cleanup_authority: trusted_process_group`. RyeOS then
 owns the exact direct process-group lifecycle, retained candidate, completion
 fence, and independent evaluation, but does not claim hard containment or
 hostile descendant-death proof. This lane exists for single-tenant managed
-containers such as a dedicated Railway service while the lifecycle-adapter
+containers such as a dedicated hosted service while the lifecycle-adapter
 product remains under qualification. It must not use
 `external_placement_incarnation`, satisfy that product's acceptance claims, or
 silently fall back from a missing local process scope.
 
-The trusted lane is selected explicitly by all three authorities: the signed
-node policy, the distinct trusted session protocol, and the selected trusted
-worker item. Ordinary and hardened workers remain fail-closed. One placement
+The trusted holding is selected by the node, never by a separate worker item:
+the signed node policy enables it, and the one authoring worker lists both the
+contained and the trusted session protocols, so the node picks the protocol
+whose declared holding it reports. Ordinary and hardened workers remain
+fail-closed. One placement
 should run one worker campaign at a time; import and freeze the candidate
 before recycling it. Deployment, signing, competition submission, and
 publication credentials stay outside the worker service.
@@ -165,6 +168,151 @@ External cleanup is only a cleanup fallback. Admission also requires exact
 filesystem realization, a closed model-tool inventory, supervisor and
 credential separation, and writer-exclusion qualification. A lifecycle grant
 cannot waive any of those gates.
+
+## Restored guest product measurement
+
+The snapshot-backed external guest route has a separate content-measurement
+contract. It does not turn the ordinary configured-node lifecycle described
+above into proof that a snapshot contains an admitted runtime. The controller
+derives expected content from the authenticated retained product witness and
+its exact CAS manifest. Provider snapshot identifiers and readiness responses
+identify provider observations; they do not supply expected content hashes.
+
+The current guest owner product uses a fixed four-entry ABI rooted at
+`/ryeos/guest-runtime`: `bin`,
+`bin/ryeos-external-guest-occurrence-owner`, `controller-root.hex`, and
+`guest-owner-profile.json`. Product production, upload and measurement share
+the layout observer
+`ryeos-external-execution::guest_import_authorization::ObservedGuestRuntime`.
+Owner bytes, controller root and bounded profile may vary within that ABI;
+their exact content changes the product identity. A different layout requires
+a coordinated product-format change rather than a caller-selected path.
+
+`ryeos-external-guest-restoration-verifier` is delivered separately from the
+snapshot as an independently admitted executable. It receives only a bounded
+controller challenge, measures the exact installed tree through pinned
+filesystem handles, and returns the challenge digest, manifest hash, owner
+executable hash and observed controller root. It does not receive expected
+hashes that it can merely echo. The controller compares that result with its
+independent retained expectations.
+
+The result becomes usable evidence only through the authenticated adapter run
+for the exact restored occurrence, exact checker/upload identities, complete
+bounded output and successful exit. The daemon retains the observation and
+rejoins it to the snapshot/product/owner coordinates when consuming the
+qualification. Snapshot creation, restored allocation, checker execution and
+termination retain distinct durable operation records; uncertain contact does
+not authorize another attempt. Changing a nonce or deadline cannot remint
+checker contact authority.
+
+These are implemented source contracts, not a statement that a particular
+provider generation has passed live qualification. The local
+`cli_profiles` integration test executes one built checker over two disposable
+owner products at the fixed root, checks canonical output and challenge/content
+identities, and rejects crossed product expectations. It covers the executable
+boundary beyond the shared measurement function; it does not allocate a
+provider or establish network containment. A point measurement does
+not prove lasting immutability or writer exclusion. Provider terminal status
+does not prove whole-scope settlement or containment. The authenticated
+provider transport and admitted adapter remain part of the trust assumption;
+the observation is not hardware attestation. Each stronger claim requires its
+own accepted evidence, and an ordinary successful checker run is insufficient
+for activation or publication.
+
+## Guest-wire qualification
+
+The guest owner product earns `external_guest_inputs_v5_launcher_v4` through
+`tool:codex/qualification/guest-wire-verifier` and
+`config:codex/guest-wire-qualification-policy`. The claim says the measured
+owner, supervisor and launcher executables performed the guest-inputs (schema
+5) and launcher (spec schema 4) exchange. It is proved under an ephemeral
+controller key and a test configuration. A live session remains the proof of
+operation under the real controller key, connection and credentials.
+
+The scenario declares the launch shape it qualifies: controller transport,
+sandbox network-policy kind, and the resolver and hosts sources a launch
+captures. The verifier builds its bootstrap from the declared sources and
+refuses unless the supervisor's Ready reports exactly those sources with the
+digests of the provider's real files. The proof retains the shape as
+`verified`. A qualification that built nothing under its shape (a local
+verifier) retains the shape its signed policy declares as `declared`. Launch
+does not branch on that basis: it compares the binding's transport, policy kind
+and network-input sources with the retained shape, and refuses a proof that
+retained none.
+
+### A Worker-less remote lane
+
+The restored-sandbox machinery already carries a remote consumer attempt:
+create, owner measurement, consumer attempt, terminate, attempt journals and
+`remote_consumer_attempt` corroboration. But the existing consumer lane is
+welded to a Worker consumer, and the owner runtime has no Worker. Rather than
+narrow the claim or use the opaque lane, policy v5 adds a Worker-less remote
+scenario beside it:
+
+- A scenario's `remote_probe_input` is signed, bounded, opaque data, digested
+  into the scenario source digest. It is exclusive with
+  `consumer_worker_request`. A policy without a consumer execution context
+  requires a probe input on every remote scenario; a policy with one requires
+  a Worker request. `recipe_ref` is optional only for probe scenarios.
+- `RemoteProbeInputRecord` has no Worker requirement. Its prerequisite is
+  the daemon-retained owner measurement of the restored product, never a
+  value the verifier supplies.
+- The Q-transcript requirement applies only when a consumer execution
+  context exists.
+- The claim string appears only in signed data. The verifier checks
+  `claims_on_success` against its compiled schema pins and refuses a
+  mismatch; the mechanism never names the claim.
+
+### Why the probe re-produces the product
+
+The owner needs euid 0 and verifies imports against the controller root baked
+into the subject. Nobody in the guest holds that key. So the guest role
+re-measures the subject, requires it to equal the prerequisite, and produces
+an equivalent owner product from the same owner bytes and profile under an
+ephemeral key. It mounts that product over `/ryeos/guest-runtime`, with tmpfs
+over `/ryeos/activation` and `/ryeos/occurrences`, in a private mount
+namespace (`lillux::sandbox::enter_root_overlay_namespace`). The subject tree
+and snapshot are never touched. It then runs the shipped owner through its
+real privilege drop. The claim binds the subject's owner executable digest
+and manifest hash, never the probe manifest. The probe key and product never
+leave the guest.
+
+### Why a loopback controller
+
+The supervisor's relay transport still rejects relay bootstraps, and the
+controller file relay is structured-session only. The HTTP bootstrap accepts
+any https origin, including an IP literal, with a pinned TLS root. So the
+guest role serves a minimal HTTPS channel controller on 127.0.0.1 with an
+ephemeral root (`loopback_tls.rs`, `guest/controller.rs`) and drives the real
+supervisor and launcher through Bootstrap, Ready, Apply and Applied.
+
+### Archive members
+
+The supervisor and launcher must reach the guest as named bytes. A remote
+verifier names them as `archive_members` (member name to `bin:` ref) in the
+same bundle as the scenario. The retained verifier source records each
+member's sha256 as registered in the installed bundle
+(`archive_member_digests`); the guest's evidence reports the digests it ran;
+the origin compares them. Dual payload ownership is refused by the release
+validators, so `codex` owns both binaries and `render-sandbox` and
+`modal-sandbox` carry byte-identical copies through
+`scripts/release/shared-static-payloads.yaml`. Hosted-workflow nodes load
+`codex` but not `render-sandbox`.
+
+### Settlement and controller key
+
+The policy requires `scope_empty` settlement for the verifier root. That is
+observable only on a host class with delegated per-scope cgroups (`local`
+with `process_scopes: required`). A `local_direct` origin cannot issue the
+claim. Do not weaken the policy to `trusted_process_group_absent`.
+
+The owner product carries `controller-root.hex`, so the relationship
+`owner_to_guest_wire_verifier` produces it per controller through
+`graph:codex/guest-owner-runtime-production-for-controller`. The shipped
+relationship carries the RFC 8032 test-vector key as a placeholder, and the
+verifier refuses a subject rooted at it
+(`refuse_placeholder_controller_root`). A bundle must be re-signed with the
+real controller key before this claim can be issued for that controller.
 
 ## Credential and command boundary
 

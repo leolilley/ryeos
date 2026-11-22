@@ -99,6 +99,12 @@ impl RuntimeRoot {
         self.state().join("cache")
     }
 
+    /// Node-signed heads of the project item revision chains, one document
+    /// per project.
+    pub fn revision_heads_dir(&self) -> PathBuf {
+        self.state().join("revision-heads")
+    }
+
     /// Node-private implementation root for declarative external-content
     /// activation. Callers must still open and mutate it through Lillux
     /// descriptor-relative primitives; this method owns only canonical layout.
@@ -116,15 +122,60 @@ impl RuntimeRoot {
         self.managed_external_content().join("staging")
     }
 
-    pub fn operator_signing_key_path(&self) -> PathBuf {
-        self.config()
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem")
+    /// Node-volume home of the local operator's key material
+    /// (`.ai/node/operator`).
+    pub fn operator_dir(&self) -> PathBuf {
+        self.node().join("operator")
     }
 
-    pub fn trusted_keys_dir(&self) -> PathBuf {
-        self.config().join("keys").join("trusted")
+    /// The local operator's signing key. This is the only owner of the path;
+    /// every reader and writer goes through it.
+    pub fn operator_signing_key_path(&self) -> PathBuf {
+        self.operator_dir().join("signing").join("private_key.pem")
+    }
+
+    /// Node-volume home of the authoring key (`.ai/node/authoring`): the key
+    /// the daemon signs runtime-authored items with. It is not the operator
+    /// key and not the node key.
+    pub fn authoring_dir(&self) -> PathBuf {
+        self.node().join("authoring")
+    }
+
+    /// The authoring key. This is the only owner of the path.
+    pub fn authoring_signing_key_path(&self) -> PathBuf {
+        self.authoring_dir().join("signing").join("private_key.pem")
+    }
+
+    /// The operator-signed genesis record created by `ryeos init`.
+    pub fn operator_genesis_path(&self) -> PathBuf {
+        self.operator_dir().join("genesis.json")
+    }
+
+    /// Node-signed remote pin records, one `<name>.yaml` per remote
+    /// (`.ai/node/remotes`).
+    pub fn remote_pins_dir(&self) -> PathBuf {
+        self.node().join("remotes")
+    }
+
+    /// Node-signed machine declaration records, one `<label>.yaml` per
+    /// machine (`.ai/node/machines`).
+    pub fn machine_declarations_dir(&self) -> PathBuf {
+        self.node().join("machines")
+    }
+
+    /// Node-owned signer registry root (`.ai/node/trust`).
+    pub fn trust_dir(&self) -> PathBuf {
+        self.ai().join(crate::trust::NODE_TRUST_DIR)
+    }
+
+    /// Node-signed signer records, one `<fingerprint>.yaml` per signer.
+    pub fn trust_signers_dir(&self) -> PathBuf {
+        crate::trust::signers_dir(self.as_path())
+    }
+
+    /// Hash-chained, node-signed key events.
+    pub fn trust_events_dir(&self) -> PathBuf {
+        crate::trust::events_dir(self.as_path())
     }
 
     pub fn node_signing_key_path(&self) -> PathBuf {
@@ -133,6 +184,17 @@ impl RuntimeRoot {
 
     pub fn authorized_keys_dir(&self) -> PathBuf {
         self.node().join("auth").join("authorized_keys")
+    }
+
+    /// Node-signed remote delegations stored for local principals, one
+    /// directory per delegator.
+    pub fn delegations_dir(&self) -> PathBuf {
+        self.node().join("auth").join("delegations")
+    }
+
+    /// Node-signed tombstones of revoked delegations, keyed by digest.
+    pub fn delegation_revocations_dir(&self) -> PathBuf {
+        self.node().join("auth").join("delegation_revocations")
     }
 }
 

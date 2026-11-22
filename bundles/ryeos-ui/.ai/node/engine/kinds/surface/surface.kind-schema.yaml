@@ -1,0 +1,313 @@
+# ryeos:signed:2026-11-20T23:17:59Z:f33cfbbd0bafc0cc55d246aa43a7e067e2353ee6d91f62b5d95e8cb4b0d133b2:WGRGZqNOzST9VTFpT377Tq5lYgsgXuU5m9h+MUiV2sG6AIDHF1Ev7mGrEvhHS/STenm9iJ9Kvke4/JQSW54PCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/surface"
+version: "3.0.0"
+# A project file may not take the ref of a surface an installed bundle
+# supplies. Resolution refuses the ref, naming both files, so a project can
+# add its own surfaces but never replace the node's.
+project_shadowing: refuse
+location:
+  directory: surfaces
+
+# A surface is never executed. Its seat (the operator presentation opened on
+# it) is a daemon-owned thread of this profile; terminal seat chains retire
+# through a retirement fence so their retained evidence outlives the chain.
+thread_profile:
+  name: seat_session
+  root_executable: false
+  supports_interrupt: false
+  supports_continuation: false
+  supports_operator_followup: false
+  retirement_fence: true
+
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+
+composer: handler:ryeos/core/extends-chain
+resolution:
+  - step: resolve_extends_chain
+    field: extends
+    max_depth: 16
+effective_trust:
+  include_references: false
+composer_config:
+  extends_field: extends
+  fields:
+    - name: title
+      strategy: replace_root_last
+      expect_value_type: string
+    - name: tiling
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: tiles
+      strategy: replace_root_last
+      expect_value_type: sequence
+    # The ref list is replaced whole: a child Surface names the complete
+    # ordered list of sets it opens.
+    - name: view_sets
+      strategy: replace_root_last
+      expect_value_type: sequence
+    - name: dialogs
+      strategy: replace_root_last
+      expect_value_type: sequence
+    - name: style
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: chip
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: input
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: sources
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: affordances
+      strategy: keyed_seq_merge_root_last
+      key: id
+      expect_value_type: sequence
+    - name: instruments
+      strategy: keyed_seq_merge_root_last
+      key: id
+      expect_value_type: sequence
+    - name: capabilities
+      strategy: narrow_against_parent_effective
+      expect_value_type: mapping
+    # replace_root_last, not keyed merge: group entries carry no `id` key,
+    # so the keyed merge would silently drop them.
+    - name: library
+      strategy: replace_root_last
+      expect_value_type: sequence
+    - name: launch_entry
+      strategy: replace_root_last
+      expect_value_type: boolean
+
+composed_value_contract:
+  root_type: mapping
+  required: {}
+  optional:
+    title:
+      type: single
+      prim: string
+    launch_entry:
+      type: single
+      prim: boolean
+    tiling:
+      type: single
+      prim: mapping
+    tiles:
+      type: single
+      prim: sequence
+    # The sets this Surface opens as tabs, in tab order, each a `view_set:`
+    # ref. A set is its own item (see the `view_set` kind); a Surface never
+    # carries one inline, and a Surface that does is refused at resolution.
+    view_sets:
+      type: single
+      prim: sequence
+      elements: { type: single, prim: string }
+    dialogs:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+            title: { type: single, prim: string }
+            view: { type: single, prim: string }
+          optional: {}
+    style:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required: {}
+        optional:
+          border:
+            type: single
+            prim: string
+            enum: [thick, thin, hidden, none]
+          view_set_tabs: { type: single, prim: boolean }
+          switcher:
+            type: single
+            prim: string
+            enum: [left, top, right, hidden]
+          status_bar:
+            type: single
+            prim: string
+            enum: [bottom, top, hidden]
+          add_tab: { type: single, prim: boolean }
+    chip:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required: {}
+        optional:
+          mark:
+            type: single
+            prim: string
+            enum: [grid, key, initial, picture]
+          # The signed picture the `picture` mark draws, by content hash. Only
+          # a node-authored Surface may name one; the daemon drops it from a
+          # project-authored Surface and records the attenuation.
+          art:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                sha256: { type: single, prim: string }
+                media_type:
+                  type: single
+                  prim: string
+                  enum: [image/png, image/jpeg, image/webp]
+              optional: {}
+    extends:
+      type: union
+      prims: [string, "null"]
+    input:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          route:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                invoke:
+                  type: single
+                  prim: mapping
+                  contract:
+                    root_type: mapping
+                    required:
+                      type: { type: single, prim: string }
+                      ref: { type: single, prim: string }
+                    optional: {}
+                bindings:
+                  type: single
+                  prim: mapping
+                  contract:
+                    root_type: mapping
+                    required:
+                      input_parameter: { type: single, prim: string }
+                    optional:
+                      thread_target_parameter: { type: single, prim: string }
+                      interrupt_intent_parameter: { type: single, prim: string }
+              optional:
+                params: { type: single, prim: mapping }
+                requires_project: { type: single, prim: boolean }
+        optional: {}
+    sources:
+      type: mapping
+      values:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            ref: { type: single, prim: string }
+          optional:
+            role: { type: single, prim: string }
+            params: { type: single, prim: mapping }
+            collection: { type: single, prim: string }
+            refresh: { type: single, prim: mapping }
+            dynamic_parameters:
+              type: single
+              prim: sequence
+              elements: { type: single, prim: string }
+            activation:
+              type: single
+              prim: string
+              enum: [initial, on_demand]
+            requires_project: { type: single, prim: boolean }
+    affordances:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+          optional:
+            label: { type: single, prim: string }
+            category: { type: single, prim: string }
+            icon: { type: single, prim: string }
+            producer:
+              type: single
+              prim: string
+              enum: [selection, input, tokens]
+            requires_project: { type: single, prim: boolean }
+            invoke:
+              type: single
+              prim: mapping
+              contract:
+                root_type: mapping
+                required:
+                  plane:
+                    type: single
+                    prim: string
+                    enum: [ui, rye]
+                optional:
+                  ref: { type: single, prim: string }
+                  args: { type: single, prim: mapping }
+                  tokens:
+                    type: single
+                    prim: sequence
+                    elements: { type: single, prim: string }
+                  facet: { type: single, prim: string }
+                  value: { type: single, prim: any }
+                  merge: { type: single, prim: mapping }
+                  open_view: { type: single, prim: string }
+                  drill: { type: single, prim: boolean }
+                  notice: { type: single, prim: string }
+    instruments:
+      type: single
+      prim: sequence
+    capabilities:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          sources: { type: single, prim: sequence, elements: { type: single, prim: string } }
+          affordances: { type: single, prim: sequence, elements: { type: single, prim: string } }
+        optional: {}
+    # Every entry is a `{ group, views }` mapping.
+    library:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            group: { type: single, prim: string }
+            views: { type: single, prim: sequence, elements: { type: single, prim: string } }
+          optional: {}
+
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    description:
+      from: path
+      key: description
+    category:
+      from: relative_dir
+      required: true

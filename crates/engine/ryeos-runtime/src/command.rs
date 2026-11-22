@@ -325,6 +325,16 @@ pub struct CommandControlFlag {
     pub aliases: Vec<String>,
 }
 
+/// A static authoring observation is distinct from complete execution validation.
+/// It never selects a product or supplies executable admission authority.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationScope {
+    #[default]
+    CompleteExecution,
+    SourceObservation,
+}
+
 /// Generic vocabulary for where a control flag routes — a request field or CLI
 /// display state. A closed set the dispatcher knows how to apply; command data
 /// chooses which flag maps to which, but never invents new destinations (the
@@ -332,6 +342,8 @@ pub struct CommandControlFlag {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlFlagBinding {
+    /// Presence → a non-executable source observation beneath validate-only.
+    SourceObservation,
     /// Presence → request `launch_mode = "accepted"`.
     LaunchModeAccepted,
     /// Presence → force the live stream on.
@@ -352,6 +364,9 @@ pub enum ControlFlagBinding {
     /// Presence → authorize project-backed child roots to receive independent
     /// private COW generations retained for explicit owner disposition.
     RetainChildResults,
+    /// Presence → demand the live project explicitly (`project.intent: live`):
+    /// a launch whose resolved root is not the live project is refused.
+    LiveProject,
     /// Presence → exclude the operator vault from an otherwise ordinary
     /// project-environment overlay.
     ExcludeOperatorVault,

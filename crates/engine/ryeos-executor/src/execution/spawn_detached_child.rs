@@ -53,7 +53,6 @@ use ryeos_runtime::events::RuntimeEventType;
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-#[allow(clippy::too_many_arguments)]
 pub async fn spawn_detached_child(
     state: &AppState,
     thread_auth: &ThreadAuthState,
@@ -138,6 +137,28 @@ pub async fn spawn_detached_child(
             state
                 .state_store
                 .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")?;
+        // The child exists, so an earlier drive may have crashed between
+        // its link and its lineage event. A settled parent is the normal
+        // case on a late retry and must not turn the repair into a failure.
+        match state
+            .threads
+            .record_dispatch_child_lineage(&child_thread_id)
+        {
+            Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+                ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+            )) => tracing::warn!(
+                parent_thread_id,
+                child_thread_id,
+                "parent settled before the detached child's lineage event was repaired"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                parent_thread_id,
+                child_thread_id,
+                error = %error,
+                "failed to repair the detached child's lineage event"
+            ),
+        }
         if inherited_stop.is_some() {
             crate::execution::process_attachment::finalize_requested_stop_if_present(
                 state,
@@ -395,6 +416,7 @@ pub async fn spawn_detached_child(
         }
     };
     let child_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: child_provenance.logical_project_root(&parent.current_site_id),
         requested_by: requested_by.clone(),
         project_context: child_project_context.clone(),
         subject_resolution_authority: child_provenance.subject_resolution_authority(),
@@ -555,49 +577,54 @@ pub async fn spawn_detached_child(
             Some(prepared.launch_metadata()),
         )?;
     let prepared = prepared.with_persisted_birth_audit();
-    let inherited_stop =
-        match state
-            .state_store
-            .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")
-        {
-            Ok(inherited_stop) => inherited_stop,
-            Err(error) => {
-                let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
-                    state,
-                    &child_thread_id,
-                    json!({
-                        "code": "child_link_failed",
-                        "reason": error.to_string(),
-                    }),
-                );
-                match cleanup {
-                    Ok(outcome) if outcome.is_settled() => {
-                        crate::execution::launch::kick_launch_window_for_terminal(
-                            state,
-                            &child_thread_id,
-                        );
-                        crate::execution::launch::kick_follow_resume_if_ready(
-                            state,
-                            &child_thread_id,
-                        );
-                    }
-                    Ok(outcome) => tracing::warn!(
-                        child_thread_id,
-                        ?outcome,
-                        "preserved concurrently advanced detached child after lineage failure"
-                    ),
-                    Err(cleanup_error) => {
-                        return Err(anyhow::anyhow!(
-                            "detach: record child lineage under parent {parent_thread_id}: \
-                             {error}; conditional child cleanup also failed: {cleanup_error}"
-                        ));
-                    }
-                }
-                return Err(error).context(format!(
-                    "detach: record child lineage under parent {parent_thread_id}"
-                ));
+    let inherited_stop = match state
+        .state_store
+        .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")
+        .and_then(|inherited_stop| {
+            // A parent stopped during admission cannot author the
+            // lineage event; the child is stopped below instead.
+            if inherited_stop.is_none() {
+                state
+                    .threads
+                    .require_dispatch_child_lineage(&child_thread_id)?;
             }
-        };
+            Ok(inherited_stop)
+        }) {
+        Ok(inherited_stop) => inherited_stop,
+        Err(error) => {
+            let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                state,
+                &child_thread_id,
+                json!({
+                    "code": "child_link_failed",
+                    "reason": format!("{error:#}"),
+                }),
+            );
+            match cleanup {
+                Ok(outcome) if outcome.is_settled() => {
+                    crate::execution::launch::kick_launch_window_for_terminal(
+                        state,
+                        &child_thread_id,
+                    );
+                    crate::execution::launch::kick_follow_resume_if_ready(state, &child_thread_id);
+                }
+                Ok(outcome) => tracing::warn!(
+                    child_thread_id,
+                    ?outcome,
+                    "preserved concurrently advanced detached child after lineage failure"
+                ),
+                Err(cleanup_error) => {
+                    return Err(anyhow::anyhow!(
+                        "detach: record child lineage under parent {parent_thread_id}: \
+                             {error:#}; conditional child cleanup also failed: {cleanup_error}"
+                    ));
+                }
+            }
+            return Err(error).context(format!(
+                "detach: record child lineage under parent {parent_thread_id}"
+            ));
+        }
+    };
     if inherited_stop.is_some() {
         crate::execution::process_attachment::finalize_requested_stop_if_present(
             state,
@@ -633,7 +660,7 @@ pub async fn spawn_detached_child(
                     state,
                     &child_thread_id,
                     "launch_window_enqueue_failed",
-                    &error.to_string(),
+                    &format!("{error:#}"),
                 )?;
                 return Err(error).context("detach: enqueue child in launch window");
             }

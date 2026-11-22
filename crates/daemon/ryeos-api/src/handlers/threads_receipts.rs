@@ -37,7 +37,7 @@ pub async fn handle(
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     // Mirror `threads.get`: null for missing OR non-owned (after the owner
     // check below), so existence is never leaked.
@@ -49,7 +49,7 @@ pub async fn handle(
     let artifacts = state
         .threads
         .list_thread_artifacts(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     let mut receipts: Vec<Value> = artifacts
         .into_iter()

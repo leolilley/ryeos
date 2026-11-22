@@ -27,6 +27,89 @@ pub struct ReplayResponse {
     pub next_cursor: Option<i64>,
 }
 
+/// Bytes stored beside the event append that names them. The runtime computes
+/// the hash of the attachment object, so an event can name it in its
+/// `attachment_refs` before the append is sent; the daemon recomputes the hash
+/// and refuses an upload that no event of the append names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventAttachment {
+    media_type: String,
+    bytes: Vec<u8>,
+    object_hash: String,
+}
+
+impl EventAttachment {
+    pub fn new(media_type: &str, bytes: Vec<u8>) -> anyhow::Result<Self> {
+        let object = ryeos_state::objects::ThreadAttachment::for_bytes(media_type, &bytes)?;
+        Ok(Self {
+            media_type: media_type.to_owned(),
+            object_hash: object.object_hash()?,
+            bytes,
+        })
+    }
+
+    /// The hash an event lists in `attachment_refs` to name this attachment.
+    pub fn object_hash(&self) -> &str {
+        &self.object_hash
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// What an event append carries besides its events.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventAppendOptions {
+    /// Attachments stored under the same write permit as the events.
+    pub attachments: Vec<EventAttachment>,
+    /// A key for the whole batch: a retry after a lost acknowledgement that
+    /// repeats the key and the batch is answered without appending twice.
+    pub idempotency_key: Option<String>,
+}
+
+impl EventAppendOptions {
+    /// The append parameters these options add to `{thread_id, events}`.
+    pub fn wire_fields(&self) -> serde_json::Map<String, Value> {
+        use base64::Engine as _;
+        let mut fields = serde_json::Map::new();
+        if !self.attachments.is_empty() {
+            fields.insert(
+                "attachments".to_owned(),
+                Value::Array(
+                    self.attachments
+                        .iter()
+                        .map(|attachment| {
+                            serde_json::json!({
+                                "media_type": attachment.media_type,
+                                "bytes_b64": base64::engine::general_purpose::STANDARD
+                                    .encode(&attachment.bytes),
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(key) = &self.idempotency_key {
+            fields.insert("idempotency_key".to_owned(), Value::String(key.clone()));
+        }
+        fields
+    }
+}
+
+/// The wire code of an append whose attachments the node's policy refuses.
+pub const ATTACHMENT_REFUSED_CODE: &str = "attachment_refused";
+
+/// An event append refused because of its attachments: too many, a media type
+/// the node does not accept, or too large. The events were not appended.
+#[derive(Debug, thiserror::Error)]
+#[error("attachment_refused: {0}")]
+pub struct AttachmentRefused(pub String);
+
 #[derive(Debug, thiserror::Error)]
 pub enum CallbackError {
     #[error("{code}: {message}")]
@@ -617,6 +700,9 @@ pub const PARAM_PARENT_LIMITS: &str = "parent_limits";
 pub const PARAM_PARENT_THREAD_ID: &str = "parent_thread_id";
 pub const PARAM_DEPTH: &str = "depth";
 pub const PARAM_CONTINUATION: &str = "continuation";
+/// Caller parameter carrying the run deadline of a root launch, in seconds.
+/// It is daemon control data, never model input.
+pub const PARAM_RUN_TIMEOUT: &str = "run_timeout";
 
 /// Control keys stripped from directive prompt inputs (all runtime-owned).
 pub const RESERVED_CONTROL_KEYS: &[&str] = &[
@@ -624,6 +710,7 @@ pub const RESERVED_CONTROL_KEYS: &[&str] = &[
     PARAM_PARENT_THREAD_ID,
     PARAM_DEPTH,
     PARAM_CONTINUATION,
+    PARAM_RUN_TIMEOUT,
 ];
 
 /// Request to bind one already-admitted exclusive subprocess dependency to
@@ -654,6 +741,12 @@ pub struct DedicatedSessionStartRequest {
     /// worker restart. The daemon verifies this against the signed protocol
     /// profile before launching the worker.
     pub recover_upstream_session: bool,
+    /// The root thread of a completed predecessor whose upstream conversation
+    /// this execution continues. Present exactly when the admitted worker
+    /// mode is a continuation; the daemon judges the predecessor against the
+    /// admitted owner, profile and credential generation before admitting
+    /// the session with the predecessor's upstream session id.
+    pub continue_from: Option<String>,
 }
 
 /// One opaque command issued by the integration runtime that owns a dedicated
@@ -931,13 +1024,13 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         thread_id: &str,
         event_type: &str,
         payload: Value,
-        storage_class: &str,
     ) -> Result<Value, CallbackError>;
 
     async fn append_events(
         &self,
         thread_id: &str,
         events: Vec<Value>,
+        options: EventAppendOptions,
     ) -> Result<Value, CallbackError>;
 
     /// Replay events for a thread or a whole chain. `params` carries
@@ -946,6 +1039,20 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     /// thread-scoped read filters to one thread. The daemon authorizes the
     /// target against the caller's chain.
     async fn replay_events(&self, params: Value) -> Result<Value, CallbackError>;
+
+    /// One stored attachment named by an event of the caller's chain, as
+    /// `{ media_type, byte_length, bytes_b64 }`. Meaning-blind: any attachment.
+    /// The daemon refuses a hash no event of the chain names.
+    async fn read_attachment(
+        &self,
+        thread_id: &str,
+        attachment: &str,
+    ) -> Result<Value, CallbackError> {
+        let _ = (thread_id, attachment);
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "this callback client cannot read attachments"
+        )))
+    }
 
     async fn bundle_events_append(
         &self,
@@ -1195,6 +1302,27 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn append_options_add_attachments_and_key_to_the_wire() {
+        assert!(EventAppendOptions::default().wire_fields().is_empty());
+        let attachment = EventAttachment::new("application/json", b"{}".to_vec()).unwrap();
+        let object_hash = attachment.object_hash().to_owned();
+        assert_eq!(object_hash.len(), 64);
+        let fields = EventAppendOptions {
+            attachments: vec![attachment],
+            idempotency_key: Some("launch-1".to_owned()),
+        }
+        .wire_fields();
+        assert_eq!(fields["idempotency_key"], "launch-1");
+        assert_eq!(fields["attachments"][0]["media_type"], "application/json");
+        assert_eq!(fields["attachments"][0]["bytes_b64"], "e30=");
+    }
+
+    #[test]
+    fn an_attachment_is_refused_without_a_valid_media_type() {
+        assert!(EventAttachment::new("Not A Type", b"x".to_vec()).is_err());
+    }
+
+    #[test]
     fn runtime_failure_contract_rejects_unsupported_or_unbounded_values() {
         let valid = RuntimeFailure {
             kind: RUNTIME_FAILURE_KIND.to_string(),
@@ -1416,7 +1544,7 @@ mod tests {
                 "declaration_id": "subject",
                 "witness_hash": "a".repeat(64),
                 "witness_source": {"kind": "local_capture"},
-                "qualification_hash": null
+                "qualification_hash": null, "remote_testimony": null
             }
         }]))
         .unwrap();

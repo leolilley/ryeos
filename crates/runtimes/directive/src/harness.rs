@@ -71,6 +71,12 @@ impl Harness {
         }
     }
 
+    /// The run deadline clock, when the daemon stamped an end on this
+    /// execution.
+    pub fn run_clock(&self) -> Option<crate::run_clock::RunClock> {
+        crate::run_clock::RunClock::from_limits(&self.limits)
+    }
+
     pub fn cancelled_flag(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
     }
@@ -91,6 +97,12 @@ impl Harness {
     /// exactly one cognition.
     pub fn take_interrupt(&self) -> bool {
         self.interrupted.swap(false, Ordering::Relaxed)
+    }
+
+    /// Whether the next turn is the last the turn limit allows. With a limit of
+    /// one, that is the first turn.
+    pub fn final_turn_next(&self) -> bool {
+        self.limits.turns > 0 && self.turns_used.saturating_add(1) == self.limits.turns
     }
 
     pub fn check_limits(&self) -> Result<(), String> {
@@ -484,6 +496,7 @@ mod tests {
                 depth: 3,
                 duration_seconds: 60,
                 aggregate: Default::default(),
+                deadline: Default::default(),
                 runtime: runtime_limits(&[
                     (TOOL_CALLS_LIMIT, 4),
                     (PROVIDER_REQUEST_BODY_BYTES_LIMIT, 4096),

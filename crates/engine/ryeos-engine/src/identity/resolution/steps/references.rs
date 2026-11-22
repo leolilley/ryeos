@@ -81,7 +81,6 @@ pub(crate) fn run(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn walk(
     ctx: &mut ResolutionContext<'_>,
     from_path: &Path,

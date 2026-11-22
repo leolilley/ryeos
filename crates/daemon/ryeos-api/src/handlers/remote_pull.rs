@@ -10,8 +10,8 @@ use std::{ffi::OsStr, ffi::OsString};
 use anyhow::{Result, bail};
 use serde_json::Value;
 
+use crate::handlers::remote_push::named_remote_client;
 use crate::registry::ServiceDescriptor;
-use crate::remote::client::RemoteClient;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -25,6 +25,9 @@ pub struct Request {
     /// Remote config name.
     #[serde(default = "default_remote")]
     pub remote: String,
+    /// The root on the remote the requested hashes are read under. The remote
+    /// serves only hashes reachable from it.
+    pub root: crate::objects_read_scope::ReadRoot,
     /// Typed object hashes to fetch. Namespace is never inferred.
     #[serde(
         default,
@@ -41,14 +44,18 @@ pub struct Request {
     pub output_dir: String,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
     if req.object_hashes.is_empty() && req.blob_hashes.is_empty() {
         anyhow::bail!("object_hashes and blob_hashes must not both be empty");
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
+    let client = named_remote_client(&state, &req.remote, &ctx)?;
     let presence = client
-        .objects_has(&req.object_hashes, &req.blob_hashes)
+        .objects_has(&req.root, &req.object_hashes, &req.blob_hashes)
         .await?;
     let missing = presence
         .missing_object_hashes
@@ -65,7 +72,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             missing.join(", ")
         );
     }
-    let resp = client.objects_get(&req.object_hashes, &[]).await?;
+    let resp = client
+        .objects_get(&req.root, &req.object_hashes, &[])
+        .await?;
 
     let mut fetched = 0usize;
     let mut stored_hashes: Vec<String> = Vec::new();
@@ -99,7 +108,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 let name = OsString::from(format!("{}.json", entry.hash));
                 if staging
                     .directory()
-                    .atomic_create_regular(&name, &content, 0o600)?
+                    .atomic_create_regular(&name, &content, 0o600, crate::API_TEMP_PURPOSE)?
                     .is_none()
                 {
                     anyhow::bail!("duplicate remote object artifact name");
@@ -118,7 +127,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             staging
                 .directory()
                 .open_regular_create(OsStr::new(&hash), true, true, 0o600)?;
-        client.stream_blob(&hash, &mut output).await?;
+        client.stream_blob(&req.root, &hash, &mut output).await?;
         output.sync_all()?;
         stored_hashes.push(hash);
         fetched += 1;
@@ -202,6 +211,7 @@ impl Drop for PinnedStagingDirectory {
         if let Err(error) = directory.remove_contents_recursive().and_then(|()| {
             self.parent
                 .remove_empty_child_if_same(&self.name, directory)
+                .map(|receipt| receipt.is_some())
                 .and_then(|removed| {
                     if removed {
                         Ok(())
@@ -219,11 +229,11 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/pull",
     endpoint: "remote.pull",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.objects/get"],
-    handler: |params, _ctx, state| {
+    required_caps: &["ryeos.execute.service.remote/pull"],
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

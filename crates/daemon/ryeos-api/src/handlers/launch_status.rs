@@ -28,7 +28,7 @@ pub async fn handle(
     let status = state
         .state_store
         .launch_planning_status(&req.launch_id, &ctx.fingerprint)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
         .ok_or(HandlerError::NotFound)?;
     Ok(json!(status))
 }

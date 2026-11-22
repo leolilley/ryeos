@@ -1,10 +1,10 @@
 //! Cron expression parsing and next-fire computation.
 //!
-//! Uses the `cron` crate (v0.16.0) for cron expressions.
+//! Cron expressions are evaluated by `ryeos_scheduler_contract::CronSchedule`.
 //! Interval and at types are handled directly.
 
 use anyhow::{Context, Result, bail};
-use std::str::FromStr;
+use ryeos_scheduler_contract::{CronSchedule, ScheduleZone, parse_iso_ts};
 
 /// Compute the next fire time (millis since epoch) after `after_ms`.
 ///
@@ -64,21 +64,10 @@ pub fn compute_scheduled_at(
 // ── Cron ────────────────────────────────────────────────────────────
 
 fn next_cron_fire(expression: &str, timezone: &str, after_ms: i64) -> Result<Option<i64>> {
-    let schedule = cron::Schedule::from_str(expression)
+    let schedule = CronSchedule::parse(expression)
         .with_context(|| format!("invalid cron expression: {}", expression))?;
-
-    let after = chrono::DateTime::from_timestamp_millis(after_ms).unwrap_or_else(chrono::Utc::now);
-
-    let tz: chrono_tz::Tz = timezone
-        .parse()
-        .with_context(|| format!("invalid IANA timezone: {}", timezone))?;
-
-    let after_with_tz = after.with_timezone(&tz);
-
-    match schedule.after(&after_with_tz).next() {
-        Some(dt) => Ok(Some(dt.timestamp_millis())),
-        None => Ok(None),
-    }
+    let zone = ScheduleZone::parse(timezone)?;
+    Ok(schedule.next_after(&zone, after_ms))
 }
 
 /// Walk cron fire times between `start_ms` and `end_ms` and return
@@ -92,14 +81,12 @@ fn find_most_recent_cron(
     start_ms: i64,
     end_ms: i64,
 ) -> Option<i64> {
-    let schedule = cron::Schedule::from_str(expression).ok()?;
-    let tz: chrono_tz::Tz = timezone.parse().ok()?;
-    let start = chrono::DateTime::from_timestamp_millis(start_ms)?;
-    let start_with_tz = start.with_timezone(&tz);
+    let schedule = CronSchedule::parse(expression).ok()?;
+    let zone = ScheduleZone::parse(timezone).ok()?;
 
     let mut most_recent: Option<i64> = None;
     const MAX_ITERATIONS: usize = 10_000;
-    for (i, dt) in schedule.after(&start_with_tz).enumerate() {
+    for (i, ms) in schedule.boundaries_after(&zone, start_ms).enumerate() {
         if i >= MAX_ITERATIONS {
             tracing::warn!(
                 expression = %expression,
@@ -107,13 +94,28 @@ fn find_most_recent_cron(
             );
             break;
         }
-        let ms = dt.timestamp_millis();
         if ms > end_ms {
             break;
         }
         most_recent = Some(ms);
     }
     most_recent
+}
+
+/// The `n`th cron boundary strictly after `start_ms` (1-based).
+///
+/// Lifetime bounds call this with `n <= SCHEDULE_MAX_FIRES_LIMIT`, the same
+/// iteration cap [`find_most_recent_cron`] uses.
+pub fn nth_cron_boundary_after(
+    expression: &str,
+    timezone: &str,
+    start_ms: i64,
+    n: u32,
+) -> Option<i64> {
+    let index = usize::try_from(n.checked_sub(1)?).ok()?;
+    let schedule = CronSchedule::parse(expression).ok()?;
+    let zone = ScheduleZone::parse(timezone).ok()?;
+    schedule.boundaries_after(&zone, start_ms).nth(index)
 }
 
 // ── Interval ────────────────────────────────────────────────────────
@@ -163,72 +165,15 @@ fn next_at_fire(expression: &str, now_ms: i64) -> Result<Option<i64>> {
     }
 }
 
-pub fn parse_iso_ts(expression: &str) -> Option<i64> {
-    // Try chrono's ISO 8601 parsing
-    chrono::DateTime::parse_from_rfc3339(expression)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
-        .or_else(|| {
-            // Try without timezone (assume UTC)
-            let with_z = format!("{}Z", expression);
-            chrono::DateTime::parse_from_rfc3339(&with_z)
-                .ok()
-                .map(|dt| dt.timestamp_millis())
-        })
-}
-
-// ── Validation ──────────────────────────────────────────────────────
-
-/// Validate a schedule expression parses correctly for the given type.
-pub fn validate_expression(schedule_type: &str, expression: &str) -> Result<()> {
-    match schedule_type {
-        "cron" => {
-            cron::Schedule::from_str(expression)
-                .with_context(|| format!("invalid cron expression: {}", expression))?;
-            Ok(())
-        }
-        "interval" => {
-            let secs: i64 = expression
-                .parse()
-                .with_context(|| format!("interval must be integer seconds: {}", expression))?;
-            if secs <= 0 {
-                bail!("interval must be positive, got: {}", secs);
-            }
-            Ok(())
-        }
-        "at" => {
-            if parse_iso_ts(expression).is_none() {
-                bail!(
-                    "invalid at expression (must be ISO 8601 timestamp): {}",
-                    expression
-                );
-            }
-            Ok(())
-        }
-        other => bail!("unknown schedule_type: {}", other),
-    }
-}
-
 /// Check if an `at` schedule's timestamp is in the past.
 pub fn is_at_past(expression: &str, now_ms: i64) -> bool {
     parse_iso_ts(expression).is_none_or(|ts| ts <= now_ms)
 }
 
-/// Validate a timezone string.
-pub fn validate_timezone(tz: &str) -> Result<()> {
-    tz.parse::<chrono_tz::Tz>()
-        .with_context(|| format!("invalid IANA timezone: {}", tz))?;
-    Ok(())
-}
-
-/// Validate the canonical schedule identity shared with durable fire records.
-pub fn validate_schedule_id(id: &str) -> Result<()> {
-    ryeos_state::gc::retention::validate_schedule_id(id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_scheduler_contract::{validate_expression, validate_schedule_id, validate_timezone};
 
     // ── validate_expression ──────────────────────────────────────
 
@@ -303,9 +248,7 @@ mod tests {
     fn next_at_future() {
         let now = 1_000_000;
         let future = now + 600_000;
-        let ts = chrono::DateTime::from_timestamp_millis(future)
-            .unwrap()
-            .to_rfc3339();
+        let ts = ryeos_effect_contract::rfc3339::format_unix_millis(future).unwrap();
         let result = compute_next_fire("at", &ts, "UTC", now, None).unwrap();
         assert!(result.is_some());
     }
@@ -320,7 +263,7 @@ mod tests {
 
     #[test]
     fn next_cron_basic() {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = lillux::time::timestamp_millis();
         let result = compute_next_fire("cron", "0 * * * * *", "UTC", now, None).unwrap();
         assert!(result.is_some());
         assert!(result.unwrap() > now);
@@ -384,10 +327,28 @@ mod tests {
 
     #[test]
     fn at_is_not_past_future_timestamp() {
-        let future =
-            chrono::DateTime::from_timestamp_millis(lillux::time::timestamp_millis() + 600_000)
-                .unwrap()
-                .to_rfc3339();
+        let future = ryeos_effect_contract::rfc3339::format_unix_millis(
+            lillux::time::timestamp_millis() + 600_000,
+        )
+        .unwrap();
         assert!(!is_at_past(&future, lillux::time::timestamp_millis()));
+    }
+
+    #[test]
+    fn nth_cron_boundary_counts_from_the_start_exclusive() {
+        // Every minute, from exactly one minute boundary.
+        let start = 1_700_000_040_000; // 22:14:00 UTC
+        assert_eq!(
+            nth_cron_boundary_after("0 * * * * *", "UTC", start, 1),
+            Some(start + 60_000)
+        );
+        assert_eq!(
+            nth_cron_boundary_after("0 * * * * *", "UTC", start, 3),
+            Some(start + 180_000)
+        );
+        assert_eq!(
+            nth_cron_boundary_after("0 * * * * *", "UTC", start, 0),
+            None
+        );
     }
 }

@@ -1,3 +1,10 @@
+mod guest_clock;
+pub use guest_clock::{LocalClockAnchor, LocalDeadline, WallClockTrust, wall_clock_trust};
+mod retained_occupancy;
+pub use retained_occupancy::{
+    OccupancyServiceEdge, RetainedClockCloseFailure, RetainedOccupancyClock, RetiredOccupancyClock,
+};
+
 use std::thread;
 pub use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -5,7 +12,382 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
+/// Transport of already-issued local endpoints. This is neither admission nor
+/// funded occupancy authority. The caller must authenticate the original pair
+/// and independently enforce single-use invocation and companion-role exclusion.
+#[cfg(target_os = "linux")]
+pub struct OriginalLocalDeadlineHandoff {
+    service: MonotonicDeadline,
+    cleanup: MonotonicDeadline,
+    bound: crate::InheritedDescriptorAuthority,
+    clock: crate::InheritedDescriptorAuthority,
+}
+
+#[cfg(target_os = "linux")]
+impl OriginalLocalDeadlineHandoff {
+    pub fn from_original(
+        service: MonotonicDeadline,
+        cleanup: MonotonicDeadline,
+    ) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt as _;
+        if cleanup.is_before(&service) || service.has_elapsed() {
+            return Err("original local deadline pair is inverted or expired".into());
+        }
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(service)
+            .map_err(|error| error.to_string())?;
+        let clock = original_window::pin_current_clock_namespace(&lease)?;
+        // BOOTTIME precedes both remaining observations: export can only narrow.
+        let before = occupancy_now()?;
+        let service_tick = local_deadline_wire::expiry(before.tick_ns, service.remaining())?;
+        let cleanup_tick = if service.same_endpoint(&cleanup) {
+            service_tick
+        } else {
+            local_deadline_wire::expiry(before.tick_ns, cleanup.remaining())?
+        };
+        let identity = clock.file().metadata().map_err(|error| error.to_string())?;
+        let wire = local_deadline_wire::Wire {
+            version: 1,
+            contract_digest: before.contract_digest.clone(),
+            incarnation_digest: before.incarnation_digest.clone(),
+            clock_dev: identity.dev(),
+            clock_ino: identity.ino(),
+            service_tick,
+            cleanup_tick,
+        };
+        wire.validate(&before)?;
+        let bytes = serde_json::to_vec(&wire).map_err(|error| error.to_string())?;
+        if bytes.is_empty() || bytes.len() > original_window::MAX_BYTES {
+            return Err("local deadline packet exceeds fixed bound".into());
+        }
+        let bound = crate::sealed_memfd(c"original-local-deadlines", &bytes)?;
+        let handoff = Self {
+            service,
+            cleanup,
+            bound,
+            clock,
+        };
+        handoff.require_live_pair()?;
+        Ok(handoff)
+    }
+
+    fn require_live_pair(&self) -> Result<(), String> {
+        if self.service.has_elapsed() || self.cleanup.is_before(&self.service) {
+            return Err("original local deadline pair expired or inverted".into());
+        }
+        local_deadline_wire::read(&self.bound, &self.clock)?.validate(&occupancy_now()?)
+    }
+
+    /// Duplicate the exact sealed object and pinned clock, never re-export time.
+    pub fn duplicate_retained_pair(&self) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt as _;
+        let _lease = crate::exec::retain_fork_sensitive_descriptors_until(self.service)
+            .map_err(|error| error.to_string())?;
+        self.require_live_pair()?;
+        let copy = Self {
+            service: self.service,
+            cleanup: self.cleanup,
+            bound: self.bound.duplicate_at_or_above(3)?,
+            clock: self.clock.duplicate_at_or_above(3)?,
+        };
+        let originals = [
+            self.bound.inherited_descriptor()?,
+            self.clock.inherited_descriptor()?,
+        ];
+        for (source, target) in [(&self.bound, &copy.bound), (&self.clock, &copy.clock)] {
+            if originals.contains(&target.inherited_descriptor()?) {
+                return Err("local deadline duplicate overlaps original role".into());
+            }
+            let a = source
+                .file()
+                .metadata()
+                .map_err(|error| error.to_string())?;
+            let b = target
+                .file()
+                .metadata()
+                .map_err(|error| error.to_string())?;
+            if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
+                return Err("local deadline duplicate changed object identity".into());
+            }
+        }
+        copy.require_live_pair()?;
+        self.require_live_pair()?;
+        Ok(copy)
+    }
+
+    pub fn original_service(&self) -> MonotonicDeadline {
+        self.service
+    }
+    pub fn original_cleanup(&self) -> MonotonicDeadline {
+        self.cleanup
+    }
+    pub fn into_authorities(
+        self,
+    ) -> (
+        crate::InheritedDescriptorAuthority,
+        crate::InheritedDescriptorAuthority,
+    ) {
+        (self.bound, self.clock)
+    }
+}
+
+/// Conservative local endpoints adopted once, with the original clock pinned.
+/// No descriptor from this owner may be forwarded to the semantic target.
+#[cfg(target_os = "linux")]
+pub struct AdoptedOriginalLocalDeadlines {
+    service: MonotonicDeadline,
+    cleanup: MonotonicDeadline,
+    _clock: crate::InheritedDescriptorAuthority,
+}
+
+#[cfg(target_os = "linux")]
+impl AdoptedOriginalLocalDeadlines {
+    /// # Safety
+    /// Both roles must be uniquely owned deliberate inherited descriptors with
+    /// no Rust owner, distinct from every companion role. Admission and the
+    /// independent single-use invocation guard belong to the enclosing owner.
+    pub unsafe fn take_inherited(bound_fd: u32, clock_fd: u32) -> Result<Self, String> {
+        local_deadline_wire::require_roles(bound_fd, clock_fd)?;
+        let bound = unsafe { crate::take_inherited_descriptor_authority(bound_fd) }?;
+        let clock = unsafe { crate::take_inherited_descriptor_authority(clock_fd) }?;
+        Self::from_owned_roles(bound, clock)
+    }
+
+    fn from_owned_roles(
+        bound: crate::InheritedDescriptorAuthority,
+        clock: crate::InheritedDescriptorAuthority,
+    ) -> Result<Self, String> {
+        let wire = local_deadline_wire::read(&bound, &clock)?;
+        // The wire carries exact suspend-inclusive coordinates, so adoption
+        // delay cannot renew time and a paused host cannot extend it.
+        let now = occupancy_now()?;
+        wire.validate(&now)?;
+        let service = MonotonicDeadline::at_boot_tick(wire.service_tick)
+            .ok_or("adopted service deadline has no suspend-inclusive clock")?;
+        let cleanup = MonotonicDeadline::at_boot_tick(wire.cleanup_tick)
+            .ok_or("adopted cleanup deadline has no suspend-inclusive clock")?;
+        original_window::require_same_clock_namespace(clock.file())?;
+        wire.validate(&occupancy_now()?)?;
+        if service.has_elapsed() {
+            return Err("local deadline expired during adoption".into());
+        }
+        drop(bound);
+        Ok(Self {
+            service,
+            cleanup,
+            _clock: clock,
+        })
+    }
+
+    pub fn service_deadline(&self) -> MonotonicDeadline {
+        self.service
+    }
+    pub fn cleanup_deadline(&self) -> MonotonicDeadline {
+        self.cleanup
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod local_deadline_wire {
+    use super::*;
+    use std::os::unix::fs::MetadataExt as _;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Wire {
+        pub(super) version: u32,
+        pub(super) contract_digest: String,
+        pub(super) incarnation_digest: String,
+        pub(super) clock_dev: u64,
+        pub(super) clock_ino: u64,
+        pub(super) service_tick: u64,
+        pub(super) cleanup_tick: u64,
+    }
+
+    impl Wire {
+        pub(super) fn validate(&self, now: &OccupancyCoordinate) -> Result<(), String> {
+            now.validate()?;
+            if self.version != 1
+                || self.contract_digest != now.contract_digest
+                || self.incarnation_digest != now.incarnation_digest
+                || self.service_tick <= now.tick_ns
+                || self.cleanup_tick < self.service_tick
+            {
+                return Err("local deadline packet expired, inverted or wrong clock domain".into());
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) fn expiry(tick: u64, remaining: Duration) -> Result<u64, String> {
+        if remaining.is_zero() {
+            return Err("original local deadline expired".into());
+        }
+        tick.checked_add(
+            u64::try_from(remaining.as_nanos()).map_err(|_| "local deadline duration overflow")?,
+        )
+        .ok_or_else(|| "local deadline tick overflow".into())
+    }
+
+    pub(super) fn require_roles(bound: u32, clock: u32) -> Result<(), String> {
+        if bound <= 2 || clock <= 2 || bound == clock {
+            return Err("local deadline roles must be distinct and above stdio".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn read(
+        bound: &crate::InheritedDescriptorAuthority,
+        clock: &crate::InheritedDescriptorAuthority,
+    ) -> Result<Wire, String> {
+        let bound_fd = bound.inherited_descriptor()?;
+        require_roles(bound_fd, clock.inherited_descriptor()?)?;
+        original_window::require_same_clock_namespace(clock.file())?;
+        let bytes =
+            crate::sandbox::read_sealed_inherited_descriptor(bound_fd, original_window::MAX_BYTES)?;
+        let wire: Wire = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode strict local deadlines: {error}"))?;
+        let identity = clock.file().metadata().map_err(|error| error.to_string())?;
+        if (wire.clock_dev, wire.clock_ino) != (identity.dev(), identity.ino()) {
+            return Err("local deadline packet disagrees with pinned clock identity".into());
+        }
+        Ok(wire)
+    }
+}
+
 pub const OCCUPANCY_CLOCK_CONTRACT_VERSION: u32 = 1;
+
+// Authored component controls; execution is deferred to the coherent gate.
+#[cfg(all(test, target_os = "linux"))]
+mod local_deadline_handoff_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt as _;
+
+    fn pair() -> OriginalLocalDeadlineHandoff {
+        let service = MonotonicDeadline::after(Duration::from_secs(60));
+        OriginalLocalDeadlineHandoff::from_original(service, service).unwrap()
+    }
+
+    #[test]
+    fn equal_endpoints_share_one_tick_and_delayed_adoption_does_not_extend() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let handoff = pair();
+        let original = handoff.original_service();
+        let wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
+        assert_eq!(wire.service_tick, wire.cleanup_tick);
+        thread::sleep(Duration::from_millis(10));
+        let (bound, clock) = handoff.into_authorities();
+        // Consume both registered owners; this same-process fixture must not
+        // impersonate raw inheritance or register an already-owned FD again.
+        let adopted = AdoptedOriginalLocalDeadlines::from_owned_roles(bound, clock).unwrap();
+        let original_left = original.remaining();
+        assert!(adopted.service.remaining() <= original_left);
+        assert!(adopted.service.same_endpoint(&adopted.cleanup));
+        assert!(adopted.service_deadline().same_endpoint(&adopted.service));
+        // Adopted deadlines count the suspend-inclusive clock.
+        assert!(matches!(adopted.service.basis, DeadlineBasis::Boot(_)));
+    }
+
+    #[test]
+    fn duplicates_preserve_objects_and_original_endpoints() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let original = pair();
+        let copy = original.duplicate_retained_pair().unwrap();
+        for (a, b) in [
+            (&original.bound, &copy.bound),
+            (&original.clock, &copy.clock),
+        ] {
+            assert_ne!(
+                a.inherited_descriptor().unwrap(),
+                b.inherited_descriptor().unwrap()
+            );
+            let a = a.file().metadata().unwrap();
+            let b = b.file().metadata().unwrap();
+            assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+        }
+        assert!(original.service.same_endpoint(&copy.service));
+        assert!(original.cleanup.same_endpoint(&copy.cleanup));
+    }
+
+    #[test]
+    fn construction_refuses_inverted_and_expired_originals() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let earlier = MonotonicDeadline::after(Duration::from_secs(30));
+        let later = MonotonicDeadline::after(Duration::from_secs(60));
+        assert!(OriginalLocalDeadlineHandoff::from_original(later, earlier).is_err());
+        assert!(
+            OriginalLocalDeadlineHandoff::from_original(
+                MonotonicDeadline::after(Duration::ZERO),
+                later
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn decoding_refuses_unknown_fields_domain_version_order_and_expiry() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let handoff = pair();
+        let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
+        let now = occupancy_now().unwrap();
+        let mut json = serde_json::to_value(&wire).unwrap();
+        json["funded_occupancy"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<local_deadline_wire::Wire>(json).is_err());
+        wire.version = 2;
+        assert!(wire.validate(&now).is_err());
+        wire.version = 1;
+        wire.incarnation_digest = crate::sha256_hex(b"other incarnation");
+        assert!(wire.validate(&now).is_err());
+        wire.incarnation_digest = now.incarnation_digest.clone();
+        wire.contract_digest = crate::sha256_hex(b"other contract");
+        assert!(wire.validate(&now).is_err());
+        wire.contract_digest = now.contract_digest.clone();
+        wire.cleanup_tick = wire.service_tick - 1;
+        assert!(wire.validate(&now).is_err());
+        wire.cleanup_tick = wire.service_tick;
+        wire.service_tick = now.tick_ns;
+        assert!(wire.validate(&now).is_err());
+    }
+
+    #[test]
+    fn descriptor_reader_refuses_wrong_clock_identity_and_oversized_packet() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let handoff = pair();
+        let mut wire = local_deadline_wire::read(&handoff.bound, &handoff.clock).unwrap();
+        wire.clock_ino ^= 1;
+        let wrong =
+            crate::sealed_memfd(c"wrong-clock-identity", &serde_json::to_vec(&wire).unwrap())
+                .unwrap();
+        assert!(local_deadline_wire::read(&wrong, &handoff.clock).is_err());
+        let oversized = crate::sealed_memfd(
+            c"oversized-deadline",
+            &vec![b' '; original_window::MAX_BYTES + 1],
+        )
+        .unwrap();
+        assert!(local_deadline_wire::read(&oversized, &handoff.clock).is_err());
+        let foreign = crate::sealed_memfd(c"foreign-clock", b"not a namespace").unwrap();
+        assert!(local_deadline_wire::read(&handoff.bound, &foreign).is_err());
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(handoff.service).unwrap();
+        let unsealed = crate::exec::InheritedDescriptorAuthority::from_owned_file(
+            std::fs::File::open("/dev/null").unwrap(),
+            &lease,
+        )
+        .unwrap();
+        assert!(local_deadline_wire::read(&unsealed, &handoff.clock).is_err());
+    }
+
+    #[test]
+    fn role_validation_precedes_ownership_and_arithmetic_refuses_overflow() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        for (bound, clock) in [(0, 9), (9, 1), (2, 9), (9, 9)] {
+            assert!(
+                unsafe { AdoptedOriginalLocalDeadlines::take_inherited(bound, clock) }.is_err()
+            );
+        }
+        assert!(local_deadline_wire::expiry(u64::MAX, Duration::from_nanos(1)).is_err());
+        assert!(local_deadline_wire::expiry(0, Duration::from_secs(u64::MAX)).is_err());
+        assert!(local_deadline_wire::expiry(0, Duration::ZERO).is_err());
+    }
+}
 
 /// Platform-neutral behavior promised by Lillux's durable occupancy clock.
 /// The host-specific clock identifier and syscall never cross this boundary.
@@ -189,38 +571,80 @@ fn occupancy_contract_digest(contract: &OccupancyClockContract) -> Result<String
 
 #[cfg(target_os = "linux")]
 fn occupancy_now_platform() -> Result<OccupancyCoordinate, String> {
-    let contract = OccupancyClockContract::current()?;
+    // The contract is fixed for the life of the process, and its digest is a
+    // canonical-JSON hash, so it is computed once.
+    static CONTRACT_DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let contract_digest = match CONTRACT_DIGEST.get() {
+        Some(digest) => digest.clone(),
+        None => CONTRACT_DIGEST
+            .get_or_init(|| {
+                OccupancyClockContract::current()
+                    .map(|contract| contract.contract_digest)
+                    .unwrap_or_default()
+            })
+            .clone(),
+    };
+    if contract_digest.is_empty() {
+        return Err("occupancy clock contract is unavailable".to_string());
+    }
+    let tick_ns = occupancy_tick_ns()?;
+    // The boot id cannot change while this process runs, so it is read once:
+    // deadline checks sample the clock often and must not open a descriptor
+    // each time.
+    static INCARNATION_DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let incarnation_digest = match INCARNATION_DIGEST.get() {
+        Some(digest) => digest.clone(),
+        None => {
+            let incarnation = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .map_err(|error| format!("read occupancy clock incarnation: {error}"))?;
+            let incarnation = incarnation.trim();
+            if incarnation.is_empty() {
+                return Err("occupancy clock incarnation is empty".to_string());
+            }
+            INCARNATION_DIGEST
+                .get_or_init(|| crate::sha256_hex(incarnation.as_bytes()))
+                .clone()
+        }
+    };
+    Ok(OccupancyCoordinate {
+        contract_digest,
+        incarnation_digest,
+        tick_ns,
+    })
+}
+
+#[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+fn occupancy_tick_ns() -> Result<u64, String> {
+    occupancy_tick_ns_fixed().map_err(str::to_owned)
+}
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+fn occupancy_tick_ns() -> Result<u64, String> {
+    occupancy_tick_ns_fixed()
+        .map(|tick| tick + simulated_suspension::get())
+        .map_err(str::to_owned)
+}
+
+#[cfg(target_os = "linux")]
+fn occupancy_tick_ns_fixed() -> Result<u64, &'static str> {
     let mut value = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // SAFETY: `value` points to a valid writable timespec for the duration of
-    // the call. The chosen clock and its semantics remain private to Lillux.
     if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut value) } != 0 {
-        return Err(format!(
-            "sample durable occupancy clock: {}",
-            std::io::Error::last_os_error()
-        ));
+        return Err("sample durable occupancy clock refused");
     }
     let seconds = u64::try_from(value.tv_sec)
-        .map_err(|_| "occupancy clock returned a negative second coordinate".to_string())?;
+        .map_err(|_| "occupancy clock returned a negative second coordinate")?;
     let nanoseconds = u64::try_from(value.tv_nsec)
-        .map_err(|_| "occupancy clock returned a negative nanosecond coordinate".to_string())?;
-    let tick_ns = seconds
+        .map_err(|_| "occupancy clock returned a negative nanosecond coordinate")?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err("occupancy clock returned invalid nanoseconds");
+    }
+    seconds
         .checked_mul(1_000_000_000)
         .and_then(|total| total.checked_add(nanoseconds))
-        .ok_or_else(|| "occupancy clock coordinate overflow".to_string())?;
-    let incarnation = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map_err(|error| format!("read occupancy clock incarnation: {error}"))?;
-    let incarnation = incarnation.trim();
-    if incarnation.is_empty() {
-        return Err("occupancy clock incarnation is empty".to_string());
-    }
-    Ok(OccupancyCoordinate {
-        contract_digest: contract.contract_digest,
-        incarnation_digest: crate::sha256_hex(incarnation.as_bytes()),
-        tick_ns,
-    })
+        .ok_or("occupancy clock coordinate overflow")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -236,40 +660,265 @@ pub struct MonotonicTimer {
     started_at: Instant,
 }
 
-/// Opaque process-local monotonic expiry authority.
+/// The host clock a [`MonotonicDeadline`] counts on.
+#[derive(Debug, Clone, Copy)]
+enum DeadlineBasis {
+    /// The process monotonic clock, which stands still while the host is
+    /// suspended.
+    Process(Instant),
+    /// The host's suspend-inclusive clock as a nanosecond coordinate, valid
+    /// for the boot this process is running on.
+    Boot(u64),
+}
+
+/// Opaque process-local expiry authority.
 ///
 /// Callers can ask whether the deadline has elapsed, but never receive the
 /// host `Instant` or compare it as durable identity. This keeps callback and
 /// lease expiry mechanics inside the Lillux time boundary.
+///
+/// A deadline made by [`Self::after`] counts the process monotonic clock and
+/// so does not advance while the host is suspended; that suits purely local
+/// timeouts. A deadline that mirrors a window issued by a remote authority
+/// comes from `LocalDeadline::to_monotonic` and counts the suspend-inclusive
+/// clock, so a paused host cannot extend it. Either kind narrows with the
+/// other through [`Self::min`].
 #[derive(Debug, Clone, Copy)]
 pub struct MonotonicDeadline {
-    deadline: Instant,
+    basis: DeadlineBasis,
 }
 
 impl MonotonicDeadline {
     pub fn after(duration: Duration) -> Self {
         Self {
-            deadline: Instant::now() + duration,
+            basis: DeadlineBasis::Process(Instant::now() + duration),
         }
+    }
+
+    pub(crate) fn at_instant(deadline: Instant) -> Self {
+        Self {
+            basis: DeadlineBasis::Process(deadline),
+        }
+    }
+
+    #[cfg(test)]
+    fn instant(&self) -> Instant {
+        match self.basis {
+            DeadlineBasis::Process(deadline) => deadline,
+            DeadlineBasis::Boot(_) => panic!("deadline counts the suspend-inclusive clock"),
+        }
+    }
+
+    /// A deadline at a suspend-inclusive clock coordinate of this boot.
+    /// `None` where the host offers no such clock.
+    pub(crate) fn at_boot_tick(tick_ns: u64) -> Option<Self> {
+        boot_tick_ns().map(|_| Self {
+            basis: DeadlineBasis::Boot(tick_ns),
+        })
     }
 
     pub fn has_elapsed(&self) -> bool {
-        Instant::now() >= self.deadline
-    }
-
-    /// Narrow two process-local expiry authorities without restarting either
-    /// clock or exposing the underlying host instant.
-    pub fn min(self, other: Self) -> Self {
-        Self {
-            deadline: self.deadline.min(other.deadline),
+        match self.basis {
+            DeadlineBasis::Process(deadline) => Instant::now() >= deadline,
+            DeadlineBasis::Boot(deadline) => boot_tick_ns().is_none_or(|now| now >= deadline),
         }
     }
 
-    /// Remaining duration in this process-local monotonic clock domain.
-    /// Returning zero is the only expiry representation exposed to callers;
-    /// the host `Instant` never escapes Lillux.
+    /// Narrow two expiry authorities without restarting either clock or
+    /// exposing the underlying host instant. Authorities on different clocks
+    /// are compared on the suspend-inclusive clock, and the result counts it:
+    /// a process-clock deadline that wins is carried over as the boot
+    /// coordinate it stands at now, so a host pause cannot stretch the
+    /// narrowed deadline past the suspend-inclusive one it was narrowed by.
+    pub fn min(self, other: Self) -> Self {
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(_), DeadlineBasis::Boot(_))
+            | (DeadlineBasis::Boot(_), DeadlineBasis::Process(_)) => {
+                match (self.boot_coordinate(), other.boot_coordinate()) {
+                    (Some(a), Some(b)) => Self {
+                        basis: DeadlineBasis::Boot(a.min(b)),
+                    },
+                    _ if other.is_before(&self) => other,
+                    _ => self,
+                }
+            }
+            _ => {
+                if other.is_before(&self) {
+                    other
+                } else {
+                    self
+                }
+            }
+        }
+    }
+
+    /// This deadline as a suspend-inclusive coordinate, where the host has
+    /// such a clock. A process deadline is placed by its time left now.
+    fn boot_coordinate(&self) -> Option<u64> {
+        match self.basis {
+            DeadlineBasis::Boot(tick) => Some(tick),
+            DeadlineBasis::Process(_) => {
+                // The tick first, then the time left: the coordinate can then
+                // only be earlier than the true one, as in `from_original`.
+                let tick = boot_tick_ns()?;
+                let left = u64::try_from(self.remaining().as_nanos()).ok()?;
+                tick.checked_add(left)
+            }
+        }
+    }
+
+    /// Whether both name the very same endpoint on the same clock.
+    pub(crate) fn same_endpoint(&self, other: &Self) -> bool {
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(a), DeadlineBasis::Process(b)) => a == b,
+            (DeadlineBasis::Boot(a), DeadlineBasis::Boot(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Compare expiries without exporting or renewing time. Two on one clock
+    /// compare exactly; two on different clocks on the suspend-inclusive one.
+    pub(crate) fn is_before(&self, other: &Self) -> bool {
+        match (self.basis, other.basis) {
+            (DeadlineBasis::Process(a), DeadlineBasis::Process(b)) => a < b,
+            (DeadlineBasis::Boot(a), DeadlineBasis::Boot(b)) => a < b,
+            _ => match (self.boot_coordinate(), other.boot_coordinate()) {
+                (Some(a), Some(b)) => a < b,
+                _ => self.remaining() < other.remaining(),
+            },
+        }
+    }
+
+    /// Remaining duration on this deadline's own clock. Returning zero is the
+    /// only expiry representation exposed to callers; the host `Instant`
+    /// never escapes Lillux.
     pub fn remaining(&self) -> Duration {
-        self.deadline.saturating_duration_since(Instant::now())
+        match self.basis {
+            DeadlineBasis::Process(deadline) => deadline.saturating_duration_since(Instant::now()),
+            DeadlineBasis::Boot(deadline) => match boot_tick_ns() {
+                Some(now) => Duration::from_nanos(deadline.saturating_sub(now)),
+                None => Duration::ZERO,
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn boot_tick_ns() -> Option<u64> {
+    occupancy_tick_ns().ok()
+}
+
+/// A host suspension, for tests: it advances the suspend-inclusive clock as
+/// this thread reads it while the process clock stands still. Per thread, so
+/// concurrent tests keep their own time.
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+pub mod simulated_suspension {
+    use std::cell::Cell;
+
+    thread_local! {
+        static EXTRA_NS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn get() -> u64 {
+        EXTRA_NS.with(Cell::get)
+    }
+
+    pub fn suspend_for(duration: std::time::Duration) {
+        EXTRA_NS.with(|extra| extra.set(extra.get() + duration.as_nanos() as u64));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_tick_ns() -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
+mod monotonic_deadline_ordering_tests {
+    use super::*;
+
+    #[test]
+    fn deadline_order_uses_exact_endpoints_and_accepts_equal_copies() {
+        let anchor = Instant::now();
+        let early = MonotonicDeadline {
+            basis: DeadlineBasis::Process(anchor),
+        };
+        let equal = early;
+        let late = MonotonicDeadline {
+            basis: DeadlineBasis::Process(anchor + Duration::from_secs(1)),
+        };
+        assert!(!early.is_before(&equal));
+        assert!(!equal.is_before(&early));
+        assert!(early.is_before(&late));
+        assert!(!late.is_before(&early));
+    }
+
+    #[test]
+    fn expired_endpoint_order_does_not_depend_on_remaining_samples() {
+        let anchor = Instant::now();
+        let earlier = anchor.checked_sub(Duration::from_secs(2));
+        let early = MonotonicDeadline {
+            basis: DeadlineBasis::Process(earlier.unwrap_or(anchor)),
+        };
+        let late = MonotonicDeadline {
+            basis: DeadlineBasis::Process(anchor),
+        };
+        assert!(early.has_elapsed());
+        assert!(late.has_elapsed());
+        assert_eq!(early.is_before(&late), earlier.is_some());
+        assert!(!late.is_before(&early));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mixed_basis_tests {
+    use super::*;
+
+    fn boot_deadline(after: Duration) -> MonotonicDeadline {
+        let now = occupancy_tick_ns().unwrap();
+        MonotonicDeadline::at_boot_tick(now + after.as_nanos() as u64).unwrap()
+    }
+
+    #[test]
+    fn a_mixed_min_never_outlives_the_suspend_inclusive_deadline() {
+        let long_process = MonotonicDeadline::after(Duration::from_secs(3600));
+        let short_boot = boot_deadline(Duration::from_secs(10));
+        let narrowed = [long_process.min(short_boot), short_boot.min(long_process)];
+        assert!(narrowed.iter().all(|deadline| !deadline.has_elapsed()));
+        // The host suspends: the boot clock moves on, the process clock does
+        // not. The narrowed deadlines follow the boot clock.
+        simulated_suspension::suspend_for(Duration::from_secs(11));
+        assert!(narrowed.iter().all(MonotonicDeadline::has_elapsed));
+        assert!(short_boot.has_elapsed());
+        assert!(!long_process.has_elapsed());
+    }
+
+    #[test]
+    fn a_process_deadline_that_wins_a_mixed_min_still_counts_suspension() {
+        let short_process = MonotonicDeadline::after(Duration::from_secs(5));
+        let long_boot = boot_deadline(Duration::from_secs(3600));
+        let narrowed = short_process.min(long_boot);
+        assert!(matches!(narrowed.basis, DeadlineBasis::Boot(_)));
+        assert!(narrowed.remaining() <= Duration::from_secs(5));
+        let other_way = long_boot.min(short_process);
+        assert!(matches!(other_way.basis, DeadlineBasis::Boot(_)));
+        assert!(!narrowed.has_elapsed());
+        simulated_suspension::suspend_for(Duration::from_secs(6));
+        assert!(narrowed.has_elapsed() && other_way.has_elapsed());
+        // The process deadline alone would not have noticed.
+        assert!(!short_process.has_elapsed());
+    }
+
+    #[test]
+    fn same_basis_min_is_unchanged() {
+        let early = MonotonicDeadline::after(Duration::from_secs(1));
+        let late = MonotonicDeadline::after(Duration::from_secs(9));
+        assert!(early.min(late).same_endpoint(&early));
+        assert!(late.min(early).same_endpoint(&early));
+        let early = boot_deadline(Duration::from_secs(1));
+        let late = boot_deadline(Duration::from_secs(9));
+        assert!(early.min(late).same_endpoint(&early));
+        assert!(late.min(early).same_endpoint(&early));
     }
 }
 
@@ -309,21 +958,133 @@ pub fn iso8601_now() -> String {
 /// Format an absolute Unix timestamp (seconds) as ISO-8601 UTC — same
 /// encoding `iso8601_now` emits, for computing comparable cutoffs.
 pub fn iso8601_from_unix_secs(secs: u64) -> String {
+    let mut output = String::new();
+    write_iso8601_from_unix_secs(secs, &mut output)
+        .expect("String timestamp formatting cannot fail");
+    output
+}
+
+/// The SAME production clock/format, written into caller-owned fixed storage.
+/// This is a timestamp observation, never an occupancy or execution allowance.
+pub(crate) fn iso8601_now_into(output: &mut dyn std::fmt::Write) -> std::fmt::Result {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    write_iso8601_from_unix_secs(now.as_secs(), output)
+}
+fn write_iso8601_from_unix_secs(secs: u64, output: &mut dyn std::fmt::Write) -> std::fmt::Result {
     let days = secs / 86400;
     let day_secs = secs % 86400;
     let hours = day_secs / 3600;
     let minutes = (day_secs % 3600) / 60;
     let seconds = day_secs % 60;
     let (year, month, day) = civil_from_days(days as i64);
-    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+    std::fmt::write(
+        output,
+        format_args!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z"),
+    )
+}
+
+/// Milliseconds a test process shifts its own wall-clock reading by, to
+/// rehearse a clock that disagrees with another machine's. The reading is
+/// compiled into every build and is zero until test code installs a value:
+/// only the installer is gated behind `test-support`, and Lillux never
+/// consults the environment to decide it.
+static WALL_CLOCK_TEST_OFFSET_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Shift every [`timestamp_millis`] and [`unix_secs_now`] reading of this
+/// process by `offset_ms` (negative: the clock runs behind). Process-global:
+/// a test that installs one must not run beside tests that read the clock.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_wall_clock_test_offset_ms(offset_ms: i64) {
+    WALL_CLOCK_TEST_OFFSET_MS.store(offset_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn wall_clock_test_offset_ms() -> i64 {
+    WALL_CLOCK_TEST_OFFSET_MS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Current wall-clock time as milliseconds since Unix epoch.
 pub fn timestamp_millis() -> i64 {
-    SystemTime::now()
+    (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as i64
+        .as_millis() as i64)
+        .saturating_add(wall_clock_test_offset_ms())
+}
+
+/// Current wall-clock time as whole seconds since the Unix epoch.
+pub fn unix_secs_now() -> u64 {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    secs.saturating_add_signed(wall_clock_test_offset_ms() / 1_000)
+}
+
+/// The strict inverse of [`iso8601_from_unix_secs`]: accepts exactly the
+/// encoding `iso8601_now` emits (`YYYY-MM-DDTHH:MM:SSZ`, 20 bytes, UTC, no
+/// fractions and no offsets) and nothing else. Calendar fields are validated.
+pub fn unix_secs_from_iso8601(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 20 {
+        return None;
+    }
+    for (index, expected) in [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'Z'),
+    ] {
+        if bytes[index] != expected {
+            return None;
+        }
+    }
+    let field = |from: usize, to: usize| -> Option<u64> {
+        let digits = &bytes[from..to];
+        if !digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        digits
+            .iter()
+            .try_fold(0_u64, |acc, digit| Some(acc * 10 + u64::from(digit - b'0')))
+    };
+    let year = field(0, 4)?;
+    let month = field(5, 7)?;
+    let day = field(8, 10)?;
+    let hours = field(11, 13)?;
+    let minutes = field(14, 16)?;
+    let seconds = field(17, 19)?;
+    if !(1..=12).contains(&month) || hours > 23 || minutes > 59 || seconds > 59 {
+        return None;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if leap => 29,
+        _ => 28,
+    };
+    if day == 0 || day > days_in_month {
+        return None;
+    }
+    let days = u64::try_from(days_from_civil(year as i64, month as u32, day as u32)).ok()?;
+    Some(days * 86400 + hours * 3600 + minutes * 60 + seconds)
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date; the inverse of
+/// `civil_from_days`.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + i64::from(doe) - 719468
 }
 
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
@@ -374,6 +1135,69 @@ pub fn run(action: TimeAction) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn iso8601_parsing_inverts_formatting() {
+        for secs in [
+            0_u64,
+            86_399,
+            86_400,
+            951_782_400,   // 2000-02-29
+            1_709_208_000, // 2024-02-29T12:00:00Z
+            1_761_700_000,
+            4_102_444_800,   // 2100-01-01
+            253_402_300_799, // 9999-12-31T23:59:59Z
+        ] {
+            let text = iso8601_from_unix_secs(secs);
+            assert_eq!(unix_secs_from_iso8601(&text), Some(secs), "{text}");
+        }
+        assert_eq!(unix_secs_from_iso8601("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            unix_secs_from_iso8601("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800)
+        );
+        let now = unix_secs_now();
+        assert_eq!(
+            unix_secs_from_iso8601(&iso8601_from_unix_secs(now)),
+            Some(now)
+        );
+    }
+
+    #[test]
+    fn iso8601_parsing_validates_the_calendar() {
+        assert_eq!(unix_secs_from_iso8601("2023-02-29T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("1900-02-29T00:00:00Z"), None);
+        assert!(unix_secs_from_iso8601("2000-02-29T00:00:00Z").is_some());
+        assert_eq!(unix_secs_from_iso8601("2024-13-01T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-00-10T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-31T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-00T00:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-10T24:00:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-10T00:60:00Z"), None);
+        assert_eq!(unix_secs_from_iso8601("2024-04-10T00:00:60Z"), None);
+    }
+
+    #[test]
+    fn iso8601_parsing_accepts_only_the_emitted_encoding() {
+        for text in [
+            "2024-04-10T00:00:00+00:00",
+            "2024-04-10T00:00:00.5Z",
+            "2024-04-10T00:00:00.000Z",
+            "2024-04-10T01:00:00+01:00",
+            "2024-04-10T00:00:00z",
+            "2024-04-10 00:00:00Z",
+            "2024-04-10T00:00:00",
+            "2024-04-10T00:00Z",
+            "",
+            "2024-04-10T00:00:00ZZ",
+            " 2024-04-10T00:00:00Z",
+            "+024-04-10T00:00:00Z",
+            "2024/04/10T00:00:00Z",
+            "2024-04-10T0a:00:00Z",
+            "２０２４-04-10T00:00:00Z",
+        ] {
+            assert_eq!(unix_secs_from_iso8601(text), None, "{text:?}");
+        }
+    }
 
     #[test]
     fn occupancy_clock_exposes_only_the_portable_contract() {
@@ -431,9 +1255,892 @@ mod tests {
     fn deadline_intersection_preserves_the_original_earliest_instant() {
         let earlier = MonotonicDeadline::after(Duration::ZERO);
         let later = MonotonicDeadline::after(Duration::from_secs(60));
-        assert_eq!(earlier.min(later).deadline, earlier.deadline);
-        assert_eq!(later.min(earlier).deadline, earlier.deadline);
+        assert!(earlier.min(later).same_endpoint(&earlier));
+        assert!(later.min(earlier).same_endpoint(&earlier));
         assert!(later.min(earlier).has_elapsed());
-        assert_eq!(earlier.min(earlier).deadline, earlier.deadline);
+        assert!(earlier.min(earlier).same_endpoint(&earlier));
+    }
+}
+
+/// A sealed transfer of an existing local window, not financial, node,
+/// release or physical-retirement authority. No raw/serde/default constructor.
+/// The selected adapter must inherit BOTH exact descriptor roles once.
+pub struct OriginalNamespaceOccupancyHandoff {
+    original_deadline: MonotonicDeadline,
+    window: crate::InheritedDescriptorAuthority,
+    clock_namespace: crate::InheritedDescriptorAuthority,
+}
+
+impl OriginalNamespaceOccupancyHandoff {
+    /// The original local deadline retained by the exporting owner.
+    /// This is never reconstructed from remaining duration or wire data.
+    pub fn original_deadline(&self) -> MonotonicDeadline {
+        self.original_deadline
+    }
+
+    /// Duplicate the same sealed window and pinned clock as one opaque owner.
+    /// This preserves the original deadline and grants no contact or target
+    /// permission. A selected caller must separately authorize any forwarding.
+    #[cfg(target_os = "linux")]
+    pub fn duplicate_retained_pair(&self) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt as _;
+        let _lease = crate::exec::retain_fork_sensitive_descriptors_until(self.original_deadline)
+            .map_err(|error| format!("retain original window duplication: {error}"))?;
+        self.require_live_pair()?;
+        // The outer deadline-bound lease makes these nested registered leases
+        // reentrant, even when a fork is waiting. No second barrier wait.
+        let duplicate = Self {
+            original_deadline: self.original_deadline,
+            window: self.window.duplicate_at_or_above(3)?,
+            clock_namespace: self.clock_namespace.duplicate_at_or_above(3)?,
+        };
+        let original_fds = [
+            self.window.inherited_descriptor()?,
+            self.clock_namespace.inherited_descriptor()?,
+        ];
+        for (original, copy) in [
+            (&self.window, &duplicate.window),
+            (&self.clock_namespace, &duplicate.clock_namespace),
+        ] {
+            if original_fds.contains(&copy.inherited_descriptor()?) {
+                return Err("original window duplicate overlaps retained roles".into());
+            }
+            let source = original
+                .file()
+                .metadata()
+                .map_err(|error| error.to_string())?;
+            let target = copy.file().metadata().map_err(|error| error.to_string())?;
+            if (source.dev(), source.ino()) != (target.dev(), target.ino()) {
+                return Err("original window duplicate changed object identity".into());
+            }
+        }
+        duplicate.require_live_pair()?;
+        self.require_live_pair()?;
+        Ok(duplicate)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn require_live_pair(&self) -> Result<(), String> {
+        let window_fd = self.window.inherited_descriptor()?;
+        let clock_fd = self.clock_namespace.inherited_descriptor()?;
+        if window_fd <= 2 || clock_fd <= 2 || window_fd == clock_fd {
+            return Err("original-window roles must be distinct and above stdio".into());
+        }
+        original_window::require_same_clock_namespace(self.clock_namespace.file())?;
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(
+            window_fd,
+            original_window::MAX_BYTES,
+        )?;
+        let wire: original_window::Wire = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode strict original occupancy handoff: {error}"))?;
+        wire.require_clock_namespace(self.clock_namespace.file())?;
+        wire.validate(&occupancy_now()?)?;
+        original_window::require_window(
+            &wire.limit,
+            Duration::from_nanos(wire.cleanup_ns),
+            self.original_deadline,
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn duplicate_retained_pair(&self) -> Result<Self, String> {
+        Err("original native occupancy handoff is unavailable on this platform".into())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn pin_original_clock_namespace(
+        original_deadline: MonotonicDeadline,
+    ) -> Result<crate::InheritedDescriptorAuthority, String> {
+        let lease = crate::exec::retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("retain original clock namespace: {error}"))?;
+        original_window::pin_current_clock_namespace(&lease)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn require_original_clock_namespace(
+        original: &crate::InheritedDescriptorAuthority,
+        original_deadline: MonotonicDeadline,
+    ) -> Result<(), String> {
+        let _lease = crate::exec::retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("retain original clock comparison: {error}"))?;
+        original_window::require_same_clock_namespace(original.file())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn from_original(
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+        original_deadline: MonotonicDeadline,
+    ) -> Result<Self, String> {
+        let clock_namespace = Self::pin_original_clock_namespace(original_deadline)?;
+        Self::from_original_in_retained_clock_namespace(
+            limit,
+            cleanup,
+            original_deadline,
+            &clock_namespace,
+        )
+    }
+
+    /// Caller must derive the original limit/deadline from its existing funded
+    /// owner. This retains THAT clock namespace, not a newly observed substitute.
+    #[cfg(target_os = "linux")]
+    pub fn from_original_in_retained_clock_namespace(
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+        original_deadline: MonotonicDeadline,
+        original_clock_namespace: &crate::InheritedDescriptorAuthority,
+    ) -> Result<Self, String> {
+        let _lease = crate::exec::retain_fork_sensitive_descriptors_until(original_deadline)
+            .map_err(|error| format!("retain original window transfer: {error}"))?;
+        Self::require_original_clock_namespace(original_clock_namespace, original_deadline)?;
+        let clock_namespace = original_clock_namespace.clone();
+        // Sample BOOTTIME BEFORE remaining Instant duration. Any delay between
+        // samples only narrows the original deadline; suspend also narrows it.
+        let before = occupancy_now()?;
+        original_window::require_window(limit, cleanup, original_deadline)?;
+        let remaining = original_deadline.remaining();
+        let contact_expiry_tick_ns = before
+            .tick_ns
+            .checked_add(
+                u64::try_from(remaining.as_nanos())
+                    .map_err(|_| "original contact expiry overflow")?,
+            )
+            .ok_or("original contact expiry overflow")?;
+        let service_expiry = limit
+            .start
+            .tick_ns
+            .checked_add(limit.maximum_occupancy_ns)
+            .and_then(|expiry| expiry.checked_sub(u64::try_from(cleanup.as_nanos()).ok()?))
+            .ok_or("original service expiry overflow")?;
+        let contact_expiry_tick_ns = contact_expiry_tick_ns.min(service_expiry);
+        use std::os::unix::fs::MetadataExt as _;
+        let namespace_identity = clock_namespace
+            .file()
+            .metadata()
+            .map_err(|error| error.to_string())?;
+        let wire = original_window::Wire {
+            version: 1,
+            clock_namespace_dev: namespace_identity.dev(),
+            clock_namespace_ino: namespace_identity.ino(),
+            limit: limit.clone(),
+            cleanup_ns: u64::try_from(cleanup.as_nanos())
+                .map_err(|_| "original cleanup overflow")?,
+            contact_expiry_tick_ns,
+        };
+        wire.validate(&before)?;
+        let bytes = serde_json::to_vec(&wire).map_err(|error| error.to_string())?;
+        if bytes.is_empty() || bytes.len() > original_window::MAX_BYTES {
+            return Err("original occupancy handoff exceeds its fixed bound".into());
+        }
+        let window = crate::sealed_memfd(c"original-native-occupancy-window", &bytes)?;
+        original_window::require_same_clock_namespace(clock_namespace.file())?;
+        original_window::require_window(limit, cleanup, original_deadline)?;
+        Ok(Self {
+            original_deadline,
+            window,
+            clock_namespace,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn pin_original_clock_namespace(
+        _original_deadline: MonotonicDeadline,
+    ) -> Result<crate::InheritedDescriptorAuthority, String> {
+        Err("original native clock namespace is unavailable on this platform".into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn require_original_clock_namespace(
+        _original: &crate::InheritedDescriptorAuthority,
+        _original_deadline: MonotonicDeadline,
+    ) -> Result<(), String> {
+        Err("original native clock namespace is unavailable on this platform".into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn from_original_in_retained_clock_namespace(
+        _limit: &OccupancyLimit,
+        _cleanup: Duration,
+        _original_deadline: MonotonicDeadline,
+        _original_clock_namespace: &crate::InheritedDescriptorAuthority,
+    ) -> Result<Self, String> {
+        Err("original native occupancy handoff is unavailable on this platform".into())
+    }
+
+    /// Consume into the existing inherited-FD compiler. Descriptor coordinates
+    /// are transport only; no reconstructed numeric PID or fresh timer.
+    pub fn into_authorities(
+        self,
+    ) -> (
+        crate::InheritedDescriptorAuthority,
+        crate::InheritedDescriptorAuthority,
+    ) {
+        (self.window, self.clock_namespace)
+    }
+}
+
+/// Adopted once in the dedicated adapter BEFORE USER/PID transition. Keeps the
+/// exact clock namespace pinned until the existing native owner consumes it.
+/// A restart must not recreate this from elapsed duration or a recovered row.
+#[cfg(target_os = "linux")]
+pub struct AdoptedOriginalNamespaceOccupancy {
+    wire: original_window::Wire,
+    deadline: MonotonicDeadline,
+    clock_namespace: crate::InheritedDescriptorAuthority,
+}
+
+#[cfg(target_os = "linux")]
+impl AdoptedOriginalNamespaceOccupancy {
+    /// # Safety
+    /// Both distinct descriptors must be uniquely owned, deliberately inherited
+    /// for this exact request, and have no other Rust owner in this process.
+    pub unsafe fn take_inherited(window_fd: u32, clock_namespace_fd: u32) -> Result<Self, String> {
+        if window_fd <= 2 || clock_namespace_fd <= 2 || window_fd == clock_namespace_fd {
+            return Err("original-window roles must be distinct and above stdio".into());
+        }
+        let window = unsafe { crate::take_inherited_descriptor_authority(window_fd) }?;
+        let clock_namespace =
+            unsafe { crate::take_inherited_descriptor_authority(clock_namespace_fd) }?;
+        Self::from_owned_original_roles(window, clock_namespace, None)
+    }
+
+    /// Adopt the same original roles while checking a protected terminal writer
+    /// against the complete live inherited inventory BEFORE those roles close.
+    /// The original wire alone supplies the deadline; no caller clock is accepted.
+    /// This is role/object validation, not funding/native-generation admission.
+    ///
+    /// # Safety
+    /// Window and clock must be distinct uniquely owned inherited coordinates,
+    /// with no existing Rust owner. Writer and every companion must remain live
+    /// in the dedicated adapter. Writer is already owned and is only borrowed.
+    pub unsafe fn take_inherited_with_terminal_writer(
+        window_fd: u32,
+        clock_namespace_fd: u32,
+        writer: &crate::InheritedDescriptorAuthority,
+        companion_fds: &[u32],
+    ) -> Result<Self, String> {
+        let writer_fd = writer.inherited_descriptor()?;
+        if window_fd <= 2
+            || clock_namespace_fd <= 2
+            || window_fd == clock_namespace_fd
+            || window_fd == writer_fd
+            || clock_namespace_fd == writer_fd
+        {
+            return Err(
+                "original-window roles overlap stdio, each other or terminal writer".into(),
+            );
+        }
+        let window = unsafe { crate::take_inherited_descriptor_authority(window_fd) }?;
+        let clock_namespace =
+            unsafe { crate::take_inherited_descriptor_authority(clock_namespace_fd) }?;
+        Self::from_owned_original_roles(window, clock_namespace, Some((writer, companion_fds)))
+    }
+
+    fn from_owned_original_roles(
+        window: crate::InheritedDescriptorAuthority,
+        clock_namespace: crate::InheritedDescriptorAuthority,
+        terminal_writer: Option<(&crate::InheritedDescriptorAuthority, &[u32])>,
+    ) -> Result<Self, String> {
+        original_window::require_same_clock_namespace(clock_namespace.file())?;
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(
+            window.inherited_descriptor()?,
+            original_window::MAX_BYTES,
+        )?;
+        let wire: original_window::Wire = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode strict original occupancy handoff: {error}"))?;
+        // Anchor BEFORE observing BOOTTIME. Never add stale remaining duration
+        // to a later Instant: that would extend the exported original expiry.
+        let anchor = Instant::now();
+        let now = occupancy_now()?;
+        wire.validate(&now)?;
+        wire.require_clock_namespace(clock_namespace.file())?;
+        let remaining = Duration::from_nanos(wire.contact_expiry_tick_ns - now.tick_ns);
+        let deadline = MonotonicDeadline::at_instant(
+            anchor
+                .checked_add(remaining)
+                .ok_or("original contact deadline overflow")?,
+        );
+        original_window::require_window(
+            &wire.limit,
+            Duration::from_nanos(wire.cleanup_ns),
+            deadline,
+        )?;
+        if let Some((writer, companion_fds)) = terminal_writer {
+            // All actual peers must still be live here. The original sealed
+            // window and actual clock are owned above, not closed/reopened.
+            let window_fd = window.inherited_descriptor()?;
+            let clock_fd = clock_namespace.inherited_descriptor()?;
+            for required in [0, 1, 2, window_fd, clock_fd] {
+                if !companion_fds.contains(&required) {
+                    return Err(
+                        "native terminal peer inventory omits stdio or original roles".into(),
+                    );
+                }
+            }
+            writer.require_distinct_nonblocking_pipe_writer_from_inherited_coordinates(
+                companion_fds,
+                deadline,
+            )?;
+        }
+        // The sealed input has served its one-use role; no FD reaches target.
+        drop(window);
+        Ok(Self {
+            wire,
+            deadline,
+            clock_namespace,
+        })
+    }
+
+    /// Borrow the original service bound while retaining clock custody.
+    /// Repeated observations return the same stored local deadline, never a
+    /// renewed timer. Callers must also re-observe BOOTTIME after bounded waits.
+    pub fn original_service_parts(
+        &self,
+    ) -> Result<(OccupancyLimit, Duration, MonotonicDeadline), String> {
+        original_window::require_same_clock_namespace(self.clock_namespace.file())?;
+        self.wire.validate(&occupancy_now()?)?;
+        self.wire
+            .require_clock_namespace(self.clock_namespace.file())?;
+        let cleanup = Duration::from_nanos(self.wire.cleanup_ns);
+        original_window::require_window(&self.wire.limit, cleanup, self.deadline)?;
+        Ok((self.wire.limit.clone(), cleanup, self.deadline))
+    }
+
+    /// Observe the reserve within the SAME original occupancy maximum.
+    /// Contact expiry closes service but must not hide the cleanup interval.
+    /// A Service observation alone does not authorize service: callers must
+    /// also pass original_service_parts. Parent cleanup policy may narrow this
+    /// bound. Remaining duration grants neither a new timer nor settlement.
+    pub fn original_cleanup_window(&self) -> Result<OccupancyWindowState, String> {
+        self.wire
+            .require_clock_namespace(self.clock_namespace.file())?;
+        if self.wire.version != 1
+            || self.wire.cleanup_ns == 0
+            || self.wire.contact_expiry_tick_ns == 0
+        {
+            return Err("original cleanup handoff has unsupported version or shape".into());
+        }
+        self.wire.limit.validate()?;
+        // One fresh durable observation validates the original boot/clock and
+        // supplies both phase and remaining time; no local Instant is created.
+        let now = occupancy_now()?;
+        self.wire
+            .limit
+            .window_at(&now, Duration::from_nanos(self.wire.cleanup_ns))
+    }
+
+    /// Consume the exact adopted coordinates. Recheck original expiry and both
+    /// actual clock-namespace views immediately before watcher preparation.
+    pub fn into_original_parts(
+        self,
+    ) -> Result<(OccupancyLimit, Duration, MonotonicDeadline), String> {
+        original_window::require_same_clock_namespace(self.clock_namespace.file())?;
+        self.wire.validate(&occupancy_now()?)?;
+        self.wire
+            .require_clock_namespace(self.clock_namespace.file())?;
+        let cleanup = Duration::from_nanos(self.wire.cleanup_ns);
+        original_window::require_window(&self.wire.limit, cleanup, self.deadline)?;
+        // self is consumed; its pinned namespace FD closes before target fork.
+        Ok((self.wire.limit, cleanup, self.deadline))
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod original_window {
+    use super::*;
+    use std::os::unix::fs::MetadataExt as _;
+    pub(super) const MAX_BYTES: usize = 4096;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Wire {
+        pub(super) version: u32,
+        pub(super) clock_namespace_dev: u64,
+        pub(super) clock_namespace_ino: u64,
+        pub(super) limit: OccupancyLimit,
+        pub(super) cleanup_ns: u64,
+        pub(super) contact_expiry_tick_ns: u64,
+    }
+    impl Wire {
+        pub(super) fn require_clock_namespace(
+            &self,
+            original: &std::fs::File,
+        ) -> Result<(), String> {
+            require_same_clock_namespace(original)?;
+            let identity = original.metadata().map_err(|error| error.to_string())?;
+            if identity.dev() != self.clock_namespace_dev
+                || identity.ino() != self.clock_namespace_ino
+            {
+                return Err(
+                    "sealed original window disagrees with retained clock namespace".into(),
+                );
+            }
+            Ok(())
+        }
+        pub(super) fn validate(&self, now: &OccupancyCoordinate) -> Result<(), String> {
+            if self.version != 1
+                || self.cleanup_ns == 0
+                || self.contact_expiry_tick_ns <= now.tick_ns
+            {
+                return Err("original contact handoff is expired or unsupported".into());
+            }
+            self.limit.validate()?;
+            now.elapsed_nanoseconds_since(&self.limit.start)?; // same actual boot/clock contract
+            if !matches!(
+                self.limit
+                    .window_at(now, Duration::from_nanos(self.cleanup_ns))?,
+                OccupancyWindowState::Service { .. }
+            ) {
+                return Err("original occupancy handoff has no service/cleanup window".into());
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) fn require_window(
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+        deadline: MonotonicDeadline,
+    ) -> Result<(), String> {
+        if deadline.has_elapsed()
+            || !matches!(limit.window(cleanup)?, OccupancyWindowState::Service { .. })
+        {
+            return Err("original contact or service window expired".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn pin_current_clock_namespace(
+        lease: &crate::exec::ForkSensitiveDescriptorLease,
+    ) -> Result<crate::InheritedDescriptorAuthority, String> {
+        let current = std::fs::File::open("/proc/thread-self/ns/time")
+            .map_err(|error| format!("pin original time namespace: {error}"))?;
+        require_same_clock_namespace(&current)?;
+        crate::exec::InheritedDescriptorAuthority::from_owned_file(current, lease)
+    }
+
+    pub(super) fn require_same_clock_namespace(original: &std::fs::File) -> Result<(), String> {
+        let expected = original.metadata().map_err(|error| error.to_string())?;
+        for path in [
+            "/proc/thread-self/ns/time",
+            "/proc/thread-self/ns/time_for_children",
+        ] {
+            let current = std::fs::File::open(path)
+                .map_err(|error| format!("pin actual clock namespace view: {error}"))?;
+            let observed = current.metadata().map_err(|error| error.to_string())?;
+            if expected.dev() != observed.dev() || expected.ino() != observed.ino() {
+                return Err(
+                    "original occupancy handoff cannot cross actual clock namespace".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod original_window_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+
+    fn duplicate(fd: i32) -> u32 {
+        let raw = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        assert!(raw > 2);
+        raw as u32 // transferred uniquely to the adopter
+    }
+    fn window() -> (OccupancyLimit, Duration, MonotonicDeadline) {
+        (
+            OccupancyLimit::new(occupancy_now().unwrap(), 10_000_000_000).unwrap(),
+            Duration::from_secs(1),
+            MonotonicDeadline::after(Duration::from_secs(5)),
+        )
+    }
+    fn adopt_bytes(bytes: &[u8]) -> Result<AdoptedOriginalNamespaceOccupancy, String> {
+        let sealed = crate::sealed_memfd(c"test-original-window", bytes).unwrap();
+        let namespace = std::fs::File::open("/proc/thread-self/ns/time").unwrap();
+        unsafe {
+            AdoptedOriginalNamespaceOccupancy::take_inherited(
+                duplicate(sealed.file().as_raw_fd()),
+                duplicate(namespace.as_raw_fd()),
+            )
+        }
+    }
+
+    fn terminal_pipe() -> (
+        crate::SupervisedLauncherAttachmentStatusPipe,
+        crate::InheritedDescriptorAuthority,
+    ) {
+        let mut held = crate::supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        held.reader
+            .require_applied_launch_receipt("test.applied/v1")
+            .unwrap();
+        let writer = held
+            .prepare_native_settlement_channel(MonotonicDeadline::after(Duration::from_secs(5)))
+            .unwrap();
+        (held, writer)
+    }
+
+    #[test]
+    fn terminal_peer_scan_observes_original_roles_before_close_without_extending_window() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let (limit, cleanup, deadline) = window();
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let companions = [
+            0,
+            1,
+            2,
+            sealed.inherited_descriptor().unwrap(),
+            namespace.inherited_descriptor().unwrap(),
+        ];
+        let (_held, writer) = terminal_pipe();
+        // Private shared owning body: actual sealed/namespace objects move once,
+        // without an unregistered raw duplicate or synthetic proof fixture.
+        let adopted = AdoptedOriginalNamespaceOccupancy::from_owned_original_roles(
+            sealed,
+            namespace,
+            Some((&writer, &companions)),
+        )
+        .unwrap();
+        assert!(adopted.deadline.instant() <= deadline.instant());
+        assert!(writer.file_identity().is_ok());
+        let (actual_limit, actual_cleanup, actual_deadline) =
+            adopted.into_original_parts().unwrap();
+        assert_eq!(actual_limit, limit);
+        assert_eq!(actual_cleanup, cleanup);
+        assert!(actual_deadline.instant() <= deadline.instant());
+    }
+
+    #[test]
+    fn original_terminal_hook_rejects_live_writer_alias_and_missing_stdio() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let (_held, writer) = terminal_pipe();
+        let alias = writer.duplicate_at_or_above(64).unwrap();
+        let (limit, cleanup, deadline) = window();
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let companions = [
+            0,
+            1,
+            2,
+            sealed.inherited_descriptor().unwrap(),
+            namespace.inherited_descriptor().unwrap(),
+            alias.inherited_descriptor().unwrap(),
+        ];
+        let error = AdoptedOriginalNamespaceOccupancy::from_owned_original_roles(
+            sealed,
+            namespace,
+            Some((&writer, &companions)),
+        )
+        .err()
+        .expect("writer alias admitted");
+        assert!(error.contains("aliases"), "{error}");
+        assert!(alias.file_identity().is_ok());
+        let (limit, cleanup, deadline) = window();
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let incomplete = [
+            sealed.inherited_descriptor().unwrap(),
+            namespace.inherited_descriptor().unwrap(),
+        ];
+        let error = AdoptedOriginalNamespaceOccupancy::from_owned_original_roles(
+            sealed,
+            namespace,
+            Some((&writer, &incomplete)),
+        )
+        .err()
+        .expect("missing stdio admitted");
+        assert!(error.contains("omits stdio"), "{error}");
+        assert!(writer.file_identity().is_ok());
+    }
+
+    #[test]
+    fn sealed_original_window_roundtrip_cannot_extend_original_deadline() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let (limit, cleanup, deadline) = window();
+        let handoff =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
+        let (sealed, namespace) = handoff.into_authorities();
+        let adopted = unsafe {
+            AdoptedOriginalNamespaceOccupancy::take_inherited(
+                duplicate(sealed.file().as_raw_fd()),
+                duplicate(namespace.file().as_raw_fd()),
+            )
+        }
+        .unwrap();
+        assert!(adopted.deadline.instant() <= deadline.instant());
+        let (actual_limit, actual_cleanup, actual_deadline) =
+            adopted.into_original_parts().unwrap();
+        assert_eq!(actual_limit, limit);
+        assert_eq!(actual_cleanup, cleanup);
+        assert!(actual_deadline.instant() <= deadline.instant());
+    }
+
+    fn adopt_original_bound(
+        limit: &OccupancyLimit,
+        cleanup: Duration,
+        deadline: MonotonicDeadline,
+    ) -> AdoptedOriginalNamespaceOccupancy {
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        unsafe {
+            AdoptedOriginalNamespaceOccupancy::take_inherited(
+                duplicate(sealed.file().as_raw_fd()),
+                duplicate(namespace.file().as_raw_fd()),
+            )
+        }
+        .unwrap()
+    }
+
+    #[test]
+    fn borrowed_original_service_preserves_deadline_and_clock_owner() {
+        let (limit, cleanup, deadline) = window();
+        let adopted = adopt_original_bound(&limit, cleanup, deadline);
+        let clock_fd = adopted.clock_namespace.inherited_descriptor().unwrap();
+        for _ in 0..3 {
+            let (observed_limit, observed_cleanup, observed_deadline) =
+                adopted.original_service_parts().unwrap();
+            assert_eq!(observed_limit, limit);
+            assert_eq!(observed_cleanup, cleanup);
+            assert_eq!(observed_deadline.instant(), adopted.deadline.instant());
+            assert_eq!(
+                adopted.clock_namespace.inherited_descriptor().unwrap(),
+                clock_fd
+            );
+            assert_ne!(unsafe { libc::fcntl(clock_fd as i32, libc::F_GETFD) }, -1);
+        }
+    }
+
+    #[test]
+    fn borrowed_original_contact_cutoff_does_not_reopen_service() {
+        let (limit, cleanup, _) = window();
+        let adopted = adopt_original_bound(
+            &limit,
+            cleanup,
+            MonotonicDeadline::after(Duration::from_millis(100)),
+        );
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(adopted.original_service_parts().is_err());
+        assert!(matches!(
+            adopted.original_cleanup_window().unwrap(),
+            OccupancyWindowState::Service { .. }
+        ));
+        assert!(adopted.original_service_parts().is_err());
+        assert!(adopted.clock_namespace.file().metadata().is_ok());
+    }
+
+    #[test]
+    fn borrowed_original_cleanup_and_expiry_remain_inside_original_maximum() {
+        let cleanup = Duration::from_secs(1);
+        let limit = OccupancyLimit::new(occupancy_now().unwrap(), 1_200_000_000).unwrap();
+        let adopted = adopt_original_bound(
+            &limit,
+            cleanup,
+            MonotonicDeadline::after(Duration::from_secs(2)),
+        );
+        std::thread::sleep(Duration::from_millis(220));
+        assert!(adopted.original_service_parts().is_err());
+        let remaining = match adopted.original_cleanup_window().unwrap() {
+            OccupancyWindowState::Cleanup { remaining } => remaining,
+            other => panic!("expected original cleanup reserve, observed {other:?}"),
+        };
+        assert!(remaining > Duration::ZERO && remaining <= cleanup);
+        std::thread::sleep(remaining + Duration::from_millis(10));
+        assert_eq!(
+            adopted.original_cleanup_window().unwrap(),
+            OccupancyWindowState::Expired
+        );
+        assert!(adopted.original_service_parts().is_err());
+        assert!(adopted.clock_namespace.file().metadata().is_ok());
+    }
+
+    #[test]
+    fn borrowed_original_bounds_refuse_substituted_clock_owner() {
+        let (limit, cleanup, deadline) = window();
+        let mut adopted = adopt_original_bound(&limit, cleanup, deadline);
+        let original_clock = adopted.clock_namespace.clone();
+        adopted.clock_namespace = crate::sealed_memfd(c"foreign-clock", b"not a clock").unwrap();
+        assert!(adopted.original_service_parts().is_err());
+        assert!(adopted.original_cleanup_window().is_err());
+        assert!(original_clock.file().metadata().is_ok());
+        assert!(adopted.clock_namespace.file().metadata().is_ok());
+    }
+
+    #[test]
+    fn retained_pair_duplicate_preserves_objects_deadline_and_original_owners() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        use std::os::unix::fs::MetadataExt as _;
+        let (limit, cleanup, deadline) = window();
+        let original =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
+        let copy = original.duplicate_retained_pair().unwrap();
+        assert_eq!(
+            copy.original_deadline.instant(),
+            original.original_deadline.instant()
+        );
+        let mut coordinates = Vec::new();
+        for authority in [
+            &original.window,
+            &original.clock_namespace,
+            &copy.window,
+            &copy.clock_namespace,
+        ] {
+            let fd = authority.inherited_descriptor().unwrap();
+            assert!(fd > 2);
+            assert!(!coordinates.contains(&fd));
+            coordinates.push(fd);
+            let flags = unsafe { libc::fcntl(authority.file().as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0);
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        }
+        for (source, duplicate) in [
+            (&original.window, &copy.window),
+            (&original.clock_namespace, &copy.clock_namespace),
+        ] {
+            let source = source.file().metadata().unwrap();
+            let duplicate = duplicate.file().metadata().unwrap();
+            assert_eq!(
+                (source.dev(), source.ino()),
+                (duplicate.dev(), duplicate.ino())
+            );
+        }
+        drop(copy);
+        original.require_live_pair().unwrap();
+        let copy = original.duplicate_retained_pair().unwrap();
+        drop(original);
+        copy.require_live_pair().unwrap();
+    }
+
+    #[test]
+    fn retained_pair_duplicate_refuses_expiry_without_consuming_originals() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let (limit, cleanup, deadline) = window();
+        let mut original =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
+        let fds = [
+            original.window.inherited_descriptor().unwrap(),
+            original.clock_namespace.inherited_descriptor().unwrap(),
+        ];
+        original.original_deadline = MonotonicDeadline::at_instant(Instant::now());
+        assert!(original.duplicate_retained_pair().is_err());
+        assert_eq!(original.window.inherited_descriptor().unwrap(), fds[0]);
+        assert_eq!(
+            original.clock_namespace.inherited_descriptor().unwrap(),
+            fds[1]
+        );
+        for fd in fds {
+            assert_ne!(unsafe { libc::fcntl(fd as i32, libc::F_GETFD) }, -1);
+        }
+    }
+
+    #[test]
+    fn retained_pair_duplicate_refuses_aliased_roles_without_consuming_originals() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let (limit, cleanup, deadline) = window();
+        let mut original =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline).unwrap();
+        original.clock_namespace = original.window.clone();
+        let fd = original.window.inherited_descriptor().unwrap();
+        assert!(original.duplicate_retained_pair().is_err());
+        assert_eq!(original.clock_namespace.inherited_descriptor().unwrap(), fd);
+        assert_ne!(unsafe { libc::fcntl(fd as i32, libc::F_GETFD) }, -1);
+    }
+
+    #[test]
+    fn original_window_rejects_unsealed_foreign_clock_and_descriptor_alias() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let (limit, cleanup, deadline) = window();
+        let (sealed, namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(
+            sealed.inherited_descriptor().unwrap(),
+            4096,
+        )
+        .unwrap();
+        let mut unsealed = tempfile::tempfile().unwrap();
+        unsealed.write_all(&bytes).unwrap();
+        assert!(
+            unsafe {
+                AdoptedOriginalNamespaceOccupancy::take_inherited(
+                    duplicate(unsealed.as_raw_fd()),
+                    duplicate(namespace.file().as_raw_fd()),
+                )
+            }
+            .is_err()
+        );
+        let foreign = std::fs::File::open("/dev/null").unwrap();
+        assert!(
+            unsafe {
+                AdoptedOriginalNamespaceOccupancy::take_inherited(
+                    duplicate(sealed.file().as_raw_fd()),
+                    duplicate(foreign.as_raw_fd()),
+                )
+            }
+            .is_err()
+        );
+        // Rejected aliases are not consumed: they cannot be uniquely owned twice.
+        let coordinate = sealed.inherited_descriptor().unwrap();
+        assert!(
+            unsafe { AdoptedOriginalNamespaceOccupancy::take_inherited(coordinate, coordinate) }
+                .is_err()
+        );
+        assert_ne!(
+            unsafe { libc::fcntl(sealed.file().as_raw_fd(), libc::F_GETFD) },
+            -1
+        );
+    }
+
+    #[test]
+    fn original_window_strict_wire_refuses_expired_foreign_and_partial() {
+        let _serial = crate::exec::registered_pair::serialize_clock_close_tests();
+        let (limit, cleanup, deadline) = window();
+        let (sealed, _namespace) =
+            OriginalNamespaceOccupancyHandoff::from_original(&limit, cleanup, deadline)
+                .unwrap()
+                .into_authorities();
+        let bytes = crate::sandbox::read_sealed_inherited_descriptor(
+            sealed.inherited_descriptor().unwrap(),
+            4096,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for name in ["version", "limit", "cleanup_ns", "contact_expiry_tick_ns"] {
+            let mut altered = value.clone();
+            altered.as_object_mut().unwrap().remove(name);
+            assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        }
+        for field in ["contract_digest", "incarnation_digest"] {
+            let mut altered = value.clone();
+            altered["limit"]["start"][field] = serde_json::json!("f".repeat(64));
+            assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        }
+        for field in ["clock_namespace_dev", "clock_namespace_ino", "cleanup_ns"] {
+            let mut altered = value.clone();
+            altered[field] = serde_json::json!(0);
+            assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        }
+        let mut altered = value.clone();
+        altered["contact_expiry_tick_ns"] = serde_json::json!(0);
+        assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        let mut altered = value.clone();
+        altered["extra"] = serde_json::json!(true);
+        assert!(adopt_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+        let text = std::str::from_utf8(&bytes)
+            .unwrap()
+            .replacen('{', "{\"version\":1,", 1);
+        assert!(adopt_bytes(text.as_bytes()).is_err());
+        assert!(adopt_bytes(&[b' '; 4097]).is_err());
     }
 }

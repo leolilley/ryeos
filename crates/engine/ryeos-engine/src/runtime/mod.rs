@@ -307,6 +307,17 @@ fn render_runtime_argument(
             expand_template(&template, ctx).map(PlanArgument::literal)
         }
         RuntimeArgument::Literal(literal) => Ok(PlanArgument::literal(literal.literal)),
+        RuntimeArgument::ExecutionProjectFile(input) => {
+            input.execution_project_file.validate().map_err(|error| {
+                EngineError::InvalidRuntimeConfig {
+                    path: "config.args.execution_project_file".to_owned(),
+                    reason: format!("{error:#}"),
+                }
+            })?;
+            Ok(PlanArgument::AdmittedExecutionProjectFile {
+                declaration: input.execution_project_file,
+            })
+        }
         RuntimeArgument::SourceMember(member) => {
             validate_source_member_path(&member.source_member)?;
             Ok(PlanArgument::AdmittedSourceMember {
@@ -357,6 +368,12 @@ fn json_type_name(value: &Value) -> &'static str {
 #[derive(Debug, Default, Clone)]
 pub struct SpecOverrides {
     pub command: Option<String>,
+    /// Authenticated chain element that owned the singleton runtime command.
+    /// This is present only on the authority-bearing production compiler path.
+    pub runtime_command_owner: Option<RuntimeCommandOwner>,
+    /// Exact verified authority aligned with each chain element. The legacy
+    /// non-authoritative wrapper leaves this absent and must refuse `bin:`.
+    pub authenticated_chain_authorities: Option<Vec<crate::contracts::PlanTrustAuthority>>,
     pub args: Option<Vec<RuntimeArgument>>,
     pub stdin_data: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -365,6 +382,13 @@ pub struct SpecOverrides {
     /// handler claims one field on `ExecutionDecorations` (e.g.
     /// `native_async`) and sets it. Default = empty.
     pub execution: ExecutionDecorations,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeCommandOwner {
+    pub definition_owner: crate::contracts::PlanTrustAuthority,
+    pub definition_owner_chain_index: usize,
+    pub authored_command: String,
 }
 
 /// Mutable compilation state passed to every handler.
@@ -566,7 +590,6 @@ impl std::fmt::Debug for RuntimeHandlerRegistry {
 /// does NOT route through the handler registry (e.g. `version`,
 /// `executor_id`). Any other key that is not registered is a hard
 /// `EngineError::UnknownRuntimeBlock`.
-#[allow(clippy::too_many_arguments)]
 pub fn compile_with_handlers(
     chain: &[ChainIntermediate],
     root_source_path: &Path,
@@ -608,13 +631,13 @@ pub fn compile_with_handlers(
         project_authority,
         sealed_content,
         project_root,
+        None,
     )
 }
 
 /// Separate process-path templating from authority to inspect project files.
 /// A logical execution root may populate argv/env/cwd, but it is never made
 /// available to interpreter discovery or source/config lookup handlers.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_with_handlers_and_execution_root(
     chain: &[ChainIntermediate],
     root_source_path: &Path,
@@ -637,7 +660,15 @@ pub(crate) fn compile_with_handlers_and_execution_root(
     )>,
     sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
     execution_root: Option<&Path>,
+    authenticated_chain_authorities: Option<&[crate::contracts::PlanTrustAuthority]>,
 ) -> Result<PlanSubprocessSpec, EngineError> {
+    if let Some(authorities) = authenticated_chain_authorities
+        && authorities.len() != chain.len()
+    {
+        return Err(EngineError::Internal(
+            "verified chain authority count differs from runtime chain".to_owned(),
+        ));
+    }
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
         env: plan_env.clone(),
@@ -661,6 +692,8 @@ pub(crate) fn compile_with_handlers_and_execution_root(
         root_trust_class,
         host_env,
     };
+    ctx.spec_overrides.authenticated_chain_authorities =
+        authenticated_chain_authorities.map(|authorities| authorities.to_vec());
     ctx.template_ctx.project_path = execution_root.map(|p| p.to_path_buf());
 
     ctx.template_ctx.params = params.clone();
@@ -828,6 +861,16 @@ pub(crate) fn compile_with_handlers_and_execution_root(
         }
     }
 
+    // Every subprocess carries a stop policy. A `native_async` declaration
+    // owns it; otherwise the signed execution config decides it here, so the
+    // daemon never falls back to an undeclared grace when it stops this
+    // process.
+    if ctx.spec_overrides.execution.native_async.is_none() && !chain.is_empty() {
+        ctx.current_index = 0;
+        ctx.spec_overrides.execution.cancellation_mode =
+            Some(handlers::native_async::resolve_execution_stop_policy(&ctx)?);
+    }
+
     // Now build the spec. command/args/stdin must come from a handler
     // (currently the `config` handler). Templates expanded against
     // the populated template context.
@@ -871,20 +914,35 @@ pub(crate) fn compile_with_handlers_and_execution_root(
     // not solve this by adding a deferred child environment to a parent launch
     // preparer: an ordinary child owns this admission itself.
     let (cmd, verified_command) = if cmd_expanded.starts_with("bin:") {
-        let resolved = crate::binary_resolver::resolve_runtime_binary_command_ref(
-            &cmd_expanded,
-            &chain
-                .first()
-                .ok_or_else(|| EngineError::NoRuntimeConfig {
-                    chain: chain_str.to_vec(),
-                })?
-                .source_root,
-            chain[0].source_space,
-            root_source_path,
-            roots,
-            node_trust_ref,
-            ctx.root_trust_class,
-        )?;
+        let owner = spec_overrides
+            .runtime_command_owner
+            .as_ref()
+            .ok_or_else(|| EngineError::InvalidRuntimeConfig {
+                path: "config.command".to_owned(),
+                reason: "binary command has no authenticated singleton runtime owner".to_owned(),
+            })?;
+        let runtime_selection = crate::contracts::PlanRuntimeBinarySelection {
+            definition_owner: owner.definition_owner.clone(),
+            definition_owner_chain_index: owner.definition_owner_chain_index,
+            authored_command: owner.authored_command.clone(),
+            expanded_command: cmd_expanded.clone(),
+        };
+        let (resolved, member_source_proof) =
+            crate::binary_resolver::resolve_runtime_binary_command_ref_with_selection(
+                &cmd_expanded,
+                &chain
+                    .first()
+                    .ok_or_else(|| EngineError::NoRuntimeConfig {
+                        chain: chain_str.to_vec(),
+                    })?
+                    .source_root,
+                chain[0].source_space,
+                root_source_path,
+                roots,
+                node_trust_ref,
+                ctx.root_trust_class,
+                &runtime_selection,
+            )?;
         (
             resolved.absolute_path.to_string_lossy().into_owned(),
             Some(crate::contracts::PlanVerifiedCommand::BundleExecutor {
@@ -895,6 +953,8 @@ pub(crate) fn compile_with_handlers_and_execution_root(
                 provider: crate::contracts::PlanBundleExecutorIdentity {
                     manifest_hash: resolved.manifest_hash,
                     signer_fingerprint: resolved.signer_fingerprint,
+                    runtime_selection,
+                    member_source_proof,
                 },
             }),
         )
@@ -902,7 +962,7 @@ pub(crate) fn compile_with_handlers_and_execution_root(
         crate::external_content::parse_realization_command_ref(&cmd_expanded).map_err(|error| {
             EngineError::InvalidRuntimeConfig {
                 path: "config.command".to_owned(),
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             }
         })?;
         (cmd_expanded, None)
@@ -999,7 +1059,11 @@ mod tests {
         let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
-        let roots = ResolutionRoots { ordered: vec![] };
+        let roots = ResolutionRoots {
+            logical_project_root: None,
+            owned_namespaces: Vec::new(),
+            ordered: vec![],
+        };
         let spec = compile_with_handlers_and_execution_root(
             &chain,
             source_path,
@@ -1019,6 +1083,7 @@ mod tests {
             None,
             None,
             Some(root),
+            None,
         )
         .unwrap();
         assert_eq!(spec.args[0].literal_value(), root.to_str());
@@ -1201,6 +1266,89 @@ mod tests {
                 .literal_value(),
             Some(source)
         );
+    }
+
+    #[test]
+    fn execution_project_file_argument_retains_signed_data_without_templates() {
+        let value = serde_json::json!({"execution_project_file": {
+            "relative_path":"candidate/module.py", "destination":"/candidate-input",
+            "max_bytes":4096, "normalized_mode":420, "access":"read_only"
+        }});
+        let argument: RuntimeArgument = serde_json::from_value(value.clone()).unwrap();
+        let plan =
+            render_runtime_argument(argument, &TemplateContext::new(PathBuf::from("/tool.yaml")))
+                .unwrap();
+        let PlanArgument::AdmittedExecutionProjectFile { declaration } = &plan else {
+            panic!("project file became literal argv");
+        };
+        assert_eq!(declaration.relative_path, "candidate/module.py");
+        assert_eq!(declaration.max_bytes, 4096);
+        assert_eq!(
+            serde_json::from_value::<PlanArgument>(serde_json::to_value(&plan).unwrap()).unwrap(),
+            plan
+        );
+        for field in [
+            "relative_path",
+            "destination",
+            "max_bytes",
+            "normalized_mode",
+            "access",
+        ] {
+            let mut missing = value.clone();
+            missing["execution_project_file"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<RuntimeArgument>(missing).is_err(),
+                "missing {field}"
+            );
+            let mut null = value.clone();
+            null["execution_project_file"][field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<RuntimeArgument>(null).is_err(),
+                "null {field}"
+            );
+        }
+        for field in ["descriptor", "sha256", "host_path"] {
+            let mut changed = value.clone();
+            changed["execution_project_file"][field] = serde_json::json!("caller override");
+            assert!(serde_json::from_value::<RuntimeArgument>(changed).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_project_file_argument_refuses_unsafe_signed_shapes() {
+        let base = serde_json::json!({"relative_path":"candidate/module.py", "destination":"/candidate-input",
+            "max_bytes":4096, "normalized_mode":420, "access":"read_only"});
+        for (field, value) in [
+            ("relative_path", serde_json::json!("../secret")),
+            ("destination", serde_json::json!("/workspace/private")),
+            ("destination", serde_json::json!("/")),
+            ("destination", serde_json::json!("/proc/custom")),
+            (
+                "destination",
+                serde_json::json!("/.lillux-sealed-staging/file"),
+            ),
+            ("max_bytes", serde_json::json!(0)),
+            ("max_bytes", serde_json::json!(65537)),
+            ("normalized_mode", serde_json::json!(493)),
+            ("access", serde_json::json!("private_writable")),
+        ] {
+            let mut changed = base.clone();
+            changed[field] = value;
+            let argument: RuntimeArgument =
+                serde_json::from_value(serde_json::json!({"execution_project_file":changed}))
+                    .unwrap();
+            assert!(
+                render_runtime_argument(
+                    argument,
+                    &TemplateContext::new(PathBuf::from("/tool.yaml"))
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

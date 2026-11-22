@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T05:27:26Z:d76fe909e63a0e25a25470d887c433a4a0d88f05024fc9b9122fec51da2caa1f:j/rLZbGAjhG3gO9v4EX98GrGRNmJJEUv0LFynvwa9oEvKOFL+sY4eIH5RhCRx+ARErnpUwM7HTF7JSBTMmojBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T06:37:39Z:937600ef21475101ee8e1dd60459f1c0bf912bbccafd7e9306bfeafeb710a90b:YrlJ0+JPI25AC9OBRlgFVxaDgu659jKZeqGCOoxhmhJlEpzSc+N8IYZ+qTi0LK1UnPrJitq5GjQ8KhyH+s5pAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-home
 title: Home
 version: "1.0.0"
@@ -14,7 +14,7 @@ sources:
     ref: service:ui/ryeos-ui/node/activity
     params:
       event_limit: 30
-      exclude_types: ["seat.facet", "thread_usage", "cognition_out"]
+      exclude_types: ["seat.facet", "thread_usage", "cognition_out", "cognition_frame", "cognition_compaction"]
     collection: events
   attention:
     ref: service:ui/ryeos-ui/work/attention
@@ -25,49 +25,37 @@ sources:
     collection: projects
 affordances:
   - id: watch-thread
-    label: Talk to work
+    label: Inspect execution
     invoke:
       plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
-        chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/thread/transcript
+      facet: selection
+      value:
+        thread_id: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
       drill: true
-  - id: review-attention
-    label: Review request
+  - id: open-attention
+    label: Open work
     invoke:
       plane: ui
       facet: selection
       merge:
         work:
-          thread: "{record.placement_thread_id}"
-          chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/work/approvals
-      drill: true
-  - id: review-candidate
-    label: Review candidate
-    invoke:
-      plane: ui
-      facet: selection
-      merge:
-        work:
-          thread: "{record.placement_thread_id}"
-          chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/work/candidate
+          thread: "{record.subject.thread_id}"
+          chain_root: "{record.subject.chain_root_id}"
+      open_view: view:ryeos/work/overview
       drill: true
 sections:
   - title: Needs attention
     source_channel: attention
     collection: attention
     projection:
-      primary: operation_class
-      meta: state
+      primary: title
+      meta: detail.summary
       tone:
-        field: state
-        map: { pending: warn }
+        field: tone
+        map: { warn: warn, danger: danger }
         default: neutral
-    activate: review-attention
+    activate: open-attention
   - title: Active executions
     source_channel: active
     collection: threads
@@ -75,17 +63,12 @@ sections:
       primary: item_ref
       meta: status
     activate: watch-thread
-  - title: Candidates to review
-    source_channel: attention
-    collection: candidates
+  - title: Activity coverage
+    source_channel: active
+    collection: coverage
     projection:
-      primary: candidate_snapshot_hash
-      meta: publication_result
-      tone:
-        field: publication_result
-        map: { retained: warn, retained_for_review: warn }
-        default: neutral
-    activate: review-candidate
+      primary: state
+      meta: reason
   - title: Recent movement
     source_channel: movement
     collection: events
@@ -99,5 +82,17 @@ sections:
     projection:
       primary: name
       meta: root
+  - title: Recent movement coverage
+    source_channel: movement
+    collection: events_coverage
+    projection:
+      primary: state
+      meta: reason
+      tone:
+        field: state
+        map:
+          failed: danger
+          partial: warn
+        default: neutral
 refresh:
   on_hint: [thread, activity, project]

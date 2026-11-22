@@ -6,8 +6,8 @@
 //!
 //! Section directories (routes, commands) support recursive subfolders:
 //!
-//!   .ai/node/routes/ui/ryeos-ui/dimension-get.yaml
-//!   .ai/node/routes/ui/ryeos-ui/items/list.yaml
+//!   .ai/node/routes/ui/session/current.yaml
+//!   .ai/node/routes/ui/session/seat/open.yaml
 //!   .ai/node/commands/web.yaml
 //!
 //! The `bundles` section remains flat (no subdirectories).
@@ -21,33 +21,17 @@
 //! Trust model: signed-required, fail-closed. Unsigned, tampered, or
 //! untrusted-signer items are startup errors.
 
+pub mod coherence;
 pub mod loader;
+pub mod recompose;
+pub mod retire;
 pub mod sections;
 
+use ryeos_node_runtime::node_config_source::{BundleRecord, NodeItemContext};
 use std::collections::BTreeSet;
-use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
 
 use crate::node_config::sections::command::CommandRecord;
 use crate::route_raw::RawRouteSpec;
-
-/// Loader-derived structural context for a node-config item.
-#[derive(Debug, Clone)]
-pub struct NodeItemContext {
-    /// Section name selected by `.ai/node/<section>/...`.
-    pub section: String,
-    /// Relative item id below the section root, without extension.
-    pub id: String,
-    /// Filename stem.
-    pub stem: String,
-    /// Path relative to the section root, including extension.
-    pub rel_path: PathBuf,
-    /// Absolute source file path.
-    pub source_file: PathBuf,
-    /// Trusted signer fingerprint from the verified signature.
-    pub signer_fingerprint: String,
-}
 
 /// Which sources a section scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,23 +85,14 @@ pub struct SectionLoadSpec {
 }
 
 /// A single parsed bundle registration record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BundleRecord {
-    /// Bundle name (filename without extension).
-    pub name: String,
-    /// Absolute, canonicalized path to the bundle root directory.
-    pub path: PathBuf,
-    /// Path to the `.yaml` file that declared this record.
-    pub source_file: PathBuf,
-}
-
 /// Immutable snapshot of all node-config sections loaded at startup.
 #[derive(Debug, Clone)]
 pub struct NodeConfigSnapshot {
     pub external_execution: Vec<sections::external_execution::InstalledExternalExecutionBinding>,
     pub runtime_snapshot_production:
         Vec<sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding>,
+    pub guest_runtime_materialization:
+        Vec<sections::guest_runtime_materialization::InstalledGuestRuntimeMaterializationBinding>,
     pub runtime_snapshot_qualification:
         Vec<sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding>,
     /// All registered bundle records, in load order.
@@ -126,6 +101,9 @@ pub struct NodeConfigSnapshot {
     pub routes: Vec<RawRouteSpec>,
     /// All loaded command definitions.
     pub commands: Vec<CommandRecord>,
+    /// Installed binding files set aside undecoded because they are signed
+    /// under a retired schema (signature verified, nothing admitted).
+    pub stale_bindings: Vec<coherence::StaleBinding>,
 }
 
 impl NodeConfigSnapshot {}
@@ -178,6 +156,7 @@ impl NodeConfigTable {
             Box::new(sections::route::RouteSection),
             Box::new(sections::external_execution::ExternalExecutionSection),
             Box::new(sections::runtime_snapshot_production::RuntimeSnapshotProductionSection),
+            Box::new(sections::guest_runtime_materialization::GuestRuntimeMaterializationSection),
             Box::new(sections::runtime_snapshot_qualification::RuntimeSnapshotQualificationSection),
         ])
         .expect("built-in node-config section table is valid")

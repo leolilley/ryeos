@@ -7,7 +7,11 @@
 pub mod bundle_set_update;
 pub mod client;
 pub mod config;
+pub mod descriptor;
 pub mod forward;
 pub mod import;
+pub mod product_push;
 pub mod pull;
 pub mod push;
+pub mod qualification_testimony_push;
+pub mod result_attestation;

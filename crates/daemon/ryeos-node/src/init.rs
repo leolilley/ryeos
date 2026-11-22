@@ -51,7 +51,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::Engine as _;
 use lillux::crypto::{
     DecodePrivateKey, EncodePrivateKey, Signature, Signer, SigningKey, Verifier, VerifyingKey,
@@ -63,7 +63,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
-use ryeos_engine::trust::{TrustStore, compute_fingerprint, pin_key};
+use ryeos_engine::trust::{TrustStore, compute_fingerprint};
 
 mod bundle_install;
 mod derived_views;
@@ -125,6 +125,12 @@ pub struct InitOptions {
     /// an exact bundle inventory and the first complete node-policy
     /// generation. It is create-once and never becomes live policy authority.
     pub node_profile: Option<String>,
+    /// Host class the deployment declares this node runs on, named
+    /// explicitly with the profile. It selects which of the profile's
+    /// declared floors and isolation lanes the node's policy carries, and is
+    /// bound into the substrate identity. Never inferred from what the host
+    /// proves; a class the profile does not declare is refused.
+    pub host_class: Option<String>,
     /// Deployment-authorized identity of the immutable substrate carrying this
     /// node. Required for a fresh initialization; an existing node reloads and
     /// verifies the record and refuses contradictory replacement input.
@@ -133,6 +139,23 @@ pub struct InitOptions {
     /// selected trusted profile as part of this same stopped-node init
     /// transaction. This is never inferred from a mismatch.
     pub replace_node_policy_generation: bool,
+    /// Which sections a replacement keeps from the installed generation or
+    /// takes from the profile, beyond those the operator record carries.
+    /// Meaningful only with `replace_node_policy_generation`.
+    pub policy_carry: ryeos_node_runtime::node_policy::generation::PolicyCarryChoices,
+    /// Authorize the offered substrate identity to replace the recorded one
+    /// when only the image digest differs. Valid only together with
+    /// `replace_node_policy_generation` and the confirmation below; never
+    /// inferred from a mismatch.
+    pub replace_substrate_identity: bool,
+    /// Required acknowledgement for `replace_substrate_identity`.
+    pub confirm_substrate_identity_replacement: bool,
+    /// Installed bindings (`<section>/<id>`) this initialization may leave
+    /// pinning artifacts its bundle replacement removes. A replacement that
+    /// strands any other binding is refused before anything changes; naming
+    /// a binding it does not strand is refused too. Named bindings stay
+    /// installed and fail `ryeos node doctor` until recomposed.
+    pub invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
     /// Skip preflight verification of source bundles (trust + signatures).
     /// Used in dev/test when source bundles are not yet signed and populated.
     /// DO NOT expose this as a CLI flag — production installs always verify.
@@ -166,6 +189,9 @@ pub struct InitReport {
     pub app_root: PathBuf,
     pub user_key_fingerprint: String,
     pub node_key_fingerprint: String,
+    /// Fingerprint of the authoring key the daemon signs runtime-authored
+    /// items with.
+    pub authoring_key_fingerprint: String,
     pub official_publisher_pinned: String,
     /// SHA-256 fingerprint of the X25519 vault public key. Surfaced
     /// so operators can sanity-check that subsequent vault writes are
@@ -175,15 +201,43 @@ pub struct InitReport {
     pub bundles_installed: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_class: Option<String>,
     pub substrate_identity: SubstrateIdentity,
+    /// The image digests this initialization moved the substrate identity
+    /// between; present only when a confirmed replacement happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub substrate_image_replacement: Option<SubstrateImageReplacement>,
+    /// The capacity issuance amendment a policy generation replacement made
+    /// because its `native_capacity` policy differs from the one in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_amendment: Option<crate::native_capacity::CapacityPolicyAmendmentReport>,
+    /// Installed bindings this initialization's bundle replacement left
+    /// pinning artifacts it removed, as the operator named them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub invalidated_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
 }
 
-const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v3";
-const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v1";
-const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
-const INIT_SEED_MAX_BYTES: u64 = ryeos_app::node_document::MAX_ITEM_BYTES;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SubstrateImageReplacement {
+    pub previous_image_digest: String,
+    pub new_image_digest: String,
+}
+
+const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v5";
+/// Offline operations whose operator-signed request may authorize a reseal of
+/// the completion.
+const COMPLETION_OPERATIONS: &[&str] = &[
+    "node.policy-apply",
+    "node.reset.policy-generation",
+    "node.capacity.reanchor",
+    "node.operator.rotate",
+];
+const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v2";
+const INIT_COMPLETION_MAX_BYTES: u64 = 384 * 1024;
+const INIT_SEED_MAX_BYTES: u64 = ryeos_node_runtime::node_document::MAX_ITEM_BYTES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -195,10 +249,15 @@ struct InitCompletionBody {
     policy_generation_digest: String,
     substrate_identity_digest: String,
     registration_digests: BTreeMap<String, String>,
+    capacity_account: crate::native_capacity::NativeCapacityAccountBinding,
+    /// Which key signed the completion and what vouches for the operator.
+    authority: crate::apply_authority::Authority,
 }
 
 /// Immutable deployment identity used when admitting independently published
-/// bundle sets. The profile is required-nullable so absence is itself bound.
+/// bundle sets. The profile and host class are required-nullable so absence
+/// is itself bound; a profile is always bound together with the host class
+/// the deployment declared for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubstrateIdentity {
@@ -206,15 +265,22 @@ pub struct SubstrateIdentity {
     pub image_digest: String,
     pub protocol: u32,
     pub node_profile: Option<String>,
+    pub host_class: Option<String>,
 }
 
 impl SubstrateIdentity {
-    pub fn new(image_digest: String, protocol: u32, node_profile: Option<String>) -> Result<Self> {
+    pub fn new(
+        image_digest: String,
+        protocol: u32,
+        node_profile: Option<String>,
+        host_class: Option<String>,
+    ) -> Result<Self> {
         let identity = Self {
             schema: SUBSTRATE_IDENTITY_SCHEMA.to_owned(),
             image_digest,
             protocol,
             node_profile,
+            host_class,
         };
         identity.validate()?;
         Ok(identity)
@@ -233,10 +299,20 @@ impl SubstrateIdentity {
             bail!("substrate protocol must be nonzero");
         }
         if let Some(profile) = &self.node_profile {
-            ryeos_app::node_policy::generation::validate_init_profile_name(profile)
+            ryeos_node_runtime::node_policy::generation::validate_init_profile_name(profile)
                 .context("validate substrate node-profile binding")?;
         }
+        validate_host_class_selection(self.node_profile.as_deref(), self.host_class.as_deref())
+            .context("validate substrate host-class binding")?;
         Ok(())
+    }
+
+    /// The host class this identity binds. Every initialized node names one
+    /// with its profile; an identity without one cannot vouch for any class.
+    pub fn bound_host_class(&self) -> Result<&str> {
+        self.host_class
+            .as_deref()
+            .context("this node's substrate identity binds no host class; initialize it with --node-profile and --host-class")
     }
 
     pub fn digest(&self) -> Result<String> {
@@ -247,25 +323,162 @@ impl SubstrateIdentity {
     }
 }
 
+/// A profile is selected together with the host class the deployment
+/// declares for it, and a host class only together with a profile.
+fn validate_host_class_selection(
+    node_profile: Option<&str>,
+    host_class: Option<&str>,
+) -> Result<()> {
+    match (node_profile, host_class) {
+        (Some(_), None) => bail!(
+            "a node profile is selected with an explicit host class (--host-class); none was given"
+        ),
+        (None, Some(host_class)) => {
+            bail!("host class `{host_class}` was given without a node profile to select it from")
+        }
+        (Some(_), Some(host_class))
+            if !ryeos_engine::isolation::valid_host_class_name(host_class) =>
+        {
+            bail!("host class `{host_class}` is not a canonical name")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `profile` narrowed to the host class the deployment named for it.
+fn select_profile_host_class(
+    name: &str,
+    profile: &ryeos_node_runtime::node_policy::generation::NodeInitProfile,
+    host_class: Option<&str>,
+) -> Result<ryeos_node_runtime::node_policy::generation::NodeInitProfile> {
+    validate_host_class_selection(Some(name), host_class)?;
+    let host_class =
+        host_class.context("a node profile is selected with an explicit host class")?;
+    profile
+        .for_host_class(host_class)
+        .with_context(|| format!("select host class `{host_class}` of node profile {name}"))
+}
+
 fn substrate_identity_path(app_root: &Path) -> PathBuf {
     app_root
         .join(ryeos_engine::AI_DIR)
         .join("node/substrate-identity.json")
 }
 
-fn publish_substrate_identity(app_root: &Path, identity: &SubstrateIdentity) -> Result<()> {
+/// Record the offered substrate identity, or prove it equals the record.
+///
+/// With `authorized`, an offered identity whose image digest differs from the
+/// record is accepted when the protocol and host class are those recorded;
+/// the record is then left untouched and the previous identity is returned so
+/// the caller rewrites it once the completion record is invalidated.
+fn publish_substrate_identity(
+    app_root: &Path,
+    identity: &SubstrateIdentity,
+    authorized: bool,
+) -> Result<Option<SubstrateIdentity>> {
     identity.validate()?;
     let path = substrate_identity_path(app_root);
     if path.exists() {
         let current = load_substrate_identity_record(app_root)?;
-        if current != *identity {
-            bail!("refusing to replace the initialized substrate identity");
+        if current == *identity {
+            return Ok(None);
         }
-        return Ok(());
+        if current.protocol != identity.protocol {
+            bail!(
+                "refusing to replace the initialized substrate identity: recorded protocol {} differs from offered protocol {}; a node's substrate protocol does not change",
+                current.protocol,
+                identity.protocol
+            );
+        }
+        if current.host_class != identity.host_class {
+            bail!(
+                "refusing to replace the initialized substrate identity: recorded host class {} differs from offered host class {}; a node's host class does not change",
+                current.host_class.as_deref().unwrap_or("none"),
+                identity.host_class.as_deref().unwrap_or("none")
+            );
+        }
+        if current.image_digest == identity.image_digest {
+            bail!(
+                "refusing to replace the initialized substrate identity: only the node profile differs from the record"
+            );
+        }
+        if !authorized {
+            bail!(
+                "refusing to replace the initialized substrate identity: recorded image digest {} differs from offered image digest {}; moving to the offered image needs --replace-node-policy-generation --confirm-node-policy-generation-replacement --replace-substrate-identity --confirm-substrate-identity-replacement",
+                current.image_digest,
+                identity.image_digest
+            );
+        }
+        return Ok(Some(current));
     }
     let bytes = serde_json::to_vec_pretty(identity)?;
     lillux::atomic_write(&path, &bytes)
-        .map_err(|error| anyhow!("write substrate identity {}: {error}", path.display()))
+        .map_err(|error| anyhow!("write substrate identity {}: {error}", path.display()))?;
+    Ok(None)
+}
+
+/// Remove the substrate identity record a first-time init wrote, when that
+/// init's definition admission fails. Does nothing unless `created_here`, so
+/// a record that predates the invocation is never touched.
+fn retire_first_init_identity(app_root: &Path, created_here: bool) -> Result<()> {
+    if !created_here {
+        return Ok(());
+    }
+    let path = substrate_identity_path(app_root);
+    lillux::remove_file_durable(&path)
+        .map_err(|error| anyhow!("remove substrate identity {}: {error}", path.display()))
+}
+
+/// Replace the recorded substrate identity with the authorized offered one.
+fn replace_substrate_identity_record(app_root: &Path, identity: &SubstrateIdentity) -> Result<()> {
+    identity.validate()?;
+    let path = substrate_identity_path(app_root);
+    let bytes = serde_json::to_vec_pretty(identity)?;
+    lillux::atomic_write(&path, &bytes)
+        .map_err(|error| anyhow!("rewrite substrate identity {}: {error}", path.display()))
+}
+
+/// The substrate-identity replacement flags are valid only as part of the
+/// confirmed policy-generation replacement and only together.
+fn require_substrate_replacement_flags(opts: &InitOptions) -> Result<()> {
+    if !opts.replace_substrate_identity && !opts.confirm_substrate_identity_replacement {
+        return Ok(());
+    }
+    if !(opts.replace_substrate_identity && opts.confirm_substrate_identity_replacement) {
+        bail!(
+            "--replace-substrate-identity and --confirm-substrate-identity-replacement are required together"
+        );
+    }
+    if !opts.replace_node_policy_generation {
+        bail!(
+            "--replace-substrate-identity is valid only together with --replace-node-policy-generation"
+        );
+    }
+    if opts.substrate_identity.is_none() {
+        bail!(
+            "--replace-substrate-identity needs the offered substrate identity (--substrate-image-digest/--substrate-protocol)"
+        );
+    }
+    Ok(())
+}
+
+/// Record the node profile a policy-generation replacement selected in the
+/// initialized substrate identity, leaving every other field of the identity
+/// as recorded. A host class that disagrees with the recorded one is refused
+/// before this runs; the rewritten identity is validated as a whole, so the
+/// profile must still select the recorded host class.
+fn rebind_substrate_node_profile(app_root: &Path, node_profile: Option<&str>) -> Result<()> {
+    let recorded = load_substrate_identity_record(app_root)?;
+    if recorded.node_profile.as_deref() == node_profile {
+        return Ok(());
+    }
+    let mut rebound = recorded;
+    rebound.node_profile = node_profile.map(str::to_owned);
+    rebound.validate()?;
+    let path = substrate_identity_path(app_root);
+    let bytes = serde_json::to_vec_pretty(&rebound)?;
+    lillux::atomic_write(&path, &bytes)
+        .map_err(|error| anyhow!("rewrite substrate identity {}: {error}", path.display()))
 }
 
 fn load_substrate_identity_record(app_root: &Path) -> Result<SubstrateIdentity> {
@@ -282,6 +495,9 @@ fn load_substrate_identity_record(app_root: &Path) -> Result<SubstrateIdentity> 
 #[serde(deny_unknown_fields)]
 struct InitCompletionDocument {
     body: InitCompletionBody,
+    /// The operator-signed request the node applied, when the node signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request: Option<crate::offline_operation::contract::SignedRequest>,
     signature: String,
 }
 
@@ -295,6 +511,7 @@ pub struct ProspectiveInitCompletionInput {
     pub policy_generation_digest: String,
     pub registration_digests: BTreeMap<String, String>,
     pub substrate_identity: Option<SubstrateIdentity>,
+    pub capacity_account: crate::native_capacity::NativeCapacityAccountBinding,
 }
 
 /// Operator authority supplied by the stopped-node caller.  Keeping the key
@@ -332,6 +549,7 @@ pub struct InitCompletionReport {
     pub substrate_identity: SubstrateIdentity,
     pub completion_digest: String,
     pub bundles_verified: usize,
+    pub capacity_account: crate::native_capacity::NativeCapacityAccountBinding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,14 +576,18 @@ pub struct InitProgress {
 ///
 /// Order:
 ///   1. Layout: create `<app_root>/.ai/{node,state,bundles,config}`
-///   2. Operator key (load-or-create at `<app_root>/.ai/config/keys/signing/private_key.pem`)
-///   3. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
-///   4. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
-///   5. Pin official publisher key into user trust dir + additional trust files
-///   6. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
-///   7. Install each discovered bundle + write registration record
-///   8. Vault X25519 keypair
-///   9. Post-init trust verification
+///   2. Pin official publisher key into user trust dir + additional trust files
+///   3. Verify the selected profile and refuse, before any key exists, when
+///      its capability floor needs durable app-root storage the host lacks
+///   4. Operator key (load-or-create at `<app_root>/.ai/node/operator/signing/private_key.pem`)
+///   5. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
+///      and authoring key (load-or-create at
+///      `<app_root>/.ai/node/authoring/signing/private_key.pem`)
+///   6. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
+///   7. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
+///   8. Install each discovered bundle + write registration record
+///   9. Vault X25519 keypair
+///   10. Post-init trust verification
 pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     run_init_with_progress(opts, |_| Ok(()))
 }
@@ -375,22 +597,80 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 /// the registered policy table. An explicitly selected schema cut instead
 /// proves only the complete node-signed predecessor occupant, because decoding
 /// retired section schemas is precisely what the cut must not require.
-pub fn preflight_existing_policy_generation(app_root: &Path, schema_cut: bool) -> Result<()> {
-    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
-    let trust = TrustStore::load(None, &operator_config_root)
+pub fn preflight_existing_policy_generation(
+    app_root: &Path,
+    schema_cut: bool,
+    active_bundles: &[String],
+) -> Result<()> {
+    let trust = TrustStore::load_node_registry(app_root)
         .context("load node trust for policy-generation preflight")?;
     if schema_cut {
-        ryeos_app::node_policy::generation::validate_schema_cut_policy_occupant(app_root, &trust)
-            .context("prove complete signed predecessor policy generation")
+        ryeos_node_runtime::node_policy::generation::validate_schema_cut_policy_occupant(
+            app_root, &trust,
+        )
+        .context("prove complete signed predecessor policy generation")
     } else {
-        ryeos_app::node_policy::generation::load_policy_generation(
+        let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
             app_root,
             &trust,
-            &ryeos_app::node_policy::NodePolicyTable::new(),
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
         )
-        .context("compile current signed node policy generation")
-        .map(|_| ())
+        .context("compile current signed node policy generation")?;
+        snapshot
+            .require::<ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority>()?
+            .require_bundle_sources(active_bundles.iter().map(String::as_str))
+            .context("check command authority for selected install bundles")
     }
+}
+
+/// Digest of the node policy generation that replacing the node's policy from
+/// the image seed `source_dir` would install. Nothing is written: the trust
+/// the profile is verified under is the node's pinned trust plus the official
+/// publisher and the named trust documents, held in memory. A request builder
+/// pins this digest so the replacement refuses before any change if the seed
+/// would install anything else.
+pub fn prospective_replacement_policy_digest(
+    app_root: &Path,
+    source_dir: &Path,
+    node_profile: &str,
+    host_class: &str,
+    trust_files: &[PathBuf],
+    policy_carry: &ryeos_node_runtime::node_policy::generation::PolicyCarryChoices,
+) -> Result<String> {
+    let trust = TrustStore::load_node_registry(app_root)
+        .context("load the node's pinned trust for the replacement profile")?;
+    let official = decode_official_publisher_pubkey()?;
+    let mut extra = vec![(official, "ryeos-official".to_owned())];
+    for trust_file in trust_files {
+        let content = fs::read_to_string(trust_file)
+            .with_context(|| format!("read trust file {}", trust_file.display()))?;
+        let doc = ryeos_engine::trust::PublisherTrustDoc::parse(&content)
+            .map_err(|error| anyhow!("{error}"))?;
+        let verifying_key = doc
+            .decode_verifying_key()
+            .map_err(|error| anyhow!("{error}"))?;
+        extra.push((verifying_key, doc.owner));
+    }
+    let profile_trust = bootstrap_trust_store(Some(&trust), &extra)?;
+    let profile = load_trusted_init_node_profile(source_dir, node_profile, &profile_trust)?;
+    let profile = select_profile_host_class(node_profile, &profile, Some(host_class))?
+        .admit_import_roots(app_root)
+        .context("admit declared external-content import roots")?;
+    let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+    let generation =
+        profile.validated_generation(&policy_table, Path::new("selected-node-profile"))?;
+    let update =
+        ryeos_node_runtime::node_policy::generation::prepare_schema_cut_carrying_operator_policy(
+            app_root,
+            &trust,
+            &policy_table,
+            host_class,
+            generation,
+            policy_carry,
+            Path::new("selected-node-profile"),
+        )
+        .context("carry operator-applied policy into the replacement generation")?;
+    Ok(update.generation().digest().to_owned())
 }
 
 pub fn run_init_with_progress(
@@ -410,7 +690,102 @@ pub fn run_init_with_operator_ceremony(
 
 fn run_init_internal(
     opts: &InitOptions,
+    ceremony: Option<InitOperatorCeremony>,
+    observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    run_init_on_storage(
+        opts,
+        ceremony,
+        lillux::process_control::RootStorageFacts::observe,
+        observe,
+    )
+}
+
+/// Initialization with the app-root storage observation supplied, so the
+/// durable-storage refusal can be exercised for storage this host does not
+/// have.
+fn run_init_on_storage(
+    opts: &InitOptions,
+    ceremony: Option<InitOperatorCeremony>,
+    observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
+    observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    require_source_dir(opts)?;
+    // Init is an offline mutation of the same node namespace owned by the
+    // daemon. Acquire the exact operational lock before creating or changing
+    // any app-root entry, and retain it through final completion testimony.
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(&opts.app_root),
+    )
+    .context("acquire stopped-node authority for initialization")?;
+    run_init_under_lock_on_storage(
+        opts,
+        InitAuthority::OperatorProcess,
+        ceremony,
+        &state_lock,
+        None,
+        observe_storage,
+        observe,
+    )
+}
+
+fn require_source_dir(opts: &InitOptions) -> Result<()> {
+    if !opts.source_dir.is_dir() {
+        bail!(
+            "bundle source directory not found: {}\n\
+             \n\
+             If you installed from a package, the default source is /usr/share/ryeos.\n\
+             For development, use: ryeos init --source bundles\n\
+             For Docker, use: ryeos init --source /opt/ryeos",
+            opts.source_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whose consent an initialization run records, and so whose key signs what
+/// it produces.
+#[derive(Clone, Copy)]
+pub enum InitAuthority<'a> {
+    /// The run is the operator's own command: the operator key on this
+    /// volume is created if absent and signs the completion and any capacity
+    /// amendment. Only the command-line tool runs this way.
+    OperatorProcess,
+    /// The run applies a queued offline operation. The daemon holds no
+    /// operator key, so the node key signs under the operator-signed request,
+    /// and the operator is the one the node already records.
+    Request(crate::apply_authority::DocumentSigner<'a>),
+}
+
+/// Initialization under a stopped-node state lock the caller already holds.
+/// The lock must protect `opts.app_root`. When `expected_policy_generation`
+/// is given, the prospective node policy generation must have exactly that
+/// digest, and the call refuses before any installed bundle or completion
+/// record changes when it does not.
+pub fn run_init_under_lock(
+    opts: &InitOptions,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    expected_policy_generation: Option<&str>,
+    authority: InitAuthority<'_>,
+) -> Result<InitReport> {
+    run_init_under_lock_on_storage(
+        opts,
+        authority,
+        None,
+        state_lock,
+        expected_policy_generation,
+        lillux::process_control::RootStorageFacts::observe,
+        |_| Ok(()),
+    )
+}
+
+fn run_init_under_lock_on_storage(
+    opts: &InitOptions,
+    authority: InitAuthority<'_>,
     mut ceremony: Option<InitOperatorCeremony>,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    expected_policy_generation: Option<&str>,
+    observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,
 ) -> Result<InitReport> {
     let mut progress = |phase, completed, total, detail: Option<String>| {
@@ -423,94 +798,161 @@ fn run_init_internal(
     };
     progress(InitPhase::PreparingLayout, None, None, None)?;
     // ── 0. Source exists? ──
-    if !opts.source_dir.is_dir() {
-        bail!(
-            "bundle source directory not found: {}\n\
-             \n\
-             If you installed from a package, the default source is /usr/share/ryeos.\n\
-             For development, use: ryeos init --source bundles\n\
-             For Docker, use: ryeos init --source /opt/ryeos",
-            opts.source_dir.display()
-        );
-    }
+    require_source_dir(opts)?;
+    // A node that still keeps its operator key where an older layout did must
+    // be moved by hand; init never mints a second operator identity beside it.
+    crate::operator_layout::check_operator_layout(&opts.app_root)?;
+    state_lock
+        .ensure_protects_app_root(&opts.app_root)
+        .context("initialization needs the state lock of the app root it initializes")?;
 
-    // Init is an offline mutation of the same node namespace owned by the
-    // daemon. Acquire the exact operational lock before creating or changing
-    // any app-root entry, and retain it through final completion testimony.
-    let state_lock = ryeos_app::state_lock::StateLock::acquire(
-        &ryeos_app::state_lock::default_lock_path(&opts.app_root),
-    )
-    .context("acquire stopped-node authority for initialization")?;
+    require_substrate_replacement_flags(opts)?;
 
     // ── 1. Layout ──
     create_layout(&opts.app_root)?;
+    let mut pending_substrate_replacement: Option<(SubstrateIdentity, SubstrateIdentity)> = None;
+    // True only when this invocation is about to write the identity record.
+    // An app root that already holds one is never rolled back.
+    let identity_created_here =
+        opts.substrate_identity.is_some() && !substrate_identity_path(&opts.app_root).exists();
     match &opts.substrate_identity {
         Some(identity) => {
             identity.validate()?;
             if identity.node_profile != opts.node_profile {
                 bail!("substrate identity node-profile binding disagrees with initialization");
             }
-            publish_substrate_identity(&opts.app_root, identity)?;
+            if identity.host_class != opts.host_class {
+                bail!("substrate identity host-class binding disagrees with initialization");
+            }
+            pending_substrate_replacement = publish_substrate_identity(
+                &opts.app_root,
+                identity,
+                opts.replace_substrate_identity,
+            )?
+            .map(|previous| (previous, identity.clone()));
         }
         None => {
-            load_substrate_identity_record(&opts.app_root).context(
+            let recorded = load_substrate_identity_record(&opts.app_root).context(
                 "fresh initialization requires explicit --substrate-image-digest and --substrate-protocol",
             )?;
+            if opts.host_class.is_some() && recorded.host_class != opts.host_class {
+                bail!(
+                    "host class {} disagrees with the class this node was initialized under ({}); \
+                     a node's host class does not change",
+                    opts.host_class.as_deref().unwrap_or("none"),
+                    recorded.host_class.as_deref().unwrap_or("none")
+                );
+            }
         }
     }
-    ryeos_app::config::retire_pre_node_policy_config(&opts.app_root)
-        .context("retire predecessor daemon policy fields")?;
-    let bootstrap_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(opts.app_root.clone()),
-        bind: opts.bind,
-        uds_path: opts.uds_path.clone(),
-        ..Default::default()
-    })
-    .context("resolve node bootstrap configuration")?;
-    ryeos_app::config::seed_bootstrap_config(&bootstrap_config, &state_lock)
+    if let Some(name) = opts.node_profile.as_deref() {
+        validate_host_class_selection(Some(name), opts.host_class.as_deref())?;
+    }
+    let bootstrap_config =
+        ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+            app_root: Some(opts.app_root.clone()),
+            bind: opts.bind,
+            uds_path: opts.uds_path.clone(),
+            ..Default::default()
+        })
+        .context("resolve node bootstrap configuration")?;
+    ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, state_lock)
         .context("seed node bootstrap configuration")?;
-    // Operator config root (`<app_root>/.ai/config`) — the single trust
-    // source for `ryeos init`. Bundles are never a trust source.
-    let operator_config_root = opts.app_root.join(ryeos_engine::AI_DIR).join("config");
+    // ── 2. Publisher keys, held in memory ──
+    progress(InitPhase::PinningTrust, None, None, None)?;
+    // Owner label must match the bundle pipeline (`populate-bundles.sh --owner
+    // ryeos-official`, all release Dockerfiles). The label is informational, but
+    // bundle preflight compares it, so a divergence used to brick boot (the
+    // mismatch is now a warning, not fatal — see ryeos-bundle preflight).
+    //
+    // No node key exists yet on a fresh node, so these keys cannot be recorded
+    // in the node-signed registry until the node key is created below. They
+    // verify the selected profile from memory until then.
+    let official_publisher_vk = decode_official_publisher_pubkey()?;
+    let mut publisher_pins = vec![(official_publisher_vk, "ryeos-official".to_owned())];
+    for trust_file in &opts.trust_files {
+        publisher_pins.push(
+            read_trust_file(trust_file)
+                .with_context(|| format!("read trust file {}", trust_file.display()))?,
+        );
+    }
+    let existing_registry = load_existing_registry(&opts.app_root)?;
+    if let Some(registry) = existing_registry.as_ref() {
+        for (key, _) in &publisher_pins {
+            let fingerprint = compute_fingerprint(key);
+            if let Some(record) = registry.signer(&fingerprint)
+                && record.status == ryeos_engine::trust::SignerStatus::Revoked
+            {
+                return Err(anyhow!(ryeos_engine::trust::TrustError::SignerRevoked {
+                    fingerprint,
+                    label: record.label.clone(),
+                }));
+            }
+        }
+    }
+    let bootstrap_trust = bootstrap_trust_store(existing_registry.as_ref(), &publisher_pins)?;
 
-    let trust_dir = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("trusted");
-    fs::create_dir_all(&trust_dir)
-        .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
+    // ── 3. Durable storage the selected profile requires ──
+    // Publisher trust is pinned, so the profile verifies now. A node whose
+    // floor needs durable app-root storage is refused here, before any key
+    // or identity exists: on storage that does not survive a restart, each
+    // attempt would otherwise mint a new identity that nothing can pace.
+    if let Some(name) = opts.node_profile.as_deref() {
+        let profile = load_trusted_init_node_profile(&opts.source_dir, name, &bootstrap_trust)?;
+        let profile = select_profile_host_class(name, &profile, opts.host_class.as_deref())?;
+        require_profile_storage(name, &profile, &opts.app_root, observe_storage)?;
+    }
 
-    // ── 2. User key ──
+    // ── 4. User key ──
     progress(InitPhase::InitializingIdentity, None, None, None)?;
-    let user_key_path = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("signing")
-        .join("private_key.pem");
+    let user_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(opts.app_root.clone()).operator_signing_key_path();
     if let Some(ceremony) = ceremony.as_ref() {
         validate_operator_ceremony(ceremony)?;
     }
     let contribution = ceremony
         .as_mut()
         .and_then(|ceremony| ceremony.entropy_contribution.take());
-    let (user_key, user_key_created, contribution_digest) =
-        load_or_create_operator_key(&user_key_path, contribution)
-            .with_context(|| format!("user key at {}", user_key_path.display()))?;
-    let user_fp = compute_fingerprint(&user_key.verifying_key());
-    ensure_operator_genesis(
-        &opts.app_root,
-        &user_key,
-        &user_fp,
-        ceremony.as_ref().map(|ceremony| &ceremony.profile),
-        user_key_created,
-        contribution_digest.as_deref(),
-    )?;
+    let (user_key, user_vk, user_fp, user_key_created) = match authority {
+        InitAuthority::OperatorProcess => {
+            let (user_key, user_key_created, contribution_digest) =
+                load_or_create_operator_key(&user_key_path, contribution)
+                    .with_context(|| format!("user key at {}", user_key_path.display()))?;
+            let user_fp = compute_fingerprint(&user_key.verifying_key());
+            ensure_operator_genesis(
+                &opts.app_root,
+                &user_key,
+                &user_fp,
+                ceremony.as_ref().map(|ceremony| &ceremony.profile),
+                user_key_created,
+                contribution_digest.as_deref(),
+            )?;
+            let user_vk = user_key.verifying_key();
+            (Some(user_key), user_vk, user_fp, user_key_created)
+        }
+        InitAuthority::Request(_) => {
+            // The operator is the one the node already records; its key is
+            // not here and is not needed.
+            let operator = ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+                &opts.app_root,
+            )?;
+            (
+                None,
+                *operator.verifying_key(),
+                operator.fingerprint().to_owned(),
+                false,
+            )
+        }
+    };
+    let signer = match (&user_key, authority) {
+        (Some(key), InitAuthority::OperatorProcess) => {
+            crate::apply_authority::DocumentSigner::Operator(key)
+        }
+        (_, InitAuthority::Request(signer)) => signer,
+        (None, InitAuthority::OperatorProcess) => unreachable!("the operator key was loaded"),
+    };
 
-    // ── 3. Node key ──
+    // ── 5. Node key ──
     let node_key_path = opts
         .app_root
         .join(ryeos_engine::AI_DIR)
@@ -520,7 +962,7 @@ fn run_init_internal(
     let node_key = load_or_create_key(&node_key_path, false)
         .with_context(|| format!("node key at {}", node_key_path.display()))?;
     let node_fp = compute_fingerprint(&node_key.verifying_key());
-    ryeos_app::identity::NodeIdentity::load(&node_key_path)
+    ryeos_node_runtime::identity::NodeIdentity::load(&node_key_path)
         .with_context(|| format!("load node identity {}", node_key_path.display()))?
         .write_public_identity(&node_key_path.with_file_name("public-identity.json"))
         .with_context(|| {
@@ -532,45 +974,61 @@ fn run_init_internal(
             )
         })?;
 
-    // ── 4. Self-trust both keys ──
-    pin_key(
-        &user_key.verifying_key(),
-        "user",
-        &trust_dir,
-        Some(&user_key),
-    )
-    .map_err(|e| anyhow!("pin user trust doc: {e}"))?;
-    pin_key(
-        &node_key.verifying_key(),
-        "node",
-        &trust_dir,
-        Some(&node_key),
-    )
-    .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
+    // ── 5a. Authoring key ──
+    // The daemon signs runtime-authored items with this key, never with the
+    // node key or the operator key. It lives in its own key home and is
+    // pinned below with a scope that admits no kind.
+    let authoring_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(opts.app_root.clone()).authoring_signing_key_path();
+    let authoring_key = load_or_create_key(&authoring_key_path, false)
+        .with_context(|| format!("authoring key at {}", authoring_key_path.display()))?;
+    let authoring_fp = compute_fingerprint(&authoring_key.verifying_key());
 
-    // ── 5. Pin official publisher key ──
-    progress(InitPhase::PinningTrust, None, None, None)?;
-    // Owner label must match the bundle pipeline (`populate-bundles.sh --owner
-    // ryeos-official`, all release Dockerfiles). The label is informational, but
-    // bundle preflight compares it, so a divergence used to brick boot (the
-    // mismatch is now a warning, not fatal — see ryeos-bundle preflight).
-    let official_publisher_vk = decode_official_publisher_pubkey()?;
-    let pinned_fp = pin_key(&official_publisher_vk, "ryeos-official", &trust_dir, None)
-        .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
-    if pinned_fp != OFFICIAL_PUBLISHER_FP {
-        bail!(
-            "official publisher fingerprint mismatch: hardcoded {} but \
-             public key bytes hash to {}",
-            OFFICIAL_PUBLISHER_FP,
-            pinned_fp
-        );
-    }
-
-    // ── 5b. Pin additional trust files (--trust-file) ──
-    for trust_file in &opts.trust_files {
-        pin_trust_file(trust_file, &trust_dir)
-            .with_context(|| format!("pin trust file {}", trust_file.display()))?;
-    }
+    // ── 5b. Record the signers in the node-signed registry ──
+    // The node key is the implicit root and gets no record. Publishers (the
+    // official key and each --trust-file) are pinned for bundle space; the
+    // operator for project and node space.
+    let mut registry_pins: Vec<(
+        VerifyingKey,
+        String,
+        ryeos_engine::trust::SignerRole,
+        ryeos_engine::trust::SignerScope,
+    )> = publisher_pins
+        .iter()
+        .map(|(key, label)| {
+            (
+                *key,
+                label.clone(),
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::publisher_default(),
+            )
+        })
+        .collect();
+    registry_pins.push((
+        user_vk,
+        "user".to_owned(),
+        ryeos_engine::trust::SignerRole::Operator,
+        ryeos_engine::trust::SignerScope::operator_default(),
+    ));
+    registry_pins.push((
+        authoring_key.verifying_key(),
+        "authoring".to_owned(),
+        ryeos_engine::trust::SignerRole::Authoring,
+        ryeos_engine::trust::SignerScope::authoring_default(),
+    ));
+    let init_request_digest =
+        lillux::sha256_hex(format!("ryeos/init-trust/v1:{user_fp}:{node_fp}").as_bytes());
+    crate::trust_registry::record_init_signers(
+        &opts.app_root,
+        state_lock,
+        &crate::trust_registry::Actor {
+            node_key: &node_key,
+            operator: &user_fp,
+            request_digest: &init_request_digest,
+        },
+        &registry_pins,
+    )
+    .context("record init signers in the node trust registry")?;
 
     // ── 6. Discover bundles in source_dir ──
     progress(InitPhase::DiscoveringBundles, None, None, None)?;
@@ -591,12 +1049,22 @@ fn run_init_internal(
     // A publisher-signed bootstrap profile selects the exact bundle inventory
     // and proposes the first complete policy generation. Init never turns
     // bundle registrations or bundle names into parallel policy authority.
-    let seed_trust_store = TrustStore::load(None, &operator_config_root)
+    let seed_trust_store = TrustStore::load_node_registry(&opts.app_root)
         .context("load trust store for source-root seed data")?;
     let selected_node_profile = opts
         .node_profile
         .as_deref()
-        .map(|name| load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store))
+        .map(|name| {
+            load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store)
+                .and_then(|profile| {
+                    select_profile_host_class(name, &profile, opts.host_class.as_deref())
+                })
+                .and_then(|profile| {
+                    profile
+                        .admit_import_roots(&opts.app_root)
+                        .context("admit declared external-content import roots")
+                })
+        })
         .transpose()?;
     if let Some(profile) = selected_node_profile.as_ref() {
         let mut available = discovered.into_iter().collect::<BTreeMap<_, _>>();
@@ -620,16 +1088,19 @@ fn run_init_internal(
         discovered = selected;
     }
     let config_table = ryeos_app::node_config::NodeConfigTable::new();
-    let policy_table = ryeos_app::node_policy::NodePolicyTable::new();
+    let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+    if !opts.replace_node_policy_generation && !opts.policy_carry.is_empty() {
+        bail!("--keep-section and --reset-section apply only to a policy generation replacement");
+    }
     let current_node_policy_generation = if opts.replace_node_policy_generation {
-        ryeos_app::node_policy::generation::validate_schema_cut_policy_occupant(
+        ryeos_node_runtime::node_policy::generation::validate_schema_cut_policy_occupant(
             &opts.app_root,
             &seed_trust_store,
         )
         .context("prove existing signed policy generation for explicit schema cut")?;
         None
     } else {
-        ryeos_app::node_policy::generation::load_optional_policy_generation(
+        ryeos_node_runtime::node_policy::generation::load_optional_policy_generation(
             &opts.app_root,
             &seed_trust_store,
             &policy_table,
@@ -649,14 +1120,31 @@ fn run_init_internal(
         (None, None) => {
             bail!("node initialization requires an explicit publisher-signed --node-profile")
         }
-        (None, Some(selected)) if opts.replace_node_policy_generation => {
-            Some(ryeos_app::node_policy::generation::NodePolicyUpdate::schema_cut(selected))
-        }
+        (None, Some(selected)) if opts.replace_node_policy_generation => Some(
+            ryeos_node_runtime::node_policy::generation::prepare_schema_cut_carrying_operator_policy(
+                &opts.app_root,
+                &seed_trust_store,
+                &policy_table,
+                opts.host_class
+                    .as_deref()
+                    .context("a policy generation replacement names the node's host class")?,
+                selected,
+                &opts.policy_carry,
+                Path::new("selected-node-profile"),
+            )
+            .context("carry operator-applied policy into the replacement generation")?,
+        ),
         (None, Some(selected)) => {
-            Some(ryeos_app::node_policy::generation::NodePolicyUpdate::initial(selected))
+            Some(ryeos_node_runtime::node_policy::generation::NodePolicyUpdate::initial(selected))
         }
         (Some(_), None) => None,
-        (Some(current), Some(selected)) if current.policies() == selected.policies() => None,
+        // Sections the operator applied stay theirs: the profile matches when
+        // every other section does.
+        (Some(current), Some(selected))
+            if &selected.with_operator_sections_of(current) == current.policies() =>
+        {
+            None
+        }
         (Some(_), Some(_)) => bail!(
             "selected node profile conflicts with the existing node policy generation; use explicit stopped-node policy changes"
         ),
@@ -695,8 +1183,16 @@ fn run_init_internal(
         .map(|update| update.generation())
         .or(current_node_policy_generation.as_ref())
         .context("init has no complete prospective node policy generation")?;
+    if let Some(expected) = expected_policy_generation
+        && prospective_policy_generation.digest() != expected
+    {
+        bail!(
+            "the policy generation this initialization would install has digest {}, not the {expected} the request pinned; nothing was changed",
+            prospective_policy_generation.digest()
+        );
+    }
     let prospective_records = prospective_bundle_records(&plan, None);
-    let prospective_policy = ryeos_app::node_policy::compile_generation(
+    let prospective_policy = ryeos_node_runtime::node_policy::compile_generation(
         &opts.app_root,
         &policy_table,
         prospective_policy_generation,
@@ -704,13 +1200,13 @@ fn run_init_internal(
     )
     .context("compile prospective init node policy")?;
     let command_registration = prospective_policy.require::<
-        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+        ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
-    let prospective_loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let prospective_loader = ryeos_app::node_config::loader::NodeConfigLoader {
         app_root: &opts.app_root,
         trust_store: &seed_trust_store,
     };
-    prospective_loader
+    let prospective_config = prospective_loader
         .load_full(
             &config_table,
             &prospective_records,
@@ -718,16 +1214,60 @@ fn run_init_internal(
             &policy_table,
         )
         .context("prospective init source set has invalid node configuration")?;
+    // A replacement must not silently leave installed bindings pinning the
+    // payloads it removes: the first produce, qualify or launch through them
+    // would fail. Checked before any installed tree moves.
+    let invalidated_bindings = check_replacement_bindings(
+        &opts.app_root,
+        &plan,
+        selected_node_profile.is_some(),
+        &prospective_config,
+        &seed_trust_store,
+        &opts.invalidate_bindings,
+    )?;
     let isolation_policy =
         prospective_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?;
-    let prospective_isolation = ryeos_app::engine_init::admit_node_bundle_roots(
+    let prospective_isolation = ryeos_node_runtime::engine_init::admit_node_bundle_roots(
         &opts.app_root,
         &prospective_roots,
         &seed_trust_store,
         isolation_policy,
-        prospective_policy.generation_digest(),
+        prospective_policy.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?,
     )
-    .context("prospective init source set failed definition admission")?;
+    .map_err(|error| {
+        // Admission needs the node key and trust registry, which exist only
+        // after the identity record, so it cannot run first. A first-time init
+        // that fails it retires the record it wrote: the app root stays
+        // uninitialized and a retry may choose another host class.
+        let retired = retire_first_init_identity(&opts.app_root, identity_created_here);
+        let declared = opts
+            .node_profile
+            .as_deref()
+            .and_then(|name| {
+                load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store).ok()
+            })
+            .and_then(|profile| profile.host_classes().ok())
+            .unwrap_or_default();
+        let recorded_host_class = if identity_created_here {
+            None
+        } else {
+            load_substrate_identity_record(&opts.app_root)
+                .ok()
+                .and_then(|identity| identity.host_class)
+        };
+        let refusal = enforced_admission_refusal(
+            isolation_policy,
+            &declared,
+            recorded_host_class.as_deref(),
+            error,
+        );
+        match retired {
+            Ok(()) => refusal,
+            Err(retire_error) => refusal.context(format!(
+                "also failed to retire the substrate identity this init wrote: {retire_error:#}"
+            )),
+        }
+    })?;
 
     // Re-init inherits the existing immutable node policy, but resolves its
     // selected backend and all supporting kinds through the prospective source
@@ -742,6 +1282,9 @@ fn run_init_internal(
     // complete host qualification before accepting scoped execution.
     let isolation = Arc::clone(&prospective_isolation);
 
+    // One parse cache for the source pass and every staging pass: a staged
+    // file whose bytes match a source file already parsed is not parsed again.
+    let parse_results = Arc::new(ryeos_engine::parsers::ParseResultCache::default());
     if !opts.skip_preflight {
         progress(
             InitPhase::VerifyingBundles,
@@ -756,11 +1299,12 @@ fn run_init_internal(
                 Some(plan.verification_jobs.len()),
                 Some(job.subject.clone()),
             )?;
-            ryeos_bundle::preflight::preflight_verify_bundle_in_context(
+            ryeos_bundle::preflight::preflight_verify_bundle_in_context_with_parse_results(
                 &job.subject_root,
                 &job.dependency_roots,
-                &operator_config_root,
+                &opts.app_root,
                 Arc::clone(&isolation),
+                &parse_results,
             )
             .with_context(|| {
                 format!("verify {} source against pinned publisher key", job.subject)
@@ -768,17 +1312,75 @@ fn run_init_internal(
         }
     }
 
+    // ── 6c. Capacity issuance for a replacement ──
+    // The capacity issuance pins the `native_capacity` policy it was granted
+    // under. A replacement whose policy differs (the operator reset that
+    // section, or the profile changed one the operator never applied)
+    // amends the issuance in this same stopped-node transaction, as
+    // `policy-apply native_capacity` does. Its checks run here, before the
+    // completion record is removed, so a refusal changes nothing; the
+    // amendment itself is made just before the generation is published.
+    let prospective_capacity_policy = prospective_policy
+        .require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?;
+    let capacity_amendment_due = if opts.replace_node_policy_generation
+        && selected_node_policy_update.is_some()
+        && capacity_issuance_present(&opts.app_root)?
+    {
+        let check = crate::native_capacity::check_capacity_policy_amendment(
+            &opts.app_root,
+            state_lock,
+            &user_fp,
+            prospective_capacity_policy,
+        )
+        .context(
+            "policy generation replacement refused before any change: the capacity issuance \
+             cannot take the replacement's native_capacity policy; when an incarnation debit is \
+             outstanding or the account image does not fit, settle the account with \
+             `ryeos node capacity reissue --reason \"...\"`, then rerun the replacement",
+        )?;
+        // An interrupted replacement may already have amended the issuance
+        // and still owe its evidence line; amending again converges on the
+        // same document and records it.
+        check == crate::native_capacity::CapacityPolicyAmendmentCheck::Needed
+            || !init_completion_path(&opts.app_root).exists()
+    } else {
+        false
+    };
+
     // ── 7. Install each bundle (atomic stage → swap) ──
     // Serialize the entire installed-set mutation. Each per-name transaction
     // below is acquired through this guard, preserving global -> per-name lock
     // order while dependency generations are activated in plan order.
     let bundle_registry_lock =
-        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&opts.app_root)?;
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&opts.app_root)?;
     // This file is the whole-node generation commit point. Remove its prior
     // occupant durably before the first bundle tree or registration changes;
     // a crash anywhere below must leave startup refusing the incomplete
     // generation rather than accepting the preceding completion record.
     invalidate_init_completion(&opts.app_root)?;
+    // A replacement selects a new node profile; the identity this node
+    // records must name the profile its policy generation now follows. The
+    // completion record that binds the identity digest is already removed.
+    if opts.substrate_identity.is_none()
+        && opts.replace_node_policy_generation
+        && selected_node_policy_update.is_some()
+    {
+        rebind_substrate_node_profile(&opts.app_root, opts.node_profile.as_deref())?;
+    }
+    // The confirmed image move is recorded here, after the completion record
+    // that binds the old identity digest is gone and before the completion is
+    // sealed again, so no window exists where a valid completion names a
+    // record it does not match.
+    let substrate_image_replacement = match &pending_substrate_replacement {
+        Some((previous, offered)) => {
+            replace_substrate_identity_record(&opts.app_root, offered)?;
+            Some(SubstrateImageReplacement {
+                previous_image_digest: previous.image_digest.clone(),
+                new_image_digest: offered.image_digest.clone(),
+            })
+        }
+        None => None,
+    };
     let mut bundles_installed = Vec::new();
     for (index, name) in plan.install_order.iter().enumerate() {
         progress(
@@ -799,7 +1401,10 @@ fn run_init_internal(
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
-        let transaction = bundle_registry_lock.acquire_bundle(name)?;
+        let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+            &bundle_registry_lock,
+            name,
+        )?;
         transaction.reconcile(&node_key)?;
         let registration = bundle_registration_value(&target);
         // Source-set preflight above validates the complete graph before init
@@ -846,12 +1451,13 @@ fn run_init_internal(
                     if opts.skip_preflight {
                         return Ok(());
                     }
-                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
+                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context_with_parse_results(
                         staging,
                         name,
                         &installed_dependency_roots,
-                        &operator_config_root,
+                        &opts.app_root,
                         Arc::clone(&isolation),
+                        &parse_results,
                     )
                     .with_context(|| {
                         format!(
@@ -890,12 +1496,13 @@ fn run_init_internal(
                     if opts.skip_preflight {
                         return Ok(());
                     }
-                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
+                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context_with_parse_results(
                         staging,
                         name,
                         &installed_dependency_roots,
-                        &operator_config_root,
+                        &opts.app_root,
                         Arc::clone(&isolation),
+                        &parse_results,
                     )
                     .with_context(|| {
                         format!(
@@ -916,7 +1523,10 @@ fn run_init_internal(
             if desired.contains(&name) {
                 continue;
             }
-            let transaction = bundle_registry_lock.acquire_bundle(&name)?;
+            let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
+                &bundle_registry_lock,
+                &name,
+            )?;
             transaction.reconcile(&node_key)?;
             transaction.begin_remove()?;
             transaction.commit_absent()?;
@@ -968,16 +1578,46 @@ fn run_init_internal(
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
     // ── 8b. Node-owned default policies ──
-    materialize_node_derived_views(&opts.app_root)?;
+    materialize_node_derived_views(
+        &opts.app_root,
+        &ryeos_bundle::manifest::compose_sync_include_for_roots(
+            &prospective_roots,
+            &seed_trust_store,
+        )
+        .context("compose the node's sync_include table from the bundles being installed")?,
+    )?;
+    // The issuance is amended before the generation that needs it is
+    // published, as `policy-apply native_capacity` orders it; the completion
+    // sealed below then binds the amended issuance.
+    let capacity_amendment = if capacity_amendment_due {
+        Some(
+            crate::native_capacity::amend_capacity_policy(
+                crate::native_capacity::CapacityPolicyAmendmentRequest {
+                    app_root: &opts.app_root,
+                    state_lock,
+                    signer,
+                    policy: prospective_capacity_policy,
+                    reason: &format!(
+                        "node policy generation {} (replacement)",
+                        prospective_policy.generation_digest()
+                    ),
+                    command: "node policy generation replacement",
+                },
+            )
+            .context("amend the capacity issuance to the replacement's native_capacity policy")?,
+        )
+    } else {
+        None
+    };
     if let Some(update) = selected_node_policy_update.as_ref() {
-        let identity = ryeos_app::identity::NodeIdentity::load(&node_key_path)
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(&node_key_path)
             .context("load node identity for policy-set bootstrap")?;
-        ryeos_app::node_policy::generation::publish_policy_update(
+        ryeos_node_runtime::node_policy::generation::publish_policy_update(
             &opts.app_root,
             update,
             &identity,
             &seed_trust_store,
-            &state_lock,
+            state_lock,
         )
         .context("materialize selected node policy generation")?;
     }
@@ -985,54 +1625,128 @@ fn run_init_internal(
     // ── 9. Post-init trust verification ──
     progress(InitPhase::Finalizing, None, None, None)?;
     let post_trust =
-        TrustStore::load(None, &operator_config_root).context("load post-init trust store")?;
+        TrustStore::load_node_registry(&opts.app_root).context("load post-init trust store")?;
+    let registry_dir = ryeos_engine::trust::signers_dir(&opts.app_root);
     if !post_trust.is_trusted(OFFICIAL_PUBLISHER_FP) {
         bail!(
             "post-init self-check failed: official publisher key {} is \
-             not in the loaded trust store — trust dir at {}",
+             not in the loaded trust store — registry at {}",
             OFFICIAL_PUBLISHER_FP,
-            trust_dir.display()
+            registry_dir.display()
         );
     }
     if !post_trust.is_trusted(&user_fp) {
         bail!(
             "post-init self-check failed: user key {} not loadable — \
-             trust dir at {}",
+             registry at {}",
             user_fp,
-            trust_dir.display()
+            registry_dir.display()
         );
     }
     if !post_trust.is_trusted(&node_fp) {
         bail!(
             "post-init self-check failed: node key {} not loadable — \
-             trust dir at {}",
+             registry at {}",
             node_fp,
-            trust_dir.display()
+            registry_dir.display()
         );
     }
 
     let vault_pubkey_fingerprint = vault_sk.public_key().fingerprint();
+    let capacity_issuance = crate::native_capacity::prepare_initial_capacity_binding(
+        &opts.app_root,
+        state_lock,
+        user_key.as_ref(),
+        user_key_created,
+        &node_fp,
+        prospective_capacity_policy,
+    )?;
     write_init_completion(
         &opts.app_root,
-        &user_key,
+        signer,
         &user_fp,
         &node_fp,
         &vault_pubkey_fingerprint,
         prospective_policy.generation_digest(),
-    )?;
+        capacity_issuance.binding(),
+    )
+    .map_err(|error| capacity_issuance.retain_error(error))?;
     let next_steps = Vec::new();
 
     Ok(InitReport {
         app_root: opts.app_root.clone(),
         user_key_fingerprint: user_fp,
         node_key_fingerprint: node_fp,
+        authoring_key_fingerprint: authoring_fp,
         official_publisher_pinned: OFFICIAL_PUBLISHER_FP.to_string(),
         vault_pubkey_fingerprint,
         bundles_installed,
         node_profile: opts.node_profile.clone(),
+        host_class: opts.host_class.clone(),
         substrate_identity: load_substrate_identity_record(&opts.app_root)?,
+        substrate_image_replacement,
+        capacity_amendment,
+        invalidated_bindings,
         next_steps,
     })
+}
+
+/// The installed bindings an initialization's bundle set strands, admitted
+/// only when the operator named each one. The prospective set is the source
+/// plan, plus, when no profile selects the exact inventory, the installed
+/// bundles the plan leaves in place.
+fn check_replacement_bindings(
+    app_root: &Path,
+    plan: &ryeos_bundle::plan::BundlePlan,
+    profile_selects_inventory: bool,
+    prospective_config: &ryeos_app::node_config::NodeConfigSnapshot,
+    trust_store: &TrustStore,
+    invalidate: &[ryeos_app::node_config::coherence::BindingRef],
+) -> Result<Vec<ryeos_app::node_config::coherence::BindingRef>> {
+    if !ryeos_app::node_config::coherence::has_pinning_bindings(prospective_config)
+        && invalidate.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let bundles_dir = app_root.join(ryeos_engine::AI_DIR).join("bundles");
+    let current: Vec<(String, PathBuf)> = installed_bundle_names(app_root)?
+        .into_iter()
+        .map(|name| {
+            let root = bundles_dir.join(&name);
+            (name, root)
+        })
+        .collect();
+    let mut prospective: Vec<(String, PathBuf)> = plan
+        .bundles
+        .iter()
+        .map(|(name, bundle)| (name.clone(), bundle.source.root_path().clone()))
+        .collect();
+    if !profile_selects_inventory {
+        prospective.extend(
+            current
+                .iter()
+                .filter(|(name, _)| !plan.bundles.contains_key(name))
+                .cloned(),
+        );
+    }
+    ryeos_app::node_config::coherence::check_bundle_replacement(
+        prospective_config,
+        &current,
+        &prospective,
+        trust_store,
+        invalidate,
+    )
+}
+
+/// Whether the operator-signed capacity issuance exists. Its absence on an
+/// existing node is refused later, where the issuance is bound.
+fn capacity_issuance_present(app_root: &Path) -> Result<bool> {
+    let path = app_root.join(".ai/config/onboarding/native-capacity-issuance.json");
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
 }
 
 fn init_completion_path(app_root: &Path) -> PathBuf {
@@ -1146,13 +1860,31 @@ fn installed_bundle_names(app_root: &Path) -> Result<BTreeSet<String>> {
 
 fn write_init_completion(
     app_root: &Path,
-    signing_key: &SigningKey,
+    signer: crate::apply_authority::DocumentSigner<'_>,
     operator_fingerprint: &str,
     node_fingerprint: &str,
     vault_fingerprint: &str,
     policy_generation_digest: &str,
+    expected_capacity_account: &crate::native_capacity::NativeCapacityAccountBinding,
 ) -> Result<()> {
     let substrate_identity = load_substrate_identity_record(app_root)?;
+    let trust = TrustStore::load_node_registry(app_root)?;
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )?;
+    if snapshot.generation_digest() != policy_generation_digest {
+        bail!("capacity initialization policy changed before completion");
+    }
+    let capacity_account = crate::native_capacity::load_existing_capacity_binding(
+        app_root,
+        node_fingerprint,
+        snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+    )?;
+    if &capacity_account != expected_capacity_account {
+        bail!("capacity issuance changed after initialization preparation");
+    }
     let body = InitCompletionBody {
         schema: INIT_COMPLETION_SCHEMA.to_string(),
         operator_fingerprint: operator_fingerprint.to_string(),
@@ -1161,15 +1893,14 @@ fn write_init_completion(
         policy_generation_digest: policy_generation_digest.to_string(),
         substrate_identity_digest: substrate_identity.digest()?,
         registration_digests: registration_digests(app_root)?,
+        capacity_account,
+        authority: signer.authority()?,
     };
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
-    let signature = signing_key.sign(canonical.as_bytes());
     let document = InitCompletionDocument {
+        request: signer.request(),
+        signature: signer.sign(canonical.as_bytes()),
         body,
-        signature: format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
-        ),
     };
     let bytes = serde_json::to_vec_pretty(&document)?;
     if bytes.len() as u64 > INIT_COMPLETION_MAX_BYTES {
@@ -1206,6 +1937,9 @@ pub fn prepare_prospective_init_completion(
         require_lower_hex_digest(label, digest)?;
     }
     let substrate_identity = load_substrate_identity_record_from_input(&input)?;
+    input
+        .capacity_account
+        .require_node(&input.node_fingerprint)?;
     let body = InitCompletionBody {
         schema: INIT_COMPLETION_SCHEMA.to_owned(),
         operator_fingerprint: signer.fingerprint(),
@@ -1214,11 +1948,14 @@ pub fn prepare_prospective_init_completion(
         policy_generation_digest: input.policy_generation_digest,
         substrate_identity_digest: substrate_identity.digest()?,
         registration_digests: input.registration_digests,
+        capacity_account: input.capacity_account,
+        authority: crate::apply_authority::Authority::Operator,
     };
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
     let signature = signer.signing_key.sign(canonical.as_bytes());
     let document = InitCompletionDocument {
         body,
+        request: None,
         signature: format!(
             "ed25519:{}",
             base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
@@ -1287,6 +2024,11 @@ pub fn prepare_bundle_set_init_completion(
             policy_generation_digest,
             registration_digests: future,
             substrate_identity: Some(load_verified_substrate_identity(app_root)?),
+            capacity_account: verify_init_completion(app_root)?
+                .context(
+                    "prospective bundle completion requires original verified capacity issuance",
+                )?
+                .capacity_account,
         },
     )
 }
@@ -1302,18 +2044,26 @@ fn require_lower_hex_digest(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn seal_current_init_completion(
+/// Reseal the completion over the node's current state. `signer` is the
+/// operator's own key in the operator's process, or the node key under the
+/// operator-signed request that authorized the change (or, after a change an
+/// authenticated live caller made, the node key alone). `operator` names the
+/// operator the completion records; absent, it is the configured operator.
+pub(crate) fn seal_current_init_completion(
     app_root: &Path,
     expected_policy_generation_digest: Option<&str>,
+    signer: crate::apply_authority::DocumentSigner<'_>,
+    operator: Option<&str>,
 ) -> Result<()> {
-    let operator_key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
-    let operator_pem = Zeroizing::new(String::from_utf8(
-        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
-    )?);
-    let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
-    let operator_fingerprint = compute_fingerprint(&operator_key.verifying_key());
+    let operator_fingerprint = match (operator, signer) {
+        (Some(named), _) => named.to_owned(),
+        (None, crate::apply_authority::DocumentSigner::Operator(key)) => {
+            compute_fingerprint(&key.verifying_key())
+        }
+        (None, _) => ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)?
+            .fingerprint()
+            .to_owned(),
+    };
 
     let node_key_path = app_root
         .join(ryeos_engine::AI_DIR)
@@ -1328,24 +2078,46 @@ fn seal_current_init_completion(
         .join(ryeos_engine::AI_DIR)
         .join("node/vault/public_key.pem");
     let vault_fingerprint = lillux::vault::read_public_key(&vault_path)?.fingerprint();
-    let trust_store = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))?;
-    let generation = ryeos_app::node_policy::generation::load_policy_generation(
+    let trust_store = TrustStore::load_node_registry(app_root)?;
+    let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         app_root,
         &trust_store,
-        &ryeos_app::node_policy::NodePolicyTable::new(),
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
     )?;
     if expected_policy_generation_digest.is_some_and(|expected| generation.digest() != expected) {
         bail!("published node policy generation differs from the prepared replacement");
     }
 
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust_store,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )?;
+    let capacity_account = crate::native_capacity::load_existing_capacity_binding(
+        app_root,
+        &node_fingerprint,
+        snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+    )?;
     write_init_completion(
         app_root,
-        &operator_key,
+        signer,
         &operator_fingerprint,
         &node_fingerprint,
         &vault_fingerprint,
         generation.digest(),
+        &capacity_account,
     )
+}
+
+/// The node's own signing key, read from its volume.
+fn load_node_signing_key(app_root: &Path) -> Result<SigningKey> {
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/identity/private_key.pem");
+    let pem = Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&path, 32 * 1024)?,
+    )?);
+    Ok(SigningKey::from_pkcs8_pem(pem.as_str())?)
 }
 
 /// Advance the whole-init commit point after a stopped-node policy update.
@@ -1354,15 +2126,52 @@ fn seal_current_init_completion(
 /// changes, the preceding completion record no longer validates. This final
 /// write is the commit point that makes the newly published generation
 /// startable. Re-running the same policy update repairs a crash in that gap.
+/// `signer` is what vouches for the update: the node key under the
+/// operator-signed request that asked for it.
 pub fn seal_init_completion_after_policy_update(
     app_root: &Path,
     expected_policy_generation_digest: &str,
-    state_lock: &ryeos_app::state_lock::StateLock,
+    state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    signer: crate::apply_authority::DocumentSigner<'_>,
 ) -> Result<()> {
     state_lock
         .ensure_protects_app_root(app_root)
         .context("init-completion publication requires this app root's state lock")?;
-    seal_current_init_completion(app_root, Some(expected_policy_generation_digest))
+    seal_current_init_completion(
+        app_root,
+        Some(expected_policy_generation_digest),
+        signer,
+        None,
+    )
+}
+
+/// Advance the whole-init commit point after a stopped-node bundle
+/// registration change.
+///
+/// The completion record pins the digest of every bundle registration, so a
+/// bundle install or removal invalidates it the moment the registration set
+/// changes; nothing stopped-node can run against the node, and the daemon
+/// cannot boot, until a new record is sealed. Sealing here, under the same
+/// state lock the mutation held, makes the new registration set startable.
+/// A crash between the mutation and this seal leaves the node refusing until
+/// the same operation is re-run, which reseals it.
+pub fn seal_init_completion_after_bundle_registration_change(
+    app_root: &Path,
+    state_lock: &ryeos_node_runtime::state_lock::StateLockLease,
+) -> Result<()> {
+    state_lock
+        .ensure_protects_app_root(app_root)
+        .context("init-completion publication requires this app root's state lock")?;
+    // A bundle registration change is made by an authenticated live caller;
+    // no operator request exists for it, so the node reseals under its own
+    // key and the completion names no request.
+    let node_key = load_node_signing_key(app_root)?;
+    seal_current_init_completion(
+        app_root,
+        None,
+        crate::apply_authority::DocumentSigner::Node(&node_key),
+        None,
+    )
 }
 
 /// Seal the exact initialized state authored by an integration-test fixture.
@@ -1371,12 +2180,76 @@ pub fn seal_init_completion_after_policy_update(
 /// selected. Fixtures build the same keys, policy generation, and bundle
 /// registrations as `run_init`, but must finish planting test-only bundles
 /// before the registration set can be signed as one complete transaction.
+/// The fixture must supply a fresh temporary node for first issuance; resealing
+/// preserves the existing capacity binding and never recreates a lost one.
 #[cfg(feature = "test-support")]
-pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
-    seal_current_init_completion(app_root, None)
+pub fn seal_test_fixture_init_completion(app_root: &Path, operator_key: &SigningKey) -> Result<()> {
+    use std::ffi::OsStr;
+
+    let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+        &ryeos_node_runtime::state_lock::default_lock_path(app_root),
+    )?;
+    state_lock.ensure_protects_app_root(app_root)?;
+    let config = lillux::PinnedDirectory::open(&app_root.join(ryeos_engine::AI_DIR))?
+        .context("test fixture app state is absent")?
+        .open_or_create_child(OsStr::new("config"), 0o700)?;
+    let onboarding = config.open_or_create_child(OsStr::new("onboarding"), 0o700)?;
+    // An earlier completion is evidence of an existing fixture incarnation.
+    // Absence of its issuance must refuse through the real issuer, not turn a
+    // test reseal into a reset of cumulative consumption.
+    let first_completion = onboarding
+        .open_pinned_regular(OsStr::new("init-completion.json"), false)?
+        .is_none();
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("node/identity/private_key.pem"),
+    )?;
+    let trust = TrustStore::load_node_registry(app_root)?;
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )?;
+    // Fixture-only issuance uses the same authenticated policy, actual files,
+    // signed operator binding and retained failure owner as real initialization.
+    // This code is absent without test-support; production still requires the
+    // actual operator-creation result from its stopped-node ceremony.
+    let issuance = crate::native_capacity::prepare_initial_capacity_binding(
+        app_root,
+        &state_lock,
+        Some(operator_key),
+        first_completion,
+        node.fingerprint(),
+        snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+    )?;
+    seal_current_init_completion(
+        app_root,
+        Some(snapshot.generation_digest()),
+        crate::apply_authority::DocumentSigner::Operator(operator_key),
+        None,
+    )
+    .map_err(|error| issuance.retain_error(error))
 }
 
 pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionReport>> {
+    verify_init_completion_checking_capacity(app_root, true)
+}
+
+/// Everything [`verify_init_completion`] verifies except that the capacity
+/// account sits where its binding says. The operator's re-anchor command
+/// needs the signed completion of a node whose data moved to another
+/// filesystem, to decide what to re-anchor; nothing else may call it.
+pub(crate) fn verify_init_completion_before_capacity_install(
+    app_root: &Path,
+) -> Result<Option<InitCompletionReport>> {
+    verify_init_completion_checking_capacity(app_root, false)
+}
+
+fn verify_init_completion_checking_capacity(
+    app_root: &Path,
+    require_capacity_installed: bool,
+) -> Result<Option<InitCompletionReport>> {
     let path = init_completion_path(app_root);
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1390,14 +2263,30 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
         Ok(_) => {}
     }
     let bytes = lillux::read_regular_file_bounded_no_follow(&path, INIT_COMPLETION_MAX_BYTES)?;
+    refuse_old_completion(&bytes)?;
     let document: InitCompletionDocument = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse init completion {}", path.display()))?;
     if document.body.schema != INIT_COMPLETION_SCHEMA {
         bail!("unsupported init completion schema");
     }
-    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
-    let trust_store = TrustStore::load(None, &operator_config_root)
+    let trust_store = TrustStore::load_node_registry(app_root)
         .context("load pinned operator verification authority")?;
+    // The completion records the configured operator, and only this node's
+    // own operator may be named: another pinned key (a publisher's) naming
+    // itself as operator is refused. A node with no operator genesis has no
+    // local operator to compare against; the record must then still name a
+    // pinned key.
+    if let Some((local_operator, _)) = crate::offline_operation::local_operator(app_root)
+        .context("read the local operator identity for init-completion verification")?
+    {
+        ryeos_engine::trust::require_document_signer(
+            &path,
+            &document.body.operator_fingerprint,
+            &local_operator,
+            "operator",
+            "only this node's operator is recorded in its init completion record: re-run `ryeos init` on this node with its own operator key",
+        )?;
+    }
     let operator_key = trust_store
         .get(&document.body.operator_fingerprint)
         .map(|signer| &signer.verifying_key)
@@ -1406,22 +2295,40 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if operator_fingerprint != document.body.operator_fingerprint {
         bail!("init completion operator fingerprint disagrees with pinned public key");
     }
-    let signature = document
-        .signature
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| anyhow!("init completion signature has an invalid encoding"))?;
-    let signature =
-        Signature::from_slice(&base64::engine::general_purpose::STANDARD.decode(signature)?)?;
     let canonical = lillux::canonical_json(&serde_json::to_value(&document.body)?)?;
-    operator_key
-        .verify(canonical.as_bytes(), &signature)
-        .context("verify init completion signature")?;
+    let node_key = ryeos_engine::trust::load_node_verifying_key(app_root)
+        .context("load the pinned node key for init-completion verification")?;
+    // The operator that consented is looked up in the capacity operator
+    // lineage on demand: only a completion the node sealed under a request
+    // needs it.
+    let lineage_lookup = |fingerprint: &str| -> Result<lillux::crypto::VerifyingKey> {
+        if fingerprint == document.body.operator_fingerprint {
+            return Ok(*operator_key);
+        }
+        crate::native_capacity::OperatorLineage::load(app_root)?
+            .resolve(fingerprint)
+            .copied()
+    };
+    crate::apply_authority::verify(
+        canonical.as_bytes(),
+        &document.signature,
+        &document.body.authority,
+        document.request.as_ref(),
+        &crate::apply_authority::Acceptance {
+            node_key: &node_key,
+            operator_key: &lineage_lookup,
+            operations: COMPLETION_OPERATIONS,
+            allow_node_alone: true,
+            claimed_operator: &document.body.operator_fingerprint,
+        },
+    )
+    .context("verify init completion signature")?;
 
     let node_identity_path = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node/identity/public-identity.json");
     let node_identity =
-        ryeos_app::identity::NodeIdentity::load_public_identity(&node_identity_path)
+        ryeos_node_runtime::identity::NodeIdentity::load_public_identity(&node_identity_path)
             .context("load pinned public node identity for init-completion verification")?;
     if node_identity.verified_fingerprint()? != document.body.node_fingerprint {
         bail!("init completion node fingerprint does not match the current key");
@@ -1437,10 +2344,10 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if registrations != document.body.registration_digests {
         bail!("bundle registrations differ from the signed init completion record");
     }
-    let generation = ryeos_app::node_policy::generation::load_policy_generation(
+    let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         app_root,
         &trust_store,
-        &ryeos_app::node_policy::NodePolicyTable::new(),
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
     )?;
     if generation.digest() != document.body.policy_generation_digest {
         bail!("node policy generation differs from the signed init completion record");
@@ -1448,6 +2355,31 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     let substrate_identity = load_substrate_identity_record(app_root)?;
     if substrate_identity.digest()? != document.body.substrate_identity_digest {
         bail!("substrate identity differs from the signed init completion record");
+    }
+    // The node runs under the isolation policy of the class its identity
+    // binds, and no other: refuse a generation for another class here, so
+    // the daemon and every stopped-node tool refuse it before using it.
+    generation.require_host_class(substrate_identity.bound_host_class()?)?;
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust_store,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )?;
+    if snapshot.generation_digest() != document.body.policy_generation_digest {
+        bail!("capacity policy generation changed during completion verification");
+    }
+    let capacity_lineage = crate::native_capacity::OperatorLineage::load(app_root)?;
+    document
+        .body
+        .capacity_account
+        .require_reanchor_document(app_root, &capacity_lineage)?;
+
+    if require_capacity_installed {
+        document.body.capacity_account.require_installed(
+            app_root,
+            &document.body.node_fingerprint,
+            snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+        )?;
     }
     Ok(Some(InitCompletionReport {
         operator_fingerprint,
@@ -1457,7 +2389,28 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
         substrate_identity,
         completion_digest: lillux::sha256_hex(&bytes),
         bundles_verified: registrations.len(),
+        capacity_account: document.body.capacity_account,
     }))
+}
+
+/// Refuse, by name and with its cure, a completion record of a shape this
+/// build no longer reads.
+fn refuse_old_completion(bytes: &[u8]) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).context("init completion is not JSON")?;
+    let schema = value
+        .pointer("/body/schema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    ensure!(
+        schema == INIT_COMPLETION_SCHEMA,
+        "init_completion_old_shape: the init completion has schema `{schema}`; this build reads \
+         `{INIT_COMPLETION_SCHEMA}`, which the node signs under the operator's request or the \
+         operator signs in the command-line tool, never from a key on the node volume. Stop the \
+         node and run `ryeos init` on this app root with its original arguments, which reseals \
+         the completion"
+    );
+    Ok(())
 }
 
 /// Load substrate compatibility authority only after verifying the complete
@@ -1471,17 +2424,19 @@ pub fn load_verified_substrate_identity(app_root: &Path) -> Result<SubstrateIden
 fn prospective_bundle_records(
     plan: &ryeos_bundle::plan::BundlePlan,
     replacement: Option<(&str, &Path)>,
-) -> Vec<ryeos_app::node_config::BundleRecord> {
+) -> Vec<ryeos_node_runtime::node_config_source::BundleRecord> {
     plan.bundles
         .iter()
-        .map(|(name, bundle)| ryeos_app::node_config::BundleRecord {
-            name: name.clone(),
-            path: replacement
-                .filter(|(replacement_name, _)| *replacement_name == name)
-                .map(|(_, path)| path.to_path_buf())
-                .unwrap_or_else(|| bundle.source.root_path().clone()),
-            source_file: PathBuf::from(format!("prospective/{name}.yaml")),
-        })
+        .map(
+            |(name, bundle)| ryeos_node_runtime::node_config_source::BundleRecord {
+                name: name.clone(),
+                path: replacement
+                    .filter(|(replacement_name, _)| *replacement_name == name)
+                    .map(|(_, path)| path.to_path_buf())
+                    .unwrap_or_else(|| bundle.source.root_path().clone()),
+                source_file: PathBuf::from(format!("prospective/{name}.yaml")),
+            },
+        )
         .collect()
 }
 
@@ -1492,20 +2447,20 @@ fn validate_prospective_staging(
     plan: &ryeos_bundle::plan::BundlePlan,
     node_trust_store: &TrustStore,
     config_table: &ryeos_app::node_config::NodeConfigTable,
-    policy_table: &ryeos_app::node_policy::NodePolicyTable,
-    policy_snapshot: &ryeos_app::node_policy::NodePolicySnapshot,
+    policy_table: &ryeos_node_runtime::node_policy::NodePolicyTable,
+    policy_snapshot: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
 ) -> Result<()> {
     let records = prospective_bundle_records(plan, Some((bundle_name, staging)));
     let roots = records
         .iter()
         .map(|record| record.path.clone())
         .collect::<Vec<_>>();
-    let loader = ryeos_app::node_config::loader::BootstrapLoader {
+    let loader = ryeos_app::node_config::loader::NodeConfigLoader {
         app_root,
         trust_store: node_trust_store,
     };
     let command_registration = policy_snapshot.require::<
-        ryeos_app::node_policy::sections::command_registration::CommandRegistrationAuthority,
+        ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority,
     >()?;
     loader
         .load_full(config_table, &records, command_registration, policy_table)
@@ -1513,12 +2468,12 @@ fn validate_prospective_staging(
             format!("completed `{bundle_name}` staging tree has invalid node config")
         })?;
     let isolation_policy = policy_snapshot.require::<ryeos_engine::isolation::IsolationPolicy>()?;
-    ryeos_app::engine_init::admit_node_bundle_roots(
+    ryeos_node_runtime::engine_init::admit_node_bundle_roots(
         app_root,
         &roots,
         node_trust_store,
         isolation_policy,
-        policy_snapshot.generation_digest(),
+        policy_snapshot.section_digest::<ryeos_engine::isolation::IsolationPolicy>()?,
     )
     .with_context(|| {
         format!("completed `{bundle_name}` staging tree failed definition admission")
@@ -1533,22 +2488,118 @@ fn source_node_init_dir(source_dir: &Path) -> PathBuf {
         .join("init")
 }
 
+/// The host class a node names to run its jobs with no isolation backend. It
+/// is never selected implicitly; initialization must be given it by name.
+const UNCONFINED_HOST_CLASS: &str = "local_unconfined";
+
+/// The refusal for a prospective source set that fails definition admission.
+/// Under an enforced lane the cause is usually the host's sandbox probe: the
+/// message says so and, when the profile declares the explicit unconfined
+/// class, names it as the opt-out. Initialization never falls back to it.
+/// `recorded_host_class` is the host class the app root's substrate identity
+/// already records, if any. A recorded class never changes, so when it differs
+/// from the unconfined class the opt-out is a different, empty app root, not a
+/// re-run against this one.
+fn enforced_admission_refusal(
+    policy: &ryeos_engine::isolation::IsolationPolicy,
+    declared_host_classes: &[String],
+    recorded_host_class: Option<&str>,
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    if policy.mode != ryeos_engine::isolation::IsolationMode::Enforce {
+        return cause.context("prospective init source set failed definition admission");
+    }
+    let host_class = &policy.host_class;
+    let opt_out = if host_class != UNCONFINED_HOST_CLASS
+        && declared_host_classes
+            .iter()
+            .any(|declared| declared == UNCONFINED_HOST_CLASS)
+    {
+        match recorded_host_class {
+            Some(recorded) if recorded != UNCONFINED_HOST_CLASS => format!(
+                " This app root is already initialized with host class `{recorded}`, and a \
+                 node's host class does not change, so `--host-class {UNCONFINED_HOST_CLASS}` \
+                 is refused here. To run jobs unconfined as the daemon user, initialize a new, \
+                 empty app root with `--host-class {UNCONFINED_HOST_CLASS}`; initialization \
+                 does not select it for you."
+            ),
+            _ => format!(
+                " To run jobs unconfined as the daemon user, re-run with `--host-class \
+                 {UNCONFINED_HOST_CLASS}`; initialization does not select it for you."
+            ),
+        }
+    } else {
+        String::new()
+    };
+    anyhow!(
+        "enforced_lane_admission_refused: host class `{host_class}` enforces execution \
+         isolation, and this host's sandbox probe \
+         or the prospective source set did not pass admission: {cause:#}. Fix the host (the \
+         sandbox needs unprivileged user, mount and pid namespaces and the new mount API), or \
+         choose a different host class.{opt_out}"
+    )
+}
+
+/// Refuse, before any key or identity exists, when `profile`'s capability
+/// floor requires durable app-root storage and `app_root` is not on it.
+fn require_profile_storage(
+    name: &str,
+    profile: &ryeos_node_runtime::node_policy::generation::NodeInitProfile,
+    app_root: &Path,
+    observe_storage: impl FnOnce(&Path) -> lillux::process_control::RootStorageFacts,
+) -> Result<()> {
+    use lillux::process_control::STORAGE_DURABLE_ROOT;
+    let isolation: ryeos_engine::isolation::IsolationPolicy = profile.typed_policy(
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        Path::new("selected-node-profile"),
+    )?;
+    let Some(entry) = isolation.requires_capabilities.iter().find(|entry| {
+        entry
+            .names()
+            .iter()
+            .any(|entry_name| entry_name == STORAGE_DURABLE_ROOT)
+    }) else {
+        return Ok(());
+    };
+    let storage = observe_storage(app_root);
+    let evidence = lillux::process_control::decide_durable_root(&storage);
+    let refusal = match &evidence {
+        Ok(evidence) => {
+            match lillux::process_control::satisfies(entry, STORAGE_DURABLE_ROOT, evidence) {
+                Ok(()) => {
+                    tracing::info!(profile = name, basis = %evidence.basis, "durable app-root storage proven");
+                    return Ok(());
+                }
+                Err(mismatch) => mismatch,
+            }
+        }
+        Err(reason) => reason.clone(),
+    };
+    bail!(
+        "profile {name} requires {STORAGE_DURABLE_ROOT}; {refusal}. Attach a persistent volume \
+         and place the app root on it. No identity or key was created."
+    )
+}
+
 pub fn load_trusted_init_node_profile(
     source_dir: &Path,
     name: &str,
     trust_store: &TrustStore,
-) -> Result<ryeos_app::node_policy::generation::NodeInitProfile> {
-    ryeos_app::node_policy::generation::validate_init_profile_name(name)?;
+) -> Result<ryeos_node_runtime::node_policy::generation::NodeInitProfile> {
+    ryeos_node_runtime::node_policy::generation::validate_init_profile_name(name)?;
     let path = source_node_init_dir(source_dir)
         .join("profiles")
         .join(format!("{name}.yaml"));
     let raw = read_trusted_seed_yaml(&path, trust_store)
         .with_context(|| format!("verify init node profile {}", path.display()))?;
     let body = lillux::signature::strip_signature_lines(&raw);
-    let parsed: ryeos_app::node_policy::generation::NodeInitProfile =
+    let parsed: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
         serde_yaml::from_str(&body)
             .with_context(|| format!("parse init node profile {}", path.display()))?;
-    parsed.validate(&ryeos_app::node_policy::NodePolicyTable::new(), &path)?;
+    parsed.validate(
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        &path,
+    )?;
     Ok(parsed)
 }
 
@@ -1577,11 +2628,16 @@ fn verify_trusted_seed_yaml(content: &str, path: &Path, trust_store: &TrustStore
         suffix: None,
         after_shebang: false,
     };
-    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+    let header = ryeos_engine::item_resolution::parse_signature_header(content, &envelope)
         .with_context(|| format!("seed YAML {} has no valid signature", path.display()))?;
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)
-            .with_context(|| format!("verify seed YAML signature {}", path.display()))?;
+    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
+        content,
+        &header,
+        &envelope,
+        trust_store,
+        &ryeos_engine::trust::SignerContext::bundle("init_seed"),
+    )
+    .with_context(|| format!("verify seed YAML signature {}", path.display()))?;
     if trust_class != TrustClass::Trusted {
         bail!(
             "seed YAML {} is not trusted (trust_class: {:?})",
@@ -1686,20 +2742,51 @@ fn decode_official_publisher_pubkey() -> Result<VerifyingKey> {
     Ok(vk)
 }
 
-/// Parse a `PUBLISHER_TRUST.toml` and pin its key into the trust store.
-fn pin_trust_file(trust_file: &Path, trust_dir: &Path) -> Result<()> {
+/// Parse a `PUBLISHER_TRUST.toml` into its key and owner label.
+fn read_trust_file(trust_file: &Path) -> Result<(VerifyingKey, String)> {
     let content = fs::read_to_string(trust_file)
         .with_context(|| format!("read trust file {}", trust_file.display()))?;
-
     let doc =
         ryeos_engine::trust::PublisherTrustDoc::parse(&content).map_err(|e| anyhow!("{e}"))?;
-
     let vk = doc.decode_verifying_key().map_err(|e| anyhow!("{e}"))?;
+    Ok((vk, doc.owner))
+}
 
-    pin_key(&vk, &doc.owner, trust_dir, None)
-        .map_err(|e| anyhow!("pin trust doc for {}: {e}", doc.owner))?;
+/// The registry of an already-initialized node, or `None` for a fresh one
+/// (no node identity yet). A registry that is present must load cleanly.
+fn load_existing_registry(app_root: &Path) -> Result<Option<TrustStore>> {
+    if !ryeos_engine::trust::node_public_identity_path(app_root).exists() {
+        return Ok(None);
+    }
+    Ok(Some(TrustStore::load_node_registry(app_root)?))
+}
 
-    Ok(())
+/// Trust used to verify the init profile and seed data before the node key
+/// can sign registry records: the existing registry (when there is one) plus
+/// the publisher keys init is about to pin, all held in memory.
+fn bootstrap_trust_store(
+    existing: Option<&TrustStore>,
+    publishers: &[(VerifyingKey, String)],
+) -> Result<TrustStore> {
+    use base64::Engine as _;
+    let mut entries = existing.map(TrustStore::signer_entries).unwrap_or_default();
+    for (key, label) in publishers {
+        let fingerprint = compute_fingerprint(key);
+        if entries.iter().any(|entry| entry.fingerprint == fingerprint) {
+            continue;
+        }
+        entries.push(ryeos_engine::trust::TrustedSignerEntry {
+            fingerprint,
+            public_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(key.as_bytes())
+            ),
+            label: label.clone(),
+            scope: ryeos_engine::trust::SignerScope::publisher_default(),
+            endorsements: None,
+        });
+    }
+    Ok(TrustStore::from_signer_entries(&entries)?)
 }
 
 /// Create the Model B directory layout.
@@ -1752,17 +2839,10 @@ fn create_layout(app_root: &Path) -> Result<()> {
             .join("refs"),
         // Installed bundles directory
         app_root.join(ryeos_engine::AI_DIR).join("bundles"),
-        // Operator config (operator-edited)
-        app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
+        // Operator key material
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+            .operator_dir()
             .join("signing"),
-        app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("trusted"),
     ];
     for d in &dirs {
         fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;
@@ -1883,11 +2963,8 @@ fn ensure_operator_genesis(
     key_created: bool,
     contribution_digest: Option<&str>,
 ) -> Result<()> {
-    let path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("identity")
-        .join("operator-genesis.json");
+    let path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
     lillux::with_exclusive_file_lock(&path, || {
         ensure_operator_genesis_locked(
             &path,
@@ -1931,6 +3008,8 @@ fn ensure_operator_genesis_locked(
                 "display_name",
                 "identity_statement",
                 "contribution_digest",
+                "predecessor_fingerprint",
+                "predecessor_created_at",
                 "signature",
             ];
             if object.keys().any(|key| !allowed.contains(&key.as_str()))
@@ -2003,7 +3082,7 @@ fn ensure_operator_genesis_locked(
     let mut document = serde_json::json!({
         "schema": "ryeos/operator-genesis/v1",
         "operator_fingerprint": operator_fingerprint,
-        "created_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "created_at": lillux::time::iso8601_now(),
         "ceremony_version": "1",
     });
     if let Some(display_name) = profile
@@ -2032,6 +3111,129 @@ fn ensure_operator_genesis_locked(
     lillux::atomic_write(path, &bytes)
         .map_err(|error| anyhow!("write operator genesis {}: {error}", path.display()))?;
     Ok(())
+}
+
+/// The genesis a rotating operator signs with its new key, in the operator's
+/// process. It is signed by the new key, carries the old display fields and
+/// names the predecessor key and its creation time.
+pub(crate) fn build_rotated_operator_genesis(
+    app_root: &Path,
+    new_key: &SigningKey,
+    predecessor_fingerprint: &str,
+) -> Result<Vec<u8>> {
+    let path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
+    let new_fingerprint = compute_fingerprint(&new_key.verifying_key());
+    let source = String::from_utf8(lillux::read_regular_file_bounded_no_follow(
+        &path,
+        64 * 1024,
+    )?)
+    .with_context(|| format!("read operator genesis {}", path.display()))?;
+    let previous: serde_json::Value = serde_json::from_str(&source)
+        .with_context(|| format!("parse operator genesis {}", path.display()))?;
+    let previous_fingerprint = previous
+        .get("operator_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("operator genesis missing operator_fingerprint"))?;
+    ensure!(
+        previous_fingerprint == predecessor_fingerprint,
+        "operator genesis names {previous_fingerprint}, not the rotating operator \
+         {predecessor_fingerprint}"
+    );
+    let mut document = serde_json::json!({
+        "schema": "ryeos/operator-genesis/v1",
+        "operator_fingerprint": new_fingerprint,
+        "created_at": lillux::time::iso8601_now(),
+        "ceremony_version": "1",
+        "predecessor_fingerprint": predecessor_fingerprint,
+    });
+    if let Some(created) = previous.get("created_at") {
+        document["predecessor_created_at"] = created.clone();
+    }
+    for field in ["display_name", "identity_statement"] {
+        if let Some(value) = previous.get(field) {
+            document[field] = value.clone();
+        }
+    }
+    let canonical = lillux::canonical_json(&document)
+        .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
+    let signature = new_key.sign(canonical.as_bytes());
+    document["signature"] = serde_json::Value::String(format!(
+        "ed25519:{}",
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    ));
+    Ok(serde_json::to_vec_pretty(&document)?)
+}
+
+/// Install the genesis a rotating operator signed with its new key. The
+/// node verifies it against the new key the succession statement names: it
+/// must name the new operator, name the rotating operator as predecessor, and
+/// carry the new key's signature. A genesis that already names the new key is
+/// left as it is.
+pub(crate) fn install_rotated_operator_genesis(
+    app_root: &Path,
+    genesis: &[u8],
+    new_key: &VerifyingKey,
+    predecessor_fingerprint: &str,
+) -> Result<()> {
+    let path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
+    let new_fingerprint = compute_fingerprint(new_key);
+    let mut document: serde_json::Value =
+        serde_json::from_slice(genesis).context("parse the rotated operator genesis")?;
+    ensure!(
+        document.get("schema").and_then(serde_json::Value::as_str)
+            == Some("ryeos/operator-genesis/v1")
+            && document
+                .get("operator_fingerprint")
+                .and_then(serde_json::Value::as_str)
+                == Some(new_fingerprint.as_str())
+            && document
+                .get("predecessor_fingerprint")
+                .and_then(serde_json::Value::as_str)
+                == Some(predecessor_fingerprint),
+        "the rotated operator genesis does not name the new operator {new_fingerprint} \
+         succeeding {predecessor_fingerprint}"
+    );
+    let signature = document
+        .as_object_mut()
+        .and_then(|object| object.remove("signature"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .and_then(|value| value.strip_prefix("ed25519:").map(str::to_owned))
+        .ok_or_else(|| anyhow!("the rotated operator genesis carries no Ed25519 signature"))?;
+    let signature = Signature::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .context("decode the rotated operator genesis signature")?,
+    )?;
+    let canonical = lillux::canonical_json(&document)
+        .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
+    new_key
+        .verify(canonical.as_bytes(), &signature)
+        .context("the rotated operator genesis is not signed by the new operator key")?;
+    lillux::with_exclusive_file_lock(&path, || {
+        let source = String::from_utf8(lillux::read_regular_file_bounded_no_follow(
+            &path,
+            64 * 1024,
+        )?)
+        .with_context(|| format!("read operator genesis {}", path.display()))?;
+        let previous: serde_json::Value = serde_json::from_str(&source)
+            .with_context(|| format!("parse operator genesis {}", path.display()))?;
+        let previous_fingerprint = previous
+            .get("operator_fingerprint")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("operator genesis missing operator_fingerprint"))?;
+        if previous_fingerprint == new_fingerprint {
+            return Ok(());
+        }
+        ensure!(
+            previous_fingerprint == predecessor_fingerprint,
+            "operator genesis names {previous_fingerprint}, not the rotating operator \
+             {predecessor_fingerprint}"
+        );
+        lillux::atomic_write(&path, genesis)
+            .map_err(|error| anyhow!("write operator genesis {}: {error}", path.display()))
+    })
 }
 
 fn validate_operator_ceremony(ceremony: &InitOperatorCeremony) -> Result<()> {
@@ -2127,16 +3329,22 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
+                    Some("local".to_owned()),
                 )
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         }
     }
@@ -2181,25 +3389,36 @@ mod tests {
             "core must be in installed list: {:?}",
             report.bundles_installed
         );
-        assert!(
-            report.bundles_installed.contains(&"standard".to_string()),
-            "standard must be in installed list: {:?}",
-            report.bundles_installed
-        );
+        for name in ["knowledge", "directive", "graph", "ryeos-docs"] {
+            assert!(
+                report.bundles_installed.contains(&name.to_string()),
+                "{name} must be in installed list: {:?}",
+                report.bundles_installed
+            );
+        }
 
         // Core at .ai/bundles/core/.ai/
         assert!(
             state.join(".ai/bundles/core/.ai").is_dir(),
             "core should be installed at .ai/bundles/core/.ai/"
         );
-        // Standard at .ai/bundles/standard/.ai/
-        assert!(
-            state.join(".ai/bundles/standard/.ai").is_dir(),
-            "standard should be installed at .ai/bundles/standard/.ai/"
-        );
+        for name in ["knowledge", "directive", "graph", "ryeos-docs"] {
+            assert!(
+                state.join(".ai/bundles").join(name).join(".ai").is_dir(),
+                "{name} should be installed at .ai/bundles/{name}/.ai/"
+            );
+        }
         // Registrations
         assert!(state.join(".ai/node/bundles/core.yaml").exists());
-        assert!(state.join(".ai/node/bundles/standard.yaml").exists());
+        for name in ["knowledge", "directive", "graph", "ryeos-docs"] {
+            assert!(
+                state
+                    .join(".ai/node/bundles")
+                    .join(format!("{name}.yaml"))
+                    .exists(),
+                "{name} registration must exist"
+            );
+        }
         let core_registration = fs::read_to_string(state.join(".ai/node/bundles/core.yaml"))
             .expect("read core registration");
         let registration_body: serde_json::Value = serde_yaml::from_str(
@@ -2222,23 +3441,401 @@ mod tests {
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(
             state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
     }
 
+    fn ephemeral_root(app_root: &Path) -> lillux::process_control::RootStorageFacts {
+        lillux::process_control::RootStorageFacts {
+            path: app_root.display().to_string(),
+            filesystem: Some("overlay".to_owned()),
+            f_type: Some(0x794c_7630),
+            mount_id: Some(1),
+            mount_point: Some("/".to_owned()),
+            mount_source: Some("overlay".to_owned()),
+            root_mount_id: Some(1),
+            private_pid_namespace: Some(true),
+            hypervisor: None,
+            hypervisor_basis: "fixture".to_owned(),
+            kernel_kind: "native".to_owned(),
+        }
+    }
+
     #[test]
-    fn run_init_installs_the_exact_hosted_node_profile_without_standard() {
+    fn a_profile_requiring_durable_storage_refuses_an_ephemeral_root_before_any_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let error =
+            run_init_on_storage(&make_opts(&state, tmp.path()), None, ephemeral_root, |_| {
+                Ok(())
+            })
+            .expect_err("an ephemeral root must refuse a durable-storage profile");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("profile standard requires storage:durable_root"),
+            "{text}"
+        );
+        assert!(
+            text.contains("is on overlay (the container's writable layer)"),
+            "{text}"
+        );
+        assert!(text.contains("Attach a persistent volume"), "{text}");
+        assert!(text.contains("No identity or key was created"), "{text}");
+        assert!(
+            !state
+                .join(".ai/node/operator/signing/private_key.pem")
+                .exists()
+        );
+        assert!(!state.join(".ai/node/identity/private_key.pem").exists());
+        assert!(
+            !state
+                .join(".ai/node/identity/public-identity.json")
+                .exists()
+        );
+        assert!(!state.join(".ai/node/vault/private_key.pem").exists());
+        assert!(!state.join(".ai/node/vault/public_key.pem").exists());
+    }
+
+    fn authored_profile(
+        name: &str,
+    ) -> ryeos_node_runtime::node_policy::generation::NodeInitProfile {
+        let raw = fs::read_to_string(
+            workspace_root().join(format!("bundles/.ai/node/init/profiles/{name}.yaml")),
+        )
+        .unwrap();
+        serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).unwrap()
+    }
+
+    #[test]
+    fn an_enforced_lane_that_fails_admission_names_the_explicit_unconfined_opt_out() {
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+        policy.host_class = "local".to_owned();
+        policy.mode = ryeos_engine::isolation::IsolationMode::Enforce;
+        let declared = ["local".to_owned(), "local_unconfined".to_owned()];
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(&policy, &declared, None, anyhow!("no user namespace"))
+        );
+        assert!(
+            text.starts_with("enforced_lane_admission_refused:"),
+            "{text}"
+        );
+        assert!(text.contains("no user namespace"), "{text}");
+        assert!(text.contains("--host-class local_unconfined"), "{text}");
+        // An app root already initialized with another class cannot take the
+        // unconfined class; the refusal names a new app root instead.
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(
+                &policy,
+                &declared,
+                Some("local"),
+                anyhow!("no user namespace")
+            )
+        );
+        assert!(
+            text.starts_with("enforced_lane_admission_refused:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("already initialized with host class `local`"),
+            "{text}"
+        );
+        assert!(text.contains("new, empty app root"), "{text}");
+        assert!(!text.contains("re-run with"), "{text}");
+        // A profile that declares no unconfined class offers none.
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(
+                &policy,
+                &["local".to_owned()],
+                Some("local"),
+                anyhow!("probe failed")
+            )
+        );
+        assert!(!text.contains("local_unconfined"), "{text}");
+        // A disabled lane keeps the plain admission failure.
+        policy.mode = ryeos_engine::isolation::IsolationMode::Disabled;
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(&policy, &declared, None, anyhow!("bad bundle"))
+        );
+        assert!(!text.contains("local_unconfined"), "{text}");
+        assert!(text.contains("bad bundle"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_first_init_retires_its_identity_and_never_an_existing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = SubstrateIdentity::new(
+            format!("sha256:{}", "a".repeat(64)),
+            1,
+            Some("core".to_owned()),
+            Some("local".to_owned()),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join(ryeos_engine::AI_DIR)).unwrap();
+        publish_substrate_identity(dir.path(), &identity, false).unwrap();
+        let path = substrate_identity_path(dir.path());
+        assert!(path.exists());
+        // A record that predates the invocation stays.
+        retire_first_init_identity(dir.path(), false).unwrap();
+        assert!(path.exists());
+        // The record this invocation wrote is removed, so a retry may name
+        // another host class.
+        retire_first_init_identity(dir.path(), true).unwrap();
+        assert!(!path.exists());
+        let retry = SubstrateIdentity {
+            host_class: Some(UNCONFINED_HOST_CLASS.to_owned()),
+            ..identity
+        };
+        assert!(
+            publish_substrate_identity(dir.path(), &retry, false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_profile_is_selected_only_with_a_host_class_it_declares() {
+        let core = authored_profile("core");
+        let hosted = select_profile_host_class("core", &core, Some("hosted")).unwrap();
+        assert_eq!(hosted.host_classes().unwrap(), ["hosted"]);
+        let local = select_profile_host_class("core", &core, Some("local")).unwrap();
+        assert_eq!(local.host_classes().unwrap(), ["local"]);
+
+        let missing = format!(
+            "{:#}",
+            select_profile_host_class("core", &core, None).unwrap_err()
+        );
+        assert!(
+            missing.contains("explicit host class (--host-class)"),
+            "{missing}"
+        );
+        let undeclared = format!(
+            "{:#}",
+            select_profile_host_class("core", &core, Some("edge")).unwrap_err()
+        );
+        assert!(
+            undeclared.contains("does not declare host class `edge`"),
+            "{undeclared}"
+        );
+        // A profile without a hosted variant does not run hosted.
+        let contained = authored_profile("contained-workflow");
+        let refused = format!(
+            "{:#}",
+            select_profile_host_class("contained-workflow", &contained, Some("hosted"))
+                .unwrap_err()
+        );
+        assert!(refused.contains("it declares local"), "{refused}");
+        let noncanonical = format!(
+            "{:#}",
+            select_profile_host_class("core", &core, Some("Hosted")).unwrap_err()
+        );
+        assert!(
+            noncanonical.contains("not a canonical name"),
+            "{noncanonical}"
+        );
+    }
+
+    #[test]
+    fn every_authored_profile_compiles_under_each_host_class_it_declares() {
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+        let directory = workspace_root().join("bundles/.ai/node/init/profiles");
+        let mut names = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .file_stem()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        assert!(names.contains(&"hosted-controller".to_owned()), "{names:?}");
+        for name in names {
+            let profile = authored_profile(&name);
+            let path = directory.join(format!("{name}.yaml"));
+            profile
+                .validate(&table, &path)
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            for host_class in profile.host_classes().unwrap() {
+                let selected = select_profile_host_class(&name, &profile, Some(&host_class))
+                    .unwrap_or_else(|error| panic!("{name} {host_class}: {error:#}"));
+                selected
+                    .validated_generation(&table, &path)
+                    .unwrap_or_else(|error| panic!("{name} {host_class}: {error:#}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_substrate_identity_binds_the_host_class_with_the_profile() {
+        let digest = format!("sha256:{}", "1".repeat(64));
+        let bound = SubstrateIdentity::new(
+            digest.clone(),
+            1,
+            Some("core".to_owned()),
+            Some("hosted".to_owned()),
+        )
+        .unwrap();
+        let other = SubstrateIdentity::new(
+            digest.clone(),
+            1,
+            Some("core".to_owned()),
+            Some("local".to_owned()),
+        )
+        .unwrap();
+        assert_ne!(bound.digest().unwrap(), other.digest().unwrap());
+        assert!(SubstrateIdentity::new(digest.clone(), 1, Some("core".to_owned()), None).is_err());
+        assert!(
+            SubstrateIdentity::new(digest.clone(), 1, None, Some("hosted".to_owned())).is_err()
+        );
+        SubstrateIdentity::new(digest, 1, None, None).unwrap();
+        let mut previous = serde_json::to_value(&bound).unwrap();
+        previous["schema"] = "ryeos/substrate-identity/v1".into();
+        previous.as_object_mut().unwrap().remove("host_class");
+        assert!(
+            serde_json::from_value::<SubstrateIdentity>(previous.clone())
+                .map_err(anyhow::Error::from)
+                .and_then(|identity| identity.validate())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn run_init_refuses_an_undeclared_host_class_before_any_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, tmp.path());
+        opts.host_class = Some("local_direct".to_owned());
+        opts.substrate_identity = Some(
+            SubstrateIdentity::new(
+                format!("sha256:{}", "1".repeat(64)),
+                1,
+                Some("standard".to_owned()),
+                Some("local_direct".to_owned()),
+            )
+            .unwrap(),
+        );
+        let error = format!(
+            "{:#}",
+            run_init(&opts).expect_err("standard declares no local_direct class")
+        );
+        assert!(
+            error.contains("does not declare host class `local_direct`"),
+            "{error}"
+        );
+        assert!(
+            !state
+                .join(".ai/node/operator/signing/private_key.pem")
+                .exists()
+        );
+        assert!(!state.join(".ai/node/identity/private_key.pem").exists());
+
+        let mut unbound = make_opts(&state, tmp.path());
+        unbound.host_class = None;
+        let error = format!(
+            "{:#}",
+            run_init(&unbound).expect_err("profile without a class")
+        );
+        assert!(error.contains("host-class binding disagrees"), "{error}");
+    }
+
+    #[test]
+    fn init_refuses_to_repin_a_revoked_official_signer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let opts = make_opts(&state, tmp.path());
+        run_init(&opts).expect("first init");
+
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(
+            &ryeos_engine::roots::RuntimeRoot::new(state.clone()).node_signing_key_path(),
+        )
+        .unwrap();
+        {
+            let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+                &ryeos_node_runtime::state_lock::default_lock_path(&state),
+            )
+            .unwrap();
+            crate::trust_registry::apply_change(
+                &state,
+                &lock,
+                &crate::trust_registry::Actor {
+                    node_key: node.signing_key(),
+                    operator: "op",
+                    request_digest: &"a".repeat(64),
+                },
+                &crate::trust_registry::Change::Revoke {
+                    fingerprint: OFFICIAL_PUBLISHER_FP.to_owned(),
+                },
+            )
+            .expect("revoke the official signer");
+        }
+
+        let error = format!("{:#}", run_init(&opts).expect_err("init must refuse"));
+        assert!(error.contains("trust_signer_revoked"), "{error}");
+        assert!(error.contains(OFFICIAL_PUBLISHER_FP), "{error}");
+        let registry = TrustStore::load_node_registry(&state).unwrap();
+        assert_eq!(
+            registry.signer(OFFICIAL_PUBLISHER_FP).unwrap().status,
+            ryeos_engine::trust::SignerStatus::Revoked,
+            "the refusal must leave the revocation in place"
+        );
+    }
+
+    #[test]
+    fn run_init_records_the_selected_host_class_in_the_binding_and_the_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let report = run_init(&make_opts(&state, tmp.path())).expect("init full");
+        assert_eq!(report.host_class.as_deref(), Some("local"));
+        assert_eq!(
+            report.substrate_identity.host_class.as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            load_verified_substrate_identity(&state)
+                .unwrap()
+                .host_class
+                .as_deref(),
+            Some("local")
+        );
+        let trust = TrustStore::load_node_registry(&state).unwrap();
+        let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+            &state,
+            &trust,
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        )
+        .unwrap();
+        let isolation = snapshot
+            .require::<ryeos_engine::isolation::IsolationPolicy>()
+            .unwrap();
+        assert_eq!(isolation.host_class, "local");
+
+        // The class of an initialized node does not change on re-init.
+        let mut other = make_opts(&state, tmp.path());
+        other.host_class = Some("hosted".to_owned());
+        other.substrate_identity = None;
+        let error = format!("{:#}", run_init(&other).unwrap_err());
+        assert!(
+            error.contains("a node's host class does not change"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn run_init_installs_the_hosted_node_profile_as_core_only() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
         fs::create_dir_all(&source).unwrap();
         copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
             .expect("copy core bundle");
-        copy_dir_recursive(
-            &workspace_root().join("bundles/hosted-node"),
-            &source.join("hosted-node"),
-        )
-        .expect("copy hosted-node bundle");
         copy_dir_recursive(
             &workspace_root().join("bundles/central-auth"),
             &source.join("central-auth"),
@@ -2254,35 +3851,34 @@ mod tests {
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("hosted-node".to_owned()),
+            host_class: Some("hosted".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
                     Some("hosted-node".to_owned()),
+                    Some("hosted".to_owned()),
                 )
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
 
-        let report = run_init(&opts).expect("init core + hosted-node");
-        assert_eq!(
-            report.bundles_installed,
-            vec![
-                "core".to_string(),
-                "central-auth".to_string(),
-                "hosted-node".to_string()
-            ]
-        );
+        let report = run_init(&opts).expect("init hosted-node profile");
+        assert_eq!(report.bundles_installed, vec!["core".to_string()]);
         assert!(state.join(".ai/bundles/core/.ai").is_dir());
-        assert!(state.join(".ai/bundles/hosted-node/.ai").is_dir());
         assert!(state.join(".ai/node/bundles/core.yaml").exists());
-        assert!(state.join(".ai/node/bundles/hosted-node.yaml").exists());
-        assert!(
-            !state.join(".ai/bundles/standard").exists(),
-            "hosted-node init proof must not install standard"
-        );
+        for name in ["knowledge", "directive", "graph", "ryeos-docs"] {
+            assert!(
+                !state.join(".ai/bundles").join(name).exists(),
+                "hosted-node init proof must not install {name}"
+            );
+        }
     }
 
     #[test]
@@ -2296,22 +3892,303 @@ mod tests {
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(
             state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
+        let registry = TrustStore::load_node_registry(&state).expect("node signer registry");
+        let official = registry
+            .signer(OFFICIAL_PUBLISHER_FP)
+            .expect("official publisher record");
+        assert_eq!(official.role, ryeos_engine::trust::SignerRole::Publisher);
+        assert_eq!(
+            official.scope,
+            ryeos_engine::trust::SignerScope::publisher_default()
+        );
+        let node_fp = registry.node_fingerprint().expect("node root");
         assert!(
-            state
-                .join(".ai/config/keys/trusted")
-                .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
-                .exists()
+            registry.signer(&node_fp).is_none(),
+            "the node key is the implicit root and has no record"
         );
-        let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-            app_root: Some(state.clone()),
-            ..Default::default()
-        })
-        .expect("load init-owned bootstrap config");
+        let view = crate::trust_registry::load_view(&state).expect("cross-checked registry");
+        assert_eq!(view.chain.len(), view.records.len());
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(state.clone()),
+                ..Default::default()
+            })
+            .expect("load init-owned bootstrap config");
         assert_eq!(config.app_root, state);
         assert!(state.join(".ai/node/config.yaml").is_file());
+    }
+
+    #[test]
+    fn init_creates_a_separate_authoring_key_pinned_with_no_kinds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let first = run_init(&make_opts(&state, &user)).expect("init");
+        let root = ryeos_engine::roots::RuntimeRoot::new(state.clone());
+        let key_path = root.authoring_signing_key_path();
+        assert_eq!(
+            key_path,
+            state.join(".ai/node/authoring/signing/private_key.pem")
+        );
+        let authoring = lillux::crypto::load_signing_key(&key_path).expect("authoring key");
+        let fingerprint = compute_fingerprint(&authoring.verifying_key());
+        assert_eq!(first.authoring_key_fingerprint, fingerprint);
+        assert_ne!(first.authoring_key_fingerprint, first.node_key_fingerprint);
+        assert_ne!(first.authoring_key_fingerprint, first.user_key_fingerprint);
+
+        let registry = TrustStore::load_node_registry(&state).expect("registry");
+        let record = registry.signer(&fingerprint).expect("authoring record");
+        assert_eq!(record.role, ryeos_engine::trust::SignerRole::Authoring);
+        assert_eq!(record.status, ryeos_engine::trust::SignerStatus::Active);
+        assert_eq!(
+            record.scope,
+            ryeos_engine::trust::SignerScope::authoring_default()
+        );
+        assert!(record.scope.kinds.is_empty(), "no kind is admitted");
+
+        let second = run_init(&make_opts(&state, &user)).expect("init again");
+        assert_eq!(second.authoring_key_fingerprint, fingerprint);
+    }
+
+    #[test]
+    fn operator_rotation_replaces_the_operator_and_the_node_still_verifies() {
+        use crate::key_rotation::{
+            RotatedKey, RotationRequest, install_staged_key, prepare_rotation, rotate,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let first = run_init(&make_opts(&state, &user)).expect("init");
+        let old_fp = first.user_key_fingerprint.clone();
+        let root = ryeos_engine::roots::RuntimeRoot::new(state.clone());
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())
+            .unwrap();
+        let grants = crate::offline_operation::authorized_keys_dir(&state);
+        let old_grant = grants.join(format!("{old_fp}.toml"));
+        // Init does not write the operator's grant; daemon bootstrap does.
+        // Write it as bootstrap would so the rotation has one to replace.
+        let old_key = lillux::crypto::load_signing_key(&root.operator_signing_key_path()).unwrap();
+        ryeos_node_runtime::identity::write_authorized_key_toml(
+            &grants,
+            &old_fp,
+            &base64::engine::general_purpose::STANDARD.encode(old_key.verifying_key().as_bytes()),
+            &["*".to_string()],
+            "operator",
+            &old_fp,
+            &lillux::time::iso8601_now(),
+            &ryeos_node_runtime::identity::GrantTerms::operator(
+                ryeos_node_runtime::identity::AuthorizedBy::principal_request(&old_fp, None),
+            ),
+            node.signing_key(),
+            ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
+        )
+        .unwrap();
+        assert!(old_grant.exists());
+
+        let prepared = prepare_rotation(&state, RotatedKey::Operator).expect("prepare");
+        assert_eq!(prepared.old_fingerprint, old_fp);
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        let statement = String::from_utf8(prepared.statement.clone()).unwrap();
+        // The operator's own request is what the node's documents carry.
+        let request = crate::offline_operation::contract::SignedRequest::sign(
+            crate::offline_operation::contract::RequestBody {
+                schema: crate::offline_operation::contract::REQUEST_SCHEMA.to_owned(),
+                node_fingerprint: node.fingerprint().to_owned(),
+                signer_fingerprint: old_fp.clone(),
+                signer_grant_digest: None,
+                signer_origin_site_id: None,
+                operation: "node.operator.rotate".to_owned(),
+                arguments: serde_json::json!({}),
+                inputs: BTreeMap::new(),
+                expected_result: BTreeMap::new(),
+                precondition: BTreeMap::new(),
+                issued_at: lillux::time::iso8601_now(),
+                not_after: lillux::time::iso8601_from_unix_secs(
+                    lillux::time::unix_secs_now() + 3600,
+                ),
+            },
+            &old_key,
+        )
+        .unwrap();
+        let request_digest = request.digest().unwrap();
+        let signer = crate::apply_authority::DocumentSigner::Request {
+            node: node.signing_key(),
+            request: &request,
+        };
+        let result = rotate(
+            RotatedKey::Operator,
+            RotationRequest {
+                app_root: &state,
+                state_lock: &lock,
+                node_key: node.signing_key(),
+                request_digest: &request_digest,
+                signer_fingerprint: &old_fp,
+                signer,
+                statement: &statement,
+                genesis: prepared.genesis.as_deref(),
+            },
+        )
+        .expect("rotate");
+        drop(lock);
+        assert_eq!(result["already_rotated"], false);
+        // The node never installed the new private key: that is the
+        // operator's step, and until then the old key is still in place.
+        assert_eq!(
+            compute_fingerprint(
+                &lillux::crypto::load_signing_key(&root.operator_signing_key_path())
+                    .unwrap()
+                    .verifying_key()
+            ),
+            old_fp
+        );
+        install_staged_key(&state, RotatedKey::Operator).expect("operator installs its key");
+        // The completion the node resealed was signed by the node under the
+        // request, not by any operator key.
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(init_completion_path(&state)).unwrap()).unwrap();
+        assert_eq!(
+            document["body"]["authority"]["signed_by"],
+            "node_under_request"
+        );
+        assert_eq!(
+            document["body"]["authority"]["request_digest"],
+            serde_json::json!(request_digest)
+        );
+        assert!(!crate::key_rotation::staged_key_is_the_applied_operator(&state).unwrap());
+
+        // The new key is installed and is not the old one.
+        let installed = lillux::crypto::load_signing_key(&root.operator_signing_key_path())
+            .expect("installed operator");
+        let new_fp = compute_fingerprint(&installed.verifying_key());
+        assert_eq!(new_fp, prepared.new_fingerprint);
+        assert_ne!(new_fp, old_fp);
+        assert!(!root.operator_dir().join("rotation").exists());
+
+        // The registry retires the old key and activates the new one.
+        let registry = TrustStore::load_node_registry(&state).expect("registry");
+        let old = registry.signer(&old_fp).expect("old record");
+        let new = registry.signer(&new_fp).expect("new record");
+        assert_eq!(old.status, ryeos_engine::trust::SignerStatus::Retired);
+        assert_eq!(new.status, ryeos_engine::trust::SignerStatus::Active);
+        assert_eq!(new.role, ryeos_engine::trust::SignerRole::Operator);
+        assert!(registry.is_trusted(&old_fp), "a retired key still verifies");
+
+        // The init completion names the new operator and still verifies.
+        let completion = verify_init_completion(&state)
+            .expect("completion verifies")
+            .expect("completion present");
+        assert_eq!(completion.operator_fingerprint, new_fp);
+
+        // The grant is re-issued under the new key and the old one is gone.
+        assert!(!old_grant.exists(), "the retired key's grant is removed");
+        let grant =
+            ryeos_node_runtime::identity::load_verified_authorized_key(&new_fp, &grants, &node)
+                .unwrap()
+                .expect("new operator grant");
+        assert_eq!(
+            grant.expires_at,
+            ryeos_node_runtime::identity::GrantExpiry::Never
+        );
+        assert_eq!(grant.authorized_by.principal, format!("fp:{old_fp}"));
+        assert_eq!(
+            grant.authorized_by.request_digest.as_deref(),
+            Some(request_digest.as_str())
+        );
+
+        // Running the same request again changes nothing.
+        let again = rotate(
+            RotatedKey::Operator,
+            RotationRequest {
+                app_root: &state,
+                state_lock: &ryeos_node_runtime::state_lock::StateLock::acquire(
+                    &ryeos_node_runtime::state_lock::default_lock_path(&state),
+                )
+                .unwrap(),
+                node_key: node.signing_key(),
+                request_digest: &request_digest,
+                signer_fingerprint: &old_fp,
+                signer,
+                statement: &statement,
+                genesis: prepared.genesis.as_deref(),
+            },
+        )
+        .expect("rerun");
+        assert_eq!(again["already_rotated"], true);
+
+        // A later init keeps the rotated operator.
+        let later = run_init(&make_opts(&state, &user)).expect("init after rotation");
+        assert_eq!(later.user_key_fingerprint, new_fp);
+    }
+
+    #[test]
+    fn operator_genesis_rotation_names_the_predecessor_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path();
+        let old = SigningKey::from_bytes(&[1u8; 32]);
+        let new = SigningKey::from_bytes(&[2u8; 32]);
+        let old_fp = compute_fingerprint(&old.verifying_key());
+        let new_fp = compute_fingerprint(&new.verifying_key());
+        ensure_operator_genesis(app_root, &old, &old_fp, None, true, None).unwrap();
+        let path =
+            ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        // The operator's process signs the new genesis; the node installs it
+        // after checking it against the new public key alone.
+        let genesis = build_rotated_operator_genesis(app_root, &new, &old_fp).unwrap();
+        install_rotated_operator_genesis(app_root, &genesis, &new.verifying_key(), &old_fp)
+            .unwrap();
+        let rotated: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rotated["operator_fingerprint"], new_fp);
+        assert_eq!(rotated["predecessor_fingerprint"], old_fp);
+        assert_eq!(rotated["predecessor_created_at"], original["created_at"]);
+        // The new genesis is accepted for the new key and refused for the old.
+        ensure_operator_genesis(app_root, &new, &new_fp, None, false, None).unwrap();
+        assert!(ensure_operator_genesis(app_root, &old, &old_fp, None, false, None).is_err());
+
+        let bytes = std::fs::read(&path).unwrap();
+        install_rotated_operator_genesis(app_root, &genesis, &new.verifying_key(), &old_fp)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "rerun changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_rotated_genesis_the_new_key_did_not_sign_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path();
+        let old = SigningKey::from_bytes(&[1u8; 32]);
+        let new = SigningKey::from_bytes(&[2u8; 32]);
+        let other = SigningKey::from_bytes(&[3u8; 32]);
+        let old_fp = compute_fingerprint(&old.verifying_key());
+        ensure_operator_genesis(app_root, &old, &old_fp, None, true, None).unwrap();
+        // Signed by a key that is not the succession's new key.
+        let forged = build_rotated_operator_genesis(app_root, &new, &old_fp).unwrap();
+        let error =
+            install_rotated_operator_genesis(app_root, &forged, &other.verifying_key(), &old_fp)
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("does not name the new operator"));
+        let mut tampered: serde_json::Value = serde_json::from_slice(&forged).unwrap();
+        tampered["display_name"] = "other".into();
+        let error = install_rotated_operator_genesis(
+            app_root,
+            &serde_json::to_vec(&tampered).unwrap(),
+            &new.verifying_key(),
+            &old_fp,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("not signed by the new operator key"));
     }
 
     #[test]
@@ -2356,7 +4233,7 @@ mod tests {
         let user = tmp.path().join("home");
         let opts = make_opts(&state, &user);
         let r1 = run_init(&opts).expect("init #1");
-        let genesis_path = state.join(".ai/config/identity/operator-genesis.json");
+        let genesis_path = state.join(".ai/node/operator/genesis.json");
         let genesis = fs::read(&genesis_path).expect("operator genesis #1");
         let r2 = run_init(&opts).expect("init #2");
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint);
@@ -2370,6 +4247,44 @@ mod tests {
     }
 
     #[test]
+    fn reinit_refuses_to_invalidate_a_binding_it_does_not_strand() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("init #1");
+        let completion = fs::read(init_completion_path(&state)).expect("completion #1");
+
+        // The node pins nothing, so no replacement strands anything: naming a
+        // binding to invalidate is refused before any installed tree moves.
+        let mut named = make_opts(&state, &tmp.path().join("home"));
+        named.invalidate_bindings = vec![
+            ryeos_app::node_config::coherence::BindingRef::parse(
+                "runtime_snapshot_production/render-snapshot",
+            )
+            .unwrap(),
+        ];
+        let error = run_init(&named).expect_err("unstranded override refused");
+        let refusal = error
+            .chain()
+            .find_map(|cause| {
+                cause.downcast_ref::<ryeos_app::node_config::coherence::ReplacementBindingRefusal>()
+            })
+            .unwrap_or_else(|| panic!("typed refusal: {error:#}"));
+        assert_eq!(
+            refusal.code,
+            ryeos_app::node_config::coherence::INVALIDATED_BINDING_NOT_STRANDED
+        );
+        assert_eq!(
+            fs::read(init_completion_path(&state)).expect("completion kept"),
+            completion,
+            "a refused replacement leaves the completion record in place"
+        );
+
+        let report = run_init(&opts).expect("init #2 without overrides");
+        assert!(report.invalidated_bindings.is_empty());
+    }
+
+    #[test]
     fn substrate_identity_survives_restart_and_is_completion_bound() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -2379,7 +4294,7 @@ mod tests {
         let first = load_verified_substrate_identity(&state).expect("offline verified load");
         assert_eq!(first.image_digest, format!("sha256:{}", "1".repeat(64)));
         assert_eq!(first.protocol, 1);
-        assert_eq!(first.node_profile.as_deref(), Some("full"));
+        assert_eq!(first.node_profile.as_deref(), Some("standard"));
         assert!(
             verify_init_completion(&state)
                 .unwrap()
@@ -2418,8 +4333,10 @@ mod tests {
         )
         .unwrap();
         let lock =
-            ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&state).unwrap();
-        let transaction = lock.acquire_bundle("standard").unwrap();
+            ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state).unwrap();
+        let transaction =
+            ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(&lock, "knowledge")
+                .unwrap();
         transaction.begin_remove().unwrap();
         assert!(verify_init_completion(&state).unwrap().is_some());
         drop(transaction);
@@ -2444,14 +4361,13 @@ mod tests {
         let opts = make_opts(&state, &user);
         run_init(&opts).expect("initial generation");
 
-        let state_lock = ryeos_app::state_lock::StateLock::acquire(
-            &ryeos_app::state_lock::default_lock_path(&state),
+        let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
         )
         .expect("stopped-node authority");
-        let table = ryeos_app::node_policy::NodePolicyTable::new();
-        let trust_store =
-            TrustStore::load(None, &state.join(".ai/config")).expect("current node trust store");
-        let current = ryeos_app::node_policy::generation::load_policy_generation(
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+        let trust_store = TrustStore::load_node_registry(&state).expect("current node trust store");
+        let current = ryeos_node_runtime::node_policy::generation::load_policy_generation(
             &state,
             &trust_store,
             &table,
@@ -2466,11 +4382,11 @@ mod tests {
             .prepare_replacement(&table, policies, Path::new("operator-policy.yaml"))
             .expect("prepared policy replacement");
         let replacement_digest = update.generation().digest().to_owned();
-        let identity = ryeos_app::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &state.join(".ai/node/identity/private_key.pem"),
         )
         .expect("node identity");
-        ryeos_app::node_policy::generation::publish_policy_update(
+        ryeos_node_runtime::node_policy::generation::publish_policy_update(
             &state,
             &update,
             &identity,
@@ -2485,12 +4401,81 @@ mod tests {
             format!("{error:#}").contains("node policy generation differs"),
             "{error:#}"
         );
-        seal_init_completion_after_policy_update(&state, &replacement_digest, &state_lock)
-            .expect("advance whole-init commit point");
+        seal_init_completion_after_policy_update(
+            &state,
+            &replacement_digest,
+            &state_lock,
+            crate::apply_authority::DocumentSigner::Node(identity.signing_key()),
+        )
+        .expect("advance whole-init commit point");
         let completion = verify_init_completion(&state)
             .expect("verify replacement commit")
             .expect("replacement completion");
         assert_eq!(completion.policy_generation_digest, replacement_digest);
+    }
+
+    #[test]
+    fn a_policy_generation_for_another_host_class_is_refused_even_when_sealed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+
+        let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .expect("stopped-node authority");
+        let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+        let trust_store = TrustStore::load_node_registry(&state).expect("current node trust store");
+        let current = ryeos_node_runtime::node_policy::generation::load_policy_generation(
+            &state,
+            &trust_store,
+            &table,
+        )
+        .expect("current policy generation");
+        // The same isolation policy, declared for `hosted` on a node whose
+        // signed identity binds `local`.
+        let mut policies = current.policies().clone();
+        let classes = policies
+            .get_mut("isolation")
+            .and_then(|body| body.pointer_mut("/policy/host_classes"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("isolation host classes");
+        let local = classes.remove("local").expect("the node's local class");
+        classes.insert("hosted".to_owned(), local);
+        let update = current
+            .prepare_replacement(&table, policies, Path::new("operator-policy.yaml"))
+            .expect("the reclassed generation compiles on its own");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .expect("node identity");
+        ryeos_node_runtime::node_policy::generation::publish_policy_update(
+            &state,
+            &update,
+            &identity,
+            &trust_store,
+            &state_lock,
+        )
+        .expect("publish reclassed policy");
+        seal_init_completion_after_policy_update(
+            &state,
+            update.generation().digest(),
+            &state_lock,
+            crate::apply_authority::DocumentSigner::Node(identity.signing_key()),
+        )
+        .expect("seal the reclassed generation");
+
+        let refused = format!(
+            "{:#}",
+            verify_init_completion(&state).expect_err("a reclassed node must not verify")
+        );
+        assert!(
+            refused.contains("for host class `hosted`")
+                && refused.contains("initialized under host class `local`"),
+            "{refused}"
+        );
+        assert!(load_verified_substrate_identity(&state).is_err());
     }
 
     #[test]
@@ -2548,13 +4533,1003 @@ mod tests {
     }
 
     #[test]
+    fn a_policy_replacement_rerun_after_a_crash_reproduces_the_pinned_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial standard generation");
+        let source = workspace_root().join("bundles");
+        let pinned = prospective_replacement_policy_digest(
+            &state,
+            &source,
+            "standard-central-auth",
+            "local",
+            &[dev_trust_file()],
+            &Default::default(),
+        )
+        .expect("the generation the seed would install");
+        let replacement = InitOptions {
+            app_root: state.clone(),
+            bind: None,
+            uds_path: None,
+            source_dir: source,
+            trust_files: vec![dev_trust_file()],
+            node_profile: Some("standard-central-auth".to_owned()),
+            host_class: Some("local".to_owned()),
+            substrate_identity: None,
+            replace_node_policy_generation: true,
+            policy_carry: Default::default(),
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
+            skip_preflight: true,
+        };
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        // A pin the seed would not install refuses before anything changes.
+        let before = verify_init_completion(&state).unwrap().unwrap();
+        let wrong = "0".repeat(64);
+        let error = run_init_under_lock(
+            &replacement,
+            &lock,
+            Some(&wrong),
+            InitAuthority::OperatorProcess,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("nothing was changed"),
+            "{error:#}"
+        );
+        assert_eq!(
+            verify_init_completion(&state)
+                .unwrap()
+                .unwrap()
+                .policy_generation_digest,
+            before.policy_generation_digest
+        );
+
+        run_init_under_lock(
+            &replacement,
+            &lock,
+            Some(&pinned),
+            InitAuthority::OperatorProcess,
+        )
+        .expect("replacement");
+        let first = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(first.policy_generation_digest, pinned);
+        // The node died before the receipt: the completion is gone and the same
+        // request runs again, to the same generation.
+        invalidate_init_completion(&state).unwrap();
+        run_init_under_lock(
+            &replacement,
+            &lock,
+            Some(&pinned),
+            InitAuthority::OperatorProcess,
+        )
+        .expect("rerun");
+        let second = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(second.policy_generation_digest, pinned);
+    }
+
+    /// The `native_capacity` member of the node's installed policy generation.
+    fn installed_native_capacity(state: &Path) -> serde_json::Value {
+        let trust = TrustStore::load_node_registry(state).expect("node trust");
+        ryeos_node_runtime::node_policy::generation::load_policy_generation(
+            state,
+            &trust,
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+        )
+        .expect("installed policy generation")
+        .policies()
+        .get(ryeos_node_runtime::node_policy::sections::native_capacity::SECTION_NAME)
+        .cloned()
+        .expect("native_capacity member")
+    }
+
+    fn as_capacity_policy(
+        body: &serde_json::Value,
+    ) -> ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy {
+        serde_json::from_value(body.clone()).expect("native_capacity body")
+    }
+
+    /// The capacity policy the sealed init completion binds.
+    fn bound_capacity_policy(
+        state: &Path,
+    ) -> ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy {
+        let completion = verify_init_completion(state)
+            .expect("verify init completion")
+            .expect("sealed init completion");
+        as_capacity_policy(
+            &serde_json::to_value(&completion.capacity_account).expect("binding")["policy"],
+        )
+    }
+
+    /// What `policy-apply native_capacity` does: amend the issuance, publish
+    /// the generation with the section recorded as operator-applied, reseal.
+    fn operator_applies_native_capacity(
+        state: &Path,
+        lock: &ryeos_node_runtime::state_lock::StateLock,
+        body: serde_json::Value,
+    ) {
+        let trust = TrustStore::load_node_registry(state).expect("node trust");
+        let update =
+            ryeos_node_runtime::node_policy::generation::prepare_policy_member_replacement(
+                state,
+                &trust,
+                &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+                "local",
+                ryeos_node_runtime::node_policy::sections::native_capacity::SECTION_NAME,
+                body.clone(),
+                Path::new("test-policy-apply"),
+            )
+            .expect("prepare the native_capacity member replacement");
+        let (operator, _, _) = load_or_create_operator_key(
+            &state.join(".ai/node/operator/signing/private_key.pem"),
+            None,
+        )
+        .expect("operator key");
+        crate::native_capacity::amend_capacity_policy(
+            crate::native_capacity::CapacityPolicyAmendmentRequest {
+                app_root: state,
+                state_lock: lock,
+                signer: crate::apply_authority::DocumentSigner::Operator(&operator),
+                policy: &as_capacity_policy(&body),
+                reason: "operator applies native_capacity",
+                command: "test policy-apply native_capacity",
+            },
+        )
+        .expect("amend the issuance");
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .expect("node identity");
+        ryeos_node_runtime::node_policy::generation::publish_policy_update(
+            state, &update, &identity, &trust, lock,
+        )
+        .expect("publish the operator generation");
+        seal_init_completion_after_policy_update(
+            state,
+            update.generation().digest(),
+            lock,
+            crate::apply_authority::DocumentSigner::Operator(&operator),
+        )
+        .expect("reseal");
+    }
+
+    /// A request the operator signed for this node, as the daemon would
+    /// apply it.
+    fn operator_request(
+        node: &ryeos_node_runtime::identity::NodeIdentity,
+        operator: &SigningKey,
+        operation: &str,
+    ) -> crate::offline_operation::contract::SignedRequest {
+        crate::offline_operation::contract::SignedRequest::sign(
+            crate::offline_operation::contract::RequestBody {
+                schema: crate::offline_operation::contract::REQUEST_SCHEMA.to_owned(),
+                node_fingerprint: node.fingerprint().to_owned(),
+                signer_fingerprint: compute_fingerprint(&operator.verifying_key()),
+                signer_grant_digest: None,
+                signer_origin_site_id: None,
+                operation: operation.to_owned(),
+                arguments: serde_json::json!({}),
+                inputs: BTreeMap::new(),
+                expected_result: BTreeMap::new(),
+                precondition: BTreeMap::new(),
+                issued_at: lillux::time::iso8601_now(),
+                not_after: lillux::time::iso8601_from_unix_secs(
+                    lillux::time::unix_secs_now() + 3600,
+                ),
+            },
+            operator,
+        )
+        .unwrap()
+    }
+
+    fn capacity_replacement(state: &Path, reset: &[&str]) -> InitOptions {
+        InitOptions {
+            app_root: state.to_path_buf(),
+            bind: None,
+            uds_path: None,
+            source_dir: workspace_root().join("bundles"),
+            trust_files: vec![dev_trust_file()],
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
+            substrate_identity: None,
+            replace_node_policy_generation: true,
+            policy_carry: ryeos_node_runtime::node_policy::generation::PolicyCarryChoices {
+                keep: Default::default(),
+                reset: reset.iter().map(|section| (*section).to_owned()).collect(),
+            },
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
+            skip_preflight: true,
+        }
+    }
+
+    /// An operator-applied native_capacity body that differs from the
+    /// profile's: one more step of rollover work margin.
+    fn operator_capacity_body(issued: &serde_json::Value) -> serde_json::Value {
+        let mut body = issued.clone();
+        let margin = body["incarnation"]["rollover_work_margin_steps"]
+            .as_u64()
+            .expect("rollover work margin");
+        body["incarnation"]["rollover_work_margin_steps"] = (margin + 1).into();
+        body
+    }
+
+    #[test]
+    fn a_replacement_amends_the_capacity_issuance_only_when_native_capacity_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        let issued = installed_native_capacity(&state);
+        let operator_body = operator_capacity_body(&issued);
+        operator_applies_native_capacity(&state, &lock, operator_body.clone());
+        assert_eq!(
+            bound_capacity_policy(&state),
+            as_capacity_policy(&operator_body)
+        );
+        let amendments = || {
+            crate::native_capacity::read_capacity_policy_amendments(&state.join(".ai/state"))
+                .expect("amendment evidence")
+                .len()
+        };
+        assert_eq!(amendments(), 1);
+
+        // Carried: the replacement keeps the operator's body, which is the
+        // issuance in force, so nothing is amended.
+        let carried = run_init_under_lock(
+            &capacity_replacement(&state, &[]),
+            &lock,
+            None,
+            InitAuthority::OperatorProcess,
+        )
+        .expect("carried replacement");
+        assert!(carried.capacity_amendment.is_none());
+        assert_eq!(
+            bound_capacity_policy(&state),
+            as_capacity_policy(&operator_body)
+        );
+        assert_eq!(amendments(), 1);
+
+        // Reset: the profile's body differs from the issuance in force, so
+        // the same replacement amends the issuance and seals a completion
+        // that binds it.
+        // The reset is applied the way the daemon applies it: no operator key,
+        // the node key signing under the operator's request.
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let operator = lillux::crypto::load_signing_key(
+            &ryeos_engine::roots::RuntimeRoot::new(state.clone()).operator_signing_key_path(),
+        )
+        .unwrap();
+        let request = operator_request(&node, &operator, "node.reset.policy-generation");
+        let reset = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+            InitAuthority::Request(crate::apply_authority::DocumentSigner::Request {
+                node: node.signing_key(),
+                request: &request,
+            }),
+        )
+        .expect("a reset replacement amends and completes");
+        // The amendment and the completion the node wrote are node-signed
+        // and carry the request's digest; both verify through it.
+        let request_digest = request.digest().unwrap();
+        let amendment_document = fs::read_dir(state.join(".ai/config/onboarding"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("native-capacity-reanchor.")
+            })
+            .map(|entry| fs::read(entry.path()).unwrap())
+            .map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+            .find(|document| {
+                document["body"]["authority"]["request_digest"] == request_digest.as_str()
+            })
+            .expect("the amendment the request authorized");
+        assert_eq!(
+            amendment_document["body"]["authority"]["signed_by"],
+            "node_under_request"
+        );
+        let completion_document: serde_json::Value =
+            serde_json::from_slice(&fs::read(init_completion_path(&state)).unwrap()).unwrap();
+        assert_eq!(
+            completion_document["body"]["authority"]["request_digest"],
+            request_digest.as_str()
+        );
+        verify_init_completion(&state)
+            .expect("the node-signed completion verifies through the operator's request")
+            .expect("completion present");
+        // The same completion with a request the operator did not sign is
+        // refused, and the original verifies again once restored.
+        let path = init_completion_path(&state);
+        let original = fs::read(&path).unwrap();
+        let stranger = SigningKey::from_bytes(&[42; 32]);
+        let forged = operator_request(&node, &stranger, "node.reset.policy-generation");
+        let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        tampered["request"] = serde_json::to_value(&forged).unwrap();
+        tampered["body"]["authority"]["request_digest"] = forged.digest().unwrap().into();
+        // The body changed, so the node signature no longer covers it.
+        fs::write(&path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        let refused = format!("{:#}", verify_init_completion(&state).unwrap_err());
+        assert!(
+            refused.contains("apply_authority_signature_invalid"),
+            "{refused}"
+        );
+        // Re-signed by the node over the forged digest: the signature holds,
+        // and the request's own signer is what is refused.
+        let node_key = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let canonical = lillux::canonical_json(&tampered["body"]).unwrap();
+        tampered["signature"] = crate::offline_operation::contract::encode_signature(
+            &node_key.signing_key().sign(canonical.as_bytes()),
+        )
+        .into();
+        fs::write(&path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        let refused = format!("{:#}", verify_init_completion(&state).unwrap_err());
+        assert!(
+            refused.contains("apply_authority_request_not_operator"),
+            "{refused}"
+        );
+        fs::write(&path, &original).unwrap();
+        verify_init_completion(&state).unwrap().unwrap();
+        let amendment = reset
+            .capacity_amendment
+            .expect("the reset amends the issuance");
+        assert!(!amendment.already_applied);
+        assert_eq!(
+            as_capacity_policy(&installed_native_capacity(&state)),
+            as_capacity_policy(&issued)
+        );
+        assert_eq!(bound_capacity_policy(&state), as_capacity_policy(&issued));
+        assert_eq!(amendments(), 2);
+
+        // An interrupted replacement reruns to the same state: the amendment
+        // is already in force and owes no second evidence line.
+        invalidate_init_completion(&state).unwrap();
+        let rerun = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+            InitAuthority::OperatorProcess,
+        )
+        .expect("rerun converges");
+        assert!(
+            rerun
+                .capacity_amendment
+                .expect("the rerun settles the amendment")
+                .already_applied
+        );
+        assert_eq!(bound_capacity_policy(&state), as_capacity_policy(&issued));
+        assert_eq!(amendments(), 2);
+    }
+
+    #[test]
+    fn a_replacement_capacity_change_the_account_refuses_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        let issued = installed_native_capacity(&state);
+        let operator_body = operator_capacity_body(&issued);
+        operator_applies_native_capacity(&state, &lock, operator_body.clone());
+        let before = verify_init_completion(&state).unwrap().unwrap();
+
+        // The amendment's own checks refuse (here its evidence log is
+        // group-writable), so the replacement refuses before the completion
+        // record is removed or any generation is published.
+        let log = state
+            .join(".ai/state")
+            .join(crate::native_capacity::POLICY_AMENDMENT_EVIDENCE_LOG);
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o660)).unwrap();
+        let error = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+            InitAuthority::OperatorProcess,
+        )
+        .expect_err("the account refuses the amendment");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("refused before any change"), "{rendered}");
+        assert!(rendered.contains("capacity reissue"), "{rendered}");
+        let after = verify_init_completion(&state)
+            .expect("the completion still verifies")
+            .expect("the completion record is still present");
+        assert_eq!(
+            after.policy_generation_digest,
+            before.policy_generation_digest
+        );
+        assert_eq!(
+            bound_capacity_policy(&state),
+            as_capacity_policy(&operator_body)
+        );
+        assert_eq!(
+            as_capacity_policy(&installed_native_capacity(&state)),
+            as_capacity_policy(&operator_body)
+        );
+
+        // With the account fit again, the same replacement completes.
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+        run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+            InitAuthority::OperatorProcess,
+        )
+        .expect("the replacement completes once the account admits it");
+        assert_eq!(bound_capacity_policy(&state), as_capacity_policy(&issued));
+    }
+
+    /// A node whose operator applied a capacity body the profile does not
+    /// carry, so a reset replacement amends the issuance, with an
+    /// incarnation debit left outstanding by `process`, as a start that
+    /// never released (a host that kills the daemon) leaves it.
+    fn node_owing_a_debit(
+        state: &Path,
+        lock: &ryeos_node_runtime::state_lock::StateLock,
+        process: &lillux::process_control::ExactProcessIdentity,
+    ) -> serde_json::Value {
+        let issued = installed_native_capacity(state);
+        let operator_body = operator_capacity_body(&issued);
+        operator_applies_native_capacity(state, lock, operator_body.clone());
+        let in_force = crate::native_capacity::load_existing_capacity_binding(
+            state,
+            &ryeos_node_runtime::identity::node_identity_fingerprint(state).unwrap(),
+            &as_capacity_policy(&operator_body),
+        )
+        .expect("the binding in force");
+        crate::native_capacity::leave_outstanding_debit(state, &in_force, process, lock).unwrap();
+        issued
+    }
+
+    // ---- Foreign-namespace predecessors at the real native-capacity startup.
+    //
+    // A foreign-namespace identity is a real identity of this process with
+    // `pid_namespace` rewritten to another inode. That is the adversarial
+    // case for the rule: its pid, birth ticks, boot and group all match a LIVE
+    // process here, so any decision from the numbers would call it live; only
+    // the namespace says the numbers are not comparable. The recorded
+    // incarnation of a previous container is the same shape with other numbers.
+
+    const HOLD_LOCK_ENV: &str = "RYEOS_TEST_HOLD_STATE_LOCK";
+
+    /// Not a test when run normally. The parent tests re-execute this binary
+    /// with `HOLD_LOCK_ENV` set, which makes this the second process: it takes
+    /// the state lock, announces it on stdout and holds it until its stdin
+    /// closes.
+    #[test]
+    fn hold_state_lock_helper_process() {
+        use std::io::{Read as _, Write as _};
+        let Ok(path) = std::env::var(HOLD_LOCK_ENV) else {
+            return;
+        };
+        // A helper that outlives its parent exits by itself.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(240));
+            eprintln!("state-lock helper process: 240 s cap reached; exiting");
+            std::process::exit(3);
+        });
+        // The parent released its own handle on this lock just before
+        // spawning us, but a registered descriptor's close is deferred while
+        // any other test thread has a process-creation window open, so the
+        // kernel may still see it held for a moment. Wait it out boundedly.
+        let _lock = ryeos_node_runtime::state_lock::StateLock::acquire_with_timeout(
+            std::path::Path::new(&path),
+            std::time::Duration::from_secs(120),
+        )
+        .expect("helper takes the state lock");
+        println!("STATE_LOCK_HELD");
+        std::io::stdout().flush().unwrap();
+        let mut sink = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut sink);
+    }
+
+    /// A real second process holding the node's state lock. Dropping it closes
+    /// its stdin, which ends the helper and releases the lock.
+    struct OtherProcessHoldsStateLock {
+        child: std::process::Child,
+    }
+
+    impl OtherProcessHoldsStateLock {
+        fn start(lock_path: &Path) -> Self {
+            use std::io::BufRead as _;
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "init::tests::hold_state_lock_helper_process",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HOLD_LOCK_ENV, lock_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // Readiness is the helper's own announcement, read on a thread.
+            // There is no wall-clock deadline here: a loaded runner can take
+            // minutes just to start a second copy of this test binary, and
+            // that delay says nothing about the lock. The wait ends when the
+            // helper announces, or when its stdout closes (it exited or hit
+            // its own cap), and the test's watchdog bounds the whole test.
+            // libtest prints `test <name> ... ` without a newline before the
+            // helper announces itself on the same line.
+            let stdout = child.stdout.take().unwrap();
+            let (ready, announced) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if line.contains("STATE_LOCK_HELD") {
+                        let _ = ready.send(());
+                        return;
+                    }
+                }
+            });
+            if announced.recv().is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the helper process exited without taking the state lock");
+            }
+            Self { child }
+        }
+    }
+
+    impl Drop for OtherProcessHoldsStateLock {
+        fn drop(&mut self) {
+            // Closing stdin would end it, but another process can hold the
+            // pipe's write end open; killing releases the lock regardless.
+            drop(self.child.stdin.take());
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// Aborts the whole test process, naming the test, if it is still running
+    /// after `seconds`: a hang becomes a named failure, not a job timeout.
+    struct Watchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    fn watchdog(test: &'static str, seconds: u64) -> Watchdog {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::clone(&finished);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            while std::time::Instant::now() < deadline {
+                if seen.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            eprintln!("WATCHDOG: test `{test}` still running after {seconds} s; aborting");
+            std::process::abort();
+        });
+        Watchdog(finished)
+    }
+
+    impl Drop for Watchdog {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn foreign_namespace_identity() -> lillux::process_control::ExactProcessIdentity {
+        let mut foreign = lillux::process_control::capture_current_process_identity().unwrap();
+        let other = if foreign.pid_namespace == "pid:[1]" {
+            "pid:[2]"
+        } else {
+            "pid:[1]"
+        };
+        foreign.pid_namespace = other.to_owned();
+        // Matching boot, pid and birth, yet neither alive nor ended.
+        assert!(matches!(
+            foreign.observe_end(),
+            Err(lillux::ProcessEndError::ForeignPidNamespace { .. })
+        ));
+        foreign
+    }
+
+    fn ended_process_identity() -> lillux::process_control::ExactProcessIdentity {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("read x")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead =
+            lillux::process_control::capture_exact_process_identity(child.id(), None).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(dead.has_ended().unwrap());
+        dead
+    }
+
+    /// With a second process holding the lock the node cannot even take it,
+    /// so no start can obtain the witness and nothing is classified; once it
+    /// is free the very same start proceeds.
+    fn assert_startup_refused_while_held_and_proceeds_when_free(state: &Path) {
+        use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
+        let lock_path = default_lock_path(state);
+        let holder = OtherProcessHoldsStateLock::start(&lock_path);
+        // A start under a held lock refuses promptly; it never waits it out.
+        let started = std::time::Instant::now();
+        assert!(
+            StateLock::acquire_with_timeout(&lock_path, std::time::Duration::from_millis(300))
+                .is_err(),
+            "the state lock is held by another process"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "refusing a held lock took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            StateLock::acquire(&lock_path).is_err(),
+            "the state lock is still held by another process"
+        );
+        drop(holder);
+        let lock = StateLock::acquire(&lock_path).expect("lock is free once the holder exits");
+        // A lock that does not protect this app root is no proof either.
+        let other_directory = tempfile::tempdir().unwrap();
+        let other = StateLock::acquire(&other_directory.path().join("other.lock")).unwrap();
+        let wrong = crate::native_capacity::startup_seams::open_and_debit(state, &other)
+            .expect_err("a lock of another root must not admit this start");
+        assert!(!format!("{wrong:#}").is_empty());
+        crate::native_capacity::startup_seams::open_and_debit(state, &lock)
+            .expect("under the state lock the foreign-namespace predecessor counts as ended");
+    }
+
+    /// Site: the outstanding debit of the previous incarnation
+    /// (`prepare_open`, before redo; the check after redo re-classifies the
+    /// same identity and is reached only after this one passed).
+    #[test]
+    fn foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
+     {
+        let _watchdog = watchdog(
+            "foreign_namespace_debit_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        node_owing_a_debit(&state, &lock, &foreign_namespace_identity());
+        drop(lock);
+        assert_startup_refused_while_held_and_proceeds_when_free(&state);
+    }
+
+    /// Site: the previous recovery process (`ensure_recovery_attempt`). The
+    /// debit's own incarnation is plainly dead; the earlier start that
+    /// charged a recovery attempt was in another pid namespace.
+    #[test]
+    fn foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free()
+     {
+        let _watchdog = watchdog(
+            "foreign_namespace_recovery_process_is_refused_while_another_process_holds_the_state_lock_and_settled_when_free",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        node_owing_a_debit(&state, &lock, &ended_process_identity());
+        crate::native_capacity::startup_seams::charge_recovery_for(
+            &state,
+            &lock,
+            &foreign_namespace_identity(),
+        )
+        .expect("a crashed start's recovery charge");
+        drop(lock);
+        assert_startup_refused_while_held_and_proceeds_when_free(&state);
+    }
+
+    // ---- Pre-cut capacity records of a killed daemon.
+
+    /// A node whose capacity files hold what a killed daemon of the previous
+    /// schema left: an outstanding debit and a charged recovery attempt, both
+    /// naming dead incarnations, stored with identities that lack
+    /// `pid_namespace`. `mutate` may damage the stored identity further.
+    fn node_with_pre_cut_capacity_records(
+        state: &Path,
+        user: &Path,
+        mutate: &dyn Fn(String) -> String,
+    ) -> (
+        ryeos_node_runtime::state_lock::StateLock,
+        crate::native_capacity::CapacityAccountSummary,
+    ) {
+        run_init(&make_opts(state, user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(state),
+        )
+        .unwrap();
+        node_owing_a_debit(state, &lock, &ended_process_identity());
+        crate::native_capacity::startup_seams::charge_recovery_for(
+            state,
+            &lock,
+            &ended_process_identity(),
+        )
+        .expect("a killed start's recovery charge");
+        let summary = crate::native_capacity::inspect_capacity_account(state)
+            .unwrap()
+            .expect("capacity account");
+        assert!(summary.outstanding_incarnation && summary.recovery_attempts_used == 1);
+        crate::native_capacity::downgrade_to_pre_cut_for_test(state, mutate).unwrap();
+        (lock, summary)
+    }
+
+    /// The documented cut, run as the offline operation runs it, retires the
+    /// pre-cut records and the node then starts, settles the dead incarnation
+    /// and debits normally.
+    #[test]
+    fn the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts() {
+        let _watchdog = watchdog(
+            "the_execution_history_cut_re_records_pre_cut_capacity_records_and_the_node_starts",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let (lock, before) = node_with_pre_cut_capacity_records(&state, &user, &|json| json);
+        // The pre-cut files do not decode, and the refusal names the cure.
+        let refused = crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect_err("a pre-cut record cannot start");
+        let refused = format!("{refused:#}");
+        assert!(
+            refused.contains("predates recorded pid namespaces")
+                && refused.contains("ryeos node reset execution-history --confirm"),
+            "{refused}"
+        );
+        assert!(crate::native_capacity::inspect_capacity_account(&state).is_err());
+
+        // A node that has run has a State store and a Runtime store; a freshly
+        // initialised one has neither, so establish them the way a first live
+        // boot does. The reset issues its own native host, hence the serial.
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(state.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        ryeos_app::runtime_db::test_native::seed_node(&config, true);
+        let _serial = lillux_sqlite::test_host::serial();
+        let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+        let report = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect("the documented cut");
+        assert_eq!(
+            report["native_capacity_cut"],
+            serde_json::json!({"anchor_rewritten": true, "account_rewritten": true})
+        );
+        // Idempotent: a rerun finds nothing left to re-record.
+        let again = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect("the cut reruns");
+        assert_eq!(
+            again["native_capacity_cut"],
+            serde_json::json!({"anchor_rewritten": false, "account_rewritten": false})
+        );
+
+        crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect("the node starts, settles the dead incarnation and debits");
+        let after = crate::native_capacity::inspect_capacity_account(&state)
+            .unwrap()
+            .expect("capacity account");
+        // Same epoch; the settlement spent one more recovery attempt and
+        // refunded nothing; the new incarnation took the next sequence.
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(after.sequence, before.sequence + 1);
+        assert_eq!(
+            after.recovery_attempts_used,
+            before.recovery_attempts_used + 1
+        );
+        assert!(after.outstanding_incarnation);
+        assert!(after.incarnations_remaining <= before.incarnations_remaining);
+    }
+
+    /// A cut that dies between its two writes leaves the anchor re-recorded and
+    /// the account not yet: a start refuses it naming the cure rather than as
+    /// corruption, and rerunning the cut lets the node start.
+    #[test]
+    fn a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node()
+     {
+        let _watchdog = watchdog(
+            "a_cut_interrupted_between_its_writes_refuses_a_start_with_the_cure_and_the_rerun_starts_the_node",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let (lock, _) = node_with_pre_cut_capacity_records(&state, &user, &|json| json);
+        let interrupted =
+            crate::native_capacity::retire_with_fault_for_test(&state, &lock, &mut |step| {
+                if step == crate::native_capacity::CutStep::AnchorReplaced {
+                    anyhow::bail!("injected interruption");
+                }
+                Ok(())
+            })
+            .expect_err("the cut is interrupted");
+        assert!(format!("{interrupted:#}").contains("injected interruption"));
+        let refused = crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect_err("a half-cut account cannot start");
+        let refused = format!("{refused:#}");
+        assert!(
+            refused.contains("predates recorded pid namespaces")
+                && refused.contains("ryeos node reset execution-history --confirm"),
+            "{refused}"
+        );
+        let rerun = crate::native_capacity::retire_pre_cut_identity_records(&state, &lock)
+            .expect("the cut reruns");
+        assert!(!rerun.anchor_rewritten && rerun.account_rewritten);
+        crate::native_capacity::startup_seams::open_and_debit(&state, &lock)
+            .expect("the node starts once the cut has finished");
+    }
+
+    /// The step keys on the exact pre-cut shape: a record that fails to
+    /// decode for any other reason is refused and left as it was.
+    #[test]
+    fn the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape() {
+        let _watchdog = watchdog(
+            "the_cut_refuses_a_capacity_record_that_is_not_the_pre_cut_shape",
+            300,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        // An identity of the old shape that is also damaged: a renamed key.
+        let (lock, _) = node_with_pre_cut_capacity_records(&state, &user, &|json| {
+            json.replace("\"target_pid\"", "\"target_pidx\"")
+        });
+        let files =
+            |name: &str| std::fs::read(state.join(".ai/node/native-capacity").join(name)).unwrap();
+        let (account, anchor) = (files("account"), files("anchor"));
+        let epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+        let error = crate::offline_operation::handlers::reset_execution_history_for_test(
+            &state,
+            &lock,
+            epoch - 1,
+            epoch,
+        )
+        .expect_err("a damaged record is not the pre-cut shape");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("not the pre-cut shape") || rendered.contains("pre-cut"),
+            "{rendered}"
+        );
+        assert_eq!((files("account"), files("anchor")), (account, anchor));
+    }
+
+    #[test]
+    fn a_replacement_over_a_live_incarnation_debit_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        node_owing_a_debit(&state, &lock, &live);
+        let before = verify_init_completion(&state).unwrap().unwrap();
+
+        let error = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+            InitAuthority::OperatorProcess,
+        )
+        .expect_err("a live incarnation's debit refuses the amendment");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("refused before any change"), "{rendered}");
+        assert!(rendered.contains("remains live or unproved"), "{rendered}");
+        let after = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(
+            after.policy_generation_digest,
+            before.policy_generation_digest
+        );
+    }
+
+    #[test]
+    fn a_replacement_settles_a_dead_incarnation_before_amending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        // A process this test owned and reaped: its death is the kernel's.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("read x")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead =
+            lillux::process_control::capture_exact_process_identity(child.id(), None).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(dead.has_ended().unwrap());
+        let issued = node_owing_a_debit(&state, &lock, &dead);
+
+        let report = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+            InitAuthority::OperatorProcess,
+        )
+        .expect("the replacement settles the dead incarnation and amends");
+        let amendment = report.capacity_amendment.expect("the amendment");
+        assert!(!amendment.already_applied);
+        assert_eq!(
+            amendment.settled_incarnation.as_deref(),
+            Some(dead.incarnation_digest().unwrap().as_str())
+        );
+        assert_eq!(bound_capacity_policy(&state), as_capacity_policy(&issued));
+
+        invalidate_init_completion(&state).unwrap();
+        let rerun = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+            InitAuthority::OperatorProcess,
+        )
+        .expect("rerun converges");
+        let again = rerun.capacity_amendment.expect("the rerun names it");
+        assert!(again.already_applied);
+        assert_eq!(again.settled_incarnation, None);
+    }
+
+    #[test]
     fn explicit_policy_cut_reconciles_the_profiles_exact_bundle_inventory() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        run_init(&make_opts(&state, &user)).expect("initial full generation");
+        run_init(&make_opts(&state, &user)).expect("initial standard generation");
         let node_key = fs::read(state.join(".ai/node/identity/private_key.pem")).unwrap();
-        let operator_key = fs::read(state.join(".ai/config/keys/signing/private_key.pem")).unwrap();
+        let operator_key =
+            fs::read(state.join(".ai/node/operator/signing/private_key.pem")).unwrap();
         fs::write(state.join(".ai/state/preserved-sentinel"), b"preserved").unwrap();
 
         let replacement = InitOptions {
@@ -2563,17 +5538,22 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("hosted-workflow".to_owned()),
+            node_profile: Some("standard-central-auth".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
+            policy_carry: Default::default(),
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
         run_init(&replacement).expect("replace policy and exact bundle inventory");
 
-        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
+        let trust = TrustStore::load_node_registry(&state).unwrap();
         let profile = load_trusted_init_node_profile(
             &workspace_root().join("bundles"),
-            "hosted-workflow",
+            "standard-central-auth",
             &trust,
         )
         .unwrap();
@@ -2586,13 +5566,174 @@ mod tests {
             node_key
         );
         assert_eq!(
-            fs::read(state.join(".ai/config/keys/signing/private_key.pem")).unwrap(),
+            fs::read(state.join(".ai/node/operator/signing/private_key.pem")).unwrap(),
             operator_key
         );
         assert_eq!(
             fs::read(state.join(".ai/state/preserved-sentinel")).unwrap(),
             b"preserved"
         );
+    }
+
+    #[test]
+    fn explicit_policy_cut_records_each_selected_node_profile_in_the_substrate_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = InitOptions {
+            node_profile: Some("core".to_owned()),
+            ..make_opts(&state, &tmp.path().join("home"))
+        };
+        opts.substrate_identity = Some(
+            SubstrateIdentity::new(
+                format!("sha256:{}", "1".repeat(64)),
+                1,
+                Some("core".to_owned()),
+                Some("local".to_owned()),
+            )
+            .unwrap(),
+        );
+        run_init(&opts).expect("initial core generation");
+        let recorded = |state: &Path| {
+            load_substrate_identity_record(state).expect("recorded substrate identity")
+        };
+        let initial = recorded(&state);
+        assert_eq!(initial.node_profile.as_deref(), Some("core"));
+
+        for profile in ["core-scheduling", "core"] {
+            opts.node_profile = Some(profile.to_owned());
+            opts.substrate_identity = None;
+            opts.replace_node_policy_generation = true;
+            run_init(&opts).unwrap_or_else(|error| panic!("replace with {profile}: {error:#}"));
+            let identity = recorded(&state);
+            assert_eq!(identity.node_profile.as_deref(), Some(profile));
+            assert_eq!(identity.host_class, initial.host_class);
+            assert_eq!(identity.image_digest, initial.image_digest);
+        }
+
+        opts.host_class = Some("other".to_owned());
+        let refused = run_init(&opts).expect_err("a host-class change is refused");
+        assert!(
+            format!("{refused:#}").contains("disagrees with the class"),
+            "got: {refused:#}"
+        );
+    }
+
+    fn offered_substrate_identity(
+        digest_nibble: &str,
+        protocol: u32,
+        host_class: &str,
+    ) -> SubstrateIdentity {
+        SubstrateIdentity::new(
+            format!("sha256:{}", digest_nibble.repeat(64)),
+            protocol,
+            Some("standard".to_owned()),
+            Some(host_class.to_owned()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_substrate_image_move_is_refused_without_the_confirmed_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("initial generation");
+        let before = fs::read(substrate_identity_path(&state)).unwrap();
+
+        opts.replace_node_policy_generation = true;
+        opts.substrate_identity = Some(offered_substrate_identity("2", 1, "local"));
+        let error = run_init(&opts).expect_err("an image move needs the flags");
+        let message = format!("{error:#}");
+        assert!(message.contains(&"1".repeat(64)), "{message}");
+        assert!(message.contains(&"2".repeat(64)), "{message}");
+        assert!(
+            message.contains("--replace-substrate-identity")
+                && message.contains("--confirm-substrate-identity-replacement"),
+            "{message}"
+        );
+        assert_eq!(fs::read(substrate_identity_path(&state)).unwrap(), before);
+    }
+
+    #[test]
+    fn a_confirmed_substrate_image_move_rewrites_the_record_and_reseals_the_completion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("initial generation");
+
+        opts.replace_node_policy_generation = true;
+        opts.replace_substrate_identity = true;
+        opts.confirm_substrate_identity_replacement = true;
+        let offered = offered_substrate_identity("2", 1, "local");
+        opts.substrate_identity = Some(offered.clone());
+        let report = run_init(&opts).expect("confirmed image move");
+        assert_eq!(
+            report.substrate_image_replacement,
+            Some(SubstrateImageReplacement {
+                previous_image_digest: format!("sha256:{}", "1".repeat(64)),
+                new_image_digest: offered.image_digest.clone(),
+            })
+        );
+        assert_eq!(load_substrate_identity_record(&state).unwrap(), offered);
+        assert_eq!(load_verified_substrate_identity(&state).unwrap(), offered);
+        assert!(verify_init_completion(&state).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_confirmed_substrate_replacement_still_refuses_a_protocol_or_host_class_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("initial generation");
+        let before = fs::read(substrate_identity_path(&state)).unwrap();
+
+        opts.replace_node_policy_generation = true;
+        opts.replace_substrate_identity = true;
+        opts.confirm_substrate_identity_replacement = true;
+
+        opts.substrate_identity = Some(offered_substrate_identity("2", 2, "local"));
+        let error = run_init(&opts).expect_err("a protocol change is refused");
+        assert!(format!("{error:#}").contains("protocol"), "{error:#}");
+
+        opts.host_class = Some("other".to_owned());
+        opts.substrate_identity = Some(offered_substrate_identity("2", 1, "other"));
+        let error = run_init(&opts).expect_err("a host-class change is refused");
+        assert!(format!("{error:#}").contains("host class"), "{error:#}");
+        assert_eq!(fs::read(substrate_identity_path(&state)).unwrap(), before);
+        assert!(verify_init_completion(&state).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_substrate_replacement_flags_need_each_other_and_the_policy_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let mut opts = make_opts(&state, &tmp.path().join("home"));
+
+        opts.replace_substrate_identity = true;
+        opts.confirm_substrate_identity_replacement = true;
+        let error = run_init(&opts).expect_err("no policy replacement");
+        assert!(
+            format!("{error:#}").contains("only together with --replace-node-policy-generation"),
+            "{error:#}"
+        );
+
+        opts.replace_node_policy_generation = true;
+        opts.confirm_substrate_identity_replacement = false;
+        let error = run_init(&opts).expect_err("no confirmation");
+        assert!(
+            format!("{error:#}").contains("required together"),
+            "{error:#}"
+        );
+        assert!(!substrate_identity_path(&state).exists());
+
+        opts.confirm_substrate_identity_replacement = true;
+        opts.substrate_identity = None;
+        let error = run_init(&opts).expect_err("no offered identity");
+        assert!(
+            format!("{error:#}").contains("needs the offered substrate identity"),
+            "{error:#}"
+        );
+        assert!(!substrate_identity_path(&state).exists());
     }
 
     #[test]
@@ -2603,7 +5744,7 @@ mod tests {
         let opts = make_opts(&state, &user);
         run_init(&opts).expect("initial current generation");
 
-        let identity = ryeos_app::identity::NodeIdentity::load(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
             &state.join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
@@ -2611,7 +5752,7 @@ mod tests {
             "schema": 1,
             "additional_patterns": [],
         });
-        let bytes = ryeos_app::node_document::render_signed_item(
+        let bytes = ryeos_node_runtime::node_document::render_signed_item(
             "ingest_ignore",
             "policy",
             &predecessor,
@@ -2630,11 +5771,11 @@ mod tests {
         replacement.replace_node_policy_generation = true;
         run_init(&replacement).expect("explicit schema cut replaces predecessor generation");
 
-        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
-        let current = ryeos_app::node_policy::generation::load_optional_policy_generation(
+        let trust = TrustStore::load_node_registry(&state).unwrap();
+        let current = ryeos_node_runtime::node_policy::generation::load_optional_policy_generation(
             &state,
             &trust,
-            &ryeos_app::node_policy::NodePolicyTable::new(),
+            &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
         )
         .unwrap()
         .expect("current policy generation");
@@ -2661,7 +5802,7 @@ mod tests {
         copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
             .expect("copy core bundle");
         copy_source_seed(&source);
-        fs::remove_file(source.join(".ai/node/init/profiles/full.yaml"))
+        fs::remove_file(source.join(".ai/node/init/profiles/standard.yaml"))
             .expect("remove selected node profile");
 
         let state = tmp.path().join("state");
@@ -2671,23 +5812,29 @@ mod tests {
             uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
+                    Some("local".to_owned()),
                 )
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
 
         let err = run_init(&opts).expect_err("missing seed must fail closed");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("full.yaml") || msg.contains("node init profile"),
+            msg.contains("standard.yaml") || msg.contains("node init profile"),
             "got: {msg}"
         );
     }
@@ -2702,16 +5849,22 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
+                    Some("local".to_owned()),
                 )
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
 
@@ -2736,13 +5889,16 @@ mod tests {
     }
 
     #[test]
-    fn discover_bundles_finds_core_and_standard() {
+    fn discover_bundles_finds_core_and_workflow_bundles() {
         let bundles = discover_bundles(&workspace_root().join("bundles")).unwrap();
         let names: Vec<&str> = bundles.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"core"), "must find core: {:?}", names);
+        for name in ["knowledge", "directive", "graph", "ryeos-docs"] {
+            assert!(names.contains(&name), "must find {name}: {:?}", names);
+        }
         assert!(
-            names.contains(&"standard"),
-            "must find standard: {:?}",
+            !names.contains(&"standard"),
+            "the standard bundle no longer exists: {:?}",
             names
         );
     }
@@ -2856,35 +6012,65 @@ mod tests {
         assert!(mf.provides_kinds.contains(&"tool".to_string()));
         assert!(
             !mf.provides_kinds.contains(&"knowledge".to_string()),
-            "core must NOT provide knowledge after schema move to standard: {:?}",
+            "core must NOT provide knowledge: it lives in the knowledge bundle: {:?}",
             mf.provides_kinds
         );
         assert!(mf.requires_kinds.is_empty(), "core should have no requires");
     }
 
     #[test]
-    fn parse_manifest_reads_standard() {
-        let mf = parse_manifest(&workspace_root().join("bundles/standard"), "standard")
-            .expect("parse standard manifest");
-        assert_eq!(mf.name, "standard");
+    fn parse_manifest_reads_directive() {
+        let mf = parse_manifest(&workspace_root().join("bundles/directive"), "directive")
+            .expect("parse directive manifest");
+        assert_eq!(mf.name, "directive");
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
+        assert!(
+            mf.uses_kinds.contains(&"knowledge".to_string()),
+            "directive uses knowledge from its provider bundle"
+        );
+        for kind in ["config", "handler", "worker"] {
+            assert!(
+                mf.requires_kinds.contains(&kind.to_string()),
+                "directive requires {kind} from core"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_manifest_reads_graph() {
+        let mf = parse_manifest(&workspace_root().join("bundles/graph"), "graph")
+            .expect("parse graph manifest");
+        assert_eq!(mf.name, "graph");
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
         assert!(
-            mf.provides_kinds.contains(&"knowledge".to_string()),
-            "standard must provide knowledge after schema move from core"
+            mf.requires_kinds.contains(&"handler".to_string()),
+            "graph requires handler from core"
         );
+    }
+
+    #[test]
+    fn parse_manifest_reads_knowledge() {
+        let mf = parse_manifest(&workspace_root().join("bundles/knowledge"), "knowledge")
+            .expect("parse knowledge manifest");
+        assert_eq!(mf.name, "knowledge");
+        assert!(mf.provides_kinds.contains(&"knowledge".to_string()));
         assert!(
             !mf.uses_kinds.contains(&"knowledge".to_string()),
-            "standard must not use knowledge externally since it now provides it"
+            "knowledge must not use knowledge externally since it provides it"
         );
         assert!(
             mf.requires_kinds.contains(&"config".to_string()),
-            "standard requires config from core"
+            "knowledge requires config from core"
         );
-        assert!(
-            mf.requires_kinds.contains(&"handler".to_string()),
-            "standard requires handler from core"
-        );
+    }
+
+    #[test]
+    fn parse_manifest_reads_ryeos_docs() {
+        let mf = parse_manifest(&workspace_root().join("bundles/ryeos-docs"), "ryeos-docs")
+            .expect("parse ryeos-docs manifest");
+        assert_eq!(mf.name, "ryeos-docs");
+        assert!(mf.provides_kinds.is_empty(), "ryeos-docs provides no kind");
+        assert!(mf.requires_kinds.contains(&"knowledge".to_string()));
     }
 
     #[test]
@@ -2906,12 +6092,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_dependencies_core_and_standard_ok() {
+    fn validate_dependencies_core_and_workflow_bundles_ok() {
         let root = workspace_root();
-        let bundles = vec![
-            ("core".to_string(), root.join("bundles/core")),
-            ("standard".to_string(), root.join("bundles/standard")),
-        ];
+        let bundles = ["core", "knowledge", "directive", "graph"]
+            .into_iter()
+            .map(|name| (name.to_string(), root.join("bundles").join(name)))
+            .collect::<Vec<_>>();
         assert!(
             validate_manifest_dependencies(&bundles).is_ok(),
             "all bundle dependencies should be satisfied"
@@ -3092,16 +6278,22 @@ typo_field: oops
             uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
+            host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
+                    Some("local".to_owned()),
                 )
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
+            replace_substrate_identity: false,
+            confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
 
@@ -3173,33 +6365,33 @@ typo_field: oops
             kinds.contains(&"tool".to_string()),
             "core must provide tool: {kinds:?}"
         );
-        // Standard kinds are NOT in core
+        // Workflow kinds are NOT in core
         assert!(
             !kinds.contains(&"directive".to_string()),
-            "directive is a standard kind, not core: {kinds:?}"
+            "directive is a directive-bundle kind, not core: {kinds:?}"
         );
         assert!(
             !kinds.contains(&"knowledge".to_string()),
-            "core must NOT provide knowledge after schema move to standard: {kinds:?}"
+            "core must NOT provide knowledge: it lives in the knowledge bundle: {kinds:?}"
         );
     }
 
     #[test]
-    fn derive_provides_kinds_scans_standard_schemas() {
-        let ai_dir = workspace_root().join("bundles/standard/.ai");
-        let kinds = derive_provides_kinds(&ai_dir).expect("derive standard provides_kinds");
-        assert!(
-            kinds.contains(&"directive".to_string()),
-            "standard must provide directive: {kinds:?}"
-        );
-        assert!(
-            kinds.contains(&"graph".to_string()),
-            "standard must provide graph: {kinds:?}"
-        );
-        assert!(
-            kinds.contains(&"knowledge".to_string()),
-            "standard must provide knowledge after schema move from core: {kinds:?}"
-        );
+    fn derive_provides_kinds_scans_workflow_schemas() {
+        for (bundle, kind) in [
+            ("directive", "directive"),
+            ("graph", "graph"),
+            ("knowledge", "knowledge"),
+        ] {
+            let ai_dir = workspace_root().join("bundles").join(bundle).join(".ai");
+            let kinds = derive_provides_kinds(&ai_dir)
+                .unwrap_or_else(|error| panic!("derive {bundle} provides_kinds: {error}"));
+            assert_eq!(
+                kinds,
+                vec![kind.to_string()],
+                "{bundle} must provide exactly {kind}"
+            );
+        }
     }
 
     #[test]
@@ -3230,6 +6422,8 @@ typo_field: oops
             runtime_authority: Default::default(),
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
+            sync_include: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],

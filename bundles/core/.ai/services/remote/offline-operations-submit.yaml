@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-13T21:32:28Z:4ea33340575d987a809a87b8a8cfb33ad99eb1bbac78b5e92d1434c3d2a67560:8iWqckMKwed6o8/ulp9XPhG09MEWiXqNC/E1D0dcfOd9hEgYeBwGd8Q/lGUGvhGMKIc9y1xMWo1jbh1hk6uaAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.offline-operations-submit
+required_caps: ["ryeos.execute.service.remote/offline-operations-submit"]
+schema:
+  remote: string
+  request: object
+  inputs: object?
+  stop: string?
+description: "Forward an offline-operation request the caller signed with its own key, with its input files, to a remote's offline-operations route under the caller's stored delegation for that remote; the remote verifies and queues it as the caller. The delegation must lend ryeos.execute.service.offline-operations/submit. Returns {remote, result} where result is the remote's {request_digest, operation, ledger_head, already_queued, stop, submitted_by, delegated_via}"

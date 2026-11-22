@@ -1,0 +1,454 @@
+//! Mock LLM provider for V5.4 P3b directive-runtime e2e tests.
+//!
+//! Spins a tiny axum HTTP server on an ephemeral port that mimics the
+//! OpenAI Chat Completions surface that
+//! `crates/runtimes/directive/src/adapter.rs::call_provider` POSTs to
+//! (`<base_url>/chat/completions`).
+//!
+//! The server is fed a `Vec<MockResponse>` at start time and pops one
+//! response per incoming request (sequential, FIFO). When the canned
+//! list is exhausted, additional requests get HTTP 500 — useful for
+//! pinning that a test-under-test didn't loop more times than expected.
+//!
+//! The OpenAI shape we emit (only fields the adapter actually reads —
+//! see `parse_response` in `adapter.rs`):
+//!
+//! ```json
+//! {
+//!   "choices": [{
+//!     "message": {
+//!       "role": "assistant",
+//!       "content": "...",
+//!       "tool_calls": [...]
+//!     },
+//!     "finish_reason": "stop" | "tool_calls"
+//!   }],
+//!   "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
+//! }
+//! ```
+//!
+//! Auth is disabled — the harness expects directives under test to
+//! configure `model-providers/mock.yaml` with `auth: {}` so the
+//! adapter at `adapter.rs:38-43` skips its `Authorization` header.
+//! See V5.4-PLAN P3b.1 commentary for the env-injection gap that
+//! makes a real-provider test impossible to write without changing
+//! the daemon's runtime spawn env.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::post;
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, oneshot, watch};
+use tokio::task::JoinHandle;
+
+/// One canned LLM response. The mock pops these FIFO.
+#[derive(Debug, Clone)]
+pub enum MockResponse {
+    /// Provider-owned HTTP failure before any response stream begins.
+    HttpError { status: u16, body: String },
+    /// Plain assistant text — `finish_reason = "stop"`.
+    Text(String),
+    /// Tool-call response — `finish_reason = "tool_calls"`. `arguments`
+    /// is the raw JSON string the adapter forwards into
+    /// `parse_tool_arguments` (see `adapter.rs:166`).
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// One assistant message carrying SEVERAL tool calls — the shape a
+    /// batching model emits and the runner's concurrent dispatch consumes.
+    ToolCalls(Vec<MockToolCallSpec>),
+}
+
+#[derive(Debug, Clone)]
+pub struct MockToolCallSpec {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+impl MockResponse {
+    fn into_choice(self) -> Value {
+        match self {
+            MockResponse::HttpError { .. } => {
+                unreachable!("HTTP errors are returned before provider-body rendering")
+            }
+            MockResponse::Text(text) => json!({
+                "message": {
+                    "role": "assistant",
+                    "content": text,
+                },
+                "finish_reason": "stop",
+            }),
+            MockResponse::ToolCall {
+                id,
+                name,
+                arguments,
+            } => json!({
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments,
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls",
+            }),
+            MockResponse::ToolCalls(calls) => json!({
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": calls
+                        .into_iter()
+                        .map(|call| json!({
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                        }))
+                        .collect::<Vec<_>>(),
+                },
+                "finish_reason": "tool_calls",
+            }),
+        }
+    }
+}
+
+/// Shared mock-provider state. The queue is popped FIFO per request;
+/// each request's headers are appended to `captured_headers` so a
+/// test can assert that env-var-injected secrets reach the wire.
+struct MockState {
+    queue: Vec<MockResponse>,
+    captured_headers: Vec<HashMap<String, String>>,
+    /// Every request body received, in arrival order, so a test can assert
+    /// the exact transcript the NEXT turn was given (tool-result ordering).
+    captured_bodies: Vec<Value>,
+    /// Lillux wall-clock observation for each accepted request, paired by
+    /// index with `captured_bodies`.
+    captured_request_times_ms: Vec<i64>,
+    /// Artificial latency applied before each response is served. Lets a
+    /// test keep a thread observably `running` long enough to attach an SSE
+    /// subscriber before the thread settles. Zero by default.
+    response_delay: std::time::Duration,
+    /// Optional deterministic gate used by concurrency tests that must prove
+    /// an operation occurs while the provider request remains in flight.
+    response_gate: Option<watch::Receiver<bool>>,
+}
+
+/// A live mock provider. Drop signals shutdown to the server task.
+pub struct MockProvider {
+    /// Base URL clients should POST `/chat/completions` to. NB the
+    /// adapter at `adapter.rs:24` appends `/chat/completions`, so
+    /// `base_url` itself is the bare `http://127.0.0.1:<port>`.
+    pub base_url: String,
+    state: Arc<Mutex<MockState>>,
+    response_gate_tx: Option<watch::Sender<bool>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl MockProvider {
+    /// Spawn a mock provider with the given canned responses (popped
+    /// FIFO). Returns once the server is bound and listening.
+    ///
+    /// Binds `127.0.0.1:0` directly and reads back the kernel-assigned
+    /// port, avoiding the race between a separate port selection and bind.
+    pub async fn start(canned: Vec<MockResponse>) -> Self {
+        Self::start_with_response_delay(canned, std::time::Duration::ZERO).await
+    }
+
+    /// Like [`start`] but sleeps `response_delay` before serving each
+    /// response, so the thread under test stays `running` long enough for a
+    /// test to attach an SSE subscriber before it settles.
+    pub async fn start_with_response_delay(
+        canned: Vec<MockResponse>,
+        response_delay: std::time::Duration,
+    ) -> Self {
+        Self::start_with_response_control(canned, response_delay, false).await
+    }
+
+    /// Hold every provider response until [`Self::release_responses`] is
+    /// called. Requests are still captured immediately, making live-runtime
+    /// concurrency tests deterministic without relying on wall-clock delays.
+    pub async fn start_blocked(canned: Vec<MockResponse>) -> Self {
+        Self::start_with_response_control(canned, std::time::Duration::ZERO, true).await
+    }
+
+    async fn start_with_response_control(
+        canned: Vec<MockResponse>,
+        response_delay: std::time::Duration,
+        gated: bool,
+    ) -> Self {
+        let (response_gate_tx, response_gate) = if gated {
+            let (tx, rx) = watch::channel(false);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let state = Arc::new(Mutex::new(MockState {
+            queue: canned,
+            captured_headers: Vec::new(),
+            captured_bodies: Vec::new(),
+            captured_request_times_ms: Vec::new(),
+            response_delay,
+            response_gate,
+        }));
+
+        let app = Router::new()
+            .route("/chat/completions", post(handle_chat_completions))
+            .with_state(state.clone());
+
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(bind)
+            .await
+            .expect("mock provider bind 127.0.0.1:0");
+        let actual_port = listener
+            .local_addr()
+            .expect("mock provider local_addr")
+            .port();
+        let base_url = format!("http://127.0.0.1:{actual_port}");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        let join = tokio::spawn(async move {
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
+            let _ = server.await;
+        });
+
+        Self {
+            base_url,
+            state,
+            response_gate_tx,
+            shutdown_tx: Some(shutdown_tx),
+            join: Some(join),
+        }
+    }
+
+    /// Permanently open a response gate created by [`Self::start_blocked`].
+    pub fn release_responses(&self) {
+        if let Some(gate) = &self.response_gate_tx {
+            gate.send_replace(true);
+        }
+    }
+
+    /// Snapshot of all request-header maps observed since startup,
+    /// in arrival order. Header names are lowercased and values are
+    /// taken from the first occurrence (axum's `HeaderMap`
+    /// preserves order; this helper flattens to `String -> String`).
+    pub async fn captured_headers(&self) -> Vec<HashMap<String, String>> {
+        self.state.lock().await.captured_headers.clone()
+    }
+
+    pub async fn captured_bodies(&self) -> Vec<Value> {
+        self.state.lock().await.captured_bodies.clone()
+    }
+
+    pub async fn captured_request_times_ms(&self) -> Vec<i64> {
+        self.state.lock().await.captured_request_times_ms.clone()
+    }
+}
+
+impl Drop for MockProvider {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            join.abort();
+        }
+    }
+}
+
+fn flatten_headers(headers: &HeaderMap) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (k, v) in headers.iter() {
+        let name = k.as_str().to_ascii_lowercase();
+        let value = v.to_str().unwrap_or("").to_string();
+        out.entry(name).or_insert(value);
+    }
+    out
+}
+
+async fn handle_chat_completions(
+    State(state): State<Arc<Mutex<MockState>>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let (next, response_delay, response_gate) = {
+        let mut g = state.lock().await;
+        g.captured_headers.push(flatten_headers(&headers));
+        g.captured_bodies.push(body.clone());
+        g.captured_request_times_ms
+            .push(lillux::time::timestamp_millis());
+        if g.queue.is_empty() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "mock_provider: canned response queue exhausted".to_string(),
+            )
+                .into_response();
+        }
+        let next = g.queue.remove(0);
+        let delay = g.response_delay;
+        (next, delay, g.response_gate.clone())
+    };
+    // Sleep WITHOUT holding the state lock so concurrent requests aren't
+    // serialized by one slow response.
+    if !response_delay.is_zero() {
+        tokio::time::sleep(response_delay).await;
+    }
+    if let Some(mut response_gate) = response_gate {
+        while !*response_gate.borrow() {
+            if response_gate.changed().await.is_err() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "mock_provider: response gate closed".to_string(),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let next = match next {
+        MockResponse::HttpError { status, body } => {
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return (status, body).into_response();
+        }
+        response => response,
+    };
+    let streaming = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if streaming {
+        // OpenAI-compatible SSE chunked response. The directive
+        // runtime defaults to `delta_merge` mode (see
+        // streaming.rs::stream_mode), which expects
+        // `choices[0].delta.{content,tool_calls}` per chunk and
+        // optional `usage` on the final chunk. The runtime's tool-use
+        // accumulator threads tool-call args across chunks via index;
+        // for the mock we emit the whole tool-call in a single chunk
+        // (id + name + arguments together) to keep the harness
+        // minimal.
+        sse_response(next).into_response()
+    } else {
+        let choice = next.into_choice();
+        let resp = json!({
+            "choices": [choice],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+            }
+        });
+        Json(resp).into_response()
+    }
+}
+
+/// Build an OpenAI-style streaming SSE response from a single
+/// canned mock response. Two `data:` events: the assistant content
+/// (or tool call) chunk, then the final chunk carrying `usage` +
+/// `finish_reason`. Closes with `data: [DONE]`.
+fn sse_response(resp: MockResponse) -> Response {
+    let resp = match resp {
+        MockResponse::HttpError { .. } => {
+            unreachable!("HTTP errors are returned before SSE rendering")
+        }
+        // Normalize the single-call form into the list form so the SSE
+        // construction below has one shape to build.
+        MockResponse::ToolCall {
+            id,
+            name,
+            arguments,
+        } => MockResponse::ToolCalls(vec![MockToolCallSpec {
+            id,
+            name,
+            arguments,
+        }]),
+        other => other,
+    };
+    let (delta_payload, finish_reason) = match resp {
+        MockResponse::HttpError { .. } => {
+            unreachable!("HTTP errors are returned before SSE rendering")
+        }
+        MockResponse::Text(text) => (
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": text,
+                    },
+                    "finish_reason": null,
+                }]
+            }),
+            "stop",
+        ),
+        MockResponse::ToolCall { .. } => {
+            unreachable!("normalized into ToolCalls above")
+        }
+        MockResponse::ToolCalls(calls) => (
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        // Whole calls in a single chunk (id + name +
+                        // arguments together), one accumulator index per
+                        // call, to keep the harness minimal.
+                        "tool_calls": calls
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, call)| json!({
+                                "index": index,
+                                "id": call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.name,
+                                    "arguments": call.arguments,
+                                }
+                            }))
+                            .collect::<Vec<_>>(),
+                    },
+                    "finish_reason": null,
+                }]
+            }),
+            "tool_calls",
+        ),
+    };
+    let final_payload = json!({
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": finish_reason,
+        }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+        }
+    });
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        delta_payload, final_payload
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(Body::from(body))
+        .expect("build sse response")
+}

@@ -1,6 +1,11 @@
+pub mod cache_marks;
 pub mod http;
+pub mod images;
 pub mod messages;
+pub mod parts_builder;
 pub mod prepared;
+pub mod reasoning_capture;
+pub mod reasoning_replay;
 pub mod streaming;
 pub mod tools;
 

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-pub use ryeos_app::config::{Config, ConfigSources};
+pub use ryeos_node_runtime::config::{Config, ConfigSources};
 
 #[derive(Debug, Parser)]
 #[command(name = "ryeosd", about = "Rust control plane daemon for Rye OS")]
@@ -40,6 +40,17 @@ pub struct Cli {
     #[arg(long)]
     pub force: bool,
 
+    /// Root of the immutable image seed tree this node runs from. A signed
+    /// offline policy replacement is seeded from it and from nothing else;
+    /// without it that operation is refused. Needs `--substrate-image-digest`.
+    #[arg(long, requires = "substrate_image_digest")]
+    pub image_seed_root: Option<PathBuf>,
+
+    /// Digest of the substrate image this process runs, `sha256:<hex>`.
+    /// A signed offline policy replacement names the image it is for.
+    #[arg(long, requires = "image_seed_root")]
+    pub substrate_image_digest: Option<String>,
+
     /// Test-only selection paired with a Lillux-owned inherited channel.
     #[cfg(feature = "handoff-test-support")]
     #[arg(long, hide = true)]
@@ -53,7 +64,7 @@ pub struct Cli {
 
 impl Cli {
     /// Convert the parsed CLI into the plain-data `ConfigSources`
-    /// consumed by `ryeos_app::config::Config::load`.
+    /// consumed by `ryeos_node_runtime::config::Config::load`.
     pub fn to_sources(&self) -> ConfigSources {
         ConfigSources {
             config_file: self.config.clone(),
@@ -76,6 +87,10 @@ pub enum DaemonCommand {
     InitPolicyPreflight {
         #[arg(long)]
         app_root: PathBuf,
+        /// Exact bundle names selected by the installer for the prospective
+        /// init. Each must appear in the current signed command policy.
+        #[arg(long = "active-bundle")]
+        active_bundles: Vec<String>,
         /// Verify only the complete node-signed predecessor occupant when an
         /// explicit clean schema cut has already been selected.
         #[arg(long)]
@@ -89,6 +104,22 @@ pub enum DaemonCommand {
         app_root: PathBuf,
         #[arg(long)]
         controller_account_json: String,
+        #[arg(long)]
+        node_resources_json: String,
+    },
+    /// Root-only retirement of native host services. With `--app-root`, the
+    /// service of that node, which must be stopped; with `--orphaned`, every
+    /// RyeOS node service whose recorded app root no longer exists.
+    #[command(hide = true)]
+    HostRetire {
+        #[arg(
+            long,
+            required_unless_present = "orphaned",
+            conflicts_with = "orphaned"
+        )]
+        app_root: Option<PathBuf>,
+        #[arg(long)]
+        orphaned: bool,
     },
     /// Root-only installer transaction bridge. It owns the shared package
     /// namespace lock; it is neither node configuration nor worker authority.
@@ -142,7 +173,11 @@ pub enum DaemonCommand {
         #[arg(long)]
         profile: bool,
 
-        /// Print build provenance as JSON.
+        /// Print the compiled optional Cargo features, one per line.
+        #[arg(long)]
+        features: bool,
+
+        /// Print build provenance, including compiled features, as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -191,6 +226,8 @@ pub enum HostInstallAction {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -232,7 +269,7 @@ mod tests {
         .unwrap();
         assert!(
             matches!(cli.command, Some(DaemonCommand::HostService { app_root })
-            if app_root == PathBuf::from("/home/example/.local/share/ryeos"))
+            if app_root.as_path() == Path::new("/home/example/.local/share/ryeos"))
         );
     }
 
@@ -249,7 +286,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(DaemonCommand::HostRuntime { binding })
-                if binding == PathBuf::from("/run/ryeos/host-runtime.json")
+                if binding.as_path() == Path::new("/run/ryeos/host-runtime.json")
         ));
     }
 
@@ -285,7 +322,7 @@ mod tests {
             Some(DaemonCommand::HostInstall {
                 package_root,
                 action: HostInstallAction::Acquire { prepared: true, args, .. },
-            }) if package_root == PathBuf::from("/usr/share/ryeos")
+            }) if package_root.as_path() == Path::new("/usr/share/ryeos")
                 && args == vec![OsString::from("--populate"), OsString::from("--all")]
         ));
     }
@@ -305,7 +342,32 @@ mod tests {
             Some(DaemonCommand::InitPolicyPreflight {
                 app_root,
                 schema_cut: true,
-            }) if app_root == PathBuf::from("/home/example/.local/share/ryeos")
+                active_bundles,
+            }) if app_root.as_path() == Path::new("/home/example/.local/share/ryeos")
+                && active_bundles.is_empty()
+        ));
+    }
+
+    #[test]
+    fn init_policy_preflight_retains_selected_bundle_names() {
+        let cli = Cli::try_parse_from([
+            "ryeosd",
+            "init-policy-preflight",
+            "--app-root",
+            "/home/example/.local/share/ryeos",
+            "--active-bundle",
+            "core",
+            "--active-bundle",
+            "test-bundle",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(DaemonCommand::InitPolicyPreflight {
+                schema_cut: false,
+                active_bundles,
+                ..
+            }) if active_bundles == ["core", "test-bundle"]
         ));
     }
 }

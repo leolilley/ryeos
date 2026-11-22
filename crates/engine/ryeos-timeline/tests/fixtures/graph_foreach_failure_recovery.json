@@ -1,0 +1,834 @@
+{
+ "events": [
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 1,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "event_id": 171,
+   "event_type": "thread_created",
+   "payload": {
+    "executor_ref": "native:ryeos-graph-runtime",
+    "item_ref": "graph:test/anchor_chain",
+    "kind": "graph_run",
+    "launch_mode": "wait"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 1,
+   "ts": "2026-11-16T03:55:25Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 2,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "event_id": 172,
+   "event_type": "as_launched_resolution",
+   "payload": {
+    "ancestors": [],
+    "effective_trust_class": "trusted_project",
+    "policy_facts": {
+     "effective_caps": [
+      "ryeos.execute.graph.test/anchor_chain",
+      "ryeos.execute.tool.test/anchor_demo/anchor_demo",
+      "ryeos.execute.tool.test/fail_demo/fail_demo"
+     ]
+    },
+    "referenced_items": [],
+    "root": {
+     "raw_content_digest": "0000000000000000000000000000000000000000000000000000000000000003",
+     "requested_id": "graph:test/anchor_chain",
+     "resolved_ref": "graph:test/anchor_chain",
+     "signer_fingerprint": "0000000000000000000000000000000000000000000000000000000000000004",
+     "source_root": {
+      "kind": "project"
+     },
+     "source_space": "project",
+     "trust_class": "trusted_project"
+    }
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 2,
+   "ts": "2026-11-16T03:55:25Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 3,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "event_id": 173,
+   "event_type": "as_launched_ref_bindings",
+   "payload": {
+    "records": {},
+    "ref_bindings": {}
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 3,
+   "ts": "2026-11-16T03:55:25Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 4,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "event_id": 174,
+   "event_type": "runtime_launch_facts",
+   "payload": {
+    "facts": {},
+    "node_requirements_met_by": {}
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 4,
+   "ts": "2026-11-16T03:55:25Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 5,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000007",
+   "event_id": 175,
+   "event_type": "thread_started",
+   "payload": {},
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 5,
+   "ts": "2026-11-16T03:55:25Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 6,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+   "event_id": 176,
+   "event_type": "graph_started",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_id": "test/anchor_chain",
+    "graph_run_id": "gr-aaa75e79b22d"
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000007",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000007",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 6,
+   "ts": "2026-11-16T03:55:25Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 7,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "event_id": 180,
+   "event_type": "graph_step_started",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "greet",
+    "node_ref": "graph:test/anchor_chain#node:greet",
+    "step": 0
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 7,
+   "ts": "2026-11-16T03:55:27Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 8,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "event_id": 181,
+   "event_type": "tool_call_start",
+   "payload": {
+    "call_id": "call_1",
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "item_id": "tool:test/anchor_demo/anchor_demo",
+    "node": "greet",
+    "node_ref": "graph:test/anchor_chain#node:greet",
+    "operation_id": "000000000000000000000000000000000000000000000000000000000000000c",
+    "step": 0,
+    "tool": "tool:test/anchor_demo/anchor_demo"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 8,
+   "ts": "2026-11-16T03:55:27Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 9,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "event_id": 182,
+   "event_type": "tool_call_result",
+   "payload": {
+    "call_id": "call_1",
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "item_id": "tool:test/anchor_demo/anchor_demo",
+    "node": "greet",
+    "node_ref": "graph:test/anchor_chain#node:greet",
+    "operation_id": "000000000000000000000000000000000000000000000000000000000000000c",
+    "status": "ok",
+    "step": 0,
+    "tool": "tool:test/anchor_demo/anchor_demo"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 9,
+   "ts": "2026-11-16T03:55:27Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 10,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000e",
+   "event_id": 183,
+   "event_type": "child_thread_spawned",
+   "payload": {
+    "child_thread_id": "T-0002",
+    "item_id": "tool:test/anchor_demo/anchor_demo",
+    "node": "greet",
+    "spawn_reason": "dispatch",
+    "step": 0
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 10,
+   "ts": "2026-11-16T03:55:27Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 11,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
+   "event_id": 184,
+   "event_type": "artifact_published",
+   "payload": {
+    "artifact_type": "graph_node_receipt",
+    "content_hash": null,
+    "metadata": {
+     "cache_hit": false,
+     "cost": null,
+     "definition_ref": "graph:test/anchor_chain",
+     "dispatch": {
+      "action_digest": "0000000000000000000000000000000000000000000000000000000000000010",
+      "effect_class": "live",
+      "publication": "not_applicable",
+      "result_projection": {
+       "kind": "dispatched_subject"
+      },
+      "source": "executed"
+     },
+     "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+     "elapsed_ms": 1430,
+     "error": null,
+     "graph_run_id": "gr-aaa75e79b22d",
+     "node": "greet",
+     "node_result_hash": "0000000000000000000000000000000000000000000000000000000000000011",
+     "step": 0,
+     "timestamp": "2026-11-16T03:55:27Z"
+    },
+    "uri": "graph://runs/gr-aaa75e79b22d/node-receipts/0"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000e",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000e",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 11,
+   "ts": "2026-11-16T03:55:27Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 12,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
+   "event_id": 185,
+   "event_type": "graph_step_completed",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "greet",
+    "node_ref": "graph:test/anchor_chain#node:greet",
+    "status": "ok",
+    "step": 0
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 12,
+   "ts": "2026-11-16T03:55:27Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 13,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000013",
+   "event_id": 186,
+   "event_type": "graph_foreach_started",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "detach": false,
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "max_concurrency": null,
+    "node": "each",
+    "node_ref": "graph:test/anchor_chain#node:each",
+    "parallel": false,
+    "step": 1,
+    "total": 2
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 13,
+   "ts": "2026-11-16T03:55:27Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 14,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000014",
+   "event_id": 193,
+   "event_type": "graph_step_started",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "each",
+    "node_ref": "graph:test/anchor_chain#node:each",
+    "step": 1
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000013",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000013",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 14,
+   "ts": "2026-11-16T03:55:30Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 17,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000015",
+   "event_id": 194,
+   "event_type": "child_thread_spawned",
+   "payload": {
+    "child_thread_id": "T-0003",
+    "item_id": "tool:test/anchor_demo/anchor_demo",
+    "node": "each",
+    "spawn_reason": "dispatch",
+    "step": 1
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000016",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000016",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 17,
+   "ts": "2026-11-16T03:55:30Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 18,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000017",
+   "event_id": 195,
+   "event_type": "child_thread_spawned",
+   "payload": {
+    "child_thread_id": "T-0004",
+    "item_id": "tool:test/anchor_demo/anchor_demo",
+    "node": "each",
+    "spawn_reason": "dispatch",
+    "step": 1
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000015",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000015",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 18,
+   "ts": "2026-11-16T03:55:30Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 19,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000018",
+   "event_id": 196,
+   "event_type": "artifact_published",
+   "payload": {
+    "artifact_type": "graph_node_receipt",
+    "content_hash": null,
+    "metadata": {
+     "cache_hit": false,
+     "cost": null,
+     "definition_ref": "graph:test/anchor_chain",
+     "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+     "elapsed_ms": 2387,
+     "error": null,
+     "fanout": {
+      "dispatches": [
+       {
+        "action_digest": "0000000000000000000000000000000000000000000000000000000000000019",
+        "effect_class": "live",
+        "publication": "not_applicable",
+        "result_projection": {
+         "kind": "dispatched_subject"
+        },
+        "source": "executed"
+       },
+       {
+        "action_digest": "000000000000000000000000000000000000000000000000000000000000001a",
+        "effect_class": "live",
+        "publication": "not_applicable",
+        "result_projection": {
+         "kind": "dispatched_subject"
+        },
+        "source": "executed"
+       }
+      ],
+      "expected": 2,
+      "failed": 0,
+      "statuses": [
+       "completed",
+       "completed"
+      ]
+     },
+     "graph_run_id": "gr-aaa75e79b22d",
+     "node": "each",
+     "node_result_hash": "000000000000000000000000000000000000000000000000000000000000001b",
+     "step": 1,
+     "timestamp": "2026-11-16T03:55:30Z"
+    },
+    "uri": "graph://runs/gr-aaa75e79b22d/node-receipts/1"
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000017",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000017",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 19,
+   "ts": "2026-11-16T03:55:30Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 20,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000001c",
+   "event_id": 197,
+   "event_type": "graph_step_completed",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "each",
+    "node_ref": "graph:test/anchor_chain#node:each",
+    "status": "ok",
+    "step": 1
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000018",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000018",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 20,
+   "ts": "2026-11-16T03:55:30Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 21,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000001d",
+   "event_id": 201,
+   "event_type": "graph_step_started",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "flaky",
+    "node_ref": "graph:test/anchor_chain#node:flaky",
+    "step": 2
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000001c",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000001c",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 21,
+   "ts": "2026-11-16T03:55:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 22,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000001e",
+   "event_id": 202,
+   "event_type": "tool_call_start",
+   "payload": {
+    "call_id": "call_2",
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "item_id": "tool:test/fail_demo/fail_demo",
+    "node": "flaky",
+    "node_ref": "graph:test/anchor_chain#node:flaky",
+    "operation_id": "000000000000000000000000000000000000000000000000000000000000001f",
+    "step": 2,
+    "tool": "tool:test/fail_demo/fail_demo"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000001d",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000001d",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 22,
+   "ts": "2026-11-16T03:55:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 23,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000020",
+   "event_id": 203,
+   "event_type": "tool_call_result",
+   "payload": {
+    "call_id": "call_2",
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "item_id": "tool:test/fail_demo/fail_demo",
+    "node": "flaky",
+    "node_ref": "graph:test/anchor_chain#node:flaky",
+    "operation_id": "000000000000000000000000000000000000000000000000000000000000001f",
+    "status": "error",
+    "step": 2,
+    "tool": "tool:test/fail_demo/fail_demo"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000001e",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000001e",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 23,
+   "ts": "2026-11-16T03:55:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 24,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000021",
+   "event_id": 204,
+   "event_type": "child_thread_spawned",
+   "payload": {
+    "child_thread_id": "T-0005",
+    "item_id": "tool:test/fail_demo/fail_demo",
+    "node": "flaky",
+    "spawn_reason": "dispatch",
+    "step": 2
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000020",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000020",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 24,
+   "ts": "2026-11-16T03:55:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 25,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000022",
+   "event_id": 205,
+   "event_type": "artifact_published",
+   "payload": {
+    "artifact_type": "graph_node_receipt",
+    "content_hash": null,
+    "metadata": {
+     "cache_hit": false,
+     "cost": null,
+     "definition_ref": "graph:test/anchor_chain",
+     "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+     "elapsed_ms": 1295,
+     "error": "<scrubbed error 591 chars>",
+     "graph_run_id": "gr-aaa75e79b22d",
+     "node": "flaky",
+     "node_result_hash": null,
+     "step": 2,
+     "timestamp": "2026-11-16T03:55:32Z"
+    },
+    "uri": "graph://runs/gr-aaa75e79b22d/node-receipts/2"
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000021",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000021",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 25,
+   "ts": "2026-11-16T03:55:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 26,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000023",
+   "event_id": 206,
+   "event_type": "graph_step_completed",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "error": "<scrubbed error 591 chars>",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "flaky",
+    "node_ref": "graph:test/anchor_chain#node:flaky",
+    "status": "error",
+    "step": 2
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000022",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000022",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 26,
+   "ts": "2026-11-16T03:55:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 27,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000024",
+   "event_id": 210,
+   "event_type": "graph_step_started",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "recover",
+    "node_ref": "graph:test/anchor_chain#node:recover",
+    "step": 3
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000023",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000023",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 27,
+   "ts": "2026-11-16T03:55:33Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 28,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000025",
+   "event_id": 211,
+   "event_type": "tool_call_start",
+   "payload": {
+    "call_id": "call_3",
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "item_id": "tool:test/anchor_demo/anchor_demo",
+    "node": "recover",
+    "node_ref": "graph:test/anchor_chain#node:recover",
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000026",
+    "step": 3,
+    "tool": "tool:test/anchor_demo/anchor_demo"
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000024",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000024",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 28,
+   "ts": "2026-11-16T03:55:33Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 29,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000027",
+   "event_id": 212,
+   "event_type": "tool_call_result",
+   "payload": {
+    "call_id": "call_3",
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "item_id": "tool:test/anchor_demo/anchor_demo",
+    "node": "recover",
+    "node_ref": "graph:test/anchor_chain#node:recover",
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000026",
+    "status": "ok",
+    "step": 3,
+    "tool": "tool:test/anchor_demo/anchor_demo"
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000025",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000025",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 29,
+   "ts": "2026-11-16T03:55:33Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 30,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000028",
+   "event_id": 213,
+   "event_type": "child_thread_spawned",
+   "payload": {
+    "child_thread_id": "T-0006",
+    "item_id": "tool:test/anchor_demo/anchor_demo",
+    "node": "recover",
+    "spawn_reason": "dispatch",
+    "step": 3
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000027",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000027",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 30,
+   "ts": "2026-11-16T03:55:33Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 31,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000029",
+   "event_id": 214,
+   "event_type": "artifact_published",
+   "payload": {
+    "artifact_type": "graph_node_receipt",
+    "content_hash": null,
+    "metadata": {
+     "cache_hit": false,
+     "cost": null,
+     "definition_ref": "graph:test/anchor_chain",
+     "dispatch": {
+      "action_digest": "000000000000000000000000000000000000000000000000000000000000002a",
+      "effect_class": "live",
+      "publication": "not_applicable",
+      "result_projection": {
+       "kind": "dispatched_subject"
+      },
+      "source": "executed"
+     },
+     "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+     "elapsed_ms": 1109,
+     "error": null,
+     "graph_run_id": "gr-aaa75e79b22d",
+     "node": "recover",
+     "node_result_hash": "000000000000000000000000000000000000000000000000000000000000002b",
+     "step": 3,
+     "timestamp": "2026-11-16T03:55:33Z"
+    },
+    "uri": "graph://runs/gr-aaa75e79b22d/node-receipts/3"
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000028",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000028",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 31,
+   "ts": "2026-11-16T03:55:33Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 32,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000002c",
+   "event_id": 215,
+   "event_type": "graph_step_completed",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "recover",
+    "node_ref": "graph:test/anchor_chain#node:recover",
+    "status": "ok",
+    "step": 3
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000029",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000029",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 32,
+   "ts": "2026-11-16T03:55:34Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 33,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000002d",
+   "event_id": 216,
+   "event_type": "graph_step_started",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "done",
+    "node_ref": "graph:test/anchor_chain#node:done",
+    "step": 4
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000002c",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000002c",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 33,
+   "ts": "2026-11-16T03:55:34Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 34,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000002e",
+   "event_id": 217,
+   "event_type": "graph_step_completed",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "node": "done",
+    "node_ref": "graph:test/anchor_chain#node:done",
+    "status": "ok",
+    "step": 4
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000002d",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000002d",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 34,
+   "ts": "2026-11-16T03:55:34Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 35,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000002f",
+   "event_id": 218,
+   "event_type": "graph_completed",
+   "payload": {
+    "definition_ref": "graph:test/anchor_chain",
+    "effective_definition_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+    "graph_id": "test/anchor_chain",
+    "graph_run_id": "gr-aaa75e79b22d",
+    "status": "completed",
+    "steps": 5
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000002e",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000002e",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 35,
+   "ts": "2026-11-16T03:55:34Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 36,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000030",
+   "event_id": 219,
+   "event_type": "thread_completed",
+   "payload": {
+    "artifact_count": 0,
+    "error_digest": null,
+    "error_size_bytes": 0,
+    "has_error": false,
+    "outcome_code": "success",
+    "result_digest": "0000000000000000000000000000000000000000000000000000000000000031",
+    "result_present": true,
+    "result_project_snapshot_hash": null,
+    "result_size_bytes": 1380,
+    "result_workspace_output_capture_hash": null
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000002f",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000002f",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 36,
+   "ts": "2026-11-16T03:55:34Z"
+  }
+ ]
+}

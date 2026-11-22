@@ -3,6 +3,8 @@
 //! candidate turn. The installed trusted observer has its own BundleExecutor
 //! identity; its input tree is independently captured, imported and bound.
 
+const TEST_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("test");
+
 use crate::common::{DaemonHarness, fast_fixture};
 use crate::{public_launch, retained_runtime_producer};
 use anyhow::{Context as _, Result, ensure};
@@ -158,6 +160,7 @@ impl RuntimeInput {
                     path.file_name().context("member filename")?,
                     bytes,
                     0o755,
+                    TEST_PURPOSE,
                 )?
                 .context("staged member already exists")?;
         }
@@ -361,7 +364,7 @@ async fn public_native_mechanism_probe_settles_writer_then_captures() -> Result<
     let input = RuntimeInput::load()?;
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, keys| {
-            fast_fixture::register_standard_bundle(state, keys)?;
+            fast_fixture::register_workflow_bundles(state, keys)?;
             install(state, keys, &input)
         },
         |_| {},

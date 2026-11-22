@@ -9,21 +9,29 @@ description = "Unqualified early-access Render Sandbox lifecycle adapter"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-chrono = "0.4"
 hex = { workspace = true }
 lillux = { path = "../../kernel/lillux" }
+ryeos-effect-contract = { path = "../../engine/ryeos-effect-contract" }
 ryeos-external-execution-contract = { path = "../../engine/ryeos-external-execution-contract" }
 ryeos-http-transport = { path = "../../engine/ryeos-http-transport" }
+ryeos-remote-lease-core = { path = "../remote-lease-core" }
+ryeos-state = { path = "../../state/ryeos-state" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 signal-hook = { workspace = true }
+tar = { workspace = true }
 url = "2"
 zeroize = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-bundle = { workspace = true }
+serde_yaml = { workspace = true }
 ryeos-external-execution = { path = "../../engine/ryeos-external-execution" }
 
 [[bin]]
 name = "ryeos-render-sandbox-lifecycle-adapter"
 path = "src/main.rs"
+
+[lints]
+workspace = true

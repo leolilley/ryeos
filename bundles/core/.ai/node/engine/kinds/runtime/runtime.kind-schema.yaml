@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T05:52:27Z:7d2b905fdbc1824a976fe3702468ce762fffa2b7bc44c0b8dffeda2507f6541a:snXo+remVeT16aCZOYjRzp9rlfxEJSGhyLUakNrYN0rV3oYsp5SXQpBd4mWQVne6cYwLxGEEw7ZnmEX9zNV8BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T07:52:03Z:ddf7a59b7bcc88099e60ccf39676cd9087b026e76008e6948cdd34937cec5850:qZ+wk+KRXUNGHpkWSYq6CsB+DOm7oEJB6letoelp9XHkvf/sjAZU27YhDspNO0dZZzhkHgoBFOlPp2DPiN6gCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/runtime"
 inventory_policy:
   admission:
@@ -9,6 +9,12 @@ location:
 effective_trust:
   include_references: false
 resolution: []
+# Which spaces and trust classes may supply a launch root of this kind.
+# Only signed bundles supply this kind; a project or node file is ignored.
+launch_trust:
+  allowed_spaces: [bundle]
+  allowed_trust: [trusted_bundle]
+  operator_may_admit: []
 execution:
   terminator:
     kind: subprocess
@@ -52,7 +58,7 @@ composed_value_contract:
             elements:
               type: single
               prim: string
-              enum: [trusted_bundle, trusted_project, untrusted_project, unsigned]
+              enum: [trusted_bundle, trusted_project, untrusted_project]
           ref_bindings: { type: single, prim: mapping }
           preparation: { type: single, prim: mapping }
           config_inputs: { type: single, prim: mapping }
@@ -80,6 +86,7 @@ composed_value_contract:
           external_effect_authority: { type: single, prim: mapping }
   optional:
     execution_evidence: { type: single, prim: mapping }
+    writes_child_lineage: { type: single, prim: boolean }
     default: { type: single, prim: boolean }
     required_caps:
       type: single

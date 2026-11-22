@@ -22,14 +22,28 @@ use ryeos_scheduler::types::ScheduleSpecRecord;
 use ryeos_scheduler::{
     ScheduledDispatchReceipt, ScheduledProjectBinding, SchedulerContext, ThreadResultOutcome,
 };
+use ryeos_scheduler_service::SchedulerService;
 use ryeos_state::objects::{
     ExecutionProjectAuthority, PinnedProjectRealization, PinnedTerminalPublication,
 };
 
+/// A schedule that authors a `live_direct` project policy is demanding the
+/// live project: a scheduled launch has no operator to notice a private copy,
+/// so the policy is sealed with explicit live intent whatever it spelled.
+fn scheduled_policy(
+    policy: &ryeos_app::execution_policy::ExecutionPolicy,
+) -> ryeos_app::execution_policy::ExecutionPolicy {
+    let mut policy = policy.clone();
+    if let ProjectExecutionPolicy::LiveDirect { intent, .. } = &mut policy.project {
+        *intent = ryeos_app::execution_policy::LiveIntent::Live;
+    }
+    policy
+}
+
 /// Newtype wrapper around `AppState` so daemon-private dispatch can implement
 /// the scheduler-owned context trait without moving either public type.
 #[derive(Clone)]
-pub struct AppSchedulerContext(pub Arc<AppState>);
+pub struct AppSchedulerContext(pub Arc<AppState>, pub Arc<SchedulerService>);
 
 impl AppSchedulerContext {
     fn validate_fire_spec(
@@ -40,6 +54,9 @@ impl AppSchedulerContext {
         fire.validate()?;
         if fire.schedule_id != spec.schedule_id || fire.schedule_spec_hash != spec.spec_hash {
             bail!("scheduled fire context does not identify the admitted schedule generation");
+        }
+        if fire.limits != spec.execution.limits {
+            bail!("scheduled fire context does not carry the admitted schedule's limits");
         }
         Ok(())
     }
@@ -95,13 +112,17 @@ impl AppSchedulerContext {
         };
         let expected =
             ryeos_api::routes::response_modes::execute_mode::resolve_execution_project_authority(
-                &spec.execution.policy,
+                &scheduled_policy(&spec.execution.policy),
                 project_root,
                 snapshot_hash,
                 current_head_destination.as_ref(),
                 self.0.threads.site_id(),
                 &self.0.isolation,
                 &spec.execution.capabilities,
+                ryeos_api::routes::response_modes::execute_mode::ProviderEnvironmentRecipient {
+                    environment: &self.0.provider_env,
+                    principal: spec.execution.principal_id(),
+                },
             )?;
         if &expected != authority {
             bail!(
@@ -205,19 +226,27 @@ impl AppSchedulerContext {
 
 impl SchedulerContext for AppSchedulerContext {
     fn app_root(&self) -> &Path {
-        &self.0.config.app_root
+        self.1.app_root()
     }
 
     fn scheduler_db(&self) -> Arc<SchedulerDb> {
-        self.0.scheduler_db.clone()
+        self.1.scheduler_db()
     }
 
     fn scheduler_runtime_gate(&self) -> Arc<tokio::sync::RwLock<()>> {
-        self.0.scheduler_runtime_gate.clone()
+        self.1.runtime_gate()
+    }
+
+    fn ensure_dispatch_available(&self) -> Result<()> {
+        self.1.require_dispatch_available()
     }
 
     fn schedule_trust_store(&self) -> &ryeos_engine::trust::TrustStore {
-        &self.0.engine.node_trust_store
+        self.1.trust_store()
+    }
+
+    fn schedule_signer_fingerprint(&self) -> &str {
+        self.1.identity().fingerprint()
     }
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {
@@ -297,6 +326,10 @@ impl SchedulerContext for AppSchedulerContext {
                     self.0.threads.site_id(),
                     &self.0.isolation,
                     &handler_context.scopes,
+                    ryeos_api::routes::response_modes::execute_mode::ProviderEnvironmentRecipient {
+                        environment: &self.0.provider_env,
+                        principal: spec.execution.principal_id(),
+                    },
                 )?;
                 Ok(ScheduledProjectBinding {
                     authority,
@@ -311,13 +344,17 @@ impl SchedulerContext for AppSchedulerContext {
                     .context("scheduled live-root canonicalization task stopped")?
                     .with_context(|| format!("canonicalize scheduled project {display}"))?;
                 let authority = ryeos_api::routes::response_modes::execute_mode::resolve_execution_project_authority(
-                    &spec.execution.policy,
+                    &scheduled_policy(&spec.execution.policy),
                     Some(&canonical),
                     None,
                     None,
                     self.0.threads.site_id(),
                     &self.0.isolation,
                     &handler_context.scopes,
+                    ryeos_api::routes::response_modes::execute_mode::ProviderEnvironmentRecipient {
+                        environment: &self.0.provider_env,
+                        principal: spec.execution.principal_id(),
+                    },
                 )?;
                 Ok(ScheduledProjectBinding {
                     authority,
@@ -364,6 +401,10 @@ impl SchedulerContext for AppSchedulerContext {
                         state.threads.site_id(),
                         &state.isolation,
                         &handler_context.scopes,
+                        ryeos_api::routes::response_modes::execute_mode::ProviderEnvironmentRecipient {
+                            environment: &state.provider_env,
+                            principal: execution.principal_id(),
+                        },
                     )?;
                     ryeos_api::routes::response_modes::execute_mode::authorize_terminal_publication(
                         &execution.policy,
@@ -397,6 +438,21 @@ impl SchedulerContext for AppSchedulerContext {
                 .await
             }
         }
+    }
+
+    async fn auto_pause_schedule(
+        &self,
+        schedule_id: &str,
+        expected_spec_hash: &str,
+        reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+    ) -> Result<bool> {
+        ryeos_api::handlers::scheduler_register::auto_pause_schedule(
+            &self.1,
+            schedule_id,
+            expected_spec_hash,
+            reason,
+        )
+        .await
     }
 
     async fn dispatch_scheduled_item(
@@ -444,6 +500,7 @@ impl SchedulerContext for AppSchedulerContext {
             }
         };
         let plan_ctx = PlanContext {
+            logical_project_root: provenance.logical_project_root(&current_site_id),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: spec.execution.principal_id().to_owned(),
                 scopes: spec.execution.capabilities.clone(),
@@ -481,6 +538,9 @@ impl SchedulerContext for AppSchedulerContext {
             &self.0,
             None,
         )?;
+        // The schedule's registered capabilities are the caller; they must
+        // cover what the item declares before any thread is born.
+        ryeos_executor::dispatch::require_preflight_caller_coverage(&preflight, &exec_ctx)?;
         if !preflight.class.produces_admitted_launch_capsule() {
             bail!(
                 "scheduled item `{}` resolves to `{}` execution, which cannot publish an admitted launch capsule at the scheduled durable-handoff boundary",
@@ -536,6 +596,7 @@ impl SchedulerContext for AppSchedulerContext {
                 usage_subject: None,
                 usage_subject_asserted_by: None,
                 previous_thread_id: None,
+                initial_facets: Default::default(),
                 root_admission: Some(root_admission),
                 root_dispatch_evidence: Some(root_dispatch_evidence),
                 parent_execution_context: None,

@@ -1,7 +1,7 @@
-# ryeos:signed:2026-08-17T23:05:44Z:8898150f52b37f2c6a07579d49549a5e8dd2bc8bdb0b090d1fe08ffe5eef7687:+fzPaqhm7NhH9IgxjPqP/RTDj7OcLI7pC4yjFD+GZoXkiDGGBJPNcUefDV6KjKipTIZa5PaHRhgsaw4r5TeyCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T11:51:10Z:db3629432aa2bd59216a71d99a881ffd9a19d33e3044ffbd4b0997b01f3fbe6c:iUT6ZCCBTHiBDTVJBOGFrdqi3TPADBiqDdQb5LWcx6eSPDOR9Dmkkm6ciKXZbQOW+XqcZvZKGZIqPAn1l8n8Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - s
-description: Cryptographically sign one or more items or item globs by canonical ref or .ai path
+description: Cryptographically sign one or more items or item globs by canonical ref or .ai path with your operator key, in this CLI
 aliases:
 - tokens:
   - sign
@@ -20,6 +20,6 @@ project:
   default: discover_upward_ai
   bind_parameter: project_path
 dispatch:
-  kind: execute_ref
-  execute: service:sign
-  availability: both
+  kind: local_handler
+  handler: sign_items
+  bootstrap: false

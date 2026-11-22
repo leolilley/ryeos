@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T08:24:14Z:57dfb90ccaa1b1cacd6c7a13839d512ec4f783d2f9183dad8f56dec00f1d337d:972OWhTeqG+DgfKXInx092TuF1gQS5SyQiXZJcNAzQr/XzzJ0SxN88eFLwqzoTA4/cJHBovZH+KSi3328V4ICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-20T07:30:31Z:9e35dbcc833087b8fcebc623507450e26c9ca9e7189294438f81d972e3717282:4Zj3VeVRvxnhCMOI6fYDUt+Xw1BRO5WvUJ27zcdIAnjLJJFVoY5qgX6YDVClzKSPW62QM/t5eFEtEuvvOJ30Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -24,8 +24,8 @@ test, refresh bundles, or install this checkout locally.
 | Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
 | Fresh repo-local daemon | initialize/start with `--app-root .local/ryeos` (commands below) |
 | Fast packaged-layout install from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
-| Verify core/standard source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
-| Verify optional local-inference bundle | `target/release/ryeos-core-tools bundle-verify bundles/local-inference --registry-root bundles/core --registry-root bundles/standard` |
+| Verify core and workflow source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/graph --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/knowledge --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/directive --registry-root bundles/core --registry-root bundles/knowledge` |
+| Verify optional local-inference bundle | `target/release/ryeos-core-tools bundle-verify bundles/local-inference --registry-root bundles/core --registry-root bundles/knowledge --registry-root bundles/directive --registry-root bundles/graph` |
 | Stronger-host build and configured-remote qualification | See `development/remote-development-and-qualification.md` |
 
 Prereqs: Rust stable, `cargo-nextest`, Python 3, Linux, and usually `HOSTNAME`
@@ -88,7 +88,7 @@ It does all of this as one atomic authoring refresh:
 1. builds release binaries owned by bundles;
 2. deletes derived bundle state: `.ai/bin`, `.ai/objects`, `.ai/refs`, stale
    `PUBLISHER_TRUST.toml`;
-3. stages binaries into `bundles/{core,standard}/.ai/bin/<triple>/`;
+3. stages binaries into `bundles/{core,knowledge,directive,graph}/.ai/bin/<triple>/`;
 4. runs `ryeos-core-tools build` for core and standard, which signs items and
    rebuilds CAS manifests.
 
@@ -111,6 +111,7 @@ Default user system space:
 ```bash
 target/release/ryeos init \
   --source bundles \
+  --node-profile standard --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
@@ -120,6 +121,7 @@ Repo-local dev app root:
 target/release/ryeos init \
   --app-root .local/ryeos \
   --source bundles \
+  --node-profile standard --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 target/release/ryeos start --app-root .local/ryeos
 ```
@@ -127,9 +129,13 @@ target/release/ryeos start --app-root .local/ryeos
 If a daemon is running against that system space, stop it before init and start
 it after. A running daemon keeps the old in-memory engine/registries.
 
+`--node-profile` is required on a fresh node, and `--host-class` goes with it.
+Use a profile and class that match your node (`ryeos init --help`).
+
 ```bash
 target/release/ryeos stop --force || true
-target/release/ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+target/release/ryeos init --source bundles --node-profile standard --host-class local \
+  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 target/release/ryeos start
 ```
 
@@ -145,7 +151,7 @@ without running `makepkg`/`yay`:
 By default it uses already-built checkout artifacts: it stops a running daemon
 before replacing files, installs `ryeos`/`ryeosd` to `/usr/bin`, installs bundle sources under
 `/usr/share/ryeos/<bundle>` for every bundle in the selected set (the default is
-the full set defined by `scripts/pkg/bundle-sets.sh`), runs `ryeos init`,
+the standard set defined by `scripts/pkg/bundle-sets.sh`), runs `ryeos init`,
 verifies the initialized bundle state, and restarts the daemon if it was
 running before.
 
@@ -160,6 +166,66 @@ explicitly:
 Use `--populate --crates "<Cargo package ...>"` when only selected packages
 need rebuilding. This also covers node-only packages such as `ryeosd`; every
 unselected bundle payload retains its existing exact artifact generation.
+
+### Install build on GitHub (no local compile)
+
+`.github/workflows/remote-node-build.yml` runs `scripts/populate-bundles.sh
+--all` (the installer's default dev key and owner, release profile) for the
+dispatched ref and bundle set, and uploads one artifact (kept 3 days):
+`ryeos-node-<set>-<sha12>.tar.zst` holding `manifest.json` (commit, bundle set,
+sha256 of each binary), `target/release/` (the binaries the installer copies)
+and `bundle-state.tar.zst` (the populated bundle state). Dispatch only works
+once the workflow file is on `main`. Inputs besides `bundle_set` and `label`:
+
+- `base` (`runner`, the default, or `bookworm`). `runner` builds on the
+  ubuntu-latest runner, so the binaries need that runner's glibc (2.39).
+  `bookworm` runs the populate and every Rust build as root in the pinned
+  `rust:1.95-slim-bookworm` image `Dockerfile.release` uses (checkout and target
+  directory mounted, no sccache), then proves the packed binaries start in the
+  pinned `debian:bookworm-slim` with no dev libraries (`ryeos --version`,
+  `ryeosd build-info --revision` equal to the 12-character commit, each extra
+  binary's `--help`) and that no binary needs a glibc symbol newer than 2.36.
+  Use `bookworm` for anything that runs in a Debian 12 container.
+- `extra_bins` (default empty): space-separated cargo packages built with
+  `cargo build --release -p <pkg>` in the same environment, for example
+  `ryeos-chat-stub`. Each must produce a binary of its own name or the job
+  fails. The binary rides in the same archive under `target/release/<name>` and
+  is listed in `manifest.json` (which then also records `base` and
+  `extra_bins`). After the unpack below, run `$d/target/release/ryeos-chat-stub
+  <script.yaml>`.
+
+The job summary also prints the glibc claim and the stub's location. Dispatch,
+then find the run id:
+
+```bash
+gh workflow run remote-node-build.yml --repo leolilley/ryeos \
+  --ref work/<branch> -f bundle_set=standard -f label=<thread>
+# Debian 12 compatible binaries plus the stub model server:
+#   -f base=bookworm -f extra_bins=ryeos-chat-stub
+gh run list --repo leolilley/ryeos --workflow remote-node-build.yml -L 3
+```
+
+Download and unpack into a fresh directory (the job summary prints these with
+the real run id and name):
+
+```bash
+d=$(mktemp -d)
+gh run download <run-id> --repo leolilley/ryeos -n <artifact-name> -D "$d"
+tar --zstd -xf "$d/<artifact-name>.tar.zst" -C "$d"
+```
+
+Install from a checkout of exactly the manifest commit (the installer reads
+`bundles/` and `scripts/` from its own checkout), without `--populate`:
+
+```bash
+git worktree add --detach "$d/src" <commit-from-manifest>
+cd "$d/src" && ./scripts/ci/unpack-bundle-state.sh "$d/bundle-state.tar.zst"
+./scripts/pkg/install-local-direct.sh --bundle-set <set> \
+  --cargo-target-dir "$d/target" --trust-source-publishers
+```
+
+Add the usual `--app-root`, `--host-class`, `--prefix` and
+`--reset-node-policy-generation` flags exactly as for a local install.
 
 ### Clean-cut execution-state upgrades
 
@@ -196,6 +262,17 @@ flag or automatic fallback. It preserves project worktrees, installed bundles,
 vault values, trust, and node/signing identity. No reinstall is needed after
 the cutover when the new binaries and bundles were already installed.
 
+A node whose runtime store is of an earlier operator epoch refuses to start
+and names the reset: with the daemon stopped, run
+`ryeos node reset execution-history --confirm --schema-cut-from <stored>
+--schema-cut-to <current>` (the refusal prints the epochs), then
+`ryeos node allow-restart` and `ryeos start`. It does not retire project
+HEADs; no runtime epoch cut needs them.
+Epoch 140 is such a cut: any node whose store is at epoch 139 needs this
+reset on its next upgrade. The reset never decodes a predecessor
+store's rows. A change to a stored launch contract version without an epoch
+bump leaves a node that neither opens nor resets, which a unit test pins.
+
 Important: bundle-owned binaries (`ryeos-core-tools`, parsers, composers,
 runtimes, `ryeos-tui`, etc.) belong inside signed bundle bin trees under
 `/usr/share/ryeos/<bundle>/.ai/bin/<triple>/`; they should not be installed on
@@ -211,13 +288,48 @@ ryeos execute tool:ryeos/core/identity/public_key
 script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 ```
 
-The generated isolation policy is disabled by default. `node doctor` uses the
+The isolation mode comes from the init profile passed as `--node-profile`.
+`install-local-direct.sh` passes its bundle set's profile (`standard` by default)
+and a host class; the `local` lane of every packaged profile selects enforce,
+and `--host-class local_unconfined` selects the explicit disabled opt-out.
+`--node-profile development` also selects enforce. `node doctor` uses the
 production policy loader; after changing mode or policy contents, restart the
 node before judging execution behavior. See [Execution
-Isolation](../../../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md).
+Isolation](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md).
 
 If `ryeos tui` works but `ryeos help tui` fails, fix the CLI help path. Do not
 work around it by adding kind-specific CLI dispatch logic.
+
+## Daemon e2e: tools that call back into the daemon
+
+A tool launched under the default `tool_callback` protocol can call the daemon
+over its UDS callback channel (bundle events, item authoring). To test such a
+callback end to end, use `ryeosd::test_support::callback_probe`
+(`crates/bin/daemon/src/test_support/callback_probe.rs`). It plants one signed
+project tool that makes exactly one named callback through the shipped runtime
+client (the `ryeos-callback-probe` executable, a test-only binary of `ryeosd`)
+and prints the result as JSON.
+
+1. Choose the authority the tool may hold with `ProbeAuthority`
+   (`bundle_event(kind, ops)`, `item_authoring(kind, namespace)`,
+   `declared_cap(cap)`). Callback authority is minted only from a signed
+   manifest, so `plant_probe_tool` also plants a signed project manifest
+   declaring exactly that authority and the tool requests the same.
+2. Plant it with `plant_probe_tool(project, &fixture.publisher,
+   Path::new(env!("CARGO_BIN_EXE_ryeos-callback-probe")), &authority)`. The
+   executable path comes from the integration test because only it sees
+   `CARGO_BIN_EXE_*`. Start the daemon with `register_workflow_bundles` when
+   the callback touches workflow kinds such as `graph`.
+3. `run_callback(&h, &project, "bundle_events_append" | "bundle_events_read_chain"
+   | "bundle_events_scan" | "author_item", params)` launches the tool as the
+   harness principal and returns a `ProbeOutcome`: `Accepted(result)` (use
+   `.accepted()`) or `Refused { code, message }` (use `.refusal_code()`).
+   Each call is a separate thread, so a read-back after an append proves the
+   event is durable state.
+
+Assert refusal codes and trust classes (for example
+`authored_capability_not_covered`, `runtime_authored`), not signer
+fingerprints. Worked examples: `crates/bin/daemon/tests/callback_probe_e2e.rs`.
 
 ## Common failures
 

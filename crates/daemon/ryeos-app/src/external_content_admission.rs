@@ -20,8 +20,8 @@ use ryeos_state::{
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
+use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 
 /// Exact, non-secret reason a retained content realization cannot be admitted.
 ///
@@ -34,6 +34,110 @@ use crate::state::AppState;
 pub struct ExternalContentBindingUnavailable {
     pub manifest_hash: String,
     pub consumer_ref: String,
+}
+
+/// A consumer resolved at an exact generation has declarations with no
+/// current operator binding.
+///
+/// Pinned-project bindings are deliberately generation-scoped: a new project
+/// snapshot or a re-signed consumer changes the consumer authority, so every
+/// earlier binding stops authorizing it. That is correct, but the operator
+/// must learn which declarations failed and how to renew them, not read an
+/// untyped launch failure. The node never renews a binding on its own.
+#[derive(Debug, Clone)]
+pub struct ContentBindingMissing {
+    pub consumer_ref: String,
+    pub project_snapshot_hash: Option<String>,
+    pub effective_consumer_digest: Option<String>,
+    /// Every declaration the preview observed, with its status. Only those
+    /// not `ready` block admission.
+    pub declarations: Vec<ExternalContentPinPreview>,
+}
+
+impl std::fmt::Display for ContentBindingMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for ContentBindingMissing {}
+
+impl ContentBindingMissing {
+    pub const CODE: &'static str = "content_binding_missing";
+
+    pub fn from_preview(
+        consumer: &ryeos_state::objects::ExternalContentConsumerAuthority,
+        preview: &ExternalContentValidationPreview,
+    ) -> Self {
+        let (project_snapshot_hash, effective_consumer_digest) = match consumer {
+            ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. } => {
+                (None, None)
+            }
+            ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject {
+                project_snapshot_hash,
+                effective_consumer_digest,
+                ..
+            } => (
+                Some(project_snapshot_hash.clone()),
+                Some(effective_consumer_digest.clone()),
+            ),
+        };
+        Self {
+            consumer_ref: consumer.consumer_ref().to_owned(),
+            project_snapshot_hash,
+            effective_consumer_digest,
+            declarations: preview.declarations.clone(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        Self::CODE
+    }
+
+    /// The exact operator commands that inspect and renew the binding.
+    pub fn fix(&self) -> String {
+        match &self.project_snapshot_hash {
+            Some(snapshot) => format!(
+                "run `ryeos external-content bindings {consumer} pinned_project {snapshot}` to see each declaration and its prior binding, then `ryeos external-content rebind <prior-binding-hash> {snapshot}` for each missing one",
+                consumer = self.consumer_ref,
+            ),
+            None => format!(
+                "run `ryeos external-content bindings {} installed_bundle` to see each declaration, then stage and `ryeos external-content bind` the missing manifest",
+                self.consumer_ref
+            ),
+        }
+    }
+
+    fn message(&self) -> String {
+        let missing = self
+            .declarations
+            .iter()
+            .filter(|declaration| declaration.status != "ready")
+            .map(|declaration| format!("{} ({})", declaration.id, declaration.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{} has no current content binding for: {missing}; {}",
+            self.consumer_ref,
+            self.fix()
+        )
+    }
+
+    pub fn handler_error(&self) -> crate::handler_error::HandlerError {
+        crate::handler_error::HandlerError::Structured {
+            code: Self::CODE.to_owned(),
+            status: 409,
+            body: serde_json::json!({
+                "code": Self::CODE,
+                "error": self.message(),
+                "consumer_ref": self.consumer_ref,
+                "project_snapshot_hash": self.project_snapshot_hash,
+                "effective_consumer_digest": self.effective_consumer_digest,
+                "declarations": self.declarations,
+                "fix": self.fix(),
+            }),
+        }
+    }
 }
 
 fn require_admission_binding(
@@ -121,14 +225,11 @@ pub fn derive_consumer_authority_for_test(
     consumer_authority(resolution, subject_resolution_authority)
 }
 
-/// Whether the admitted effective bundle definition contains any project-
-/// scoped contributor. The outer execution subject alone is deliberately not
-/// evidence of this: fixed bundle pins remain reusable under a pinned launch.
-/// Conversely, a project contributor or a resolved product projection is
-/// committed by the effective definition and must retain generation scope.
-/// A source closure is owned by the resolution root itself; its mere presence
-/// therefore cannot turn a bundle root into project authority.
-pub(crate) fn bundle_consumer_depends_on_project(
+/// The one predicate for project dependence of a resolution: its root, an
+/// ancestor, or a referenced item is project-space. The consumer's own
+/// resolution and every product relationship's resolution are judged by this
+/// function, so no second place decides it.
+pub fn resolution_has_project_contributor(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> bool {
     let project_source = |ancestor: &ryeos_engine::resolution::ResolvedAncestor| {
@@ -138,12 +239,39 @@ pub(crate) fn bundle_consumer_depends_on_project(
                 ryeos_engine::contracts::ItemSourceRoot::Project
             )
     };
-    resolution.ancestors.iter().any(project_source)
+    project_source(&resolution.root)
+        || resolution.ancestors.iter().any(project_source)
         || resolution.referenced_items.iter().any(project_source)
+}
+
+/// Whether the admitted effective bundle definition depends on a project: a
+/// project-scoped contributor, or a resolved product selection whose
+/// relationship resolved from project space (recorded on the selection by the
+/// predicate above). The outer execution subject alone is deliberately not
+/// evidence of this: fixed bundle pins remain reusable under a pinned launch,
+/// and a selection whose relationship is bundle-owned does not make the
+/// consumer project-dependent. A source closure is owned by the resolution
+/// root itself; its mere presence therefore cannot turn a bundle root into
+/// project authority. A selections value that cannot be read counts as
+/// dependent, so the consumer keeps generation scope.
+pub(crate) fn bundle_consumer_depends_on_project(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> bool {
+    resolution_has_project_contributor(resolution)
         || resolution
             .composed
             .derived
-            .contains_key(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
+            .get(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
+            .is_some_and(|value| {
+                serde_json::from_value::<
+                    ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
+                >(value.clone())
+                .map_or(true, |selections| {
+                    selections
+                        .iter()
+                        .any(|(_, selection)| selection.relationship_project_dependent)
+                })
+            })
 }
 
 /// A pinned-project binding may name either an executable rooted in the
@@ -251,11 +379,38 @@ pub fn preview_external_content_pins(
         return Ok(None);
     };
 
+    Ok(Some(preview_external_content_declarations(
+        state,
+        engine,
+        kind,
+        resolution,
+        roots,
+        subject_resolution_authority,
+        &declarations,
+    )?))
+}
+
+/// Observe already checked declarations through the same bounded capture and
+/// retained-binding readers as ordinary validation. Selection of literal-only
+/// declarations grants no product selection or executable realization authority.
+pub(crate) fn preview_external_content_declarations(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    subject_resolution_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
+    declarations: &[ExternalContentDeclaration],
+) -> anyhow::Result<ExternalContentValidationPreview> {
+    let contract = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.external_content_contract());
     let mut budget = LaunchCaptureBudget::default();
     let mut sink = DigestOnlyExternalContentSink;
     let mut previews = Vec::with_capacity(declarations.len());
     let mut ready_for_admission = true;
-    for declaration in &declarations {
+    for declaration in declarations {
         let (observed_digest, binding_digest, status, ready) = if declaration
             .bundle_binary
             .is_some()
@@ -323,11 +478,11 @@ pub fn preview_external_content_pins(
             status: status.to_owned(),
         });
     }
-    validate_retained_declaration_totals(state, contract, &declarations)?;
-    Ok(Some(ExternalContentValidationPreview {
+    validate_retained_declaration_totals(state, contract, declarations)?;
+    Ok(ExternalContentValidationPreview {
         declarations: previews,
         ready_for_admission,
-    }))
+    })
 }
 
 /// Preview one preparer-selected portable content dependency through the same
@@ -853,7 +1008,6 @@ pub fn admit_portable_content_dependency_in_publication(
     .ok_or_else(|| anyhow::anyhow!("content dependency produced no external realization"))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn admit_declarations_in_publication(
     state: &AppState,
     engine: Option<&ryeos_engine::engine::Engine>,
@@ -887,7 +1041,7 @@ fn admit_declarations_in_publication(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error:#}"))?;
     let cas = authority.cas_store()?;
     let staged_roots = publication
         .as_mut()
@@ -1095,7 +1249,6 @@ fn admit_declarations_in_publication(
         reused_blobs,
         "admitted external content realization"
     );
-    drop(sink);
     drop(_permit);
     drop(guard);
 
@@ -1245,7 +1398,6 @@ mod merge_realization_tests {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn seal_pinned_content_realization(
     declaration: &ExternalContentDeclaration,
     digest: &str,
@@ -1411,7 +1563,6 @@ impl ExternalContentBlobSink for GuardedCasBlobSink<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn seal_pinned_large_realization(
     declaration: &ExternalContentDeclaration,
     digest: &str,
@@ -1624,7 +1775,7 @@ mod consumer_authority_tests {
 
         resolution.root.source_space = ItemSpace::Bundle;
         resolution.root.source_root = ItemSourceRoot::Bundle {
-            name: "standard".into(),
+            name: "knowledge".into(),
         };
         resolution.root.trust_class = TrustClass::TrustedBundle;
         assert!(!is_pinned_project_consumer_resolution(&resolution));
@@ -1667,9 +1818,10 @@ mod consumer_authority_tests {
         assert!(consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).is_err());
         resolution.ancestors.clear();
 
-        // A completed product projection is also generation-scoped even when
-        // every executable source contributor remains bundle-owned. Keep this
-        // fixture a closed, valid projection so the assertion covers the
+        // A completed product projection whose relationship resolved from
+        // project space is generation-scoped even when every executable
+        // source contributor remains bundle-owned. Keep this fixture a
+        // closed, valid projection so the assertion covers the
         // effective-definition identity path rather than mere key presence.
         let selections = serde_json::json!({
             "runtime": {
@@ -1678,6 +1830,7 @@ mod consumer_authority_tests {
                 "relationship_name": "runtime_to_worker",
                 "relationship_ref": "config:fixture/recipe",
                 "relationship_raw_content_digest": "2".repeat(64),
+                "relationship_project_dependent": true,
                 "relationship": {
                     "name": "runtime_to_worker",
                     "producer": {
@@ -1711,7 +1864,7 @@ mod consumer_authority_tests {
                     "recipe_binding": "product_recipe",
                     "product_name": "runtime"
                 },
-                "qualification": null,
+                "qualification": null, "remote_testimony": null,
                 "producer": {
                     "canonical_ref": "graph:fixture/build",
                     "effective_definition_digest": "5".repeat(64),
@@ -1749,6 +1902,30 @@ mod consumer_authority_tests {
             ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject { .. }
         ));
         assert!(consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).is_err());
+        // The same selection with a bundle-owned relationship does not make
+        // the consumer project-dependent: installed-bundle authority under a
+        // pinned generation and projectless alike, so a binding made
+        // projectless authorises the pinned launch.
+        let mut bundle_owned = resolution
+            .composed
+            .derived
+            .get(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
+            .cloned()
+            .unwrap();
+        bundle_owned["runtime"]["relationship_project_dependent"] = serde_json::json!(false);
+        resolution.composed.derived.insert(
+            ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),
+            bundle_owned,
+        );
+        assert!(!is_pinned_project_consumer_resolution(&resolution));
+        let pinned_launch = consumer_authority(&resolution, &generation).unwrap();
+        let projectless =
+            consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).unwrap();
+        assert!(matches!(
+            pinned_launch,
+            ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. }
+        ));
+        assert_eq!(pinned_launch, projectless);
         resolution
             .composed
             .derived
@@ -1762,6 +1939,55 @@ mod consumer_authority_tests {
             Value::Null,
         );
         assert!(consumer_authority(&resolution, &generation).is_err());
+    }
+
+    #[test]
+    fn project_contributor_predicate_covers_root_ancestor_and_referenced_arms() {
+        let bundle = || ResolvedAncestor {
+            requested_id: "fixture/recipe".into(),
+            resolved_ref: "config:fixture/recipe".into(),
+            source_path: "/fixture/.ai/config/fixture/recipe.yaml".into(),
+            source_space: ItemSpace::Bundle,
+            source_root: ItemSourceRoot::Bundle {
+                name: "fixture".into(),
+            },
+            trust_class: TrustClass::TrustedBundle,
+            signer_fingerprint: Some("a".repeat(64)),
+            alias_resolution: None,
+            added_by: ResolutionStepName::PipelineInit,
+            raw_content: String::new(),
+            source_content_digest: "b".repeat(64),
+            raw_content_digest: "c".repeat(64),
+        };
+        let project = || {
+            let mut item = bundle();
+            item.source_space = ItemSpace::Project;
+            item.source_root = ItemSourceRoot::Project;
+            item.trust_class = TrustClass::TrustedProject;
+            item
+        };
+        let resolution = |root: ResolvedAncestor| ResolutionOutput {
+            root,
+            ancestors: Vec::new(),
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: Default::default(),
+            effective_trust_class: TrustClass::TrustedBundle,
+            composed: KindComposedView::identity(serde_json::json!({})),
+        };
+        assert!(!resolution_has_project_contributor(&resolution(bundle())));
+        // Root arm: the relationship itself resolved from project space.
+        assert!(resolution_has_project_contributor(&resolution(project())));
+        // Root arm by source root alone.
+        let mut by_root = bundle();
+        by_root.source_root = ItemSourceRoot::Project;
+        assert!(resolution_has_project_contributor(&resolution(by_root)));
+        let mut with_ancestor = resolution(bundle());
+        with_ancestor.ancestors.push(project());
+        assert!(resolution_has_project_contributor(&with_ancestor));
+        let mut with_reference = resolution(bundle());
+        with_reference.referenced_items.push(project());
+        assert!(resolution_has_project_contributor(&with_reference));
     }
 }
 
@@ -1866,5 +2092,88 @@ mod content_contract_tests {
         );
         contract.large_content.as_mut().unwrap().max_total_bytes = None;
         check(Some(&contract), &combined).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod content_binding_missing_tests {
+    use super::*;
+
+    fn preview() -> ExternalContentValidationPreview {
+        let declaration = |id: &str, status: &str| ExternalContentPinPreview {
+            id: id.to_owned(),
+            expected_digest: Some("e".repeat(64)),
+            observed_digest: Some("e".repeat(64)),
+            binding_digest: None,
+            status: status.to_owned(),
+        };
+        ExternalContentValidationPreview {
+            declarations: vec![
+                declaration("checker-runtime", "missing_binding"),
+                declaration("subject", "ready"),
+                declaration("checker-code", "missing_manifest"),
+            ],
+            ready_for_admission: false,
+        }
+    }
+
+    #[test]
+    fn missing_binding_refusal_names_each_declaration_and_the_cure() {
+        let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::pinned_project(
+            "tool:codex/qualification/consumer-runtime-verifier".to_owned(),
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            None,
+        )
+        .unwrap();
+        let missing = ContentBindingMissing::from_preview(&consumer, &preview());
+        assert_eq!(missing.code(), "content_binding_missing");
+        assert_eq!(
+            missing.project_snapshot_hash.as_deref(),
+            Some("b".repeat(64).as_str())
+        );
+        assert_eq!(
+            missing.effective_consumer_digest.as_deref(),
+            Some("c".repeat(64).as_str())
+        );
+        let message = missing.to_string();
+        assert!(message.contains("checker-runtime (missing_binding)"));
+        assert!(message.contains("checker-code (missing_manifest)"));
+        assert!(!message.contains("subject (ready)"));
+        assert!(message.contains(&format!(
+            "ryeos external-content bindings tool:codex/qualification/consumer-runtime-verifier pinned_project {}",
+            "b".repeat(64)
+        )));
+        assert!(message.contains("ryeos external-content rebind <prior-binding-hash>"));
+
+        // Wrapped in context by any caller, it still reaches the service
+        // boundary as a typed 409 carrying every declaration.
+        let error = anyhow::Error::new(missing).context("qualification preparation");
+        let Some(crate::handler_error::HandlerError::Structured { code, status, body }) =
+            crate::handler_error::extract_handler_error(&error)
+        else {
+            panic!("missing content binding must stay typed");
+        };
+        assert_eq!(code, "content_binding_missing");
+        assert_eq!(status, 409);
+        assert_eq!(body["declarations"].as_array().unwrap().len(), 3);
+        assert_eq!(body["project_snapshot_hash"], "b".repeat(64));
+    }
+
+    #[test]
+    fn installed_bundle_refusal_names_the_installed_inventory() {
+        let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+            "worker:provider/hosted".to_owned(),
+            "a".repeat(64),
+        )
+        .unwrap();
+        let missing = ContentBindingMissing::from_preview(&consumer, &preview());
+        assert!(missing.project_snapshot_hash.is_none());
+        assert!(
+            missing.fix().contains(
+                "ryeos external-content bindings worker:provider/hosted installed_bundle"
+            )
+        );
     }
 }

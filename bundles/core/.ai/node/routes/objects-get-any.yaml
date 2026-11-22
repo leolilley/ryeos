@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-13T20:05:09Z:20da630bc8e744282dfeae959be81d5e9633f47fce5f1ef998fc931b1d77867b:rlVET9gAEMuH4Qkfe4aPG/Bzg29u2in+5PcV+WOS+irik3iZ3iawoc6nCAWmzXfHih0jFtm6blw3eR9D/EasAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: objects/get-any
+path: /objects/get-any
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:objects/get-any

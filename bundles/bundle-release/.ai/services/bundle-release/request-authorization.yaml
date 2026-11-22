@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-19T03:51:20Z:3811be5472e703f25580a2b27b93f50bda34e2c7eb2bb745eba623208fa483ac:VjdO/Tz2DrEhYHOkCiWpA8c7O5S24u3qG++q0df/VBDF6p9I6hNg8ccmrLqLBdUv2CMq/BZq19P2wJ+wR3WkAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-12T19:54:26Z:492e597055b16a74595bc185cb4834336fe2deab1e01f41eff75b1c4ec4977b3:LimH4N6yPRDQPehlre/ZYiWIEjRG3dbSWHMJRwG3bSQH7s9aiXQAz9wRB5tXq3/4apLD9EbAo3jYrpLt/R+HAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: request-authorization
 version: "1.0.0"
 description: Ask the constrained publisher to authorize one exact verified generation for one catalog namespace.
-endpoint: bundle_release.request_authorization
+endpoint: bundle-release.request-authorization
 availability: daemon_only
 required_caps: ["ryeos.execute.service.bundle-release/request-authorization"]
 schema:

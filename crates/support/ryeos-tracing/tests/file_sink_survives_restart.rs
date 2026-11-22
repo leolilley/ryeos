@@ -24,11 +24,16 @@ fn init_node_once(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::Pa
         source_dir: root.join("bundles"),
         trust_files: vec![root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
         node_profile: None,
+        host_class: None,
         substrate_identity: Some(
-            ryeos_node::SubstrateIdentity::new(format!("sha256:{}", "1".repeat(64)), 1, None)
+            ryeos_node::SubstrateIdentity::new(format!("sha256:{}", "1".repeat(64)), 1, None, None)
                 .unwrap(),
         ),
         replace_node_policy_generation: false,
+        policy_carry: Default::default(),
+        replace_substrate_identity: false,
+        confirm_substrate_identity_replacement: false,
+        invalidate_bindings: Vec::new(),
         skip_preflight: true,
     })
     .expect("ryeos init state for tracing test");

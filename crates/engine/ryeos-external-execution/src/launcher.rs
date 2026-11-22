@@ -5,11 +5,13 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::{
-    ExternalGuestInputProjection, GuestMountAccess, MAX_GUEST_INPUTS,
+    EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA, ExternalGuestInputProjection, GuestMountAccess,
+    MAX_GUEST_INPUTS,
 };
 use ryeos_state::external_execution::ExecutionChannelBinding;
 use ryeos_state::external_execution::admission::{
-    AdmittedExternalExecutionProgram, ExternalCandidateProcFilesystem, ExternalDirectSealedInput,
+    AdmittedExternalExecutionProgram, ExternalCandidateProcFilesystem,
+    ExternalCandidateRuntimeRecipe, ExternalDirectSealedInput,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +22,10 @@ pub const LAUNCHER_BOOTSTRAP_FD: u32 = 41;
 pub const LAUNCHER_RUNTIME_FD: u32 = 42;
 pub const LAUNCHER_PRIVATE_PARENT_FD: u32 = 43;
 pub const LAUNCHER_EXECUTABLE_FD: u32 = 44;
+/// The sealed execution and expiry deadlines the supervisor derived on its own
+/// clock, and the pinned clock they are valid on.
+pub const LAUNCHER_DEADLINE_BOUND_FD: u32 = 45;
+pub const LAUNCHER_DEADLINE_CLOCK_FD: u32 = 46;
 pub const LAUNCHER_RUNTIME_MOUNT_FD_BASE: u32 = 64;
 pub const MAX_LAUNCHER_RUNTIME_MOUNTS: usize = MAX_GUEST_INPUTS;
 pub const MAX_LAUNCHER_BOOTSTRAP_BYTES: usize = 512 * 1024;
@@ -35,6 +41,9 @@ pub struct ExternalCandidateRuntimeMountSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalCandidateLauncherSpec {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_limits:
+        Option<ryeos_state::external_execution::admission::ExternalNativeProcessLimits>,
     pub schema: u32,
     pub binding: ExecutionChannelBinding,
     pub candidate_program: AdmittedExternalExecutionProgram,
@@ -65,6 +74,7 @@ where
 }
 
 struct LauncherCommandFields {
+    target_limits: Option<ryeos_state::external_execution::admission::ExternalNativeProcessLimits>,
     executable: String,
     argv0: String,
     arguments: Vec<String>,
@@ -77,23 +87,32 @@ struct LauncherCommandFields {
     stdin: Option<ExternalDirectSealedInput>,
 }
 
+fn session_command_fields(
+    recipe: &ExternalCandidateRuntimeRecipe,
+) -> Result<LauncherCommandFields> {
+    Ok(LauncherCommandFields {
+        target_limits: None,
+        executable: recipe.namespace_executable()?,
+        argv0: recipe.argv0.clone(),
+        arguments: recipe.arguments.clone(),
+        cwd: recipe.cwd.clone(),
+        max_stdout_bytes: recipe.max_stdout_bytes,
+        max_stderr_bytes: recipe.max_stderr_bytes,
+        proc_filesystem: recipe.proc_filesystem,
+        contain_process_group: recipe.contain_process_group,
+        nested_sandbox: recipe.nested_sandbox,
+        stdin: None,
+    })
+}
+
 fn command_fields(program: &AdmittedExternalExecutionProgram) -> Result<LauncherCommandFields> {
     program.validate()?;
     Ok(match program {
         AdmittedExternalExecutionProgram::StructuredSession(program) => {
-            let recipe = &program.requirement.runtime_recipe;
-            LauncherCommandFields {
-                executable: recipe.namespace_executable()?,
-                argv0: recipe.argv0.clone(),
-                arguments: recipe.arguments.clone(),
-                cwd: recipe.cwd.clone(),
-                max_stdout_bytes: recipe.max_stdout_bytes,
-                max_stderr_bytes: recipe.max_stderr_bytes,
-                proc_filesystem: recipe.proc_filesystem,
-                contain_process_group: recipe.contain_process_group,
-                nested_sandbox: recipe.nested_sandbox,
-                stdin: None,
-            }
+            session_command_fields(&program.requirement.runtime_recipe)?
+        }
+        AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => {
+            session_command_fields(&program.requirement.runtime_recipe)?
         }
         AdmittedExternalExecutionProgram::DirectCommand(program) => {
             let projection = program.projection();
@@ -107,6 +126,7 @@ fn command_fields(program: &AdmittedExternalExecutionProgram) -> Result<Launcher
             // This finite mechanism is required, not inferred from the controller.
             let ryeos_state::external_execution::admission::ExternalDirectNativeRequirements::LinuxIsolatedReadOnly { .. } = &projection.native;
             LauncherCommandFields {
+                target_limits: projection.target_limits,
                 executable: program.namespace_executable()?,
                 argv0: projection.argv0.clone(),
                 arguments: projection.arguments.clone(),
@@ -123,6 +143,19 @@ fn command_fields(program: &AdmittedExternalExecutionProgram) -> Result<Launcher
 }
 
 impl ExternalCandidateLauncherSpec {
+    /// The fixture comes only from the exact Q program committed by the
+    /// channel. There is no independently mutable launcher fixture field.
+    pub(crate) fn qualification_fixture(
+        &self,
+    ) -> Option<&ryeos_external_execution_contract::qualification_fixture::QFixtureContract> {
+        match &self.candidate_program {
+            AdmittedExternalExecutionProgram::QualificationStructuredSession(program) => {
+                program.fixture()
+            }
+            _ => None,
+        }
+    }
+
     /// Compile the exact profile-owned recipe after channel attachment. The
     /// runtime tree itself is supplied independently as one exact descriptor;
     /// this conversion cannot select an ambient executable or extra mount.
@@ -164,7 +197,7 @@ impl ExternalCandidateLauncherSpec {
         }
         let command = command_fields(program)?;
         let spec = Self {
-            schema: 3,
+            schema: EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
             binding,
             candidate_program: program.clone(),
             guest_inputs: guest_inputs.clone(),
@@ -188,13 +221,17 @@ impl ExternalCandidateLauncherSpec {
             contain_process_group: command.contain_process_group,
             nested_sandbox: command.nested_sandbox,
             stdin: command.stdin,
+            target_limits: command.target_limits,
         };
         spec.validate()?;
         Ok(spec)
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 3, "unsupported external launcher schema");
+        ensure!(
+            self.schema == EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
+            "unsupported external launcher schema"
+        );
         self.binding.validate()?;
         ensure!(
             self.binding.execution_mode == self.candidate_program.execution_mode(),
@@ -246,7 +283,8 @@ impl ExternalCandidateLauncherSpec {
                 && self.proc_filesystem == command.proc_filesystem
                 && self.contain_process_group == command.contain_process_group
                 && self.nested_sandbox == command.nested_sandbox
-                && self.stdin == command.stdin,
+                && self.stdin == command.stdin
+                && self.target_limits == command.target_limits,
             "external launcher specification changed its admitted command projection"
         );
         ensure!(
@@ -312,6 +350,13 @@ impl ExternalCandidateLauncherSpec {
                 "external runtime mount layer or access is invalid"
             );
         }
+        validate_qualification_fixture_mounts(
+            self.binding.execution_mode,
+            self.qualification_fixture(),
+            self.runtime_mounts
+                .iter()
+                .map(|mount| Path::new(&mount.destination)),
+        )?;
         ensure!(
             lillux::canonical_json(&serde_json::to_value(self)?)?.len()
                 <= MAX_LAUNCHER_BOOTSTRAP_BYTES,
@@ -343,6 +388,33 @@ impl ExternalCandidateLauncherSpec {
     }
 }
 
+/// Check the derived Q mount against every admitted namespace destination
+/// before any native directory is created. Path components, not string
+/// prefixes, define collisions; the fixed fixture never overlays /workspace.
+pub(crate) fn validate_qualification_fixture_mounts<'a>(
+    mode: ryeos_external_execution_contract::ExternalExecutionMode,
+    fixture: Option<&ryeos_external_execution_contract::qualification_fixture::QFixtureContract>,
+    destinations: impl IntoIterator<Item = &'a Path>,
+) -> Result<()> {
+    let Some(fixture) = fixture else {
+        return Ok(());
+    };
+    ensure!(
+        mode == ryeos_external_execution_contract::ExternalExecutionMode::QualificationStructuredSession {},
+        "only a Q program may admit its finite fixture mount"
+    );
+    fixture.validate()?;
+    let target = Path::new(&fixture.mount_destination);
+    for destination in destinations {
+        require_absolute_normalized(destination, "fixture peer mount")?;
+        ensure!(
+            !destination.starts_with(target) && !target.starts_with(destination),
+            "Q fixture mount overlaps an admitted mount"
+        );
+    }
+    Ok(())
+}
+
 fn require_absolute_normalized(path: &Path, label: &str) -> Result<()> {
     ensure!(
         path.is_absolute(),
@@ -359,10 +431,59 @@ fn require_absolute_normalized(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Exact immutable executable capture retained with the launcher request.
+/// A digest supplied by a caller cannot construct this custody value. It
+/// measures bytes and binds a request; it does not itself prove exec occurred.
+pub struct MeasuredLauncherExecutable {
+    authority: lillux::InheritedDescriptorAuthority,
+    observation: lillux::OpenRegularFileObservation,
+    digest: String,
+}
+
+impl MeasuredLauncherExecutable {
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(crate) fn require_request(
+        &self,
+        request: &lillux::SubprocessRequest,
+        expected_digest: &str,
+    ) -> Result<()> {
+        self.authority.require_write_sealed_executable()?;
+        ensure!(
+            self.digest == expected_digest
+                && self
+                    .authority
+                    .digest_regular_file_stable_exact(&self.observation)?
+                    == self.digest,
+            "launcher executable differs from exact measured artifact"
+        );
+        self.authority
+            .require_bound_as_subprocess_executable(request, LAUNCHER_EXECUTABLE_FD)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "launcher request lost its exact measured executable descriptor: {error}"
+                )
+            })?;
+        Ok(())
+    }
+}
+
 pub struct PreparedExternalCandidateLauncherRequest {
+    pub(crate) measured_launcher: MeasuredLauncherExecutable,
     pub request: lillux::SubprocessRequest,
     pub bootstrap_digest: String,
     pub authority: ryeos_state::PinnedStateAuthority,
+    /// Exact already validated program retained for live supervisor joins.
+    pub candidate_program: AdmittedExternalExecutionProgram,
+}
+
+impl PreparedExternalCandidateLauncherRequest {
+    /// Digest of the exact sealed descriptor selected for this request.
+    pub fn measured_launcher_digest(&self) -> &str {
+        self.measured_launcher.digest()
+    }
 }
 
 /// Bind exact node-owned descriptors into a credential-free dedicated
@@ -375,9 +496,37 @@ pub fn prepare_launcher_subprocess_request(
     workspace_outputs: Option<&lillux::InheritedDescriptorAuthority>,
     runtime_mounts: &[lillux::InheritedDescriptorAuthority],
     spec: &ExternalCandidateLauncherSpec,
-    timeout_seconds: f64,
+    window: &ryeos_state::external_execution::guest_window::GuestChannelWindow,
 ) -> Result<PreparedExternalCandidateLauncherRequest> {
     spec.validate()?;
+    // Imported guest artifacts are pinned regular files, not memfds. Capture
+    // the exact stable source into a sealed executable before binding it.
+    launcher.require_owned_executable()?;
+    let source_observation = launcher.regular_file_observation()?;
+    ensure!(source_observation.size() > 0 && source_observation.size()
+        <= ryeos_external_execution_contract::staging_package::MAX_GUEST_STAGING_FRAMED_BYTES,
+        "launcher source exceeds finite guest package ceiling");
+    let digest = launcher.digest_regular_file_stable_exact(&source_observation)?;
+    let mut reader = launcher.stable_regular_reader_exact(
+        source_observation.size(),
+        &digest,
+        ryeos_external_execution_contract::staging_package::MAX_GUEST_STAGING_FRAMED_BYTES,
+    )?;
+    let captured = lillux::sealed_executable_memfd_from_reader(
+        c"measured-external-launcher",
+        &mut reader,
+        source_observation.size(),
+        &digest,
+        ryeos_external_execution_contract::staging_package::MAX_GUEST_STAGING_FRAMED_BYTES,
+    )
+    .map_err(anyhow::Error::msg)?;
+    reader.finish()?;
+    captured.require_write_sealed_executable()?;
+    let measured_launcher = MeasuredLauncherExecutable {
+        observation: captured.regular_file_observation()?,
+        digest,
+        authority: captured,
+    };
     ensure!(
         runtime_mounts.len() == spec.runtime_mounts.len(),
         "external launcher runtime mount authority count changed"
@@ -402,10 +551,19 @@ pub fn prepare_launcher_subprocess_request(
         }
         _ => anyhow::bail!("external launcher workspace-output authority presence changed"),
     }
+    let timeout_seconds = window.expiry_remaining().as_secs_f64();
     ensure!(
-        timeout_seconds.is_finite() && timeout_seconds > 0.0,
-        "external launcher timeout is invalid"
+        timeout_seconds.is_finite() && timeout_seconds > 0.0 && !window.execution_elapsed(),
+        "external launcher window has elapsed"
     );
+    let (execution_deadline, expiry_deadline) = window.monotonic_pair();
+    let (deadline_bound, deadline_clock) =
+        lillux::time::OriginalLocalDeadlineHandoff::from_original(
+            execution_deadline,
+            expiry_deadline,
+        )
+        .map_err(anyhow::Error::msg)?
+        .into_authorities();
     let bytes = spec.canonical_bytes()?;
     let bootstrap_digest = lillux::sha256_hex(&bytes);
     let bootstrap = lillux::sealed_memfd(c"ryeos-external-candidate-bootstrap", &bytes)
@@ -427,7 +585,8 @@ pub fn prepare_launcher_subprocess_request(
         inherited_fd_mappings: vec![],
         supervised_status: None,
     };
-    launcher
+    measured_launcher
+        .authority
         .bind_as_subprocess_executable(&mut request, LAUNCHER_EXECUTABLE_FD)
         .map_err(anyhow::Error::msg)?;
     bootstrap
@@ -438,6 +597,12 @@ pub fn prepare_launcher_subprocess_request(
         .map_err(anyhow::Error::msg)?;
     private_parent
         .bind_to_subprocess_request(&mut request, LAUNCHER_PRIVATE_PARENT_FD)
+        .map_err(anyhow::Error::msg)?;
+    deadline_bound
+        .bind_to_subprocess_request(&mut request, LAUNCHER_DEADLINE_BOUND_FD)
+        .map_err(anyhow::Error::msg)?;
+    deadline_clock
+        .bind_to_subprocess_request(&mut request, LAUNCHER_DEADLINE_CLOCK_FD)
         .map_err(anyhow::Error::msg)?;
     if let Some(workspace_outputs) = workspace_outputs {
         workspace_outputs.retain_for_child(&mut request.inherited_fds);
@@ -450,10 +615,13 @@ pub fn prepare_launcher_subprocess_request(
             .bind_to_subprocess_request(&mut request, target)
             .map_err(anyhow::Error::msg)?;
     }
+    measured_launcher.require_request(&request, measured_launcher.digest())?;
     Ok(PreparedExternalCandidateLauncherRequest {
+        measured_launcher,
         request,
         bootstrap_digest,
         authority,
+        candidate_program: spec.candidate_program.clone(),
     })
 }
 
@@ -468,7 +636,22 @@ pub unsafe fn prepare_from_inherited_bootstrap() -> Result<(
     ryeos_state::PinnedStateAuthority,
     NativeExternalCandidate,
     NativeCandidateOutput,
+    ryeos_state::external_execution::guest_window::GuestChannelWindow,
 )> {
+    // The supervisor derived these deadlines on this host's clock; nothing in
+    // the launcher compares a binding's absolute times with a wall clock.
+    let deadlines = unsafe {
+        lillux::time::AdoptedOriginalLocalDeadlines::take_inherited(
+            LAUNCHER_DEADLINE_BOUND_FD,
+            LAUNCHER_DEADLINE_CLOCK_FD,
+        )
+    }
+    .map_err(anyhow::Error::msg)?;
+    let window =
+        ryeos_state::external_execution::guest_window::GuestChannelWindow::from_handed_down(
+            deadlines.service_deadline(),
+            deadlines.cleanup_deadline(),
+        )?;
     let bytes = lillux::read_sealed_inherited_descriptor(
         LAUNCHER_BOOTSTRAP_FD,
         MAX_LAUNCHER_BOOTSTRAP_BYTES,
@@ -507,11 +690,12 @@ pub unsafe fn prepare_from_inherited_bootstrap() -> Result<(
         &authority,
         &private_parent,
         &mount_authorities,
+        &window,
     )?;
     // The registered mount owners intentionally remain live until preparation
     // has cloned them into the held native sandbox process.
     drop(mount_authorities);
-    Ok((spec, authority, candidate, output))
+    Ok((spec, authority, candidate, output, window))
 }
 
 #[cfg(test)]
@@ -522,6 +706,69 @@ mod tests {
         AdmittedExternalCandidateProgram, ExternalCandidateRequirement,
         ExternalCandidateRuntimeRecipe, MAX_EXTERNAL_RUNTIME_RECIPE_BYTES, PROTOCOL,
     };
+
+    #[test]
+    fn fixture_mount_requires_q_mode_and_disjoint_normalized_destinations() {
+        use ryeos_external_execution_contract::ExternalExecutionMode;
+        use ryeos_external_execution_contract::qualification_fixture::{
+            Q_FIXTURE_MOUNT_DESTINATION, QFixtureContract,
+        };
+        let fixture = QFixtureContract {
+            schema: 1,
+            mount_destination: Q_FIXTURE_MOUNT_DESTINATION.into(),
+            leaf: "candidate.txt".into(),
+            initial_content_b64: String::new(),
+            initial_blob_hash: lillux::sha256_hex(b""),
+            max_bytes: 65536,
+        };
+        let q = ExternalExecutionMode::QualificationStructuredSession {};
+        for destination in [
+            "/",
+            "/ryeos",
+            Q_FIXTURE_MOUNT_DESTINATION,
+            "/ryeos/qualification-fixture/child",
+            "/ryeos/../runtime",
+        ] {
+            assert!(
+                validate_qualification_fixture_mounts(q, Some(&fixture), [Path::new(destination)])
+                    .is_err(),
+                "{destination}"
+            );
+        }
+        validate_qualification_fixture_mounts(
+            q,
+            Some(&fixture),
+            [
+                Path::new("/workspace"),
+                Path::new("/runtime"),
+                Path::new("/ryeos/qualification-fixture-other"),
+            ],
+        )
+        .unwrap();
+        for mode in [
+            ExternalExecutionMode::StructuredSession {},
+            ExternalExecutionMode::DirectCommand {
+                stdout_max_bytes: 1,
+                stderr_max_bytes: 1,
+            },
+        ] {
+            assert!(
+                validate_qualification_fixture_mounts(
+                    mode,
+                    Some(&fixture),
+                    [Path::new("/runtime")]
+                )
+                .is_err()
+            );
+            validate_qualification_fixture_mounts(mode, None, [Path::new("/runtime")]).unwrap();
+        }
+        let mut substituted = fixture;
+        substituted.mount_destination = "/workspace".into();
+        assert!(
+            validate_qualification_fixture_mounts(q, Some(&substituted), [Path::new("/runtime")])
+                .is_err()
+        );
+    }
 
     fn program() -> AdmittedExternalCandidateProgram {
         let runtime_recipe = ExternalCandidateRuntimeRecipe {
@@ -540,7 +787,7 @@ mod tests {
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         let requirement = ExternalCandidateRequirement {
-            schema: 6,
+            schema: 7,
             required_lifecycle_capabilities: Default::default(),
             protocol: PROTOCOL.into(),
             connector_protocol:
@@ -549,6 +796,7 @@ mod tests {
             provider_declaration_id: "codex-hosted".into(),
             provider_configuration_destination: "environments.toml".into(),
             runtime_product_declaration_id: "runtime".into(),
+            runtime_authority: ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct,
             runtime_recipe,
         };
         let qualification_use =
@@ -561,10 +809,16 @@ mod tests {
             qualification_use,
             runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
             runtime_manifest_hash: "e".repeat(64),
-            runtime_witness_hash: "1".repeat(64),
+            runtime_source: ryeos_state::external_execution::admission::ExternalCandidateRuntimeSource::CapturedProduct { witness_hash: "1".repeat(64) },
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "3".repeat(64),
             runtime_recipe_digest,
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
         }
     }
 
@@ -599,6 +853,7 @@ mod tests {
 
     fn guest_inputs() -> ExternalGuestInputProjection {
         ExternalGuestInputProjection {
+            workspace_view: ryeos_external_execution_contract::GuestWorkspaceView::FullSnapshot,
             schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
             base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
                 descriptor: 55,
@@ -634,7 +889,8 @@ mod tests {
 
     fn spec() -> ExternalCandidateLauncherSpec {
         ExternalCandidateLauncherSpec {
-            schema: 3,
+            target_limits: None,
+            schema: EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA,
             binding: binding(),
             candidate_program: program().into(),
             guest_inputs: guest_inputs(),
@@ -680,10 +936,10 @@ mod tests {
                 "realization_id":"runtime","realization_manifest_hash":binding.supervisor_runtime_hash,
                 "realization_mount_root":"execution_runtime","realization_mount":"runtime","relative_path":"bin/evaluate",
                 "execution_path":"/ryeos/realizations/runtime/bin/evaluate"},
-            "projection":{"argv0":"/ryeos/realizations/runtime/bin/evaluate","arguments":["--check"],"cwd":"/workspace",
+            "projection":{"workspace_view":"full_snapshot","argv0":"/ryeos/realizations/runtime/bin/evaluate","arguments":["--check"],"cwd":"/workspace",
                 "environment":inputs.environment,"stdin":ExternalDirectSealedInput::from_bytes(b"one shot\n").unwrap(),
                 "endpoint_binding_id":"farm-direct","endpoint_binding_digest":binding.execution_binding_hash,
-                "execution_mode":binding.execution_mode,"timeout_seconds":3600,
+                "execution_mode":binding.execution_mode,"timeout_seconds":3600,"target_limits":null,
                 "native":{"kind":"linux_isolated_read_only","required_arch":"x86_64"}},
             "guest_input_identity":inputs.identity_digest().unwrap()
         })).unwrap();
@@ -697,6 +953,22 @@ mod tests {
             b"one shot\n"
         );
         exact.validate().unwrap();
+        let mut unsupported_schema = exact.clone();
+        unsupported_schema.schema = 3;
+        assert!(unsupported_schema.validate().is_err());
+        let mut changed_limits = exact.clone();
+        changed_limits.target_limits = Some(
+            ryeos_state::external_execution::admission::ExternalNativeProcessLimits {
+                max_open_files: Some(64),
+                max_address_space_bytes: None,
+                max_cpu_seconds: Some(3),
+                max_processes: None,
+                deny_process_creation: true,
+            },
+        );
+        // An independently changed launcher cannot add restrictions absent
+        // from the exact admitted program.
+        assert!(changed_limits.validate().is_err());
         // A structurally exact capsule is not evidence that this guest can
         // execute its architecture. Native validation is independently required
         // before the held launcher can produce Ready.
@@ -1007,7 +1279,7 @@ mod tests {
         let mount_path = temporary.path().join("mount");
         std::fs::create_dir(&private_path).unwrap();
         std::fs::create_dir(&mount_path).unwrap();
-        let state = ryeos_state::StateDb::open(
+        let state = ryeos_state::test_support::TestState::open(
             &runtime_path,
             std::sync::Arc::new(ryeos_state::TrustStore::new()),
         )
@@ -1056,14 +1328,14 @@ mod tests {
                 admitted_launch_capsule_hash: "8".repeat(64),
             },
         );
-        let prepared = prepare_launcher_subprocess_request(
+        let mut prepared = prepare_launcher_subprocess_request(
             &launcher,
             &runtime,
             &private,
             Some(&workspace_output),
             &[mount],
             &launch_spec,
-            30.0,
+            &ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&launch_spec.binding).unwrap(),
         )
         .unwrap();
         assert_eq!(prepared.request.cmd, "/proc/self/fd/44");
@@ -1079,7 +1351,62 @@ mod tests {
                 .unwrap(),
             workspace_output.inherited_descriptor().unwrap()
         );
-        assert_eq!(prepared.request.inherited_fd_mappings.len(), 5);
+        assert_eq!(prepared.request.inherited_fd_mappings.len(), 7);
         assert_eq!(prepared.bootstrap_digest, launch_spec.digest().unwrap());
+        let expected_launcher_digest = lillux::sha256_hex(b"#!/bin/sh\nexit 0\n");
+        assert_eq!(
+            prepared.measured_launcher_digest(),
+            expected_launcher_digest
+        );
+        assert!(launcher.require_write_sealed_executable().is_err());
+        prepared
+            .measured_launcher
+            .authority
+            .require_write_sealed_executable()
+            .unwrap();
+        // Replacing the imported file cannot replace the captured executable.
+        std::fs::write(&launcher_path, b"changed source").unwrap();
+        prepared
+            .measured_launcher
+            .require_request(&prepared.request, &expected_launcher_digest)
+            .unwrap();
+        assert!(
+            prepared
+                .measured_launcher
+                .require_request(&prepared.request, &"f".repeat(64))
+                .is_err()
+        );
+        let original_cmd =
+            std::mem::replace(&mut prepared.request.cmd, "/different-launcher".to_owned());
+        assert!(
+            prepared
+                .measured_launcher
+                .require_request(&prepared.request, &expected_launcher_digest)
+                .is_err()
+        );
+        prepared.request.cmd = original_cmd;
+        prepared
+            .request
+            .inherited_fd_mappings
+            .retain(|mapping| mapping.target_descriptor() != LAUNCHER_EXECUTABLE_FD);
+        assert!(
+            prepared
+                .measured_launcher
+                .require_request(&prepared.request, &expected_launcher_digest)
+                .is_err()
+        );
+        let other =
+            lillux::sealed_executable_memfd(c"substituted-launcher", b"#!/bin/sh\nexit 0\n")
+                .unwrap();
+        other
+            .bind_as_subprocess_executable(&mut prepared.request, LAUNCHER_EXECUTABLE_FD)
+            .unwrap();
+        // Identical bytes in a second descriptor are not the same custody.
+        assert!(
+            prepared
+                .measured_launcher
+                .require_request(&prepared.request, &expected_launcher_digest)
+                .is_err()
+        );
     }
 }

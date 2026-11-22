@@ -179,11 +179,14 @@ fn bind_argv_with_command_and_contract_and_overlay(
             .filter(|required| !required.is_empty())
             .unwrap_or_else(|| "required positional argument".to_string());
         if forms.len() == 1 {
-            return Err(format!("command {:?} requires {required}", command.tokens));
+            return Err(format!(
+                "command {:?} requires {required}",
+                command.tokens.join(" ")
+            ));
         }
         return Err(format!(
             "command {:?} requires one of its positional forms",
-            command.tokens
+            command.tokens.join(" ")
         ));
     }
 
@@ -245,7 +248,7 @@ fn bind_argv_with_command_and_contract_and_overlay(
     };
     Err(format!(
         "positional arguments {positional_detail} do not match any positional form for alias {:?}",
-        command.tokens
+        command.tokens.join(" ")
     ))
 }
 
@@ -451,7 +454,7 @@ fn reject_undeclared_positionals(
     }
     Err(format!(
         "command {:?} does not declare positional forms but received {positionals} positional argument(s)",
-        command.tokens
+        command.tokens.join(" ")
     ))
 }
 
@@ -589,10 +592,10 @@ mod tests {
 
     #[test]
     fn positional_only() {
-        let result = bind_argv(&["./bundles/standard".into()]);
+        let result = bind_argv(&["./bundles/directive".into()]);
         let args = result["_args"].as_array().unwrap();
         assert_eq!(args.len(), 1);
-        assert_eq!(args[0], "./bundles/standard");
+        assert_eq!(args[0], "./bundles/directive");
     }
 
     #[test]
@@ -650,14 +653,14 @@ mod tests {
         let result = bind_argv(&[
             "--seed".into(),
             "119".into(),
-            "./bundles/standard".into(),
+            "./bundles/directive".into(),
             "--force".into(),
         ]);
         assert_eq!(result["seed"], "119");
         assert_eq!(result["force"], true);
         let args = result["_args"].as_array().unwrap();
         assert_eq!(args.len(), 1);
-        assert_eq!(args[0], "./bundles/standard");
+        assert_eq!(args[0], "./bundles/directive");
     }
 
     #[test]
@@ -800,7 +803,7 @@ mod tests {
         );
         command.defaults.insert(
             "surface".into(),
-            serde_json::Value::String("surface:ryeos/ui/atlas".into()),
+            serde_json::Value::String("surface:ryeos/ui/base".into()),
         );
 
         let result =

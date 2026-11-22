@@ -12,6 +12,11 @@ ryeos-state = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+ryeos-node-runtime = { workspace = true }
 ryeos-app = { workspace = true }
+ryeos-state = { workspace = true, features = ["test-support"] }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

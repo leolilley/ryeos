@@ -66,13 +66,13 @@ class ComposedSelectionIdentityTests(unittest.TestCase):
                     "declaration_id": "distribution",
                     "witness_hash": self.distribution_witness,
                     "witness_source": {"kind": "local_capture"},
-                    "qualification_hash": None,
+                    "qualification_hash": None, "remote_testimony": None,
                 },
                 {
                     "declaration_id": "runtime",
                     "witness_hash": self.runtime_witness,
                     "witness_source": {"kind": "local_capture"},
-                    "qualification_hash": self.qualification,
+                    "qualification_hash": self.qualification, "remote_testimony": None,
                 },
             ],
             # Shape-only samples: these do not attest product authority or

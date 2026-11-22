@@ -3,7 +3,7 @@ use std::{fs, sync::Arc};
 use anyhow::{Result, ensure};
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
-use ryeos_engine::trust::{TrustStore, TrustedSigner};
+use ryeos_engine::trust::TrustedSigner;
 use ryeos_state::external_content::products::composition::ProductRelationships;
 use ryeos_state::external_content::products::qualification::{
     ProductQualificationConsumerDefinitionIdentity, ProductQualificationConsumerExecutionContext,
@@ -21,9 +21,9 @@ use super::{
 #[test]
 fn signed_codex_consumer_definitions_share_one_checked_bundle_generation() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut state = crate::state::test_support::build(root.path())?;
+    let (_state_owner, mut state) = crate::state::test_support::build(root.path())?;
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
     let test_bundle = root.path().join("test-bundle");
     let policy_path = test_bundle.join(".ai/config/test/consumer-qualification.yaml");
@@ -32,11 +32,10 @@ fn signed_codex_consumer_definitions_share_one_checked_bundle_generation() -> Re
     let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
-  minimum_verifier_process_settlement: scope_empty
   verifier_parameters: {}
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
@@ -49,30 +48,33 @@ product_qualification_policy:
         &policy_path,
         lillux::signature::sign_content(policy, &signer, "#", None),
     )?;
-    let roots = vec![core.clone(), standard.clone(), codex, test_bundle];
-    let mut trust = ryeos_engine::test_support::live_trust_store();
+    let mut roots = vec![core.clone()];
+    roots.extend(workflow.iter().cloned());
+    roots.push(codex);
+    roots.push(test_bundle);
     let verifier = signer.verifying_key();
-    trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
+    let trust = crate::state::test_support::live_trust_store_with(vec![TrustedSigner {
         fingerprint: lillux::signature::compute_fingerprint(&verifier),
         verifying_key: verifier,
         label: Some("consumer qualification fixture".into()),
-    }]));
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )?;
+    }]);
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
     let dispatcher = ryeos_engine::parsers::ParserDispatcher::new(parsers, Arc::clone(&handlers));
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)?;
-    let registered = ["core", "standard", "codex", "test"]
+    let registered = ["core", "knowledge", "directive", "graph", "codex", "test"]
         .into_iter()
         .zip(roots.iter().cloned())
         .map(
             |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: name.to_owned(),
                 canonical_root,
             },
@@ -317,10 +319,10 @@ product_qualification_policy:
 #[test]
 fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut state = crate::state::test_support::build(root.path())?;
-    state.node_policy = Arc::new(crate::node_policy::NodePolicySnapshot::from_test_records(
-        vec![Arc::new(
-            crate::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+    let (_state_owner, mut state) = crate::state::test_support::build(root.path())?;
+    state.node_policy = Arc::new(
+        ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
+            ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
                 schema: 1,
                 max_roots: 256,
                 max_objects: 32_768,
@@ -333,8 +335,8 @@ fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<(
                 max_links_per_object: 100_000,
                 local_verification: None,
             },
-        )],
-    ));
+        )]),
+    );
     let authority = state.state_store.pinned_state_authority()?;
     let cas = authority.cas_store()?;
     let blob = cas.store_blob(b"tool fixture")?;
@@ -353,7 +355,7 @@ fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<(
     let manifest_hash = cas.store_object(&serde_json::to_value(&manifest)?)?;
 
     let core = ryeos_engine::test_support::core_bundle_root();
-    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
     let test_bundle = root.path().join("test-bundle");
     let signer = SigningKey::from_bytes(&[7u8; 32]);
@@ -362,7 +364,7 @@ fn signed_consumer_environment_requires_its_exact_retained_binding() -> Result<(
     let environment = format!(
         r#"category: test
 version: "1.0.0"
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 external_product_slots: []
 worker_ref: worker:codex/external-hosted-authoring
 external_content:
@@ -394,11 +396,10 @@ workload_client: null
     let policy = r#"category: test
 version: "1.0.0"
 product_qualification_policy:
-  schema: ryeos.product_qualification_policy.v2
+  schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
-  minimum_verifier_process_settlement: scope_empty
   verifier_parameters: {}
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
@@ -411,30 +412,33 @@ product_qualification_policy:
         &policy_path,
         lillux::signature::sign_content(policy, &signer, "#", None),
     )?;
-    let roots = vec![core.clone(), standard.clone(), codex, test_bundle];
-    let mut trust = ryeos_engine::test_support::live_trust_store();
+    let mut roots = vec![core.clone()];
+    roots.extend(workflow.iter().cloned());
+    roots.push(codex);
+    roots.push(test_bundle);
     let verifier = signer.verifying_key();
-    trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
+    let trust = crate::state::test_support::live_trust_store_with(vec![TrustedSigner {
         fingerprint: lillux::signature::compute_fingerprint(&verifier),
         verifying_key: verifier,
         label: Some("consumer environment fixture".into()),
-    }]));
-    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
-        &[
-            core.join(".ai/node/engine/kinds"),
-            standard.join(".ai/node/engine/kinds"),
-        ],
-        &trust,
-    )?;
+    }]);
+    let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
+    kind_roots.extend(
+        workflow
+            .iter()
+            .map(|root| root.join(".ai/node/engine/kinds")),
+    );
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&kind_roots, &trust)?;
     let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
     let dispatcher = ryeos_engine::parsers::ParserDispatcher::new(parsers, Arc::clone(&handlers));
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)?;
-    let registered = ["core", "standard", "codex", "test"]
+    let registered = ["core", "knowledge", "directive", "graph", "codex", "test"]
         .into_iter()
         .zip(roots.iter().cloned())
         .map(
             |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: name.to_owned(),
                 canonical_root,
             },
@@ -475,8 +479,9 @@ product_qualification_policy:
             &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         )
     })?;
-    let operator = crate::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
-    crate::identity::write_authorized_key_toml(
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)?;
+    ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),
         &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
@@ -484,8 +489,9 @@ product_qualification_policy:
         "fixture operator",
         "fixture",
         "2026-01-01T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
-        crate::identity::WildcardPolicy::Reject,
+        ryeos_node_runtime::identity::WildcardPolicy::Reject,
     )?;
     let grant = crate::operator_authority::admitted_operator_authority_digest(
         &state,

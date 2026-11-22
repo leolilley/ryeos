@@ -1,14 +1,54 @@
-# ryeos:signed:2026-09-28T01:25:00Z:5962a4ff18776601dab4ec34e5fc1e1300d26b3200ab1ad3d467eb20c81aaf3b:AbfQeaIk+EGL8pg1vqmSUzr4DYXBYGqfHZBqR/jgdRFmfskvYQooRBnCvHWZYfa8t+59JKYqFug1yvJ6JhlpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T00:28:11Z:034f5224ae9273386cfe4de97a8bbc3c5f9807de658efb5169e47c8a2d1921c4:HK0Vx0hY4RzfdgxwNO9SGrCN++aXc5DdoGf3RNQCZTpnVlb4HmSqMqPCi68EMSFtOB+8/eCJOgJ6qLoqhny8Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
-  - central-auth
   - core
 policies:
   bundle_publication:
     schema: 2
     # Publication is disabled until the operator installs measured release authority.
     catalogs: []
+
+  # Explicit local capacity issuance; admission/signing and operation proof remain open.
+  # The account is root/node-bound and cannot be reminted by policy refresh.
+  native_capacity:
+    schema: 7
+    issuance_nonce: "33c88bbc57daa7c765d0fc460459d25a"
+    allowance:
+      # Sixteen finite 64-MiB incarnations plus 72-KiB bounded control/redo reserve.
+      storage_bytes: 1073815552
+      host_control_storage_bytes: 50331648
+      allocator_steps: 320000000
+      connection_tickets: 1024
+      cleanup_steps: 25600000
+    incarnation:
+      units:
+        storage_bytes: 67108864
+        host_control_storage_bytes: 3145728
+        allocator_steps: 20000000
+        connection_tickets: 64
+        cleanup_steps: 1600000
+      maximum_occupancy_ms: 7200000
+      cleanup_occupancy_ms: 120000
+      rollover_drain_margin_ms: 90000
+      # Spent work that begins the same planned rollover: when service work
+      # reaches allocator_steps - cleanup_steps - this, the node stops orderly.
+      rollover_work_margin_steps: 2000000
+      # Finite syscall-attempt allowance; no cleanup-success guarantee.
+      host_release_steps: 64
+      # Explicit share of cleanup_steps; never duplicates the paid envelope.
+      outside_cleanup_steps: 1310720
+    # Burned durably per recovery attempt; never native allocation credit.
+    recovery:
+      maximum_attempts: 32
+      work_per_attempt: 65536
+      control_storage_bytes: 262144
+      maximum_duration_ms: 120000
+    # Each epoch is a fresh allowance under the same issuance; nothing is refunded.
+    renewal:
+      at_orderly_rollover: false
+      operator_reissue: false
+      maximum_epochs: null
 
   accounting:
     schema: 2
@@ -78,7 +118,6 @@ policies:
       - ryeos.register.command.root.stop
       - ryeos.register.command.root.system
     bundle_source_caps:
-      central-auth: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler
@@ -121,32 +160,73 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
-  maintenance:
+  thread_attachments:
     schema: 1
-    schedules:
-      - schedule_id: maintenance-gc
-        item_ref: service:maintenance/gc
-        ref_bindings: {}
-        schedule_type: cron
-        expression: "0 0 4 * * *"
-        timezone: UTC
-        misfire_policy: skip
-        overlap_policy: skip
-        lateness_grace_secs: 60
-        initial_enabled: true
-        params:
-          compact: true
-          policy:
-            manual_pushes: 10
-            auto_snapshots: 30
-          deep: true
-          schedule_fire_max_age_days: 30
-          schedule_fire_max_count: 500
-          sync_job_retention_days: 14
-          seat_lease_grace_seconds: 600
-          durable_cas_upload_max_age_seconds: 21600
-        capabilities:
-          - ryeos.execute.service.maintenance/gc
+    max_bytes_per_attachment: 4194304
+    max_attachments_per_turn: 16
+    max_attachments_per_run: 256
+    accepted_media_types:
+      - application/json
+      - image/gif
+      - image/jpeg
+      - image/png
+      - image/webp
+      - text/plain
+  maintenance:
+    schema: 5
+    # Process-scoped native envelopes for stopped-node maintenance, keyed by
+    # operation class. A class absent here is refused.
+    # No authority-bearing offline operation is open to a remote signer.
+    remote_offline_operations: []
+    offline_native:
+      external-content-bindings:
+        max_native_storage_bytes: 33554432
+        max_native_allocator_steps: 20000000
+        max_native_connections: 8
+        max_operation_millis: 300000
+        max_cleanup_millis: 60000
+        max_cleanup_steps: 400000
+      replay-indexes:
+        max_native_storage_bytes: 33554432
+        max_native_allocator_steps: 20000000
+        max_native_connections: 8
+        max_operation_millis: 300000
+        max_cleanup_millis: 60000
+        max_cleanup_steps: 400000
+      standalone-state:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 48
+        max_operation_millis: 3600000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
+      external-supervisor-journal:
+        max_native_storage_bytes: 67108864
+        max_native_allocator_steps: 2000000000
+        max_native_connections: 16
+        max_operation_millis: 4860000
+        max_cleanup_millis: 120000
+        max_cleanup_steps: 3000000
+    offline_reset:
+      max_retained_operations: 4
+      max_source_roles: 13
+      max_copied_bytes: 268435456
+      max_retained_destination_bytes: 536870912
+      max_read_bytes: 2147483648
+      max_sql_vm_steps: 20000000
+      max_memory_bytes: 67108864
+      max_native_storage_bytes: 50331648
+      # Native SQL charges this budget as well as max_sql_vm_steps, so it must
+      # cover the whole SQL ceiling plus the host's allocation and cleanup
+      # quotes for the storage and connections here (about 1.6M together).
+      max_native_allocator_steps: 24000000
+      max_native_connections: 64
+      max_operation_millis: 300000
+      max_cleanup_millis: 60000
+      max_cleanup_steps: 1024
+      max_recovery_record_bytes: 2097152
+    # Without the scheduling bundle, maintenance is explicitly invoked, not scheduled.
+    schedules: []
   hosted:
     schema: 1
     admission_enabled: false
@@ -155,14 +235,75 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 7
-      process_scopes:
-        mode: unconfigured
-      trusted_process_group_sessions: false
-      mode: disabled
-      backend: null
+      version: 11
+      # Host classes this profile supports. The deployment names one at
+      # init (`ryeos init --host-class`), and the node runs under that
+      # class's floor and isolation lane from then on. A class names the
+      # kind of host the node runs on, not a strength: `local` is a host the
+      # operator runs, `hosted` is a hosting provider's container. What a
+      # class requires is this profile's own; the same class carries a
+      # different floor and lane in another profile.
+      host_classes:
+        hosted:
+          # A hosting provider's container. It has no qualified per-job
+          # process scopes and commonly no swap and no CAP_IPC_LOCK, so the
+          # floor accepts a resident region proven only by the absence of swap
+          # at startup (residency:swap_absent). Jobs die with the node because
+          # the node is pid 1 of its container, or its parent is a pid 1 named
+          # in enclosure_inits. Jobs run without a sandbox: the catalog
+          # services are daemon endpoints that execute no captured source, and
+          # consumers verify publisher evidence under their own policy, so the
+          # host can withhold or delay a catalog head but cannot forge one.
+          requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
+          host_direct: unavailable
+        local:
+          # A host the operator runs where the daemon is spawned directly,
+          # without an administrator-owned host association. Jobs run in the
+          # enforced namespace sandbox; no per-scope capability is required
+          # because no delegated cgroup subtree exists. Hosts whose kernel
+          # cannot provide the sandbox refuse initialization; the explicit
+          # opt-out is the `local_unconfined` class.
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, storage:durable_root, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: enforce
+          backend:
+            bundle: core
+            implementation: linux-lillux
+          proc_filesystem: pid_namespace
+          host_direct: unavailable
+        local_unconfined:
+          # The explicit opt-out from the sandbox: a host the operator runs
+          # where jobs execute as the daemon user with no isolation backend.
+          # Nothing selects this class implicitly; initialization names it
+          # with `--host-class local_unconfined`. Jobs can read the node's
+          # operator key on the volume and write any `.ai/` path, and the
+          # live-run floors hold only under an enforced lane.
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, storage:durable_root, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
+          host_direct: unavailable
+      # Inits trusted to exit when their only child exits. When the node's
+      # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
+      # to end its container, so a new container on the same boot proves
+      # the old one's jobs dead. A node that is pid 1 proves this itself.
+      enclosure_inits: [catatonit, dumb-init, tini]
       filesystem:
-        proc_filesystem: empty
         live_project:
           mode: fixed_parents
           limits:
@@ -172,14 +313,25 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
           - "{checkpoint_dir}"
       network:
         mode: host
-        runtime_files: []
+        runtime_files:
+          - source: /etc/resolv.conf
+            destination: /etc/resolv.conf
+            max_bytes: 65536
+          - source: /etc/hosts
+            destination: /etc/hosts
+            max_bytes: 65536
+          - source: /etc/ssl/certs/ca-certificates.crt
+            destination: /etc/ssl/certs/ca-certificates.crt
+            max_bytes: 4194304
+          - source: /etc/ssl/certs/ca-certificates.crt
+            destination: /etc/ssl/cert.pem
+            max_bytes: 4194304
       environment:
         allow:
           - "*"
@@ -190,6 +342,39 @@ policies:
         verified_artifact_file_bytes: 67108864
         verified_artifact_total_bytes: 268435456
         verified_artifact_files: 4096
+  # Operator grants of host-direct execution, per exact item. Empty by
+  # default, so nothing runs on the host. Changed only by the operator-signed
+  # `node.policy-apply` (`ryeos node host-access grant|revoke`).
+  host_access:
+    schema: 1
+    grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
+  # Trust classes the operator admits for launch roots beyond each kind's
+  # default, per kind (only what the kind schema lets an operator admit).
+  launch_trust:
+    schema: 1
+    admit: {}
+  # Storage class of each progressive runtime event. Every other event is
+  # always indexed; only these may be ephemeral or journal_only.
+  event_storage:
+    schema: 1
+    classes:
+      cognition_reasoning: ephemeral
+      graph_foreach_iteration: journal_only
+      observation: journal_only
+      stream_snapshot: ephemeral
+      token_delta: ephemeral
   ingest_ignore:
     schema: 2
     patterns:
@@ -199,13 +384,16 @@ policies:
       - ".git/"
       - ".hg/"
       - ".svn/"
+      - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/machines/"
+      - "/.ai/node/remotes/"
+      - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
       - "target/"
   external_content:
-    schema: 1
+    schema: 2
     roots: {}
     limits:
       max_depth: 8
@@ -235,6 +423,368 @@ policies:
     schema: 1
     enabled: false
     limits: null
-  ui_browser_sessions:
+  provider_environment:
+    schema: 2
+    names: []
+  sealed_vault_names:
     schema: 1
+    names: []
+  ui_browser_sessions:
+    schema: 5
+    session_ttl_secs: 28800
+    session_idle_secs: 3600
+    launch_token_ttl_secs: 60
+    session_scopes:
+      - ryeos.execute.service.ui/ryeos-ui/*
+      - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.events/chain_replay
+      - ryeos.execute.service.projects/add
+      - ryeos.execute.service.projects/open
+      - ryeos.execute.service.threads/input
+      - ryeos.execute.service.commands/dispatch
+      - ryeos.execute.service.commands/submit
+      - ryeos.execute.service.worker-executions/approvals
+      - ryeos.execute.service.revisions/list
+      - ryeos.execute.service.revisions/get
+      - ryeos.execute.service.worker-executions/resolve-approval
+      - ryeos.execute.directive.*
+      - ryeos.execute.graph.*
+      - ryeos.execute.tool.ryeos/core/fetch
+      - ryeos.execute.tool.ryeos/core/verify
+      - ryeos.execute.tool.ryeos/core/node/doctor
+      - ryeos.execute.tool.ryeos/knowledge/compose
+      - ryeos.execute.knowledge.*
+      - ryeos.execute.tool.core/snapshot-status
+      - ryeos.execute.tool.core/snapshot-show
+      - ryeos.execute.tool.core/snapshot-log
+      - ryeos.read.project.live
+    max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
+    max_presentations_per_session: 16
+    max_surface_instances_per_presentation: 16
+    shared_presentation:
+      max_declaration_bytes: 65536
+      max_dialogs: 16
+      max_initial_surfaces: 16
+      max_label_bytes: 128
+      max_mount_id_bytes: 64
+    seat:
+      kind: seat_session
+      max_replay_frame_events: 64
+      max_replay_frame_bytes: 4194304
+  ui_inspection:
+    schema: 1
+    max_event_limit: 500
+    max_facet_page_events: 64
+    max_facet_page_bytes: 524288
+    max_facet_pages_per_thread: 8
+    max_facet_pages_total: 64
+  # What a UI seat may read through a bound source. A service with no entry is
+  # not readable by a seat. A service under ui/ryeos-ui/ scopes its own result
+  # and is outside this list. Each keep list is an allowlist of result fields.
+  # Filesystem paths and operator-only fields are left out, and so is any field
+  # a later release adds until an entry names it.
+  ui_seat_reads:
+    schema: 1
+    reads:
+      - target: service:node/status
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /node_id
+          - /version
+          - /revision
+          - /build_date
+          - /started_at
+          - /uptime_seconds
+          - /bind
+          - /active_threads
+          - /isolation/mode
+          - /isolation/filesystem_mode
+          - /isolation/network_mode
+          - /isolation/version
+          - /isolation/policy_digest
+          - /isolation/backend
+          - /isolation/process_scopes
+          - /thread_projection
+          - /pending_head_transitions
+          - /accounting
+        max_result_bytes: 65536
+        max_items: 64
+      - target: service:bundle/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /bundles/*/name
+        max_result_bytes: 65536
+        max_items: 512
+      - target: service:projects/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /version
+          - /projects/*/local_id
+          - /projects/*/name
+          - /projects/*/root
+          - /projects/*/added_at
+          - /projects/*/tags
+          - /projects/*/exists
+          - /projects/*/current
+          - /projects/*/registered
+        max_result_bytes: 1048576
+        max_items: 1024
+      - target: service:commands/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /commands/*/name
+          - /commands/*/tokens
+          - /commands/*/description
+          - /commands/*/arguments
+          - /commands/*/forms
+          - /commands/*/defaults
+          - /commands/*/parameter_binding
+          - /commands/*/control_flags
+          - /commands/*/project
+          - /commands/*/invocable
+        max_result_bytes: 4194304
+        max_items: 4096
+      - target: service:threads/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /next_cursor
+          - /threads/*/thread_id
+          - /threads/*/chain_root_id
+          - /threads/*/kind
+          - /threads/*/status
+          - /threads/*/item_ref
+          - /threads/*/launch_mode
+          - /threads/*/current_site_id
+          - /threads/*/origin_site_id
+          - /threads/*/upstream_thread_id
+          - /threads/*/successor_thread_id
+          - /threads/*/created_at
+          - /threads/*/updated_at
+          - /threads/*/execution
+          - /threads/*/follow
+          - /threads/*/pending
+          - /threads/*/facets
+          - /threads/*/current_node
+          - /threads/*/error
+        max_result_bytes: 4194304
+        max_items: 2048
+      - target: service:scheduler/list
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /identity_filtered
+          - /node_owned_included
+          - /anonymous
+          - /note
+          - /schedules/*/schedule_id
+          - /schedules/*/item_ref
+          - /schedules/*/schedule_type
+          - /schedules/*/expression
+          - /schedules/*/timezone
+          - /schedules/*/enabled
+          - /schedules/*/registered_at
+          - /schedules/*/misfire_policy
+          - /schedules/*/overlap_policy
+          - /schedules/*/lateness_grace_secs
+          - /schedules/*/last_scheduled_at
+          - /schedules/*/last_reserved_at
+          - /schedules/*/last_dispatched_at
+          - /schedules/*/last_fire_status
+          - /schedules/*/last_fire_reason
+          - /schedules/*/last_fire_outcome
+          - /schedules/*/current_due_at
+          - /schedules/*/current_due_within_grace
+          - /schedules/*/misfire_horizon_exclusive
+          - /schedules/*/next_fire_at
+          - /schedules/*/cursor_last_scheduled_at
+          - /schedules/*/cursor_next_fire_at
+          - /schedules/*/cursor_updated_at
+          - /schedules/*/cursor_fresh
+          - /schedules/*/decision
+          - /schedules/*/decision_reason
+          - /schedules/*/lifetime_exhausted
+          - /schedules/*/total_fires
+        max_result_bytes: 1048576
+        max_items: 2048
+      - target: service:items/effective
+        classes: [local_operator, hosted_principal]
+        # A seat resolves bundle items only; it does not choose a project path.
+        deny_params: [project_path]
+        keep:
+          - /requested_ref
+          - /canonical_ref
+          - /kind
+          - /trusted
+          - /trust_class
+          - /root_trust_class
+          - /shadows_bundle_item
+          - /policy_facts
+          - /diagnostics
+          - /provenance/root/requested_id
+          - /provenance/root/resolved_ref
+          - /provenance/root/source_space
+          - /provenance/root/trust_class
+          - /provenance/root/signer_fingerprint
+          - /provenance/root/raw_content_digest
+          - /provenance/ancestors/*/requested_id
+          - /provenance/ancestors/*/resolved_ref
+          - /provenance/ancestors/*/source_space
+          - /provenance/ancestors/*/trust_class
+          - /provenance/ancestors/*/signer_fingerprint
+          - /provenance/ancestors/*/raw_content_digest
+          - /authorship
+          - /as_launched
+        max_result_bytes: 1048576
+        max_items: 2048
+      - target: service:node/locality/groups
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /schema
+          - /as_of
+          - /groups
+          - /invalid_declarations/*/label
+          - /invalid_declarations/*/code
+        max_result_bytes: 1048576
+        max_items: 1024
+      # The event streams a seat opens are named by their route. A frame is the
+      # event name beside the event record, and an entry keeps only the
+      # identifiers and live text a client reads. Ledger hashes, sequence
+      # numbers, stored payloads and error text are left out, and so is any
+      # field a later release adds until an entry names it.
+      - target: route:ui/events/chain
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /event_type
+          - /payload/chain_root_id
+          - /payload/thread_id
+          - /payload/event_type
+          - /payload/payload/delta
+          - /payload/payload/tool_use_partial/delta
+          - /payload/code
+        max_result_bytes: 65536
+        max_items: 16
+      # The session stream carries thread hints. Thread lifecycle hints keep
+      # the thread, its event name, status and time. Activity hints keep only
+      # their kind, so no thread list rides on them.
+      - target: route:ui/events/session
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /event_type
+          - /payload/kind
+          - /payload/thread_id
+          - /payload/event_type
+          - /payload/status
+          - /payload/updated_at
+        max_result_bytes: 4096
+        max_items: 4
+      # The pending approvals of a hosted work chain, as the Approvals view
+      # reads them. The service already answers only for a chain the caller
+      # owns. Each approval keeps its identifiers, digest, state, times and the
+      # public part of its requested authority.
+      - target: service:worker-executions/approvals
+        classes: [local_operator, hosted_principal]
+        keep:
+          - /approvals/*/chain_root_id
+          - /approvals/*/placement_thread_id
+          - /approvals/*/approval_id
+          - /approvals/*/worker_boot_epoch
+          - /approvals/*/request_digest
+          - /approvals/*/operation_class
+          - /approvals/*/requested_authority/accept_allowed
+          - /approvals/*/requested_authority/display
+          - /approvals/*/state
+          - /approvals/*/expires_at_ms
+          - /approvals/*/created_at_ms
+        max_result_bytes: 262144
+        max_items: 256
+      # The signed revision history of one item of the seat's own project. The
+      # project is pinned to the session's bound project, so a seat never names
+      # a path of its own, and a session with no project reads nothing. A record
+      # keeps its identifiers, digests, time, signer, verification status and
+      # the provenance keys that name no filesystem path. Failure detail text,
+      # the head failure reason and the provenance path are left out, and so is
+      # any field a later release adds until an entry names it. The list carries
+      # no item bytes. The record read keeps the signed item bytes inline for
+      # diff and revert preview; authored UI items are far below the bound, and a
+      # record that exceeds it is refused whole, never cut. Unverified records
+      # stay withheld: a seat may not ask for them.
+      - target: service:revisions/list
+        classes: [local_operator, hosted_principal]
+        pin:
+          project_path: "@session:project_root"
+        keep:
+          - /item_ref
+          - /total
+          - /sound
+          - /file
+          - /head/status
+          - /head/seq
+          - /head/head_seq
+          - /head/tip_seq
+          - /next_cursor
+          - /records/*/seq
+          - /records/*/hash
+          - /records/*/verify/status
+          - /records/*/verify/scheme
+          - /records/*/verify/signer
+          - /records/*/verify/reason
+          - /records/*/unrecorded_change_before
+          - /records/*/tombstone
+          - /records/*/recorded_at
+          - /records/*/actor/fingerprint
+          - /records/*/actor/role
+          - /records/*/before_digest
+          - /records/*/after_digest
+          - /records/*/file_ext
+          - /records/*/provenance/authored_by
+          - /records/*/provenance/action
+          - /records/*/provenance/thread_id
+          - /records/*/provenance/invocation_id
+          - /records/*/provenance/parent_item_ref
+          - /records/*/provenance/authoring_capability
+          - /records/*/provenance/target_ref
+          - /records/*/provenance/content_digest
+        max_result_bytes: 524288
+        max_items: 200
+      - target: service:revisions/get
+        classes: [local_operator, hosted_principal]
+        pin:
+          project_path: "@session:project_root"
+        deny_params: [include_unverified]
+        keep:
+          - /item_ref
+          - /total
+          - /sound
+          - /file
+          - /head/status
+          - /head/seq
+          - /head/head_seq
+          - /head/tip_seq
+          - /record/seq
+          - /record/hash
+          - /record/verify/status
+          - /record/verify/scheme
+          - /record/verify/signer
+          - /record/verify/reason
+          - /record/unrecorded_change_before
+          - /record/tombstone
+          - /record/recorded_at
+          - /record/actor/fingerprint
+          - /record/actor/role
+          - /record/before_digest
+          - /record/after_digest
+          - /record/file_ext
+          - /record/provenance/authored_by
+          - /record/provenance/action
+          - /record/provenance/thread_id
+          - /record/provenance/invocation_id
+          - /record/provenance/parent_item_ref
+          - /record/provenance/authoring_capability
+          - /record/provenance/target_ref
+          - /record/provenance/content_digest
+          - /record/body/previous
+          - /record/body/content
+        max_result_bytes: 1048576
+        max_items: 16

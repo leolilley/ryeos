@@ -1,0 +1,50 @@
+# ryeos:signed:2026-10-15T23:06:49Z:61bd48700698154258e0e4b3f23e25a0fffca860e1014b7df52eed66a036a8e5:DxyqoYiAJH0O+KSUXeGw42kQYo/9dTYmhkWZ+HpWK42oVYaZLDc+eJ7NgoX89Mo/UIvxBra7ncScel8l6MJODw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/release_candidate"
+version: "1.0.0"
+location:
+  directory: release-candidates
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# A release candidate is a signed, non-executable record naming one exact
+# populated bundle tree. The body is one canonical-JSON document (valid YAML)
+# whose `digest` is the SHA-256 of the record without that field. The engine
+# treats it as an opaque signed document; its meaning is owned by the
+# bundle-release tooling.
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required:
+    schema: { type: single, prim: string }
+    digest: { type: single, prim: string }
+    bundle: { type: single, prim: string }
+    version: { type: single, prim: string }
+    generation_inputs: { type: single, prim: mapping }
+    items: { type: single, prim: mapping }
+    unsigned: { type: single, prim: mapping }
+    closure: { type: single, prim: mapping }
+    authority: { type: single, prim: mapping }
+  optional:
+    native:
+      type: union
+      prims: [mapping, "null"]
+    predecessor:
+      type: union
+      prims: [string, "null"]
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    version:
+      from: path
+      key: version
+    category:
+      from: relative_dir
+      required: true

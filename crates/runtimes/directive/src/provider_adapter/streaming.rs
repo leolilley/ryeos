@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use crate::directive::FinishReason;
 use crate::directive::{
-    ExecutionConfig, MalformedArgs, ProviderMessage, StreamEvent, ToolCall, ToolSchema,
-    UsageUpdate, normalize_finish_reason,
+    ExecutionConfig, MalformedArgs, ProviderMessage, ProviderMessageExt, StreamEvent, ToolCall,
+    ToolSchema, UsageUpdate, normalize_finish_reason,
 };
 use crate::provider_adapter::http::{
     AdapterResponse, ObservedOutput, ProviderLimitContractStatus, ProviderUsageSource, TokenUsage,
@@ -216,6 +216,22 @@ fn tool_use_payload(
     payload
 }
 
+/// Most bytes of a refused response's body kept on a status error.
+pub const STATUS_BODY_MAX_BYTES: usize = 4096;
+
+/// The start of `body`, cut at a character boundary within
+/// [`STATUS_BODY_MAX_BYTES`].
+fn bounded_status_body(body: &str) -> String {
+    if body.len() <= STATUS_BODY_MAX_BYTES {
+        return body.to_string();
+    }
+    let mut end = STATUS_BODY_MAX_BYTES;
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    body[..end].to_string()
+}
+
 /// Redact provider error bodies by default. Returns a safe preview
 /// (first 200 chars) plus a sha256 hash. Full body is logged only when
 /// `RYEOS_LOG_PROVIDER_BODIES=1` is set (development/debugging).
@@ -234,26 +250,31 @@ fn safe_error_body(body: &str) -> String {
 
 /// A provider-call failure classified for the runner's retry loop. Every
 /// variant describes a transient provider/transport failure the runner's retry
-/// loop may re-issue. `Status`, `Timeout`, and `Send` occur STRICTLY BEFORE any
-/// SSE byte is consumed, so retrying them cannot duplicate already-emitted live
-/// `cognition_out`. `MidStream` is the one post-open class: the byte stream
-/// died under us (read timeout, reset, dropped chunk) — the request itself is
-/// idempotent (same message array), and the ephemeral deltas emitted before the
-/// cut quantify the abandoned partial; the durable `provider_retry` event
-/// delimits attempts. Any other post-open failure (invalid bytes or a runtime
-/// callback publication error) is
-/// returned as a plain `anyhow` error and is never retried.
+/// loop may re-issue only when the classification has an outcome-safe retry
+/// contract. An explicit retryable status is provider failure evidence and a
+/// connect-phase `Send` did not establish a connection. `Timeout`, non-connect
+/// `Send`, and `MidStream` can all follow provider acceptance; the cut state
+/// preserves what RyeOS observed, but identical message bytes do not make the
+/// provider effect idempotent. The runner therefore treats them as uncertain
+/// outcomes unless a future admitted provider contract supplies deduplication or
+/// outcome lookup. Other post-open failures are likewise never retried.
 ///
 /// Returned wrapped in `anyhow::Error` so diagnostic surfaces can preserve the
 /// typed detail while the runner `downcast_ref`s to read the retry
 /// classification.
 // MidStream carries the full cut-attempt state by design; the pre-stream
 // variants are small rejection records.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProviderStreamError {
     /// The provider returned a non-success HTTP status before streaming began.
-    Status { code: u16, detail: String },
+    /// `body` is the start of the response body (at most
+    /// [`STATUS_BODY_MAX_BYTES`] bytes), kept for matching the entry's declared
+    /// request rejections; `detail` is the formatted diagnostic.
+    Status {
+        code: u16,
+        detail: String,
+        body: String,
+    },
     /// The request timed out before a response arrived. The provider may still
     /// have accepted work, so this is not proof of zero usage.
     Timeout { detail: String },
@@ -451,23 +472,12 @@ impl std::fmt::Display for RuntimeCallbackPublicationError {
 
 impl std::error::Error for RuntimeCallbackPublicationError {}
 
-/// Accounting and locally observed output retained when an out-of-band signal
+/// Accounting retained when an out-of-band signal
 /// cuts an in-flight provider attempt. Cancellation/interruption are not
 /// provider failures, but any usage received before the signal must not vanish.
 #[derive(Debug, Clone)]
 pub struct CutAttemptState {
     pub usage: Option<TokenUsage>,
-    // Diagnostic parity with `AdapterResponse`; the runner consumes only
-    // `usage` since settlement moved to the daemon ledger, but cut-state
-    // provenance stays available to adapter-level tests and tracing.
-    #[allow(dead_code)]
-    pub generation_header_id: Option<String>,
-    #[allow(dead_code)]
-    pub response_id: Option<String>,
-    #[allow(dead_code)]
-    pub requested_output_tokens: Option<u64>,
-    #[allow(dead_code)]
-    pub observed_output: ObservedOutput,
 }
 
 /// Provider-neutral partial cognition retained when an interrupt cuts a turn.
@@ -476,20 +486,14 @@ pub struct CutAttemptState {
 /// role required by a later request.
 #[derive(Debug, Clone, Default)]
 pub struct InterruptedCognition {
-    pub content: Option<Value>,
-    pub reasoning_content: Option<String>,
+    /// The complete text and reasoning parts, in the order the stream gave
+    /// them. Never a tool call.
+    pub parts: Vec<ryeos_provider_contract::Part>,
 }
 
 impl InterruptedCognition {
     pub fn into_provider_message(self) -> ProviderMessage {
-        ProviderMessage {
-            // Explicit provider-wire rendering of a RyeOS cognition output.
-            role: "assistant".to_string(),
-            content: self.content,
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: self.reasoning_content,
-        }
+        ProviderMessage::new(ryeos_provider_contract::Role::Assistant, self.parts)
     }
 }
 
@@ -550,7 +554,7 @@ async fn flag_signal(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>
 #[cfg(test)]
 fn parse_sse_events(data: &str, mode: Option<&str>) -> Vec<StreamEvent> {
     let mut tool_call_state: HashMap<String, String> = HashMap::new();
-    parse_sse_events_with_state(data, mode, None, &mut tool_call_state)
+    parse_sse_events_with_state(data, mode, None, &[], &mut tool_call_state)
 }
 
 /// State-preserving variant of `parse_sse_events`. The caller threads
@@ -562,6 +566,7 @@ pub fn parse_sse_events_with_state(
     data: &str,
     mode: Option<&str>,
     stream_paths: Option<&StreamPaths>,
+    capture: &[ryeos_directive_definition::ReasoningCaptureRule],
     tool_call_state: &mut HashMap<String, String>,
 ) -> Vec<StreamEvent> {
     let raw_events = split_sse_events(data);
@@ -597,7 +602,7 @@ pub fn parse_sse_events_with_state(
                 parse_event_typed(&event_type, &parsed, &mut events, tool_call_state);
             }
             Some("delta_merge") => {
-                parse_delta_merge(&parsed, &mut events, tool_call_state);
+                parse_delta_merge(&parsed, &mut events, tool_call_state, capture);
             }
             Some("complete_chunks") => {
                 parse_complete_chunks(&parsed, &mut events, stream_paths, tool_call_state);
@@ -874,6 +879,7 @@ fn parse_event_typed(
                 argument_bytes: arguments.len(),
                 arguments: arguments_value,
                 malformed_args,
+                artefact: None,
             });
             tool_call_state.remove("current_tool_id");
             tool_call_state.remove("current_tool_name");
@@ -941,10 +947,58 @@ fn parse_event_typed(
     }
 }
 
+/// State key holding the slot of the tool call most recently opened in a
+/// delta-merge stream.
+const DELTA_MERGE_LAST_SLOT: &str = "tool_last_slot";
+
+/// The accumulation slot for one streamed tool-call delta.
+///
+/// A provider that numbers its calls sends `index`, and that is the slot.
+/// Some providers send none. Then a delta that carries an `id` belongs to
+/// the call already holding that id, or opens the next free slot; a delta
+/// with neither continues the call most recently opened. Treating a missing
+/// index as slot 0 would merge parallel calls into one.
+fn delta_merge_tool_slot(tc: &Value, tool_call_state: &mut HashMap<String, String>) -> String {
+    let slot = if let Some(index) = tc.get("index").and_then(|v| v.as_u64()) {
+        index.to_string()
+    } else if let Some(id) = tc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+    {
+        let held = tool_call_state.iter().find_map(|(key, value)| {
+            key.strip_prefix("tool_id_")
+                .filter(|_| value == id)
+                .map(str::to_string)
+        });
+        held.unwrap_or_else(|| {
+            let next = tool_call_state
+                .keys()
+                .filter_map(|key| {
+                    ["tool_id_", "tool_name_", "tool_args_"]
+                        .iter()
+                        .find_map(|prefix| key.strip_prefix(prefix))
+                        .and_then(|slot| slot.parse::<u64>().ok())
+                })
+                .max()
+                .map_or(0, |highest| highest + 1);
+            next.to_string()
+        })
+    } else {
+        tool_call_state
+            .get(DELTA_MERGE_LAST_SLOT)
+            .cloned()
+            .unwrap_or_else(|| "0".to_string())
+    };
+    tool_call_state.insert(DELTA_MERGE_LAST_SLOT.to_string(), slot.clone());
+    slot
+}
+
 fn parse_delta_merge(
     parsed: &Value,
     events: &mut Vec<StreamEvent>,
     tool_call_state: &mut HashMap<String, String>,
+    capture: &[ryeos_directive_definition::ReasoningCaptureRule],
 ) {
     if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array())
         && let Some(choice) = choices.first()
@@ -957,16 +1011,10 @@ fn parse_delta_merge(
             events.push(StreamEvent::Delta(content.to_string()));
         }
 
-        if let Some(reasoning) = choice
-            .get("delta")
-            .and_then(|d| {
-                d.get("reasoning_content")
-                    .or_else(|| d.get("reasoning"))
-                    .or_else(|| d.get("thinking"))
-            })
-            .and_then(|r| r.as_str())
-        {
-            events.push(StreamEvent::ReasoningDelta(reasoning.to_string()));
+        // Reasoning is read only by the signed capture rules; a provider that
+        // declares none has no reasoning read from its stream.
+        if let Some(delta) = choice.get("delta") {
+            super::reasoning_capture::capture_delta(delta, capture, tool_call_state, events);
         }
 
         if let Some(tool_calls) = choice
@@ -975,11 +1023,13 @@ fn parse_delta_merge(
             .and_then(|tc| tc.as_array())
         {
             for tc in tool_calls {
-                let index = tc
-                    .get("index")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-                    .to_string();
+                let index = delta_merge_tool_slot(tc, tool_call_state);
+                super::reasoning_capture::capture_tool_call_entry(
+                    tc,
+                    &index,
+                    capture,
+                    tool_call_state,
+                );
 
                 if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                     tool_call_state.insert(format!("tool_id_{}", index), id.to_string());
@@ -1046,6 +1096,11 @@ fn parse_delta_merge(
                     .unwrap_or_else(|| "{}".to_string());
                 let (args_value, malformed_args) = parse_tool_arguments(&name, &arguments);
                 let id_opt = if id.is_empty() { None } else { Some(id) };
+                let artefact = super::reasoning_capture::take_tool_call_artefact(
+                    &idx.to_string(),
+                    capture,
+                    tool_call_state,
+                );
                 events.push(StreamEvent::ToolUse {
                     id: id_opt,
                     name,
@@ -1053,6 +1108,7 @@ fn parse_delta_merge(
                     argument_bytes: arguments.len(),
                     arguments: args_value,
                     malformed_args,
+                    artefact,
                 });
             }
             for idx in indices.iter() {
@@ -1061,6 +1117,8 @@ fn parse_delta_merge(
                 tool_call_state.remove(&format!("tool_name_{}", idx_s));
                 tool_call_state.remove(&format!("tool_args_{}", idx_s));
             }
+            tool_call_state.remove(DELTA_MERGE_LAST_SLOT);
+            super::reasoning_capture::finish_capture(tool_call_state, events);
             events.push(StreamEvent::Finish {
                 reason: normalize_finish_reason(finish_reason),
                 raw: finish_reason.map(|s| s.to_string()),
@@ -1181,6 +1239,7 @@ fn parse_complete_chunks(
                 // recovery path to flag here.
                 arguments: args,
                 malformed_args: None,
+                artefact: None,
             });
             continue;
         }
@@ -1316,6 +1375,9 @@ pub struct StreamingCallInput<'a> {
     pub execution: &'a ExecutionConfig,
     pub model: &'a str,
     pub messages: &'a [ProviderMessage],
+    /// The bytes of the images the request carries, loaded by the caller
+    /// before the request is prepared.
+    pub images: &'a super::images::ImageStore,
     pub tools: &'a [ToolSchema],
     pub callback: &'a CallbackClient,
     pub turn: u32,
@@ -1430,36 +1492,23 @@ fn completed_from_retained_local_observation(
     requested_output_tokens: Option<u64>,
 ) -> Result<StreamOutcome> {
     terminal.validate()?;
+    let message = terminal.answer.message.clone();
     let mut meter = StreamOutputMeter::default();
-    if let Some(text) = terminal
-        .answer
-        .message
-        .content
-        .as_ref()
-        .and_then(Value::as_str)
-    {
+    if let Some(text) = message.text() {
         meter.accept(
-            &StreamEvent::Delta(text.to_owned()),
+            &StreamEvent::Delta(text),
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
-    if let Some(reasoning) = terminal.answer.message.reasoning_content.as_deref() {
+    if let Some(reasoning) = message.reasoning_text() {
         meter.accept(
-            &StreamEvent::ReasoningDelta(reasoning.to_owned()),
+            &StreamEvent::ReasoningDelta(reasoning),
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
-    for (index, call) in terminal
-        .answer
-        .message
-        .tool_calls
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-    {
+    for (index, call) in message.calls().iter().enumerate() {
         meter.accept(
             &StreamEvent::ToolUse {
                 id: call.id.clone(),
@@ -1468,13 +1517,12 @@ fn completed_from_retained_local_observation(
                 argument_bytes: serde_json::to_vec(&call.arguments)?.len(),
                 arguments: call.arguments.clone(),
                 malformed_args: None,
+                artefact: None,
             },
             input.execution.max_stream_output_bytes_per_turn,
             0,
         )?;
     }
-    let message: ProviderMessage =
-        serde_json::from_value(serde_json::to_value(&terminal.answer.message)?)?;
     let usage = TokenUsage {
         input_tokens: Some(terminal.usage.input_tokens),
         output_tokens: Some(terminal.usage.output_tokens),
@@ -1544,13 +1592,7 @@ pub async fn send_prepared_local_streaming(
         None
     };
     if let Some(interrupted) = pre_start_cut {
-        let attempt = CutAttemptState {
-            usage: None,
-            generation_header_id: None,
-            response_id: None,
-            requested_output_tokens,
-            observed_output: ObservedOutput::default(),
-        };
+        let attempt = CutAttemptState { usage: None };
         return if interrupted {
             Ok(StreamOutcome::Interrupted {
                 partial_cognition: InterruptedCognition::default(),
@@ -1602,9 +1644,7 @@ pub async fn send_prepared_local_streaming(
     let mut after_sequence = 0u64;
     let mut output_meter = StreamOutputMeter::default();
     let mut live_output_events_emitted = 0usize;
-    let mut accumulated_text = String::new();
-    let mut accumulated_reasoning = String::new();
-    let mut accumulated_tools = Vec::new();
+    let mut answer_parts = crate::provider_adapter::parts_builder::PartsBuilder::default();
     let mut all_events = Vec::new();
     let mut final_value: Option<Value> = None;
 
@@ -1618,19 +1658,11 @@ pub async fn send_prepared_local_streaming(
         };
         if let Some(interrupted) = cut {
             cancel_local_stream(input.callback, attempt_id, request_hash, &stream_id).await?;
-            let attempt = CutAttemptState {
-                usage: None,
-                generation_header_id: None,
-                response_id: None,
-                requested_output_tokens,
-                observed_output: output_meter.observed_output(live_output_events_emitted),
-            };
+            let attempt = CutAttemptState { usage: None };
             return if interrupted {
                 Ok(StreamOutcome::Interrupted {
                     partial_cognition: InterruptedCognition {
-                        content: (!accumulated_text.is_empty()).then(|| json!(accumulated_text)),
-                        reasoning_content: (!accumulated_reasoning.is_empty())
-                            .then_some(accumulated_reasoning),
+                        parts: answer_parts.interrupted_parts(),
                     },
                     events: all_events,
                     attempt,
@@ -1702,6 +1734,7 @@ pub async fn send_prepared_local_streaming(
                                 arguments,
                                 argument_bytes,
                                 malformed_args: None,
+                                artefact: None,
                             }
                         }
                         LocalWorkerDelta::Warning { code, message } => {
@@ -1715,7 +1748,7 @@ pub async fn send_prepared_local_streaming(
                     )?;
                     match &semantic {
                         StreamEvent::Delta(text) => {
-                            accumulated_text.push_str(text);
+                            answer_parts.push_text(text);
                             input
                                 .callback
                                 .append_runtime_event(
@@ -1738,20 +1771,26 @@ pub async fn send_prepared_local_streaming(
                                 live_output_events_emitted.saturating_add(1);
                         }
                         StreamEvent::ReasoningDelta(text) => {
-                            accumulated_reasoning.push_str(text);
+                            answer_parts.push_reasoning(text);
                         }
+                        // A local worker never produces reasoning artefacts.
+                        StreamEvent::ReasoningArtefact { .. } => {}
                         StreamEvent::ToolUse {
                             id,
                             name,
                             arguments,
                             malformed_args,
+                            artefact,
                             ..
                         } => {
-                            accumulated_tools.push(ToolCall {
-                                id: id.clone(),
-                                name: name.clone(),
-                                arguments: arguments.clone(),
-                            });
+                            answer_parts.push_call_with_artefact(
+                                ToolCall {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    arguments: arguments.clone(),
+                                },
+                                artefact.clone(),
+                            );
                             input
                                 .callback
                                 .append_runtime_event(
@@ -1835,27 +1874,12 @@ pub async fn send_prepared_local_streaming(
         &final_value.expect("final value checked above"),
     )
     .context("decode admitted local-worker final result")?;
-    let message: ProviderMessage =
-        serde_json::from_value(serde_json::to_value(&final_result.answer.message)?)?;
-    if message.role != "assistant"
-        || message.tool_call_id.is_some()
-        || final_result
-            .answer
-            .message
-            .content
-            .as_ref()
-            .and_then(Value::as_str)
-            != (!accumulated_text.is_empty()).then_some(accumulated_text.as_str())
-        || final_result.answer.message.reasoning_content.as_deref()
-            != (!accumulated_reasoning.is_empty()).then_some(accumulated_reasoning.as_str())
-        || serde_json::to_value(
-            final_result
-                .answer
-                .message
-                .tool_calls
-                .as_deref()
-                .unwrap_or_default(),
-        )? != serde_json::to_value(&accumulated_tools)?
+    let message = final_result.answer.message.clone();
+    if message.role() != "assistant"
+        || message.tool_call_id().is_some()
+        || message.text() != answer_parts.text()
+        || message.reasoning_text() != answer_parts.reasoning_text()
+        || serde_json::to_value(message.calls())? != serde_json::to_value(answer_parts.calls())?
     {
         bail!("local worker final answer contradicts its streamed semantic events");
     }
@@ -2018,13 +2042,7 @@ async fn send_prepared_streaming_inner(
         req = req.header(name.as_str(), value.as_str());
     }
 
-    let empty_cut_attempt = || CutAttemptState {
-        usage: None,
-        generation_header_id: None,
-        response_id: None,
-        requested_output_tokens,
-        observed_output: ObservedOutput::default(),
-    };
+    let empty_cut_attempt = || CutAttemptState { usage: None };
     if flag_set(&input.cancel_flag) {
         return Ok(StreamOutcome::Cancelled {
             attempt: empty_cut_attempt(),
@@ -2134,6 +2152,7 @@ async fn send_prepared_streaming_inner(
         return Err(anyhow::Error::new(ProviderStreamError::Status {
             code: status,
             detail,
+            body: bounded_status_body(&text),
         }));
     }
 
@@ -2194,9 +2213,10 @@ async fn send_prepared_streaming_inner(
     // with `non-utf8 SSE chunk`.
     let mut utf8_carry: Vec<u8> = Vec::new();
     let mut all_events: Vec<StreamEvent> = Vec::new();
-    let mut accumulated_text = String::new();
-    let mut accumulated_reasoning = String::new();
-    let mut accumulated_tools: Vec<ToolCall> = Vec::new();
+    let capture_rules = super::reasoning_capture::capture_rules(provider);
+    let mut answer_parts = crate::provider_adapter::parts_builder::PartsBuilder::new(
+        super::reasoning_capture::replay_group(provider),
+    );
     let mut output_meter = StreamOutputMeter::default();
     #[cfg(feature = "latency-profiling")]
     let mut provider_stream_started_published = false;
@@ -2312,10 +2332,10 @@ async fn send_prepared_streaming_inner(
             }
         };
 
-        // A chunk-level read failure (timeout, reset, dropped stream) is a
-        // TRANSIENT transport error on an idempotent request: classify it as a
-        // typed `MidStream` so the runner's retry loop can re-issue instead of
-        // failing the whole directive thread over one dropped HTTP stream.
+        // A chunk-level read failure (timeout, reset, dropped stream) occurs
+        // after provider acceptance. Preserve it as typed `MidStream` so the
+        // runner can retain accounting/cut evidence and report an explicit
+        // uncertain outcome without automatically re-issuing the request.
         let chunk: Bytes = chunk_res.map_err(|e| {
             let chain = format!("{:#}", anyhow::Error::new(e));
             anyhow::Error::new(ProviderStreamError::MidStream(Box::new(
@@ -2431,6 +2451,7 @@ async fn send_prepared_streaming_inner(
                 &framed,
                 Some(&stream_mode),
                 stream_paths,
+                capture_rules,
                 &mut tool_state,
             );
             reject_malformed_sse_events(
@@ -2487,7 +2508,7 @@ async fn send_prepared_streaming_inner(
                     })?;
                 match &ev {
                     StreamEvent::Delta(text) => {
-                        accumulated_text.push_str(text);
+                        answer_parts.push_text(text);
                         progressive_events.push_text(turn, text);
                         if (!text.trim().is_empty() && !first_non_whitespace_text_published)
                             || progressive_events.is_full()
@@ -2502,13 +2523,17 @@ async fn send_prepared_streaming_inner(
                         name,
                         arguments,
                         malformed_args,
+                        artefact,
                         ..
                     } => {
-                        accumulated_tools.push(ToolCall {
-                            id: id.clone(),
-                            name: name.clone(),
-                            arguments: arguments.clone(),
-                        });
+                        answer_parts.push_call_with_artefact(
+                            ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: arguments.clone(),
+                            },
+                            artefact.clone(),
+                        );
                         flush_progressive_events!(
                             "live cognition_out publication failed before tool_use mid-stream"
                         );
@@ -2542,6 +2567,9 @@ async fn send_prepared_streaming_inner(
                     }
                     StreamEvent::Usage(_) => {}
                     StreamEvent::Warning { .. } => {}
+                    StreamEvent::ReasoningArtefact { capture_id, value } => {
+                        answer_parts.push_reasoning_artefact(capture_id, value.clone());
+                    }
                     StreamEvent::ReasoningDelta(text) => {
                         crate::startup_timing::mark_first_reasoning_event();
                         #[cfg(feature = "latency-profiling")]
@@ -2566,7 +2594,7 @@ async fn send_prepared_streaming_inner(
                                 tracing::warn!(%error, "provider reasoning-start milestone publication failed");
                             }
                         }
-                        accumulated_reasoning.push_str(text);
+                        answer_parts.push_reasoning(text);
                     }
                 }
                 all_events.push(ev);
@@ -2604,13 +2632,7 @@ async fn send_prepared_streaming_inner(
     // before building any partial response.
     if exit == LoopExit::Cancelled {
         return Ok(StreamOutcome::Cancelled {
-            attempt: CutAttemptState {
-                usage: last_usage,
-                generation_header_id,
-                response_id: last_response_id,
-                requested_output_tokens,
-                observed_output: output_meter.observed_output(live_output_events_emitted),
-            },
+            attempt: CutAttemptState { usage: last_usage },
         });
     }
 
@@ -2659,8 +2681,13 @@ async fn send_prepared_streaming_inner(
         )? {
             return Err(anyhow::Error::new(error));
         }
-        let final_events =
-            parse_sse_events_with_state(&framed, Some(&stream_mode), stream_paths, &mut tool_state);
+        let final_events = parse_sse_events_with_state(
+            &framed,
+            Some(&stream_mode),
+            stream_paths,
+            capture_rules,
+            &mut tool_state,
+        );
         reject_malformed_sse_events(
             &final_events,
             &output_meter,
@@ -2671,8 +2698,9 @@ async fn send_prepared_streaming_inner(
             requested_output_tokens,
         )?;
         #[cfg(feature = "latency-profiling")]
-        if !provider_stream_started_published && !final_events.is_empty() {
-            if let Err(error) = callback
+        if !provider_stream_started_published
+            && !final_events.is_empty()
+            && let Err(error) = callback
                 .append_runtime_event(
                     RuntimeEventType::Observation,
                     json!({
@@ -2684,9 +2712,8 @@ async fn send_prepared_streaming_inner(
                     }),
                 )
                 .await
-            {
-                tracing::warn!(%error, "provider stream-start milestone publication failed");
-            }
+        {
+            tracing::warn!(%error, "provider stream-start milestone publication failed");
         }
         for ev in final_events {
             if !metadata_usage_declared && let StreamEvent::Usage(update) = &ev {
@@ -2711,7 +2738,7 @@ async fn send_prepared_streaming_inner(
                 })?;
             match &ev {
                 StreamEvent::Delta(text) => {
-                    accumulated_text.push_str(text);
+                    answer_parts.push_text(text);
                     progressive_events.push_text(turn, text);
                     if (!text.trim().is_empty() && !first_non_whitespace_text_published)
                         || progressive_events.is_full()
@@ -2726,13 +2753,17 @@ async fn send_prepared_streaming_inner(
                     name,
                     arguments,
                     malformed_args,
+                    artefact,
                     ..
                 } => {
-                    accumulated_tools.push(ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: arguments.clone(),
-                    });
+                    answer_parts.push_call_with_artefact(
+                        ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                        },
+                        artefact.clone(),
+                    );
                     flush_progressive_events!(
                         "live cognition_out publication failed before tool_use at stream end"
                     );
@@ -2764,6 +2795,9 @@ async fn send_prepared_streaming_inner(
                 }
                 StreamEvent::Usage(_) => {}
                 StreamEvent::Warning { .. } => {}
+                StreamEvent::ReasoningArtefact { capture_id, value } => {
+                    answer_parts.push_reasoning_artefact(capture_id, value.clone());
+                }
                 StreamEvent::ReasoningDelta(text) => {
                     crate::startup_timing::mark_first_reasoning_event();
                     #[cfg(feature = "latency-profiling")]
@@ -2788,7 +2822,7 @@ async fn send_prepared_streaming_inner(
                             tracing::warn!(%error, "provider reasoning-start milestone publication failed");
                         }
                     }
-                    accumulated_reasoning.push_str(text);
+                    answer_parts.push_reasoning(text);
                 }
             }
             all_events.push(ev);
@@ -2829,49 +2863,31 @@ async fn send_prepared_streaming_inner(
         }));
     }
 
-    let content = if accumulated_text.is_empty() {
-        None
-    } else {
-        Some(json!(accumulated_text))
-    };
-    let reasoning_content = if accumulated_reasoning.is_empty() {
-        None
-    } else {
-        Some(accumulated_reasoning)
-    };
+    // A stream that ended without a terminal finish reason still closes its
+    // capture state: a block left open is dropped with a warning, never kept.
+    if exit != LoopExit::Cancelled {
+        super::reasoning_capture::finish_capture(&mut tool_state, &mut all_events);
+    }
 
-    // Interrupt cut: seal the partial cognition with content + reasoning only.
-    // NO tool_calls — an interrupted cognition didn't complete
-    // its tool call, so the folded wire history has no unpaired tool_call → the
-    // runner records `cognition_out{interrupted:true}` from this.
+    // Interrupt cut: seal the partial cognition with its complete text and
+    // reasoning parts only. NO tool call: an interrupted cognition didn't
+    // complete its tool call, so the folded wire history has no unpaired
+    // tool call. The runner records a `cognition_out` with finish
+    // "interrupted" from this.
     if exit == LoopExit::Interrupted {
         return Ok(StreamOutcome::Interrupted {
             partial_cognition: InterruptedCognition {
-                content,
-                reasoning_content,
+                parts: answer_parts.interrupted_parts(),
             },
             events: all_events,
-            attempt: CutAttemptState {
-                usage: last_usage,
-                generation_header_id,
-                response_id: last_response_id,
-                requested_output_tokens,
-                observed_output: output_meter.observed_output(live_output_events_emitted),
-            },
+            attempt: CutAttemptState { usage: last_usage },
         });
     }
 
-    let message = ProviderMessage {
-        role: "assistant".to_string(),
-        content,
-        tool_calls: if accumulated_tools.is_empty() {
-            None
-        } else {
-            Some(accumulated_tools)
-        },
-        tool_call_id: None,
-        reasoning_content,
-    };
+    // The parts are in the order the stream gave them. A call the provider
+    // issued without an id gets one derived from the turn and the call's
+    // position, so a replay and a recovery see the id the live run used.
+    let message = answer_parts.finish(input.turn);
 
     Ok(StreamOutcome::Completed {
         response: AdapterResponse {
@@ -2952,6 +2968,15 @@ fn next_sse_delimiter(buffer: &str) -> Option<(usize, usize)> {
     }
 }
 
+/// The bytes an opaque reasoning artefact occupies on the turn record: its
+/// compact JSON length. They count toward the per-turn output cap, so a
+/// provider that returns its thinking twice (as text and again inside a
+/// signed block) spends the cap twice rather than growing the recorded turn
+/// past it.
+fn artefact_bytes(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
 #[derive(Debug, Default)]
 struct StreamOutputMeter {
     text_bytes: usize,
@@ -3002,6 +3027,9 @@ impl StreamOutputMeter {
         match event {
             StreamEvent::Delta(text) => self.total_bytes().saturating_add(text.len()),
             StreamEvent::ReasoningDelta(text) => self.total_bytes().saturating_add(text.len()),
+            StreamEvent::ReasoningArtefact { value, .. } => {
+                self.total_bytes().saturating_add(artefact_bytes(value))
+            }
             StreamEvent::ToolUsePartial {
                 stream_key,
                 total_len,
@@ -3055,6 +3083,10 @@ impl StreamOutputMeter {
             }
             StreamEvent::ReasoningDelta(text) => {
                 self.reasoning_bytes = self.reasoning_bytes.saturating_add(text.len());
+                self.accepted_output_events = self.accepted_output_events.saturating_add(1);
+            }
+            StreamEvent::ReasoningArtefact { value, .. } => {
+                self.reasoning_bytes = self.reasoning_bytes.saturating_add(artefact_bytes(value));
                 self.accepted_output_events = self.accepted_output_events.saturating_add(1);
             }
             StreamEvent::ToolUsePartial {
@@ -3534,6 +3566,15 @@ fn inject_system_prompt(body: &mut Value, system: &str, provider: &ProviderConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_status_body_is_cut_at_a_character_boundary_within_the_bound() {
+        let body = "é".repeat(STATUS_BODY_MAX_BYTES);
+        let kept = bounded_status_body(&body);
+        assert!(kept.len() <= STATUS_BODY_MAX_BYTES);
+        assert!(body.starts_with(&kept));
+        assert_eq!(bounded_status_body("short"), "short");
+    }
     use ryeos_tracing::test as trace_test;
     use std::result::Result;
 
@@ -3707,6 +3748,7 @@ mod tests {
                     cost_details_path: None,
                     is_byok_path: None,
                     reasoning_included_in_output: false,
+                    cache_included_in_input: false,
                     aggregation: UsageAggregation::LatestSnapshot,
                     single_snapshot: true,
                 }),
@@ -3756,9 +3798,13 @@ mod tests {
                 .is_none()
             );
             validate_usage_against_requested_limit(usage.as_mut(), Some(32_768));
-            for event in
-                parse_sse_events_with_state(frame, Some("delta_merge"), None, &mut parser_state)
-            {
+            for event in parse_sse_events_with_state(
+                frame,
+                Some("delta_merge"),
+                None,
+                &[],
+                &mut parser_state,
+            ) {
                 meter.accept(&event, 131_072, 0).unwrap();
             }
         }
@@ -3948,6 +3994,7 @@ mod tests {
             argument_bytes: 42,
             arguments: json!({"x": "longer normalized representation"}),
             malformed_args: None,
+            artefact: None,
         };
         meter.accept(&terminal, 10, 1).unwrap();
         assert_eq!(
@@ -3978,7 +4025,7 @@ mod tests {
             "\"finish_reason\":null}]}\n\n",
         );
         let mut state = HashMap::new();
-        let events = parse_sse_events_with_state(data, Some("delta_merge"), None, &mut state);
+        let events = parse_sse_events_with_state(data, Some("delta_merge"), None, &[], &mut state);
         let partials = events
             .iter()
             .filter(|event| matches!(event, StreamEvent::ToolUsePartial { .. }))
@@ -4194,6 +4241,95 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
             assert_eq!(name, "bash");
             assert_eq!(arguments, &json!({"cmd": "ls"}));
         }
+    }
+
+    fn delta_merge_tool_uses(data: &str) -> Vec<(Option<String>, String, Value)> {
+        parse_sse_events(data, Some("delta_merge"))
+            .into_iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => Some((id, name, arguments)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn delta_merge_keeps_parallel_tool_calls_apart_without_an_index() {
+        // Two calls streamed with no `index`, their fragments interleaved and
+        // each carrying its call id.
+        let data = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"bash","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"arguments":"{\"path\":\"a.txt\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_b","function":{"arguments":"{\"cmd\":\"ls\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+"#;
+        assert_eq!(
+            delta_merge_tool_uses(data),
+            vec![
+                (
+                    Some("call_a".to_string()),
+                    "read_file".to_string(),
+                    json!({"path": "a.txt"})
+                ),
+                (
+                    Some("call_b".to_string()),
+                    "bash".to_string(),
+                    json!({"cmd": "ls"})
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn delta_merge_bare_fragments_continue_the_call_most_recently_opened() {
+        // No `index` anywhere; only the opening delta of each call has an id.
+        let data = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"path\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"a.txt\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"bash","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"cmd\":\"ls\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+"#;
+        assert_eq!(
+            delta_merge_tool_uses(data),
+            vec![
+                (
+                    Some("call_a".to_string()),
+                    "read_file".to_string(),
+                    json!({"path": "a.txt"})
+                ),
+                (
+                    Some("call_b".to_string()),
+                    "bash".to_string(),
+                    json!({"cmd": "ls"})
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn delta_merge_slot_state_does_not_leak_into_the_next_response() {
+        let mut state: HashMap<String, String> = HashMap::new();
+        let first = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+"#;
+        parse_sse_events_with_state(first, Some("delta_merge"), None, &[], &mut state);
+        assert!(state.is_empty(), "leftover parser state: {state:?}");
     }
 
     #[test]
@@ -4425,6 +4561,8 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                     ("max".to_string(), json!("max")),
                 ]),
             }),
+            capture: Vec::new(),
+            replay: None,
         }
     }
 
@@ -4508,6 +4646,9 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             })),
             body_extra: None,
             spend_authority: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4543,6 +4684,9 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_template: Some(json!({"contents": "{messages}"})),
             body_extra: Some(json!({"generationConfig": {"maxOutputTokens": 1024}})),
             spend_authority: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let body = super::build_request_body(
@@ -4579,6 +4723,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                     semantics: OutputLimitSemantics::ProviderNativeOutputTokens,
                 }),
                 reasoning: None,
+                frame_stability: None,
             }),
             pricing: None,
             extra: Default::default(),
@@ -4587,6 +4732,9 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             })),
             body_extra: None,
             spend_authority: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
 
@@ -4677,6 +4825,9 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let _ =
@@ -4704,6 +4855,9 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             })),
             body_extra: None,
             spend_authority: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4752,6 +4906,9 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let mut body = json!({});
@@ -4793,12 +4950,16 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 tools: None,
                 streaming: None,
                 reasoning: None,
+                frame_stability: None,
             }),
             pricing: None,
             extra: Default::default(),
             body_template: None,
             body_extra: None,
             spend_authority: None,
+            image_input: None,
+            cache_marks: None,
+            request_rejections: None,
             profiles: vec![],
         };
         let mut body = json!({"contents": []});
@@ -5143,42 +5304,40 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     };
     use ryeos_runtime::verified_loader::VerifiedLoader;
 
-    /// Path to the bundled standard root in the workspace.
+    /// Path to the directive bundle root in the workspace.
     fn bundle_root() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .find(|p| p.join("bundles").is_dir())
             .expect("workspace root with bundles/ directory")
-            .join("bundles/standard")
+            .join("bundles/directive")
     }
 
-    /// Dev publisher public key trust entry — the standard bundle's configs
-    /// are signed with this key, so tests that load real bundle configs need
-    /// it in the trust store.  This is public key material (not a secret).
-    const DEV_PUBLISHER_TRUST_TOML: &str = r#"
-public_key = "ed25519:sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk="
-fingerprint = "741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"
-owner = "RyeOS Development"
-"#;
+    /// Dev publisher signer entry - the directive bundle's configs are
+    /// signed with this key, so tests that load real bundle configs need it
+    /// in the signer list.  This is public key material (not a secret).
+    fn dev_publisher_signers() -> Vec<ryeos_engine::trust::TrustedSignerEntry> {
+        vec![ryeos_engine::trust::TrustedSignerEntry {
+            fingerprint: "741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"
+                .to_string(),
+            public_key: "ed25519:sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk=".to_string(),
+            label: "RyeOS Development".to_string(),
+            scope: ryeos_engine::trust::SignerScope::publisher_default(),
+            endorsements: None,
+        }]
+    }
 
     /// Build a VerifiedLoader rooted at the bundled standard, with a temp
-    /// project root that holds only the dev-publisher trust entry (no
-    /// project config), so project-overlay attacks can't interfere while
-    /// the trust store still verifies the bundle's signed configs.
+    /// project root that holds no project config, so project-overlay attacks
+    /// can't interfere while the signer list still verifies the bundle's
+    /// signed configs.
     fn loader_for_bundle() -> VerifiedLoader {
         let project_root = tempfile::tempdir().expect("create temp project root");
-        let trust_dir = project_root.path().join(".ai/config/keys/trusted");
-        let _ = std::fs::create_dir_all(&trust_dir);
-        std::fs::write(
-            trust_dir.join("dev-publisher.toml"),
-            DEV_PUBLISHER_TRUST_TOML,
-        )
-        .expect("write trust entry");
 
         VerifiedLoader::new(
             project_root.path().to_path_buf(),
             vec![bundle_root()],
-            std::path::Path::new("/nonexistent-operator-trust"),
+            &dev_publisher_signers(),
         )
         .unwrap()
     }
@@ -5188,7 +5347,7 @@ owner = "RyeOS Development"
         let loader = loader_for_bundle();
         let config_id = format!("ryeos-runtime/model-providers/{provider}");
         let base = loader
-            .load_config_strict::<ProviderConfig>(&config_id)
+            .load_config_strict_signed::<ProviderConfig>(&config_id)
             .unwrap_or_else(|e| panic!("provider load failed for {provider}/{model}: {e:#}"))
             .unwrap_or_else(|| panic!("provider config missing for {provider}"));
         let matched_profile = base
@@ -5232,8 +5391,18 @@ owner = "RyeOS Development"
             .schemas
             .as_ref()
             .and_then(|s| s.messages.as_ref());
-        let (converted, system_prompt) =
-            crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
+        let (converted, system_prompt) = crate::provider_adapter::messages::convert_messages(
+            messages,
+            &schemas.cloned(),
+            &crate::provider_adapter::messages::ConvertOptions {
+                reasoning: snapshot
+                    .provider
+                    .schemas
+                    .as_ref()
+                    .and_then(|schemas| schemas.reasoning.as_ref()),
+                images: None,
+            },
+        );
         let tool_schema = snapshot
             .provider
             .schemas
@@ -5257,56 +5426,24 @@ owner = "RyeOS Development"
     /// Canonical transcript with a tool call.
     fn canonical_transcript_with_tool_call() -> Vec<ProviderMessage> {
         vec![
-            ProviderMessage {
-                role: "system".to_string(),
-                content: Some(json!("You are helpful.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("What is 2+2?")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "assistant".to_string(),
-                content: Some(json!("Let me calculate.")),
-                tool_calls: Some(vec![ToolCall {
+            ProviderMessage::system("You are helpful."),
+            ProviderMessage::user("What is 2+2?"),
+            ProviderMessage::assistant(
+                Some("Let me calculate.".to_string()),
+                vec![ToolCall {
                     id: Some("call_1".to_string()),
                     name: "calculator".to_string(),
                     arguments: json!({"expr": "2+2"}),
-                }]),
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "tool".to_string(),
-                content: Some(json!("4")),
-                tool_calls: None,
-                tool_call_id: Some("call_1".to_string()),
-                reasoning_content: None,
-            },
-            ProviderMessage {
-                role: "user".to_string(),
-                content: Some(json!("Thanks.")),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
+                }],
+                None,
+            ),
+            ProviderMessage::tool_result("call_1", "4"),
+            ProviderMessage::user("Thanks."),
         ]
     }
 
     fn canonical_transcript_no_tools() -> Vec<ProviderMessage> {
-        vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hi")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }]
+        vec![ProviderMessage::user("hi")]
     }
 
     fn canonical_tool_schemas() -> Vec<ToolSchema> {
@@ -5333,6 +5470,7 @@ owner = "RyeOS Development"
             ("openrouter", "anthropic/claude-sonnet-4.6"),
             ("zai", "glm-5.2"),
             ("zen", "gpt-5.4-nano"),
+            ("google", "gemma-4-31b-it"),
             ("local-openai", "local-test-model"),
         ] {
             let snapshot = resolve(provider, model);
@@ -5399,8 +5537,11 @@ owner = "RyeOS Development"
             .schemas
             .as_ref()
             .and_then(|schemas| schemas.messages.as_ref());
-        let (converted, system_prompt) =
-            crate::provider_adapter::messages::convert_messages(&messages, &schemas.cloned());
+        let (converted, system_prompt) = crate::provider_adapter::messages::convert_messages(
+            &messages,
+            &schemas.cloned(),
+            &Default::default(),
+        );
         let body = super::build_request_body(
             &snapshot.provider,
             model,
@@ -5430,7 +5571,13 @@ owner = "RyeOS Development"
         let model = "glm-5.2";
         let snapshot = resolve("zai", model);
         let mut transcript = canonical_transcript_with_tool_call();
-        transcript[2].reasoning_content = Some("I should use the calculator.".to_string());
+        transcript[2].parts.insert(
+            0,
+            ryeos_provider_contract::Part::Reasoning(ryeos_provider_contract::ReasoningPart {
+                text: Some("I should use the calculator.".to_string()),
+                artefact: None,
+            }),
+        );
         let body = build_golden_body(
             &snapshot,
             &transcript,
@@ -5606,17 +5753,23 @@ owner = "RyeOS Development"
         };
         let terminal = ryeos_provider_contract::AdmittedLocalWorkerFinal {
             answer: ryeos_provider_contract::ProviderCallAnswer {
-                message: ryeos_provider_contract::RecordedMessage {
-                    role: "assistant".to_owned(),
-                    content: Some(json!("done")),
-                    tool_calls: Some(vec![ryeos_provider_contract::RecordedToolCall {
-                        id: Some("call-1".to_owned()),
-                        name: "inspect".to_owned(),
-                        arguments: json!({"value": 1}),
-                    }]),
-                    tool_call_id: None,
-                    reasoning_content: Some("checked".to_owned()),
-                },
+                message: ryeos_provider_contract::RecordedMessage::new(
+                    ryeos_provider_contract::Role::Assistant,
+                    vec![
+                        ryeos_provider_contract::Part::Reasoning(
+                            ryeos_provider_contract::ReasoningPart {
+                                text: Some("checked".to_owned()),
+                                artefact: None,
+                            },
+                        ),
+                        ryeos_provider_contract::Part::text("done"),
+                        ryeos_provider_contract::Part::tool_call(
+                            "call-1",
+                            "inspect",
+                            json!({"value": 1}),
+                        ),
+                    ],
+                ),
                 finish_reason: Some("tool_calls".to_owned()),
             },
             usage: ryeos_provider_contract::AdmittedLocalWorkerUsage {
@@ -5633,6 +5786,7 @@ owner = "RyeOS Development"
             provider_id: "qwen3-0.6b-cpu-4096",
             matched_profile: None,
             config_hash: "fixture",
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &execution,
             model: "qwen3-0.6b",
             messages: &messages,
@@ -5653,12 +5807,12 @@ owner = "RyeOS Development"
             panic!("retained local observation must complete the call");
         };
         assert!(events.is_empty(), "historical deltas must not republish");
-        assert_eq!(response.message.content, Some(json!("done")));
+        assert_eq!(response.message.text().as_deref(), Some("done"));
         assert_eq!(
-            response.message.reasoning_content.as_deref(),
+            response.message.reasoning_text().as_deref(),
             Some("checked")
         );
-        assert_eq!(response.message.tool_calls.as_deref().unwrap().len(), 1);
+        assert_eq!(response.message.calls().len(), 1);
         assert_eq!(response.usage.as_ref().unwrap().input_tokens, Some(11));
         assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(3));
         assert_eq!(response.response_id.as_deref(), Some("local-response-1"));
@@ -5710,7 +5864,6 @@ owner = "RyeOS Development"
             _thread_id: &str,
             event_type: &str,
             payload: Value,
-            _storage_class: &str,
         ) -> Result<Value, ryeos_runtime::callback::CallbackError> {
             self.events
                 .lock()
@@ -5722,6 +5875,7 @@ owner = "RyeOS Development"
             &self,
             _thread_id: &str,
             events: Vec<Value>,
+            _options: ryeos_runtime::callback::EventAppendOptions,
         ) -> Result<Value, ryeos_runtime::callback::CallbackError> {
             self.batch_offsets
                 .lock()
@@ -5896,13 +6050,7 @@ owner = "RyeOS Development"
             max_stream_output_bytes_per_turn: 3_910,
             ..ExecutionConfig::default()
         };
-        let messages = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("hypothesize")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = vec![ProviderMessage::user("hypothesize")];
 
         let outcome = call_provider_streaming_for_test(StreamingCallInput {
             client: &reqwest::Client::new(),
@@ -5910,6 +6058,7 @@ owner = "RyeOS Development"
             provider_id: "opaque-test-route",
             matched_profile: snapshot.matched_profile.as_deref(),
             config_hash: &snapshot.config_hash,
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &execution,
             model: &snapshot.model_name,
             messages: &messages,
@@ -6023,13 +6172,7 @@ owner = "RyeOS Development"
         let recorder = Arc::new(StreamingEventRecorder::new());
         let callback =
             CallbackClient::from_inner(recorder.clone(), "T-deadline", "/project", "tat-test");
-        let messages = vec![ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!("respond")),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }];
+        let messages = vec![ProviderMessage::user("respond")];
 
         let outcome = call_provider_streaming_for_test(StreamingCallInput {
             client: &reqwest::Client::new(),
@@ -6037,6 +6180,7 @@ owner = "RyeOS Development"
             provider_id: "opaque-test-route",
             matched_profile: snapshot.matched_profile.as_deref(),
             config_hash: &snapshot.config_hash,
+            images: &crate::provider_adapter::images::ImageStore::default(),
             execution: &ExecutionConfig {
                 timeout_seconds: 5,
                 ..ExecutionConfig::default()
@@ -6060,7 +6204,7 @@ owner = "RyeOS Development"
         let StreamOutcome::Completed { response, .. } = outcome else {
             panic!("provider stream did not complete");
         };
-        assert_eq!(response.message.content, Some(json!("first second")));
+        assert_eq!(response.message.text().as_deref(), Some("first second"));
         assert_eq!(recorder.batch_sizes(), vec![1, 1]);
         let offsets = recorder.batch_offsets();
         assert_eq!(offsets.len(), 2);
@@ -6143,6 +6287,31 @@ owner = "RyeOS Development"
         assert!(
             content.iter().any(|b| b["type"] == "tool_use"),
             "must contain at least one tool_use block"
+        );
+    }
+
+    #[test]
+    fn bundled_google_gemma_body_carries_no_thinking_config() {
+        // Google rejects thinking settings for gemma-* models, so the Google
+        // provider must never send a thinkingConfig.
+        let snapshot = resolve("google", "gemma-4-31b-it");
+        let body = build_golden_body(
+            &snapshot,
+            &canonical_transcript_with_tool_call(),
+            &canonical_tool_schemas(),
+            None,
+        );
+        assert!(
+            body.pointer("/generationConfig/thinkingConfig").is_none(),
+            "Gemma body must omit thinkingConfig; got: {body}"
+        );
+        assert!(
+            body["tools"][0]["functionDeclarations"].is_array(),
+            "Google body must wrap tools in functionDeclarations; got: {body}"
+        );
+        assert!(
+            snapshot.provider.pricing.is_none(),
+            "route is unpriced, not free"
         );
     }
 
@@ -6469,5 +6638,188 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
             normalize_finish_reason(Some("MAX_TOKENS")),
             FinishReason::Length
         );
+    }
+
+    // ── Reasoning capture through the stream parser ──────────────────────
+
+    fn capture_rules(rules: Value) -> Vec<ryeos_directive_definition::ReasoningCaptureRule> {
+        serde_json::from_value(rules).expect("capture rules")
+    }
+
+    fn sse(frames: &[Value]) -> String {
+        frames
+            .iter()
+            .map(|frame| format!("data: {frame}\n\n"))
+            .collect()
+    }
+
+    fn delta_frame(delta: Value) -> Value {
+        json!({"choices": [{"index": 0, "delta": delta, "finish_reason": null}]})
+    }
+
+    fn finish_frame(reason: &str) -> Value {
+        json!({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
+    }
+
+    fn parse_with(
+        rules: &[ryeos_directive_definition::ReasoningCaptureRule],
+        frames: &[Value],
+    ) -> Vec<StreamEvent> {
+        let mut state = HashMap::new();
+        let mut events = Vec::new();
+        for frame in frames {
+            events.extend(parse_sse_events_with_state(
+                &sse(std::slice::from_ref(frame)),
+                Some("delta_merge"),
+                None,
+                rules,
+                &mut state,
+            ));
+        }
+        events
+    }
+
+    #[test]
+    fn a_claude_shaped_stream_yields_text_then_one_artefact_per_block() {
+        let rules = capture_rules(json!([
+            {"id": "text", "kind": "text_delta", "fields": ["reasoning_content"]},
+            {"id": "blocks", "kind": "blocks", "field": "thinking_blocks",
+             "merge_keys": ["thinking"], "close_key": "signature",
+             "whole_types": ["redacted_thinking"]}
+        ]));
+        let events = parse_with(
+            &rules,
+            &[
+                delta_frame(json!({"reasoning_content": "hm"})),
+                delta_frame(json!({"thinking_blocks": [{"type": "thinking", "thinking": "hm"}]})),
+                delta_frame(
+                    json!({"thinking_blocks": [{"type": "thinking", "thinking": "", "signature": "SIG"}]}),
+                ),
+                delta_frame(
+                    json!({"thinking_blocks": [{"type": "redacted_thinking", "data": "xx"}]}),
+                ),
+                delta_frame(json!({"content": "hi"})),
+                finish_frame("stop"),
+            ],
+        );
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|event| match event {
+                StreamEvent::ReasoningDelta(_) => "text",
+                StreamEvent::ReasoningArtefact { .. } => "artefact",
+                StreamEvent::Delta(_) => "content",
+                StreamEvent::Finish { .. } => "finish",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["text", "artefact", "artefact", "content", "finish"]);
+        let StreamEvent::ReasoningArtefact { capture_id, value } = &events[1] else {
+            panic!("artefact")
+        };
+        assert_eq!(capture_id, "blocks");
+        assert_eq!(
+            value,
+            &json!({"type": "thinking", "thinking": "hm", "signature": "SIG"})
+        );
+    }
+
+    #[test]
+    fn a_block_cut_at_the_length_limit_is_dropped_with_a_warning() {
+        let rules = capture_rules(json!([
+            {"id": "blocks", "kind": "blocks", "field": "thinking_blocks",
+             "merge_keys": ["thinking"], "close_key": "signature"}
+        ]));
+        let events = parse_with(
+            &rules,
+            &[
+                delta_frame(json!({"thinking_blocks": [{"type": "thinking", "thinking": "open"}]})),
+                finish_frame("length"),
+            ],
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ReasoningArtefact { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Warning { code, .. } if code == "reasoning_artefact_incomplete"
+        )));
+        assert!(matches!(events.last(), Some(StreamEvent::Finish { .. })));
+    }
+
+    #[test]
+    fn a_tool_call_field_rides_only_the_call_that_carried_it() {
+        let rules = capture_rules(json!([
+            {"id": "sig", "kind": "tool_call_field", "field": "extra_content", "merge": "last"}
+        ]));
+        let call = |id: &str, extra: Option<Value>| {
+            let mut entry = json!({"id": id, "type": "function",
+                "function": {"name": "t", "arguments": "{}"}});
+            if let Some(extra) = extra {
+                entry["extra_content"] = extra;
+            }
+            delta_frame(json!({"tool_calls": [entry]}))
+        };
+        let events = parse_with(
+            &rules,
+            &[
+                call("a", Some(json!({"sig": "S"}))),
+                call("b", None),
+                finish_frame("tool_calls"),
+            ],
+        );
+        let uses: Vec<(&Option<String>, &Option<crate::directive::ToolCallArtefact>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolUse { id, artefact, .. } => Some((id, artefact)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uses.len(), 2);
+        assert_eq!(uses[0].0.as_deref(), Some("a"));
+        assert_eq!(uses[0].1.as_ref().unwrap().value, json!({"sig": "S"}));
+        assert!(uses[1].1.is_none());
+    }
+
+    #[test]
+    fn no_declared_rules_means_no_reasoning_is_read() {
+        let events = parse_with(
+            &[],
+            &[
+                delta_frame(json!({"reasoning_content": "x", "reasoning": "y", "thinking": "z"})),
+                finish_frame("stop"),
+            ],
+        );
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            StreamEvent::ReasoningDelta(_) | StreamEvent::ReasoningArtefact { .. }
+        )));
+    }
+
+    #[test]
+    fn artefact_bytes_count_toward_the_per_turn_cap() {
+        let cap = 131_072_u64;
+        let artefact = |bytes: usize| StreamEvent::ReasoningArtefact {
+            capture_id: "blocks".to_string(),
+            value: json!({"thinking": "x".repeat(bytes)}),
+        };
+        let mut meter = StreamOutputMeter::default();
+        meter
+            .accept(&artefact(100 * 1024), cap, 0)
+            .expect("under the cap");
+        assert!(meter.total_bytes() > 100 * 1024);
+
+        // Thinking returned both as text and inside the block spends the cap
+        // twice, so the doubled turn trips the cap instead of growing the
+        // recorded event past it.
+        let mut doubled = StreamOutputMeter::default();
+        doubled
+            .accept(&StreamEvent::ReasoningDelta("x".repeat(70 * 1024)), cap, 0)
+            .expect("text alone fits");
+        let error = doubled
+            .accept(&artefact(70 * 1024), cap, 0)
+            .expect_err("the second copy exceeds the cap");
+        assert!(error.downcast_ref::<LocalOutputByteLimitError>().is_some());
     }
 }

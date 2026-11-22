@@ -1,13 +1,11 @@
-# ryeos:signed:2026-09-14T10:03:09Z:f87353b2db2e40aaeca2fe3d4fba09c083a7214e0f3e336098d3714632b1fe58:62h/bAUc3rGKr0q8OBt7gBf/jG8NJXI1AQGh8UChganzgnenXS+HO2D6Y3X/1POn7CaeTta6kZyCDWrBet7zBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-10-19T22:29:40Z:786d7d981c5fd85234e0c5cf3d05ae8defbc50cf30c770f9ae46f41948f00072:zthifHQ0c52cOw2ReGUK3t+GA6mA2A5MgW7IR7H5BLag00NvSiSOdNCRPnH49FsaJdATZBxJYVJFyDT94pnAAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-gc
 title: Garbage Collection
 version: "1.0.0"
-description: Garbage collection state for the active project context
+description: Bounded node garbage collection observations; live maintenance ownership is unknown
 
 widget: key_value
 sources:
   default:
     ref: service:ui/ryeos-ui/gc/status
-    params:
-      project_path: "@session:project_root"
-    requires_project: true
+    params: {}

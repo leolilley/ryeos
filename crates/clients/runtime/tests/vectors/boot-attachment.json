@@ -1,0 +1,563 @@
+[
+  {
+    "name": "root attachment generation 1",
+    "function": "sessionRootAttachment(session).binding_generation",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":1,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}"
+    },
+    "expected": {
+      "ok": {
+        "$int": "1"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "root attachment generation 9007199254740993",
+    "function": "sessionRootAttachment(session).binding_generation",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":9007199254740993,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}"
+    },
+    "expected": {
+      "ok": {
+        "$int": "9007199254740993"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "root attachment generation 18446744073709551615",
+    "function": "sessionRootAttachment(session).binding_generation",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":18446744073709551615,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}"
+    },
+    "expected": {
+      "ok": {
+        "$int": "18446744073709551615"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "invalid root attachment generation 0",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":0,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session root attachment generation is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "invalid root attachment generation -1",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":-1,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session root attachment generation is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "invalid root attachment generation 1.5",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":1.5,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session root attachment generation is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "invalid root attachment generation \"1\"",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":\"1\",\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session root attachment generation is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "duplicate surface attachment refused",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":1,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}",
+      "mutation": "push a second copy of binding_attachments[0]"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session does not contain exactly one root attachment"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "prepared link selects exact membership",
+    "function": "preparedPresentationSelection(session, url)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":9007199254740993,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}",
+      "presentations": [
+        {
+          "presentation_id": "prepared",
+          "thread_id": "thread",
+          "chain_root_id": "chain",
+          "root_binding": "copy of binding_attachments[0]",
+          "surfaces": []
+        }
+      ],
+      "url": "http://127.0.0.1:7411/ui?presentation_id=prepared"
+    },
+    "expected": {
+      "ok": {
+        "generation": {
+          "$int": "9007199254740993"
+        },
+        "presentation": {
+          "presentation_id": "prepared",
+          "thread_id": "thread",
+          "chain_root_id": "chain"
+        }
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "prepared link with stale root binding generation",
+    "function": "preparedPresentationSelection(session, url)",
+    "input": {
+      "same_as": "previous, then presentations[0].root_binding.binding_generation = 1n",
+      "url": "http://127.0.0.1:7411/ui?presentation_id=prepared"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "prepared presentation root binding is stale or invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "no membership: ?presentation_id=foreign",
+    "function": "preparedPresentationSelection(session, url)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":1,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}",
+      "presentations": [],
+      "url": "http://127.0.0.1:7411/ui?presentation_id=foreign"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "prepared presentation is not an exact authenticated membership"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "no membership: ?presentation_id=",
+    "function": "preparedPresentationSelection(session, url)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":1,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}",
+      "presentations": [],
+      "url": "http://127.0.0.1:7411/ui?presentation_id="
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "prepared presentation selection is ambiguous or empty"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "no membership: ?presentation_id=one&presentation_id=two",
+    "function": "preparedPresentationSelection(session, url)",
+    "input": {
+      "session_json": "{\"root_attachment_id\":\"surface\",\"binding_attachments\":[{\"binding_attachment_id\":\"surface\",\"binding_generation\":1,\"binding_digest\":\"digest\",\"project_path\":null,\"subject\":{\"kind\":\"projectless\"}}]}",
+      "presentations": [],
+      "url": "http://127.0.0.1:7411/ui?presentation_id=one&presentation_id=two"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "prepared presentation selection is ambiguous or empty"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "no presentation_id selects nothing",
+    "function": "preparedPresentationSelection(session, url)",
+    "input": {
+      "url": "http://127.0.0.1:7411/ui"
+    },
+    "expected": {
+      "ok": null
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "seat append bound 2000",
+    "function": "sessionSeatAppendBound(session, rootId)",
+    "input": {
+      "max_seat_append_bytes": {
+        "$int": "2000"
+      },
+      "root_attachment_id": "surface"
+    },
+    "expected": {
+      "ok": {
+        "$int": "2000"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "seat append bound undefined",
+    "function": "sessionSeatAppendBound(session, rootId)",
+    "input": {
+      "max_seat_append_bytes": {
+        "$undefined": true
+      },
+      "root_attachment_id": "surface"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session signed seat append byte bound is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "seat append bound 0",
+    "function": "sessionSeatAppendBound(session, rootId)",
+    "input": {
+      "max_seat_append_bytes": {
+        "$int": "0"
+      },
+      "root_attachment_id": "surface"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session signed seat append byte bound is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "seat append bound -1",
+    "function": "sessionSeatAppendBound(session, rootId)",
+    "input": {
+      "max_seat_append_bytes": {
+        "$int": "-1"
+      },
+      "root_attachment_id": "surface"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session signed seat append byte bound is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "seat append bound 2^53",
+    "function": "sessionSeatAppendBound(session, rootId)",
+    "input": {
+      "max_seat_append_bytes": {
+        "$int": "9007199254740992"
+      },
+      "root_attachment_id": "surface"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session signed seat append byte bound is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "seat append bound Number 2000",
+    "function": "sessionSeatAppendBound(session, rootId)",
+    "input": {
+      "max_seat_append_bytes": 2000,
+      "root_attachment_id": "surface"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session signed seat append byte bound is invalid"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "seat append bound for foreign root",
+    "function": "sessionSeatAppendBound(session, rootId)",
+    "input": {
+      "root_attachment_id": "foreign"
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "authenticated browser session does not contain exactly one root attachment"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject undefined with project_path null",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": null,
+      "subject": {
+        "$undefined": true
+      }
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject is required"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject null with project_path null",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": null,
+      "subject": null
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject is required"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"unknown\"} with project_path null",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": null,
+      "subject": {
+        "kind": "unknown"
+      }
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject contradicts its project metadata or closed schema"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"projectless\",\"local_id\":\"extra\"} with project_path null",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": null,
+      "subject": {
+        "kind": "projectless",
+        "local_id": "extra"
+      }
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject contradicts its project metadata or closed schema"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"registered_project\",\"local_id\":\"project\"} with project_path null",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": null,
+      "subject": {
+        "kind": "registered_project",
+        "local_id": "project"
+      }
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject contradicts its project metadata or closed schema"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"unregistered_project\"} with project_path set",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": "/retained/display/path",
+      "subject": {
+        "kind": "unregistered_project"
+      }
+    },
+    "expected": {
+      "ok": "surface"
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"registered_project\",\"local_id\":\"arc\"} with project_path set",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": "/retained/display/path",
+      "subject": {
+        "kind": "registered_project",
+        "local_id": "arc"
+      }
+    },
+    "expected": {
+      "ok": "surface"
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"registered_project\",\"local_id\":\"\"} with project_path set",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": "/retained/display/path",
+      "subject": {
+        "kind": "registered_project",
+        "local_id": ""
+      }
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject contradicts its project metadata or closed schema"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"registered_project\",\"local_id\":\" \"} with project_path set",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": "/retained/display/path",
+      "subject": {
+        "kind": "registered_project",
+        "local_id": " "
+      }
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject contradicts its project metadata or closed schema"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"registered_project\",\"local_id\":\"arc\\n\"} with project_path set",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": "/retained/display/path",
+      "subject": {
+        "kind": "registered_project",
+        "local_id": "arc\n"
+      }
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject contradicts its project metadata or closed schema"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "subject {\"kind\":\"registered_project\",\"local_id\":1} with project_path set",
+    "function": "sessionRootAttachment(session)",
+    "input": {
+      "project_path": "/retained/display/path",
+      "subject": {
+        "kind": "registered_project",
+        "local_id": 1
+      }
+    },
+    "expected": {
+      "error": {
+        "class": "Error",
+        "message": "binding attachment subject contradicts its project metadata or closed schema"
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "retainedPresentationUrl ?source=arc",
+    "function": "retainedPresentationUrl(url, presentationId)",
+    "input": {
+      "url": "http://127.0.0.1:7411/ui?source=arc#solve",
+      "presentation_id": "11111111-1111-4111-8111-111111111111"
+    },
+    "expected": {
+      "ok": {
+        "search": "?presentation_id=11111111-1111-4111-8111-111111111111",
+        "hash": "#solve",
+        "original_search_unchanged": true
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "retainedPresentationUrl ?presentation_id=old&source=arc",
+    "function": "retainedPresentationUrl(url, presentationId)",
+    "input": {
+      "url": "http://127.0.0.1:7411/ui?presentation_id=old&source=arc#solve",
+      "presentation_id": "11111111-1111-4111-8111-111111111111"
+    },
+    "expected": {
+      "ok": {
+        "search": "?presentation_id=11111111-1111-4111-8111-111111111111",
+        "hash": "#solve",
+        "original_search_unchanged": true
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  },
+  {
+    "name": "retainedPresentationUrl ?presentation_id=old&source=arc&presentation_id=other",
+    "function": "retainedPresentationUrl(url, presentationId)",
+    "input": {
+      "url": "http://127.0.0.1:7411/ui?presentation_id=old&source=arc&presentation_id=other#solve",
+      "presentation_id": "11111111-1111-4111-8111-111111111111"
+    },
+    "expected": {
+      "ok": {
+        "search": "?presentation_id=11111111-1111-4111-8111-111111111111",
+        "hash": "#solve",
+        "original_search_unchanged": true
+      }
+    },
+    "provenance": "test-verbatim inputs (assertions per test); outputs computed"
+  }
+]

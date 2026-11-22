@@ -49,12 +49,12 @@ pub(super) fn sign_owner_signed_source_unit(
     let Some(executor_policy) = executor_policy else {
         return Ok(None);
     };
-    let source = ryeos_app::source_closure_admission::DirectorySourceContent::new(
+    let source = ryeos_engine::source_closure::source_view::DirectorySourceContent::new(
         source_root,
         format!("source-unit-sign:{canonical_ref}:{expected_source_digest}"),
         configured_ignore,
     )?;
-    let (request, root_entry) = ryeos_app::source_closure_admission::executor_source_request(
+    let (request, root_entry) = ryeos_engine::source_closure::source_view::executor_source_request(
         &source,
         executor_policy.location,
         kind_name,
@@ -122,7 +122,7 @@ pub(super) fn sign_owner_signed_source_unit(
         .map(|entry| entry.blob_hash.as_str())
         .ok_or_else(|| anyhow!("published source unit lost its canonical owner item"))?;
     let (selected_after, root_after) =
-        ryeos_app::source_closure_admission::executor_source_request(
+        ryeos_engine::source_closure::source_view::executor_source_request(
             &source,
             executor_policy.location,
             kind_name,
@@ -313,7 +313,7 @@ fn valid_signature_for_owner(
         &header.content_hash,
         &header.signature_b64,
         &header.signer_fingerprint,
-        lillux::signature::content_to_sign(canonical_body, envelope.after_shebang),
+        canonical_body,
         &verifying_key,
         &fingerprint,
     )
@@ -365,12 +365,11 @@ fn verify_published_unit(
             bail!("source unit body changed during signature publication");
         }
         let header = header.ok_or_else(|| anyhow!("published source unit file is unsigned"))?;
-        let signed_body = lillux::signature::content_to_sign(&body, planned.envelope.after_shebang);
         if !lillux::signature::is_valid_signature_for(
             &header.content_hash,
             &header.signature_b64,
             &header.signer_fingerprint,
-            signed_body,
+            &body,
             &verifying_key,
             &fingerprint,
         ) {
@@ -490,6 +489,7 @@ mod tests {
             effective_trust: Default::default(),
             content: None,
             execution: Some(execution),
+            thread_profile: None,
             composed_value_contract: ValueShape::any_mapping(),
             composer: "handler:test/identity".to_owned(),
             composer_config: serde_json::Value::Null,
@@ -497,6 +497,9 @@ mod tests {
             inventory_kinds: Vec::new(),
             inventory_schema_keys: Vec::new(),
             inventory_policy: Default::default(),
+            launch_trust: None,
+            project_shadowing: Default::default(),
+            runtime_authoring: Default::default(),
         }
     }
 
@@ -534,7 +537,7 @@ mod tests {
             &header.content_hash,
             &header.signature_b64,
             &header.signer_fingerprint,
-            lillux::signature::content_to_sign(&body, envelope.after_shebang),
+            &body,
             &key.verifying_key(),
             &fingerprint,
         ));

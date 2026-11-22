@@ -26,11 +26,6 @@ struct SearchParams {
     query: String,
     #[serde(default)]
     num_results: Option<usize>,
-    // Accepted for backward-compat but IGNORED — this tool always uses "basic"
-    // depth (see search_tavily). "advanced" returns noisy full-page content.
-    #[serde(default)]
-    #[allow(dead_code)]
-    search_depth: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

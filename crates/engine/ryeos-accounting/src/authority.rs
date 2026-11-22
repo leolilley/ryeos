@@ -273,10 +273,10 @@ pub const CREDENTIAL_BINDING_MAC_CONTRACT: &str = "hmac-sha256/v1";
 /// daemon-held key persisted outside the ledger database — the stored digest
 /// must never become an offline verification oracle for a reader of the
 /// ledger file alone.
-pub fn credential_binding_digest(
+pub fn credential_binding_digest<N: AsRef<str>, V: AsRef<str>>(
     binding_key: &[u8],
     authority: &ProviderAccountingAuthority,
-    secrets: &[(String, String)],
+    secrets: &[(N, V)],
 ) -> Result<HexDigest, String> {
     if binding_key.len() < 16 {
         return Err("credential binding key must be at least 16 bytes".to_string());
@@ -285,8 +285,8 @@ pub fn credential_binding_digest(
         .iter()
         .map(|(name, value)| {
             (
-                name.as_str(),
-                lillux::crypto::hmac_sha256_hex(binding_key, value.as_bytes()),
+                name.as_ref(),
+                lillux::crypto::hmac_sha256_hex(binding_key, value.as_ref().as_bytes()),
             )
         })
         .collect();
