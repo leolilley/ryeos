@@ -349,22 +349,7 @@ pub async fn load_resume_state(
         // again. A successor's start must still fit the window.
         Some(anchor) => {
             let folded = fold_messages_anchored(&events, Some(anchor.chain_seq))?;
-            let delivered = folded
-                .iter()
-                .filter_map(wrap_up_notice_reasons)
-                .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
-            // A loop warning is positioned by the assistant turns before it
-            // in the compacted conversation the model is given.
-            let mut warned = std::collections::BTreeMap::new();
-            let mut turns_so_far = 0u32;
-            for message in &folded {
-                if message.message.role == ryeos_provider_contract::Role::Assistant {
-                    turns_so_far += 1;
-                }
-                if let Some(kind) = loop_warning_kind(message) {
-                    warned.insert(kind, turns_so_far);
-                }
-            }
+            let (delivered, warned) = compacted_signals(&folded);
             let messages: Vec<ProviderMessage> =
                 folded.into_iter().map(|folded| folded.message).collect();
             let over = mode == ResumeMode::Continuation
@@ -803,6 +788,32 @@ impl WrapUpDelivered {
             turn_limit: self.turn_limit || other.turn_limit,
         }
     }
+}
+
+/// The wrap-up reasons already given and the loop findings already warned
+/// about in a compacted conversation, each warning positioned by the assistant
+/// turns before it in the conversation the model is given.
+fn compacted_signals(
+    folded: &[FoldedMessage],
+) -> (
+    WrapUpDelivered,
+    std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
+) {
+    let delivered = folded
+        .iter()
+        .filter_map(wrap_up_notice_reasons)
+        .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
+    let mut warned = std::collections::BTreeMap::new();
+    let mut turns_so_far = 0u32;
+    for message in folded {
+        if message.message.role == ryeos_provider_contract::Role::Assistant {
+            turns_so_far += 1;
+        }
+        if let Some(kind) = loop_warning_kind(message) {
+            warned.insert(kind, turns_so_far);
+        }
+    }
+    (delivered, warned)
 }
 
 /// The reasons a folded message gave, when it is a wrap-up notice.
@@ -5387,6 +5398,41 @@ mod tests {
             event_at("cognition_in", 27, json!({"turn": 6, "purpose": "turn"})),
             event_at("cognition_out", 28, out(6, "after")),
         ]
+    }
+
+    #[test]
+    fn a_compaction_keeps_the_wrap_up_and_loop_warnings_its_kept_turns_carry() {
+        let mut events = windowed_events();
+        let notices: Vec<ReplayedEventRecord> = kinded_input("loop_warning_ping_pong")
+            .into_iter()
+            .chain(kinded_input(ryeos_runtime::cognition::KIND_LIMIT_WRAP_UP))
+            .enumerate()
+            .map(|(i, mut event)| {
+                event.chain_seq = 100 + i as i64;
+                event
+            })
+            .collect();
+        // The notices sit between kept turn 4 and the summary call.
+        events.splice(4..4, notices);
+        let folded = fold_messages_anchored(&events, Some(26)).unwrap();
+        let (delivered, warned) = compacted_signals(&folded);
+        assert_eq!(
+            delivered,
+            WrapUpDelivered {
+                deadline: false,
+                turn_limit: true
+            }
+        );
+        // Two assistant turns (the kept turns 3 and 4) precede the warning.
+        assert_eq!(
+            warned.get(&crate::loop_guards::FindingKind::PingPong),
+            Some(&2)
+        );
+        // Without the notices nothing is carried.
+        let plain = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let (none, empty) = compacted_signals(&plain);
+        assert_eq!(none, WrapUpDelivered::default());
+        assert!(empty.is_empty());
     }
 
     #[test]
