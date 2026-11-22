@@ -1500,10 +1500,7 @@ fn seed_dedicated_session_root(state: &AppState, thread_id: &str, project: &std:
 /// Everything a restart must leave untouched on a held root: the chain's
 /// events (count and last hash), the root thread's status and the resume
 /// budget.
-fn held_root_footprint(
-    state: &AppState,
-    thread_id: &str,
-) -> (usize, Option<String>, String, u32) {
+fn held_root_footprint(state: &AppState, thread_id: &str) -> (usize, Option<String>, String, u32) {
     let events = state
         .state_store
         .replay_events(thread_id, None, None, 10_000, usize::MAX)
@@ -1566,7 +1563,11 @@ async fn startup_recovery_holds_the_root_of_a_dedicated_session_that_is_not_runn
             Some(ryeos_app::dedicated_session_service::DEDICATED_SESSION_HOLDS_CANDIDATE),
             "{session_state}"
         );
-        assert_eq!(held_root_footprint(&state, thread_id), before, "{session_state}");
+        assert_eq!(
+            held_root_footprint(&state, thread_id),
+            before,
+            "{session_state}"
+        );
         let session = state
             .state_store
             .dedicated_session(thread_id)
