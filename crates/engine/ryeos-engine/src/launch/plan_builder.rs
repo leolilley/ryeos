@@ -2588,7 +2588,7 @@ config:
         // A chain terminal that declares a source scope, signed by a key that
         // is scoped to one registered project that is not the checkout path.
         let logical: ryeos_state::project_identity::ProjectIdentity =
-            format!("fp:{}/registered-project", "a".repeat(64))
+            format!("pid:v1:{}/registered-project", "a".repeat(64))
                 .parse()
                 .unwrap();
         let author = SigningKey::from_bytes(&[43u8; 32]);
@@ -2653,7 +2653,7 @@ config:
         let by_other = by_checkout
             .clone()
             .with_logical_project(LogicalProject::Stated(
-                format!("fp:{}/other-project", "a".repeat(64))
+                format!("pid:v1:{}/other-project", "a".repeat(64))
                     .parse()
                     .unwrap(),
             ));

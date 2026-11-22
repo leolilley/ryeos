@@ -314,8 +314,10 @@ pub struct SignerScope {
 
 /// One project a scoped signer may sign for.
 ///
-/// Written `fp:<64 hex>/<name>` for a named owner, or `own:<name>` for the
-/// signer's own key as owner. Nothing else parses: a path is never a scope.
+/// Written `pid:v1:<64 hex>/<name>` for a named owner principal, or
+/// `own:<name>` for the principal the signer's key speaks for on the judging
+/// node. Nothing else parses: a path is never a scope, and a key fingerprint
+/// is never an owner.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum ProjectScopeEntry {
@@ -324,19 +326,17 @@ pub enum ProjectScopeEntry {
 }
 
 impl ProjectScopeEntry {
-    /// Whether this entry names `identity` for a signer whose raw
-    /// fingerprint is `signer_fingerprint`.
+    /// Whether this entry names `identity` for a signer whose key speaks
+    /// for `signer_owner` on this node (from the node's ownership resolver;
+    /// `None` when the key speaks for no principal, so `own:` names nothing).
     pub fn names(
         &self,
         identity: &ryeos_state::project_identity::ProjectIdentity,
-        signer_fingerprint: &str,
+        signer_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> bool {
         match self {
             Self::Identity(entry) => entry == identity,
-            Self::Own(name) => {
-                identity.name() == name
-                    && identity.owner().strip_prefix("fp:") == Some(signer_fingerprint)
-            }
+            Self::Own(name) => identity.name() == name && signer_owner == Some(identity.owner()),
         }
     }
 }
@@ -355,7 +355,7 @@ impl std::str::FromStr for ProjectScopeEntry {
             .map(Self::Identity)
             .map_err(|error| {
                 format!(
-                    "project scope `{value}` must be fp:<owner>/<name> or own:<name>: {error:#}"
+                    "project scope `{value}` must be pid:v1:<owner>/<name> or own:<name>: {error:#}"
                 )
             })
     }
@@ -424,8 +424,8 @@ impl SignerScope {
         }
     }
 
-    /// Whether the scope admits one signature context, for the signer whose
-    /// raw fingerprint is `signer_fingerprint`. An unscoped scope (empty
+    /// Whether the scope admits one signature context, for a signer whose
+    /// key speaks for `signer_owner` on this node. An unscoped scope (empty
     /// `projects`) admits every project context; a scoped one admits only a
     /// stated identity that one of its entries names, never an absent one.
     pub fn admits(
@@ -433,7 +433,7 @@ impl SignerScope {
         space: SignerSpace,
         kind: &str,
         project: &ryeos_state::project_identity::LogicalProject,
-        signer_fingerprint: &str,
+        signer_owner: Option<&ryeos_state::principal_id::PrincipalId>,
     ) -> bool {
         if !self.spaces.contains(&space) {
             return false;
@@ -448,7 +448,7 @@ impl SignerScope {
             return self
                 .projects
                 .iter()
-                .any(|entry| entry.names(identity, signer_fingerprint));
+                .any(|entry| entry.names(identity, signer_owner));
         }
         true
     }

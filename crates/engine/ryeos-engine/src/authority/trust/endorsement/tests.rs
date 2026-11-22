@@ -26,9 +26,18 @@ fn principal(key: &SigningKey) -> String {
     format!("fp:{}", fp(key))
 }
 
+/// The principal `key` speaks for when it has no succession: its solo one,
+/// as the node's resolver computes it.
+fn owner(key: &SigningKey) -> ryeos_state::principal_id::PrincipalId {
+    crate::authority::trust::SuccessionGraph::default()
+        .ownership_of(&fp(key))
+        .unwrap()
+        .principal
+}
+
 /// The project `name` owned by `key`'s principal.
 fn identity(key: &SigningKey, name: &str) -> ProjectIdentity {
-    ProjectIdentity::new(principal(key), ProjectName::new(name).unwrap()).unwrap()
+    ProjectIdentity::new(owner(key), ProjectName::new(name).unwrap())
 }
 
 fn record(key: &SigningKey, role: SignerRole, status: SignerStatus) -> SignerRecord {
@@ -86,7 +95,9 @@ impl Node {
     }
 
     fn trust_with(&self, records: Vec<SignerRecord>) -> TrustStore {
-        TrustStore::from_registry(self.node.verifying_key(), records).unwrap()
+        TrustStore::from_registry(self.node.verifying_key(), records)
+            .unwrap()
+            .with_succession_chain(&[])
     }
 
     fn ledger(&self) -> EndorsementLedger {
@@ -843,7 +854,7 @@ fn a_tampered_or_misfiled_document_refuses_the_load() {
 }
 
 #[test]
-fn shape_rules_refuse_wildcards_empty_targets_and_foreign_projects() {
+fn shape_rules_refuse_wildcards_and_empty_targets() {
     let node = Node::new();
     let operator = principal(&node.operator);
     let at = lillux::time::iso8601_from_unix_secs(NOW);
@@ -863,18 +874,6 @@ fn shape_rules_refuse_wildcards_empty_targets_and_foreign_projects() {
             &project,
             &operator,
             Vec::new(),
-            &at,
-            &nonce(),
-            &head
-        )),
-        "endorsement_malformed"
-    );
-    assert_eq!(
-        check(EndorsementBody::standing(
-            &identity(&key(9), PROJECT),
-            &operator,
-            vec!["view".to_owned()],
-            None,
             &at,
             &nonce(),
             &head
@@ -908,5 +907,87 @@ fn shape_rules_refuse_wildcards_empty_targets_and_foreign_projects() {
         )),
         "endorsement_malformed",
         "not_after before endorsed_at"
+    );
+}
+
+#[test]
+fn an_endorsement_for_another_principals_project_is_refused_and_never_indexed() {
+    let node = Node::new();
+    let trust = node.trust();
+    let item = signed_item(&node.authoring, "x\n");
+    let foreign = identity(&key(9), PROJECT);
+    let body = EndorsementBody::for_items(
+        &foreign,
+        &principal(&node.operator),
+        vec![item_for("view", &item.2)],
+        &lillux::time::iso8601_from_unix_secs(NOW),
+        &nonce(),
+        &node.head(),
+    );
+    assert!(body.validate_shape().is_ok());
+    let refused = node.record(&trust, &node.operator, body).unwrap_err();
+    assert_eq!(refused.code(), "endorsement_project_not_endorsers");
+}
+
+#[test]
+fn a_rotated_operator_endorses_the_root_principals_project_and_the_retired_root_still_stands() {
+    let node = Node::new();
+    let successor = key(4);
+    let records = vec![
+        record(&node.operator, SignerRole::Operator, SignerStatus::Active),
+        record(&node.authoring, SignerRole::Authoring, SignerStatus::Active),
+    ];
+    let before = node.trust_with(records);
+    let item = signed_item(&node.authoring, "x\n");
+    node.record(
+        &before,
+        &node.operator,
+        node.items_body(&node.operator, PROJECT, vec![item_for("view", &item.2)]),
+    )
+    .unwrap();
+    // Rotate: the old operator is retired and the successor's record names
+    // it as predecessor.
+    let succeeded = crate::authority::trust::TrustEvent {
+        schema: "x".into(),
+        seq: 1,
+        previous: None,
+        kind: crate::authority::trust::TrustEventKind::Succeeded,
+        signer: fp(&successor),
+        record_digest: String::new(),
+        request_digest: String::new(),
+        operator: String::new(),
+        predecessor: Some(fp(&node.operator)),
+    };
+    let after = TrustStore::from_registry(
+        node.node.verifying_key(),
+        vec![
+            record(&node.operator, SignerRole::Operator, SignerStatus::Retired),
+            record(&successor, SignerRole::Operator, SignerStatus::Active),
+            record(&node.authoring, SignerRole::Authoring, SignerStatus::Active),
+        ],
+    )
+    .unwrap()
+    .with_succession_chain(&[succeeded]);
+    // The successor speaks for the root principal, so the project keeps its
+    // identity, and the retired root's endorsement still applies.
+    assert!(after.speaks_for(&fp(&successor), &owner(&node.operator)));
+    assert_eq!(
+        class(&node.indexed(&after), &item, "view", &node.project()),
+        TrustClass::Trusted
+    );
+    // The successor may endorse the same project.
+    let second = signed_item(&node.authoring, "y\n");
+    let body = EndorsementBody::for_items(
+        &node.project(),
+        &principal(&successor),
+        vec![item_for("view", &second.2)],
+        &lillux::time::iso8601_from_unix_secs(NOW),
+        &nonce(),
+        &node.head(),
+    );
+    node.record(&after, &successor, body).unwrap();
+    assert_eq!(
+        class(&node.indexed(&after), &second, "view", &node.project()),
+        TrustClass::Trusted
     );
 }

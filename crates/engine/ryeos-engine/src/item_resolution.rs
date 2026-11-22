@@ -1065,7 +1065,7 @@ mod tests {
             &LogicalProject::Absent(LogicalProjectAbsence::NotStated)
         );
         let identity: ryeos_state::project_identity::ProjectIdentity =
-            format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap();
+            format!("pid:v1:{}/alpha", "a".repeat(64)).parse().unwrap();
         let stated = checkout().with_logical_project(LogicalProject::Stated(identity.clone()));
         assert_eq!(stated.signer_project(), &LogicalProject::Stated(identity));
     }

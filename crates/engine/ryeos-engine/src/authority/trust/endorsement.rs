@@ -118,6 +118,12 @@ pub enum EndorsementRefusal {
          with `ryeos endorse list`"
     )]
     Unknown { digest: String },
+    #[error(
+        "endorsement_project_not_endorsers: project {project} is not owned by the principal \
+         the endorser {endorser} speaks for on this node. An operator endorses only its own \
+         projects"
+    )]
+    ProjectNotEndorsers { project: String, endorser: String },
     #[error("endorsement_store_unavailable: {0}")]
     Store(String),
 }
@@ -127,6 +133,7 @@ impl EndorsementRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Malformed(_) => "endorsement_malformed",
+            Self::ProjectNotEndorsers { .. } => "endorsement_project_not_endorsers",
             Self::BadSignature { .. } => "endorsement_bad_signature",
             Self::EndorserNotOperator { .. } => "endorsement_endorser_not_operator",
             Self::DelegationUnsupported { .. } => "endorsement_delegation_unsupported",
@@ -170,7 +177,8 @@ pub enum EndorsementTarget {
 pub struct EndorsementBody {
     pub schema: String,
     /// The project the endorsement is for, by owner+name identity. Its
-    /// owner is always the endorser.
+    /// owner must be the principal the endorser's key speaks for on the
+    /// judging node; the index leaves out any other.
     pub project: ryeos_state::project_identity::ProjectIdentity,
     /// `fp:<fingerprint>` of the key that signs the endorsement.
     pub endorser: String,
@@ -298,13 +306,6 @@ impl EndorsementBody {
         }
         if fingerprint_of(&self.endorser).is_none() {
             return malformed("endorser is not a canonical `fp:` principal".to_owned());
-        }
-        // An endorser endorses only its own projects.
-        if self.project.owner() != self.endorser {
-            return malformed(format!(
-                "project {} is not owned by the endorser {}",
-                self.project, self.endorser
-            ));
         }
         if let Some(via) = &self.via
             && !is_digest(via)
@@ -705,6 +706,17 @@ impl EndorsementIndex {
             if record.role != SignerRole::Operator || record.status == SignerStatus::Revoked {
                 continue;
             }
+            // An endorser endorses only its own principal's projects. The
+            // registry cannot change while the node runs (trust changes are
+            // offline operations on a stopped node), so judging this when
+            // the index is built is judging it at every use.
+            let owned = trust
+                .succession()
+                .and_then(|graph| graph.statement_principal_of(endorser))
+                .is_some_and(|principal| &principal == body.project.owner());
+            if !owned {
+                continue;
+            }
             let key =
                 record
                     .verifying_key()
@@ -984,6 +996,12 @@ pub fn record_endorsement(
     let record = trust.signer(&endorser).ok_or_else(not_operator)?;
     if record.role != SignerRole::Operator || record.status != SignerStatus::Active {
         return Err(not_operator());
+    }
+    if !trust.speaks_for(&endorser, body.project.owner()) {
+        return Err(EndorsementRefusal::ProjectNotEndorsers {
+            project: body.project.to_string(),
+            endorser: body.endorser.clone(),
+        });
     }
     let key = record.verifying_key().map_err(store_error)?;
     signed.verify(&key)?;

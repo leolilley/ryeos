@@ -1686,7 +1686,7 @@ composer: handler:ryeos/core/identity
 
     /// The project `name` owned by a fixed test principal.
     fn identity(name: &str) -> ryeos_state::project_identity::ProjectIdentity {
-        format!("fp:{}/{name}", "a".repeat(64)).parse().unwrap()
+        format!("pid:v1:{}/{name}", "a".repeat(64)).parse().unwrap()
     }
 
     /// The author is a project signer scoped to exactly one project identity.

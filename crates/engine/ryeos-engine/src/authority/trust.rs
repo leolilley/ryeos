@@ -20,6 +20,7 @@
 //! The trust store does NOT share trust policy with daemon request auth or
 //! node auth; those are distinct trust domains.
 
+use ryeos_state::principal_id::PrincipalId;
 use ryeos_state::project_identity::{LogicalProject, LogicalProjectAbsence};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -28,8 +29,10 @@ use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
 mod endorsement;
+mod ownership;
 mod registry;
 pub use endorsement::*;
+pub use ownership::*;
 pub use registry::*;
 
 use crate::contracts::{
@@ -259,6 +262,10 @@ pub struct TrustStore {
     /// endorsement snapshot, which fixes the project identity and names the
     /// signers whose items it decides.
     launch_endorsements: Option<LaunchEndorsements>,
+    /// The node's key-succession graph, from which project ownership is
+    /// resolved. Present only on a store loaded from the node registry with
+    /// its event chain; every other store refuses ownership questions.
+    succession: Option<std::sync::Arc<SuccessionGraph>>,
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +284,7 @@ impl TrustStore {
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         }
     }
 
@@ -298,6 +306,7 @@ impl TrustStore {
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         }
     }
 
@@ -378,6 +387,7 @@ impl TrustStore {
             entry_scopes,
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         };
         store.apply_entry_endorsements(entries)?;
         Ok(store)
@@ -485,6 +495,7 @@ impl TrustStore {
             entry_scopes: HashMap::new(),
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         })
     }
 
@@ -497,7 +508,8 @@ impl TrustStore {
     pub fn load_node_registry(app_root: &Path) -> Result<Self, TrustError> {
         let node_key = load_node_verifying_key(app_root)?;
         let records = load_signer_records(&signers_dir(app_root), &node_key)?;
-        let mut store = Self::from_registry(node_key, records)?;
+        let chain = load_event_chain(&events_dir(app_root), &node_key)?;
+        let mut store = Self::from_registry(node_key, records)?.with_succession_chain(&chain);
         let ledger = EndorsementLedger::load(app_root, &node_key)?;
         let index = EndorsementIndex::build(&ledger, &store)?;
         tracing::debug!(
@@ -569,6 +581,17 @@ impl TrustStore {
         // a scope naming this launch's project is unscoped for the launch, and
         // one that does not loses project space.
         let identity = logical_project.identity();
+        let owners: HashMap<String, Option<PrincipalId>> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.fingerprint.clone(),
+                    self.owner_for(&entry.fingerprint)
+                        .ok()
+                        .map(|owner| owner.principal),
+                )
+            })
+            .collect();
         entries.retain_mut(|entry| {
             if entry.scope.projects.is_empty()
                 || !entry.scope.spaces.contains(&SignerSpace::Project)
@@ -576,11 +599,12 @@ impl TrustStore {
                 return true;
             }
             let named = identity.is_some_and(|identity| {
-                entry
-                    .scope
-                    .projects
-                    .iter()
-                    .any(|project| project.names(identity, &entry.fingerprint))
+                entry.scope.projects.iter().any(|project| {
+                    project.names(
+                        identity,
+                        owners.get(&entry.fingerprint).and_then(Option::as_ref),
+                    )
+                })
             });
             entry.scope.projects.clear();
             if !named {
@@ -603,6 +627,39 @@ impl TrustStore {
             }
         }
         entries
+    }
+
+    /// This store with the key-succession graph built from its records and
+    /// `chain` (the verified node-signed key-event chain). Only a store with
+    /// a graph answers ownership questions.
+    pub fn with_succession_chain(mut self, chain: &[TrustEvent]) -> Self {
+        let records: Vec<SignerRecord> = self.records.values().cloned().collect();
+        self.succession = Some(std::sync::Arc::new(SuccessionGraph::build(&records, chain)));
+        self
+    }
+
+    /// The node's key-succession graph, when this store holds one.
+    pub fn succession(&self) -> Option<&SuccessionGraph> {
+        self.succession.as_deref()
+    }
+
+    /// The principal whose project namespace `key` acts in on this node.
+    /// `key` is a key fingerprint, `fp:<64 lowercase hex>` or bare hex. A
+    /// retired or revoked key has none (`owner_key_not_active`). This and
+    /// [`Self::speaks_for`] are the only ways to obtain an owner from a key.
+    pub fn owner_for(&self, key: &str) -> Result<ResolvedOwner, OwnerRefusal> {
+        let graph = self
+            .succession
+            .as_deref()
+            .ok_or(OwnerRefusal::Unavailable)?;
+        graph.ownership_of(key.strip_prefix("fp:").unwrap_or(key))
+    }
+
+    /// Whether `key` speaks for `principal` on this node. Decides project
+    /// ownership only; never a grant, scope, session or thread read.
+    pub fn speaks_for(&self, key: &str, principal: &PrincipalId) -> bool {
+        self.owner_for(key)
+            .is_ok_and(|owner| &owner.principal == principal)
     }
 
     /// A copy of this store holding exactly `index`, frozen. For stores built
@@ -673,6 +730,7 @@ impl TrustStore {
             node_key,
             endorsements: endorsement::EndorsementView::default(),
             launch_endorsements: None,
+            succession: None,
         }
     }
 
@@ -780,9 +838,13 @@ impl TrustStore {
                     scope: record.scope.clone(),
                 };
             }
+            let owner = self
+                .owner_for(fingerprint)
+                .ok()
+                .map(|owner| owner.principal);
             if record
                 .scope
-                .admits(context.space, context.kind, context.project, fingerprint)
+                .admits(context.space, context.kind, context.project, owner.as_ref())
             {
                 return ScopeDecision::Admitted;
             }
@@ -793,7 +855,7 @@ impl TrustStore {
         }
         if self.node_key.as_ref().map(compute_fingerprint).as_deref() == Some(fingerprint) {
             let scope = node_root_scope();
-            if scope.admits(context.space, context.kind, context.project, fingerprint) {
+            if scope.admits(context.space, context.kind, context.project, None) {
                 return ScopeDecision::Admitted;
             }
             return ScopeDecision::OutOfScope {
@@ -802,7 +864,10 @@ impl TrustStore {
             };
         }
         if let Some(scope) = self.entry_scopes.get(fingerprint) {
-            if scope.admits(context.space, context.kind, context.project, fingerprint) {
+            // A launch's signer list is already resolved against the
+            // launch's identity (see `launch_signer_entries`): no entry
+            // keeps an `own:` scope, so nothing here needs an owner.
+            if scope.admits(context.space, context.kind, context.project, None) {
                 return ScopeDecision::Admitted;
             }
             return ScopeDecision::OutOfScope {
@@ -1319,7 +1384,7 @@ mod tests {
     }
 
     const PROJECT_OWNER: &str =
-        "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        "pid:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// A stated project owned by [`PROJECT_OWNER`], one per test name.
     fn stated_project(name: &str) -> &'static LogicalProject {
@@ -1812,11 +1877,14 @@ mod tests {
     }
 
     #[test]
-    fn scoped_entries_match_only_a_stated_identity_and_own_binds_the_signers_key() {
-        let signer = "a".repeat(64);
-        let other = "b".repeat(64);
+    fn scoped_entries_match_only_a_stated_identity_and_own_binds_the_signers_principal() {
+        let owner_text = format!("pid:v1:{}", "a".repeat(64));
+        let other_text = format!("pid:v1:{}", "b".repeat(64));
+        let owner: PrincipalId = owner_text.parse().unwrap();
+        let signer = Some(&owner);
+        let (signer_text, other) = (owner_text.as_str(), other_text.as_str());
         let stated = |owner: &str, name: &str| {
-            LogicalProject::Stated(format!("fp:{owner}/{name}").parse().unwrap())
+            LogicalProject::Stated(format!("{owner}/{name}").parse().unwrap())
         };
         let scoped = SignerScope {
             spaces: vec![SignerSpace::Project],
@@ -1824,17 +1892,20 @@ mod tests {
             projects: vec!["own:demo".parse().unwrap()],
         };
         let space = SignerSpace::Project;
-        assert!(scoped.admits(space, "tool", &stated(&signer, "demo"), &signer));
+        assert!(scoped.admits(space, "tool", &stated(signer_text, "demo"), signer));
         // Another owner's project of the same name is never matched.
-        assert!(!scoped.admits(space, "tool", &stated(&other, "demo"), &signer));
-        assert!(!scoped.admits(space, "tool", &stated(&signer, "other"), &signer));
+        assert!(!scoped.admits(space, "tool", &stated(other, "demo"), signer));
+        assert!(!scoped.admits(space, "tool", &stated(signer_text, "other"), signer));
+        // A key that speaks for no principal (retired, revoked) matches no
+        // `own:` entry.
+        assert!(!scoped.admits(space, "tool", &stated(signer_text, "demo"), None));
         // A scoped signer never matches an absent identity.
         for reason in [
             LogicalProjectAbsence::NotRegistered,
             LogicalProjectAbsence::ForeignHeadNotHeld,
             LogicalProjectAbsence::NotStated,
         ] {
-            assert!(!scoped.admits(space, "tool", &LogicalProject::Absent(reason), &signer));
+            assert!(!scoped.admits(space, "tool", &LogicalProject::Absent(reason), signer));
         }
         // An unscoped signer admits every project context, absent included.
         let unscoped = SignerScope {
@@ -1845,14 +1916,16 @@ mod tests {
             space,
             "tool",
             &LogicalProject::Absent(LogicalProjectAbsence::NotRegistered),
-            &signer
+            signer
         ));
         // A path is not a scope.
         assert!("/work/listed".parse::<ProjectScopeEntry>().is_err());
+        assert!(format!("{other}/demo").parse::<ProjectScopeEntry>().is_ok());
+        // A key fingerprint is never an owner.
         assert!(
-            format!("fp:{other}/demo")
+            format!("fp:{}/demo", "b".repeat(64))
                 .parse::<ProjectScopeEntry>()
-                .is_ok()
+                .is_err()
         );
     }
 

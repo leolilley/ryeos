@@ -1,11 +1,13 @@
 //! Owner+name project identity and the project's own name declaration.
 //!
 //! A project is identified by the principal that owns it and a name:
-//! `fp:<64 lowercase hex>/<name>`. The name comes from the project tree's
-//! `.ai/project.yaml`; that declaration is a claim, never trust. The owner is
-//! never read from the tree: it is the authenticated launcher of a registered
-//! live checkout, or the principal whose head key a pushed head was found
-//! under. These types carry no authority on their own; nothing here decides
+//! `pid:v1:<64 lowercase hex>/<name>`. The owner is a principal id, never a
+//! key fingerprint (see [`crate::principal_id`]). The name comes from the
+//! project tree's `.ai/project.yaml`; that declaration is a claim, never
+//! trust. The owner is never read from the tree: it is the principal the
+//! node's resolver says the authenticated launcher of a registered live
+//! checkout speaks for, or the principal whose head key a pushed head was
+//! found under. These types carry no authority on their own; nothing here decides
 //! whether a signer is admitted.
 
 use std::fmt;
@@ -14,6 +16,8 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+
+use crate::principal_id::PrincipalId;
 
 /// Relative path of a project's name declaration inside its root.
 pub const PROJECT_DECLARATION_PATH: &str = ".ai/project.yaml";
@@ -28,7 +32,7 @@ const MAX_PROJECT_NAME_LEN: usize = 64;
 
 /// A project name: `[a-z0-9][a-z0-9._-]{0,63}`.
 ///
-/// No `/` or `:` can appear, so `fp:<owner>/<name>` always splits at the
+/// No `/` or `:` can appear, so `pid:v1:<owner>/<name>` always splits at the
 /// first `/` without ambiguity, and a name is always one path component.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -98,25 +102,21 @@ impl fmt::Display for ProjectName {
 }
 
 /// A project's identity: the owning principal and the project name.
-/// Displayed and serialized as `fp:<64 lowercase hex>/<name>`.
+/// Displayed and serialized as `pid:v1:<64 lowercase hex>/<name>`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ProjectIdentity {
-    owner: String,
+    owner: PrincipalId,
     name: ProjectName,
 }
 
 impl ProjectIdentity {
-    /// `owner` must be exactly `fp:<64 lowercase hex>`; no normalization.
-    pub fn new(owner: impl Into<String>, name: ProjectName) -> Result<Self> {
-        let owner = owner.into();
-        crate::refs::principal_storage_key(&owner)
-            .with_context(|| format!("project owner {owner:?}"))?;
-        Ok(Self { owner, name })
+    pub fn new(owner: PrincipalId, name: ProjectName) -> Self {
+        Self { owner, name }
     }
 
-    /// The owning principal, `fp:<64 lowercase hex>`.
-    pub fn owner(&self) -> &str {
+    /// The owning principal.
+    pub fn owner(&self) -> &PrincipalId {
         &self.owner
     }
 
@@ -129,10 +129,13 @@ impl FromStr for ProjectIdentity {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        let (owner, name) = value
-            .split_once('/')
-            .with_context(|| format!("project identity must be fp:<owner>/<name>: {value:?}"))?;
-        Self::new(owner, ProjectName::new(name)?)
+        let (owner, name) = value.split_once('/').with_context(|| {
+            format!("project identity must be pid:v1:<owner>/<name>: {value:?}")
+        })?;
+        let owner: PrincipalId = owner
+            .parse()
+            .with_context(|| format!("project identity owner in {value:?}"))?;
+        Ok(Self::new(owner, ProjectName::new(name)?))
     }
 }
 
@@ -236,12 +239,13 @@ pub enum PushedProject {
 }
 
 impl PushedProject {
-    /// The head this target names for `principal_id`, the authenticated
-    /// caller.
-    pub fn head_key(&self, principal_id: &str) -> Result<ProjectHeadKey> {
+    /// The head this target names in `owner`'s namespace. `owner` is the
+    /// principal the node's resolver says the authenticated caller speaks
+    /// for, never request input.
+    pub fn head_key(&self, owner: &PrincipalId) -> ProjectHeadKey {
         match self {
-            Self::Named { name } => ProjectHeadKey::owned_by(principal_id, name),
-            Self::NoProject => ProjectHeadKey::no_project(principal_id),
+            Self::Named { name } => ProjectHeadKey::owned_by(owner, name),
+            Self::NoProject => ProjectHeadKey::no_project(owner),
         }
     }
 
@@ -279,18 +283,20 @@ impl fmt::Display for PushedProject {
     }
 }
 
-/// Where a pushed project head lives: the owner's storage key and the
-/// sha256 of the project name, `projects/<owner hex>/<sha256(name)>/head`.
+/// Where a pushed project head lives: the owner principal's storage
+/// component and the sha256 of the project name,
+/// `projects/pid-v1-<hex>/<sha256(name)>/head`.
 ///
 /// The name hash is only ever computed from a [`ProjectName`], so a head
 /// cannot be keyed by a path or any other caller string. The owner must come
 /// from the authenticated principal or from a head key the node found, never
-/// from request input. [`ProjectHeadKey::from_sealed`] exists only to carry
+/// from request input; it is always a principal the node's resolver
+/// produced. [`ProjectHeadKey::from_sealed`] exists only to carry
 /// coordinates read back from a sealed record or the ref tree, which were
 /// themselves built by one of the name constructors.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectHeadKey {
-    owner_key: String,
+    owner: PrincipalId,
     name_hash: String,
 }
 
@@ -298,55 +304,55 @@ impl ProjectHeadKey {
     /// The head of `identity`.
     pub fn for_project(identity: &ProjectIdentity) -> Self {
         Self::owned_by(identity.owner(), identity.name())
-            .expect("a project identity's owner is a valid principal")
     }
 
-    /// The head `principal_id` owns under `name`. `principal_id` must be
-    /// exactly `fp:<64 lowercase hex>`.
-    pub fn owned_by(principal_id: &str, name: &ProjectName) -> Result<Self> {
-        let owner_key = crate::refs::principal_storage_key(principal_id)?.to_owned();
-        Ok(Self {
-            owner_key,
+    /// The head `owner` owns under `name`.
+    pub fn owned_by(owner: &PrincipalId, name: &ProjectName) -> Self {
+        Self {
+            owner: owner.clone(),
             name_hash: lillux::cas::sha256_hex(name.as_str().as_bytes()),
-        })
+        }
     }
 
     /// The caller's `--no-project` head: a per-principal head of an empty
     /// tree. Its name hash is of a reserved string no [`ProjectName`] can be
     /// (names cannot start with `_`), so it never collides with a project.
-    pub fn no_project(principal_id: &str) -> Result<Self> {
-        let owner_key = crate::refs::principal_storage_key(principal_id)?.to_owned();
-        Ok(Self {
-            owner_key,
+    pub fn no_project(owner: &PrincipalId) -> Self {
+        Self {
+            owner: owner.clone(),
             name_hash: lillux::cas::sha256_hex(NO_PROJECT_HEAD_NAME.as_bytes()),
-        })
+        }
     }
 
-    /// Coordinates read back from a sealed record or a found head key.
-    pub fn from_sealed(owner_key: &str, name_hash: &str) -> Result<Self> {
-        for (label, value) in [("owner key", owner_key), ("project name hash", name_hash)] {
-            if value.len() != 64
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
-                bail!("project head {label} must be 64 lowercase hex characters: {value:?}");
-            }
+    /// Coordinates read back from a sealed record or a found head key:
+    /// `owner_component` is a principal storage component
+    /// (`pid-v1-<64 hex>`). A bare fingerprint hex (the pre-cut layout)
+    /// does not parse.
+    pub fn from_sealed(owner_component: &str, name_hash: &str) -> Result<Self> {
+        let owner =
+            PrincipalId::from_storage_component(owner_component).context("project head owner")?;
+        if name_hash.len() != 64
+            || !name_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("project head name hash must be 64 lowercase hex characters: {name_hash:?}");
         }
         Ok(Self {
-            owner_key: owner_key.to_owned(),
+            owner,
             name_hash: name_hash.to_owned(),
         })
     }
 
-    /// The owner's raw fingerprint hex (no `fp:` prefix).
-    pub fn owner_key(&self) -> &str {
-        &self.owner_key
+    /// The owner's storage component, `pid-v1-<64 hex>`: the ref path
+    /// segment and directory name.
+    pub fn owner_component(&self) -> String {
+        self.owner.storage_component()
     }
 
-    /// The owning principal, `fp:<64 lowercase hex>`.
-    pub fn owner_principal(&self) -> String {
-        format!("fp:{}", self.owner_key)
+    /// The owning principal.
+    pub fn owner(&self) -> &PrincipalId {
+        &self.owner
     }
 
     /// sha256 of the project name, lowercase hex.
@@ -355,7 +361,7 @@ impl ProjectHeadKey {
     }
 
     /// The key of a sealed ref path, which must be exactly
-    /// `projects/<owner hex>/<name hash>/head`. The coordinates carry no
+    /// `projects/pid-v1-<hex>/<name hash>/head`. The coordinates carry no
     /// path or name; nothing recovers either from them.
     pub fn parse_ref_path(ref_path: &str) -> Result<Self> {
         let mut components = ref_path.split('/');
@@ -373,9 +379,9 @@ impl ProjectHeadKey {
         }
     }
 
-    /// The ref path, `projects/<owner hex>/<name hash>/head`.
+    /// The ref path, `projects/pid-v1-<hex>/<name hash>/head`.
     pub fn ref_path(&self) -> String {
-        crate::refs::project_head_ref_path(&self.owner_key, &self.name_hash)
+        crate::refs::project_head_ref_path(&self.owner_component(), &self.name_hash)
             .expect("validated project head coordinates")
     }
 }
@@ -461,30 +467,32 @@ mod tests {
     #[test]
     fn a_head_key_is_the_owner_and_the_name_hash_and_round_trips_its_ref_path() {
         let name = ProjectName::new("demo").unwrap();
-        let key = ProjectHeadKey::owned_by(OWNER, &name).unwrap();
-        assert_eq!(key.owner_principal(), OWNER);
+        let owner: PrincipalId = OWNER.parse().unwrap();
+        let key = ProjectHeadKey::owned_by(&owner, &name);
+        assert_eq!(key.owner(), &owner);
         assert_eq!(key.name_hash(), lillux::cas::sha256_hex(b"demo"));
         assert_eq!(
             key.ref_path(),
-            format!("projects/{}/{}/head", &OWNER[3..], key.name_hash())
+            format!("projects/pid-v1-{}/{}/head", &OWNER[7..], key.name_hash())
         );
         assert_eq!(
             ProjectHeadKey::parse_ref_path(&key.ref_path()).unwrap(),
             key
         );
-        let identity = ProjectIdentity::new(OWNER, name).unwrap();
+        let identity = ProjectIdentity::new(owner, name);
         assert_eq!(ProjectHeadKey::for_project(&identity), key);
         for bad in [
             "projects/a/b/head".to_owned(),
             format!("{}/extra", key.ref_path()),
-            format!("chains/{}/{}/head", &OWNER[3..], key.name_hash()),
+            format!("chains/pid-v1-{}/{}/head", &OWNER[7..], key.name_hash()),
+            // The pre-cut layout, a bare fingerprint hex owner segment.
+            format!("projects/{}/{}/head", &OWNER[7..], key.name_hash()),
         ] {
             assert!(ProjectHeadKey::parse_ref_path(&bad).is_err(), "{bad}");
         }
-        assert!(ProjectHeadKey::owned_by("fp:short", &ProjectName::new("demo").unwrap()).is_err());
     }
 
-    const OWNER: &str = "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OWNER: &str = "pid:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
     fn project_names_follow_the_rule() {
@@ -510,8 +518,10 @@ mod tests {
 
     #[test]
     fn identity_round_trips_through_its_string_form() {
-        let identity =
-            ProjectIdentity::new(OWNER, ProjectName::new("ryeos-next").unwrap()).unwrap();
+        let identity = ProjectIdentity::new(
+            OWNER.parse().unwrap(),
+            ProjectName::new("ryeos-next").unwrap(),
+        );
         let text = identity.to_string();
         assert_eq!(text, format!("{OWNER}/ryeos-next"));
         assert_eq!(text.parse::<ProjectIdentity>().unwrap(), identity);
@@ -521,7 +531,7 @@ mod tests {
             serde_json::from_str::<ProjectIdentity>(&json).unwrap(),
             identity
         );
-        assert_eq!(identity.owner(), OWNER);
+        assert_eq!(identity.owner().to_string(), OWNER);
         assert_eq!(identity.name().as_str(), "ryeos-next");
     }
 
@@ -531,7 +541,8 @@ mod tests {
             "ryeos-next",
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/x",
             "fp:0123/x",
-            "fp:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef/x",
+            "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/x",
+            "pid:v1:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef/x",
             &format!("{OWNER}/"),
             &format!("{OWNER}/a/b"),
             &format!("{OWNER}/Bad"),

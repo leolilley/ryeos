@@ -29,6 +29,7 @@ pub mod object_closure;
 pub mod objects;
 pub mod operational;
 mod pending_publication;
+pub mod principal_id;
 pub mod private_cas;
 pub mod project_discovery;
 pub mod project_identity;

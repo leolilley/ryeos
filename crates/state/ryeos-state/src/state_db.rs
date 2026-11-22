@@ -6242,7 +6242,7 @@ impl StateDb {
     ) -> anyhow::Result<Option<String>> {
         Ok(crate::refs::read_verified_project_head_ref_in_directory(
             &self._refs_directory,
-            key.owner_key(),
+            &key.owner_component(),
             key.name_hash(),
             self.trust_store.as_ref(),
         )?
@@ -6261,12 +6261,12 @@ impl StateDb {
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         let _project_lock = crate::refs::ProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
-            key.owner_key(),
+            &key.owner_component(),
             key.name_hash(),
         )?;
         crate::refs::write_verified_project_head_ref_in_directory(
             &self._refs_directory,
-            key.owner_key(),
+            &key.owner_component(),
             key.name_hash(),
             project_snapshot_hash,
             signer,
@@ -6295,13 +6295,13 @@ impl StateDb {
             .map_err(|error| ProjectHeadAdvanceRefusal::Untrusted(format!("{error:#}")))?;
         let _project_lock = crate::refs::ProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
-            key.owner_key(),
+            &key.owner_component(),
             key.name_hash(),
         )
         .map_err(ProjectHeadAdvanceRefusal::before_write)?;
         crate::refs::advance_verified_project_head_ref_in_directory(
             &self._refs_directory,
-            key.owner_key(),
+            &key.owner_component(),
             key.name_hash(),
             new_snapshot_hash,
             expected_current_hash,
@@ -9718,12 +9718,12 @@ mod tests {
         let (_dir, db) = open_temp_trusted(&signer);
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_exclusive_guard(true).unwrap();
-        let principal_id = format!("fp:{}", signer.fingerprint());
+        let owner: crate::principal_id::PrincipalId =
+            format!("pid:v1:{}", "e".repeat(64)).parse().unwrap();
         let head_key = crate::project_identity::ProjectHeadKey::owned_by(
-            &principal_id,
+            &owner,
             &crate::project_identity::ProjectName::new("demo").unwrap(),
-        )
-        .unwrap();
+        );
         let deployed_project_hash = "b".repeat(64);
         let principal_snapshot_hash = "c".repeat(64);
         let deployed_snapshot_hash = "d".repeat(64);
