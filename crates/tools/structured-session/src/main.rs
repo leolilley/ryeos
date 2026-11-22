@@ -391,6 +391,29 @@ struct InitializationStep {
     params: Value,
     response_schema: Option<String>,
     notification: Option<String>,
+    /// Version the workload's initialize response must report. Absent means
+    /// the response version is not checked.
+    #[serde(default)]
+    expected_server_version: Option<String>,
+}
+
+/// Refuse a workload whose initialize response reports a version other than
+/// the pinned one. The response carries it as `userAgent`, whose first
+/// `<originator>/<version>` token names the binary release.
+fn check_server_version(pinned: &str, result: &Value) -> Result<()> {
+    let found = result
+        .get("userAgent")
+        .and_then(Value::as_str)
+        .and_then(|agent| agent.split_whitespace().next())
+        .and_then(|token| token.rsplit_once('/'))
+        .map(|(_, version)| version)
+        .unwrap_or("unreported");
+    if found != pinned {
+        bail!(
+            "structured-session workload reports app-server version `{found}` but the pinned version is `{pinned}`; install the pinned release or update the profile pin and activation together"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2906,6 +2929,9 @@ impl StructuredWorkload {
             if let Some(schema) = step.response_schema.as_deref() {
                 self.validate_schema(schema, result.get("result").unwrap_or(&Value::Null))?;
             }
+            if let Some(pinned) = step.expected_server_version.as_deref() {
+                check_server_version(pinned, result.get("result").unwrap_or(&Value::Null))?;
+            }
         }
         Ok(())
     }
@@ -5120,6 +5146,33 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
+
+    fn initialize_result(agent: &str) -> Value {
+        json!({"userAgent":agent,"codexHome":"/h","platformFamily":"unix","platformOs":"linux"})
+    }
+
+    #[test]
+    fn a_workload_at_the_pinned_version_passes_the_version_check() {
+        let result = initialize_result("ryeos/0.147.0 (Debian 13.0.0; x86_64) unknown (ryeos; 1)");
+        check_server_version("0.147.0", &result).unwrap();
+    }
+
+    #[test]
+    fn a_workload_at_another_version_is_refused_naming_both_versions() {
+        let result = initialize_result("ryeos/0.156.1 (Debian 13.0.0; x86_64) unknown (ryeos; 1)");
+        let message = check_server_version("0.147.0", &result)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("0.156.1"), "{message}");
+        assert!(message.contains("0.147.0"), "{message}");
+        let message = check_server_version("0.147.0", &initialize_result("odd"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("unreported") && message.contains("0.147.0"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn only_the_result_notification_event_carries_the_result_marker() {

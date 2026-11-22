@@ -1194,6 +1194,19 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(selectors[".tmp/**"]["class"], "rebuildable_cache")
         self.assertEqual(selectors["tmp/**"]["class"], "rebuildable_cache")
 
+    def test_every_profile_pins_the_app_server_version_the_activation_installs(self) -> None:
+        activation = (BUNDLE / ".ai/config/codex/activation.yaml").read_text()
+        match = re.search(r"/codex/releases/([0-9.]+)/codex-package", activation)
+        self.assertIsNotNone(match)
+        for name in ("structured-session.profile.json", "authoring.profile.json",
+                     "external-authoring.profile.json"):
+            with self.subTest(profile=name):
+                profile = json.loads((SOURCE / name).read_text())
+                pins = [step["expected_server_version"]
+                        for step in profile["initialization"]
+                        if step["method"] == "initialize"]
+                self.assertEqual(pins, [match.group(1)])
+
     def test_every_pinned_server_notification_is_classified_by_every_profile(self) -> None:
         # The bridge ends a session on any notification its profile neither
         # handles nor ignores, so each notification the pinned app-server can
