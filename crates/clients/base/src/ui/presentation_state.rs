@@ -1715,6 +1715,82 @@ impl PresentationComposition {
             .select_view_set(id)
     }
 
+    /// Replace every coordinate `from` held by one Surface with `to`, in place.
+    /// Tile ids, groups and instance keys are untouched, so state keyed by
+    /// instance identity carries over. A tile or dialog whose View is absent
+    /// from the successor closure (`has_view`) is closed in the same step;
+    /// the closed tiles' instance keys are returned. Refuses when nothing in
+    /// the Surface names `from`.
+    pub fn rebind_attachment(
+        &mut self,
+        surface: &SurfaceInstanceId,
+        from: &UiBindingAttachmentCoordinate,
+        to: &UiBindingAttachmentCoordinate,
+        has_view: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<RyeOsViewInstanceKey>, String> {
+        let owner = self
+            .surfaces
+            .get_mut(surface)
+            .ok_or("Surface instance is not mounted")?;
+        let mut touched = false;
+        if owner.binding == *from {
+            owner.binding = to.clone();
+            touched = true;
+        }
+        for tab in owner.admitted_saved_tabs.values_mut() {
+            let binding = match tab {
+                AdmittedSavedSurfaceTab::Particular(tab) => &mut tab.binding,
+                AdmittedSavedSurfaceTab::Reusable(tab) => &mut tab.binding,
+            };
+            if binding == from {
+                *binding = to.clone();
+                touched = true;
+            }
+        }
+        let mut vanished = Vec::new();
+        for (key, binding) in owner.mount_bindings.iter_mut() {
+            if binding == from {
+                *binding = to.clone();
+                touched = true;
+                let present = owner
+                    .view_sets
+                    .iter()
+                    .flat_map(|set| set.tiles.values())
+                    .find(|tile| &tile.instance_key == key)
+                    .is_some_and(|tile| has_view(&tile.view.view_ref));
+                if !present {
+                    vanished.push(key.clone());
+                }
+            }
+        }
+        for key in &vanished {
+            owner.mount_bindings.remove(key);
+            for set in owner.view_sets.iter_mut() {
+                let tile = set
+                    .tiles
+                    .iter()
+                    .find(|(_, tile)| &tile.instance_key == key)
+                    .map(|(id, _)| *id);
+                if let Some(tile) = tile {
+                    set.close_tile(tile);
+                }
+            }
+        }
+        for dialog in self.dialogs.values_mut() {
+            if dialog.surface_owner.as_ref() == Some(surface) && dialog.view.binding == *from {
+                dialog.view.binding = to.clone();
+                touched = true;
+                if !has_view(&dialog.view.view_ref) {
+                    dialog.open = false;
+                }
+            }
+        }
+        if !touched {
+            return Err("rebind source is not named by this Surface".into());
+        }
+        Ok(vanished)
+    }
+
     /// Layout edits stage on a temporary payload. New/rebound tile coordinates
     /// must be explicitly supplied; retained tile coordinates stay unchanged.
     pub fn mutate_view_set<R>(

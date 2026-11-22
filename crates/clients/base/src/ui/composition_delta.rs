@@ -1442,6 +1442,73 @@ fn stage_cross_surface_move(
     })
 }
 
+/// In-place swap of one Surface attachment for its successor. The successor
+/// descriptor rides the request itself, so no other history record is needed.
+fn stage_rebind(
+    current: &PresentationComposition,
+    request: &UiCompositionRequest,
+    revision: u64,
+    next_mount_id: u64,
+    descriptors: &BTreeMap<String, UiBindingAttachment>,
+) -> Result<UiCompositionDelta, String> {
+    let CompositionMutation::RebindAttachment {
+        from,
+        to,
+        descriptor,
+    } = &request.mutation
+    else {
+        return Err("not a rebind".into());
+    };
+    let owner = request
+        .owner
+        .surface_instance_id()
+        .ok_or("rebind requires a Surface owner")?;
+    if current
+        .surfaces()
+        .get(owner)
+        .is_none_or(|surface| surface.binding() != request.owner.binding())
+    {
+        return Err("composition Surface owner differs".into());
+    }
+    let old = descriptors
+        .get(&from.binding_attachment_id)
+        .ok_or("rebind source descriptor is absent")?;
+    old.validate().map_err(str::to_owned)?;
+    if old.binding_generation != from.binding_generation || old.binding_digest != from.binding_digest
+    {
+        return Err("rebind source coordinate differs from its descriptor".into());
+    }
+    if descriptors
+        .get(&to.binding_attachment_id)
+        .is_some_and(|retained| retained != &**descriptor)
+    {
+        return Err("rebind target differs from its retained descriptor".into());
+    }
+    if descriptor.binding_generation <= old.binding_generation
+        || descriptor.root_ref != old.root_ref
+        || descriptor.subject != old.subject
+        || descriptor.project_path != old.project_path
+    {
+        return Err("rebind target is not a successor of its source".into());
+    }
+    let mut staged = current.clone();
+    staged.rebind_attachment(owner, from, to, &|view_ref| {
+        descriptor.presentation.views.contains_key(view_ref)
+    })?;
+    Ok(UiCompositionDelta {
+        mount_remaps: BTreeMap::new(),
+        allocated_mounts: None,
+        affected_bindings: vec![to.clone()],
+        composition: staged,
+        revision: revision
+            .checked_add(1)
+            .ok_or("composition revision exhausted")?,
+        next_mount_id,
+        allocated_manifest: None,
+        subjects: Vec::new(),
+    })
+}
+
 pub fn stage_composition_delta(
     current: &PresentationComposition,
     request: &UiCompositionRequest,
@@ -1462,6 +1529,12 @@ pub fn stage_composition_delta(
         CompositionMutation::MoveViewAcrossSurfaces { .. }
     ) {
         return stage_cross_surface_move(current, request, descriptors);
+    }
+    if matches!(
+        &request.mutation,
+        CompositionMutation::RebindAttachment { .. }
+    ) {
+        return stage_rebind(current, request, revision, next_mount_id, descriptors);
     }
     if let CompositionMutation::InsertFollowingView {
         tab_id,

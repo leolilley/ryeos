@@ -63,6 +63,10 @@ pub struct UiCompositionReplay {
     /// replay never makes an old move into a new local instruction.
     pub(crate) completed_mount_remaps:
         BTreeMap<String, BTreeMap<RyeOsViewInstanceKey, RyeOsViewInstanceKey>>,
+    /// Settled attachment rebinds by operation: the exact coordinates swapped
+    /// and the successor descriptor. The live ACK owner migrates transient
+    /// local state once from this; historical replay never re-applies it.
+    completed_rebinds: Vec<(String, UiBindingAttachmentCoordinate, UiBindingAttachmentCoordinate)>,
     pub lens_frames:
         BTreeMap<RyeOsViewInstanceKey, Vec<super::composition_lens::RetainedLensFrame>>,
     pub input_routes: BTreeMap<RyeOsViewInstanceKey, (u64, Option<serde_json::Value>)>,
@@ -261,6 +265,7 @@ impl UiCompositionReplay {
             settled: Arc::new(BTreeSet::new()),
             subjects: BTreeMap::new(),
             completed_mount_remaps: BTreeMap::new(),
+            completed_rebinds: Vec::new(),
             lens_frames: BTreeMap::new(),
             input_routes: BTreeMap::new(),
             transfer_drafts: BTreeMap::new(),
@@ -344,6 +349,13 @@ impl UiCompositionReplay {
         events: &[SeatEvent],
     ) -> Result<Self, String> {
         Self::from_history(initial, events)
+    }
+
+    /// Settled rebinds in history order: (operation id, from, to).
+    pub fn completed_rebinds(
+        &self,
+    ) -> &[(String, UiBindingAttachmentCoordinate, UiBindingAttachmentCoordinate)] {
+        &self.completed_rebinds
     }
 
     pub fn binding_descriptors(&self) -> &BTreeMap<String, UiBindingAttachment> {
@@ -1534,6 +1546,22 @@ impl UiCompositionReplay {
                         }
                     }
                     self.remap_completed_mount_metadata(&delta)?;
+                    let rebind = if let super::composition_operation::CompositionMutation::RebindAttachment {
+                        from,
+                        to,
+                        descriptor,
+                    } = &request.mutation
+                    {
+                        Some((from.clone(), to.clone(), (**descriptor).clone()))
+                    } else {
+                        None
+                    };
+                    if let Some((from, to, descriptor)) = rebind {
+                        self.apply_rebind_metadata(&from, &to, &descriptor, &delta.composition);
+                        self.retain_descriptor(descriptor)?;
+                        self.completed_rebinds
+                            .push((completed.operation_id.clone(), from, to));
+                    }
                     if !delta.mount_remaps.is_empty()
                         && self
                             .completed_mount_remaps
@@ -2446,6 +2474,51 @@ impl UiCompositionReplay {
         }
         *self = staged;
         Ok(())
+    }
+
+    /// Carry replay-owned metadata across a settled rebind: subject and lens
+    /// frame coordinates follow their mount; frames over a View the successor
+    /// no longer declares are dropped with their route and label.
+    fn apply_rebind_metadata(
+        &mut self,
+        from: &UiBindingAttachmentCoordinate,
+        to: &UiBindingAttachmentCoordinate,
+        descriptor: &UiBindingAttachment,
+        rebound: &PresentationComposition,
+    ) {
+        for (instance, subject) in &mut self.subjects {
+            if subject.binding == *from
+                && rebound
+                    .mount(instance)
+                    .is_some_and(|mount| mount.binding() == to)
+            {
+                subject.binding = to.clone();
+            }
+        }
+        let mut dropped = Vec::new();
+        for (instance, frames) in &mut self.lens_frames {
+            let vanished = frames.iter().any(|frame| {
+                frame.binding == *from
+                    && !descriptor.presentation.views.contains_key(&frame.view_ref)
+            });
+            if vanished {
+                dropped.push(instance.clone());
+                continue;
+            }
+            for frame in frames.iter_mut().filter(|frame| frame.binding == *from) {
+                frame.binding = to.clone();
+            }
+        }
+        for instance in dropped {
+            self.lens_frames.remove(&instance);
+            self.input_routes.remove(&instance);
+            self.lens_labels.remove(&instance);
+        }
+        for binding in self.insertion_bindings.values_mut() {
+            if binding == from {
+                *binding = to.clone();
+            }
+        }
     }
 
     fn retain_descriptor(&mut self, descriptor: UiBindingAttachment) -> Result<(), String> {
