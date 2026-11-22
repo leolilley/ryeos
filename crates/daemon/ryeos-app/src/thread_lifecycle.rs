@@ -9591,6 +9591,7 @@ mod tests {
             output_tokens: 9,
             total_usd: UsdNanos::from_nanos(1_000).unwrap(),
             basis: None,
+            usage_status: Default::default(),
         };
         let envelope = settled_envelope(
             RuntimeResultStatus::Completed,

@@ -268,6 +268,7 @@ mod tests {
                 output_tokens: 20,
                 total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.001").unwrap(),
                 basis: None,
+                usage_status: Default::default(),
             }),
             fanout: None,
         };

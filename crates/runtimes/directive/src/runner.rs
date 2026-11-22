@@ -1669,6 +1669,7 @@ impl Runner {
             output_tokens,
             total_usd: spend_usd,
             basis: None,
+            usage_status: Default::default(),
         }
         .validate()
         .map_err(|error| anyhow::anyhow!("invalid resume usage: {error}"))?;
@@ -5177,6 +5178,7 @@ impl Runner {
             output_tokens,
             total_usd: usd,
             basis: None,
+            usage_status: Default::default(),
         };
         let mut proposed_cost = self.budget.cost();
         proposed_cost
@@ -6094,6 +6096,7 @@ fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) 
         output_tokens: 0,
         total_usd: usd,
         basis: None,
+        usage_status: Default::default(),
     }
 }
 

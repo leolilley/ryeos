@@ -110,11 +110,13 @@ pub(super) fn reconcile_callback_finalization(
                 && authority_cost.spend == runtime_cost.total_usd
                 && authority_cost.provider.is_none()
                 && authority_cost.basis == runtime_cost.basis
+                && authority_cost.usage_status == runtime_cost.usage_status
                 && authority_cost.metadata.is_none()
                 && envelope_cost.input_tokens == runtime_cost.input_tokens
                 && envelope_cost.output_tokens == runtime_cost.output_tokens
                 && envelope_cost.total_usd == runtime_cost.total_usd
-                && envelope_cost.basis == runtime_cost.basis => {}
+                && envelope_cost.basis == runtime_cost.basis
+                && envelope_cost.usage_status == runtime_cost.usage_status => {}
         _ => anyhow::bail!("runtime stdout cost contradicts callback-authoritative terminal cost"),
     }
 
@@ -161,12 +163,10 @@ pub(super) fn reconcile_terminal_finalization(
     }
 
     let status = runtime_result_status(authority.status);
-    let cost = authority.final_cost.as_ref().map(|cost| RuntimeCost {
-        input_tokens: cost.input_tokens,
-        output_tokens: cost.output_tokens,
-        total_usd: cost.spend,
-        basis: cost.basis.clone(),
-    });
+    let cost = authority
+        .final_cost
+        .as_ref()
+        .map(ryeos_engine::contracts::FinalCost::to_runtime);
     if let Some(cost) = &cost {
         cost.validate().map_err(|error| {
             anyhow::anyhow!("external terminal authority has invalid cost: {error}")
@@ -214,15 +214,7 @@ pub(super) fn head_advance_not_applied_finalization(
     let final_cost = runtime_result
         .cost
         .as_ref()
-        .map(|cost| ryeos_engine::contracts::FinalCost {
-            turns: 0,
-            input_tokens: cost.input_tokens,
-            output_tokens: cost.output_tokens,
-            spend: cost.total_usd,
-            provider: None,
-            basis: cost.basis.clone(),
-            metadata: None,
-        });
+        .map(|cost| ryeos_engine::contracts::FinalCost::from_runtime(cost, 0, None, None));
     let raw_cost = runtime_result.cost.as_ref().map(|cost| {
         serde_json::to_value(cost)
             .expect("validated runtime cost must serialize for head-advance settlement")
@@ -303,15 +295,7 @@ pub(super) fn fallback_finalization(
     let final_cost = runtime_result
         .cost
         .as_ref()
-        .map(|cost| ryeos_engine::contracts::FinalCost {
-            turns: 0,
-            input_tokens: cost.input_tokens,
-            output_tokens: cost.output_tokens,
-            spend: cost.total_usd,
-            provider: None,
-            basis: cost.basis.clone(),
-            metadata: None,
-        });
+        .map(|cost| ryeos_engine::contracts::FinalCost::from_runtime(cost, 0, None, None));
     let raw_cost = runtime_result.cost.as_ref().map(|cost| {
         serde_json::to_value(cost)
             .expect("validated runtime cost must serialize for fallback settlement")
@@ -808,6 +792,7 @@ mod tests {
                 output_tokens,
                 total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("1").unwrap(),
                 basis: None,
+                usage_status: Default::default(),
             };
             assert!(cost.validate().is_err());
         }
@@ -827,6 +812,7 @@ mod tests {
             output_tokens: 5,
             total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.02").unwrap(),
             basis: None,
+            usage_status: Default::default(),
         });
         let mut cost_authority = authority(ThreadStatus::Completed);
         cost_authority.final_cost = Some(ryeos_engine::contracts::FinalCost {
@@ -836,11 +822,47 @@ mod tests {
             spend: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.02").unwrap(),
             provider: None,
             basis: None,
+            usage_status: Default::default(),
             metadata: None,
         });
         cost_authority.managed_envelope.as_mut().unwrap()["cost"] =
             serde_json::to_value(with_cost.cost.as_ref().unwrap()).unwrap();
         reconcile_callback_finalization(&cost_authority, &with_cost).unwrap();
+    }
+
+    #[test]
+    fn callback_authority_rejects_a_usage_status_mismatch() {
+        let spend = ryeos_runtime::envelope::UsdNanos::parse_canonical("0.02").unwrap();
+        let mut result = runtime_result(RuntimeResultStatus::Completed);
+        result.cost = Some(ryeos_runtime::envelope::RuntimeCost {
+            input_tokens: 3,
+            output_tokens: 5,
+            total_usd: spend,
+            basis: None,
+            usage_status: ryeos_runtime::envelope::UsageStatus::Partial,
+        });
+        let mut partial = authority(ThreadStatus::Completed);
+        partial.final_cost = Some(ryeos_engine::contracts::FinalCost::from_runtime(
+            result.cost.as_ref().unwrap(),
+            0,
+            None,
+            None,
+        ));
+        partial.managed_envelope.as_mut().unwrap()["cost"] =
+            serde_json::to_value(result.cost.as_ref().unwrap()).unwrap();
+        reconcile_callback_finalization(&partial, &result).unwrap();
+
+        // The settlement and envelope say partial; stdout claims complete.
+        let mut claims_complete = result.clone();
+        claims_complete.cost.as_mut().unwrap().usage_status =
+            ryeos_runtime::envelope::UsageStatus::Complete;
+        assert!(reconcile_callback_finalization(&partial, &claims_complete).is_err());
+
+        // The settlement says complete; stdout and envelope say partial.
+        let mut complete = partial.clone();
+        complete.final_cost.as_mut().unwrap().usage_status =
+            ryeos_runtime::envelope::UsageStatus::Complete;
+        assert!(reconcile_callback_finalization(&complete, &result).is_err());
     }
 
     #[test]
@@ -855,6 +877,7 @@ mod tests {
             output_tokens: 2,
             total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.01").unwrap(),
             basis: None,
+            usage_status: Default::default(),
         });
         assert!(reconcile_callback_finalization(&completed, &cost_result).is_err());
     }

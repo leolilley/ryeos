@@ -29,6 +29,7 @@ pub(super) fn add_runtime_cost(
             output_tokens: cost.output_tokens,
             total_usd: cost.total_usd,
             basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
+            usage_status: Default::default(),
         });
     }
     Ok(())
@@ -52,6 +53,7 @@ impl GraphAccounting {
             output_tokens: 0,
             total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
             basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
+            usage_status: Default::default(),
         });
         total
             .checked_accumulate(&record.cost)
@@ -67,6 +69,7 @@ impl GraphAccounting {
             output_tokens: 0,
             total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
             basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
+            usage_status: Default::default(),
         });
         total
             .checked_accumulate(&record.cost)
@@ -718,6 +721,7 @@ mod history_tests {
                 output_tokens: 0,
                 total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                 basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
+                usage_status: Default::default(),
             }),
             nodes: Vec::new(),
             hooks: Vec::new(),
@@ -735,6 +739,7 @@ mod history_tests {
                     output_tokens: 0,
                     total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                     basis: None,
+                    usage_status: Default::default(),
                 },
             },
         );
@@ -798,6 +803,7 @@ mod history_tests {
                 output_tokens: 1,
                 total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                 basis: Some("estimated".to_string()),
+                usage_status: Default::default(),
             }),
             fanout: None,
         };

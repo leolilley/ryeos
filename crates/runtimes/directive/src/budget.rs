@@ -28,6 +28,7 @@ impl BudgetTracker {
             output_tokens: output,
             total_usd: usd,
             basis: None,
+            usage_status: Default::default(),
         })
     }
 
@@ -54,6 +55,7 @@ impl BudgetTracker {
             output_tokens: output,
             total_usd: usd,
             basis: None,
+            usage_status: Default::default(),
         };
         cost.validate()?;
         self.total_input = input;
@@ -84,6 +86,7 @@ impl BudgetTracker {
             output_tokens: self.total_output,
             total_usd: self.total_usd,
             basis: None,
+            usage_status: Default::default(),
         }
     }
 }
@@ -173,6 +176,7 @@ mod tests {
                 output_tokens: 10,
                 total_usd: usd("0.005"),
                 basis: Some("rollup".to_string()),
+                usage_status: Default::default(),
             })
             .unwrap();
 
