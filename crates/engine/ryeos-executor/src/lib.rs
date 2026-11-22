@@ -413,10 +413,7 @@ pub mod test_support {
                 .with_context(|| format!("fixture selection omits signed slot `{}`", slot.id))?;
             let relationship_resolution = state.engine.effective_resolution_output(
                 ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                        None,
-                        &context.plan_ctx.subject_resolution_authority,
-                    ),
+                    logical_project: context.plan_ctx.logical_project.clone(),
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                         &slot.relationship_ref,
                     )?,

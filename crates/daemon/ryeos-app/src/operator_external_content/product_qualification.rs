@@ -289,10 +289,7 @@ pub fn finalize_pinned_qualification_launch(
     // bundle trust), so an absent root is not refused here.
     let roots = request_engine.resolution_roots(
         Some(project_root.to_path_buf()),
-        LogicalProject::from_optional(
-            project_authority.logical_project_root(&plan_context.current_site_id),
-            &plan_context.subject_resolution_authority,
-        ),
+        project_authority.signer_project(),
     );
     let selectors = prepared
         .product_selections

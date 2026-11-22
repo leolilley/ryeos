@@ -790,10 +790,7 @@ pub(crate) fn admit_host_direct_execution(
     // refused by the launch-time gate or the disabled-shape compile.
     let Ok((_, output)) =
         engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                provenance.logical_project_root(state.threads.site_id()),
-                &provenance.subject_resolution_authority(),
-            ),
+            logical_project: provenance.signer_project(),
             item_ref: root.clone(),
             expected_kind: Some(root.kind.clone()),
             project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
@@ -1878,10 +1875,7 @@ async fn admit_execution_with_publication(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
     let plan_ctx = PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-            provenance.logical_project_root(site_id),
-            &provenance.subject_resolution_authority(),
-        ),
+        logical_project: provenance.signer_project(),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: caller_principal_id.clone(),
             scopes: caller_scopes.clone(),

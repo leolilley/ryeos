@@ -7424,9 +7424,7 @@ metadata:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx: ryeos_engine::contracts::PlanContext {
-                logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                    None, &authority,
-                ),
+                logical_project: ryeos_engine::contracts::unestablished_project(&authority),
                 requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                     ryeos_engine::contracts::Principal {
                         fingerprint: "fp:test".into(),
@@ -7458,9 +7456,7 @@ metadata:
         let canonical_ref = CanonicalRef::parse("service:example/status").unwrap();
         VerifiedItem {
             resolved: ResolvedItem {
-                logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                    None, &authority,
-                ),
+                logical_project: ryeos_engine::contracts::unestablished_project(&authority),
                 canonical_ref: canonical_ref.clone(),
                 kind: canonical_ref.kind.clone(),
                 source_path,

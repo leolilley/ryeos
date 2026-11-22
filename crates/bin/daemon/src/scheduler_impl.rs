@@ -504,10 +504,7 @@ impl SchedulerContext for AppSchedulerContext {
             }
         };
         let plan_ctx = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                provenance.logical_project_root(&current_site_id),
-                &provenance.subject_resolution_authority(),
-            ),
+            logical_project: provenance.signer_project(),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: spec.execution.principal_id().to_owned(),
                 scopes: spec.execution.capabilities.clone(),

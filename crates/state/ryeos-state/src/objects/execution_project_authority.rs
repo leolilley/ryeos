@@ -392,6 +392,10 @@ pub enum ExecutionProjectAuthority {
         environment: EnvironmentAuthority,
         capability_ceiling: Vec<String>,
         child_policy: ChildProjectAuthorityPolicy,
+        /// The owner+name identity sealed at admission: `Stated` only when
+        /// the launcher registered this checkout under its own owner and the
+        /// tree declares that name. Never re-derived on resume.
+        signer_project: crate::project_identity::LogicalProject,
     },
     PinnedGeneration {
         stable_project_identity: String,
@@ -413,36 +417,51 @@ pub enum ExecutionProjectAuthority {
         environment: EnvironmentAuthority,
         capability_ceiling: Vec<String>,
         child_policy: ChildProjectAuthorityPolicy,
+        /// The owner+name identity sealed at admission: `Stated` only when
+        /// this node held the owner's head for that name at exactly this
+        /// generation's base. Never re-derived from a head on resume, and
+        /// never adopted from another node.
+        signer_project: crate::project_identity::LogicalProject,
     },
 }
 
 impl ExecutionProjectAuthority {
-    /// The project this authority belongs to, as the node knows it: the
-    /// absolute project path that signer project scopes name.
-    ///
-    /// A live project is its own logical root. A pinned generation is
-    /// materialized at a per-generation checkout, so its logical root is the
-    /// original project path, but only when the stable project identity says
-    /// the project is local to this node: `local:<path>`, or
-    /// `<site_id>:<path>` where `site_id` is this node's own site (the form a
-    /// pinned head launched on this node is stamped with). A pinned generation
-    /// whose identity names another site has no logical root here, so a
-    /// signer scoped to specific projects never admits its content.
-    pub fn logical_project_root(&self, site_id: &str) -> Option<PathBuf> {
+    /// The project signer scopes judge this execution's items against: the
+    /// identity sealed at admission. A projectless execution has none.
+    pub fn signer_project(&self) -> crate::project_identity::LogicalProject {
         match self {
-            Self::Projectless { .. } => None,
-            Self::LiveProject { canonical_root, .. } => Some(canonical_root.clone()),
-            Self::PinnedGeneration {
-                stable_project_identity,
-                display_path: Some(path),
-                ..
-            } if stable_project_identity == &format!("local:{}", path.display())
-                || stable_project_identity == &format!("{site_id}:{}", path.display()) =>
-            {
-                Some(path.clone())
-            }
-            Self::PinnedGeneration { .. } => None,
+            Self::Projectless { .. } => crate::project_identity::LogicalProject::Absent(
+                crate::project_identity::LogicalProjectAbsence::Projectless,
+            ),
+            Self::LiveProject { signer_project, .. }
+            | Self::PinnedGeneration { signer_project, .. } => signer_project.clone(),
         }
+    }
+
+    /// Seal the signer project established at admission. A projectless
+    /// authority states none; nothing else may state `Projectless`.
+    pub fn with_signer_project(mut self, project: crate::project_identity::LogicalProject) -> anyhow::Result<Self> {
+        match &mut self {
+            Self::Projectless { .. } => {
+                if !matches!(
+                    project,
+                    crate::project_identity::LogicalProject::Absent(crate::project_identity::LogicalProjectAbsence::Projectless)
+                ) {
+                    anyhow::bail!("a projectless authority cannot state a project identity");
+                }
+            }
+            Self::LiveProject { signer_project, .. }
+            | Self::PinnedGeneration { signer_project, .. } => {
+                if matches!(
+                    project,
+                    crate::project_identity::LogicalProject::Absent(crate::project_identity::LogicalProjectAbsence::Projectless)
+                ) {
+                    anyhow::bail!("a project authority cannot be projectless");
+                }
+                *signer_project = project;
+            }
+        }
+        Ok(self)
     }
 
     pub const PROJECTLESS: Self = Self::Projectless {
@@ -838,6 +857,10 @@ impl ExecutionProjectAuthority {
             environment,
             capability_ceiling,
             child_policy: ChildProjectAuthorityPolicy::Inherit,
+            // Fails closed until admission seals an established identity.
+            signer_project: crate::project_identity::LogicalProject::Absent(
+                crate::project_identity::LogicalProjectAbsence::NotStated,
+            ),
         };
         authority.validate()?;
         Ok(authority)
@@ -861,6 +884,10 @@ impl ExecutionProjectAuthority {
             environment,
             capability_ceiling,
             child_policy: ChildProjectAuthorityPolicy::Inherit,
+            // Fails closed until admission seals an established identity.
+            signer_project: crate::project_identity::LogicalProject::Absent(
+                crate::project_identity::LogicalProjectAbsence::NotStated,
+            ),
         };
         authority.validate()?;
         Ok(authority)

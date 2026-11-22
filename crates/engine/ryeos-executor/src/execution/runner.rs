@@ -5795,10 +5795,7 @@ pub async fn run_and_wait(
     let wait_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(
             Some(effective_path.clone()),
-            ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
-                &params.provenance.subject_resolution_authority(),
-            ),
+            params.provenance.signer_project(),
         ),
         &state.config.app_root,
     )
@@ -7270,10 +7267,7 @@ async fn dispatch_detached_bg_task(
     let roots = match ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &eng_for_spawn.resolution_roots(
             project_root,
-            ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
-                &res_for_spawn.plan_context.subject_resolution_authority,
-            ),
+            res_for_spawn.plan_context.logical_project.clone(),
         ),
         &bg_runtime_state_dir,
     ) {
@@ -9031,10 +9025,7 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         base_authority,
     )?;
     let base_plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-            base_provenance.logical_project_root(&resume.current_site_id),
-            &base_provenance.subject_resolution_authority(),
-        ),
+        logical_project: base_provenance.signer_project(),
         requested_by: resume.requested_by.clone(),
         project_context: ProjectContext::LocalPath {
             path: base.effective_path.clone(),
@@ -9424,10 +9415,7 @@ async fn run_existing_recovered_thread(
             retained_admission
                 .resolution_workspace()
                 .map(std::path::Path::to_path_buf),
-            ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
-                retained_admission.resolution_subject_authority(),
-            ),
+            params.provenance.signer_project(),
         ),
         retained_admission.resolution_subject_authority(),
         &mut selection_resolution,

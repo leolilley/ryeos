@@ -9163,9 +9163,7 @@ mod tests {
             current_operational_generation: generation_b,
         };
         let plan_context = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                None, &subject_b,
-            ),
+            logical_project: ryeos_engine::contracts::unestablished_project(&subject_b),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:cow-recovery-test".to_string(),
                 scopes: Vec::new(),
@@ -9215,7 +9213,7 @@ mod tests {
             current_operational_generation: active_base,
         };
         let plan_context = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(None, &subject),
+            logical_project: ryeos_engine::contracts::unestablished_project(&subject),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:cow-recovery-test".to_string(),
                 scopes: Vec::new(),

@@ -454,10 +454,7 @@ impl PreparedExecutionDependency {
         let canonical_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.canonical_ref)?;
         Ok(ryeos_engine::contracts::VerifiedItem {
             resolved: ryeos_engine::contracts::ResolvedItem {
-                logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                    None,
-                    &self.subject.subject_resolution_authority,
-                ),
+                logical_project: ryeos_engine::contracts::unestablished_project(&self.subject.subject_resolution_authority),
                 canonical_ref: canonical_ref.clone(),
                 kind: canonical_ref.kind,
                 source_path: self.subject.source_path.clone(),

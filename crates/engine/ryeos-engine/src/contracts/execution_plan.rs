@@ -136,6 +136,17 @@ impl SubjectResolutionAuthority {
 /// There is no path form and no materialized fallback.
 pub use ryeos_state::project_identity::{LogicalProject, LogicalProjectAbsence};
 
+/// The project of a plan whose caller established no identity: absent, with
+/// the reason its authority implies. A live root is never its own identity;
+/// only admission (a registration under the launcher's own owner) states one.
+pub fn unestablished_project(authority: &SubjectResolutionAuthority) -> LogicalProject {
+    LogicalProject::Absent(match authority {
+        SubjectResolutionAuthority::Projectless => LogicalProjectAbsence::Projectless,
+        SubjectResolutionAuthority::LiveFs => LogicalProjectAbsence::NotRegistered,
+        _ => LogicalProjectAbsence::NotStated,
+    })
+}
+
 fn validate_snapshot_hash(value: &str) -> anyhow::Result<()> {
     if value.len() != 64
         || !value

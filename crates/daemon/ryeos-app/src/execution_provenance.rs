@@ -862,11 +862,10 @@ impl ExecutionProvenance {
         })
     }
 
-    /// The logical project of this execution for signer project scopes (see
-    /// `ExecutionProjectAuthority::logical_project_root`), judged on the node
-    /// whose site is `site_id`.
-    pub fn logical_project_root(&self, site_id: &str) -> Option<PathBuf> {
-        self.project_authority().logical_project_root(site_id)
+    /// The project signer scopes judge this execution against: the identity
+    /// its authority sealed at admission.
+    pub fn signer_project(&self) -> ryeos_engine::contracts::LogicalProject {
+        self.project_authority().signer_project()
     }
 
     pub fn project_authority(&self) -> &ryeos_state::objects::ExecutionProjectAuthority {
@@ -2028,10 +2027,7 @@ mod tests {
         };
         let base = provenance("base", &base_hash);
         let context = PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
-                None,
-                &base.subject_resolution_authority(),
-            ),
+            logical_project: ryeos_engine::contracts::unestablished_project(&base.subject_resolution_authority()),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: owner.clone(),
                 scopes: Vec::new(),

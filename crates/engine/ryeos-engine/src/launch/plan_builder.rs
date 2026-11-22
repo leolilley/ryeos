@@ -2050,7 +2050,7 @@ metadata:
             crate::contracts::SubjectResolutionAuthority::Projectless
         };
         PlanContext {
-            logical_project: LogicalProject::from_optional(None, &subject_resolution_authority),
+            logical_project: crate::contracts::unestablished_project(&subject_resolution_authority),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
