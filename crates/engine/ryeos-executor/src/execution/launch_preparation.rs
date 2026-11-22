@@ -454,7 +454,10 @@ impl PreparedExecutionDependency {
         let canonical_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.canonical_ref)?;
         Ok(ryeos_engine::contracts::VerifiedItem {
             resolved: ryeos_engine::contracts::ResolvedItem {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                    None,
+                    &self.subject.subject_resolution_authority,
+                ),
                 canonical_ref: canonical_ref.clone(),
                 kind: canonical_ref.kind,
                 source_path: self.subject.source_path.clone(),
@@ -2312,7 +2315,9 @@ fn resolve_execution_dependencies(
         let project_root = None;
         let project_context = ryeos_engine::contracts::ProjectContext::None;
         let plan_context = ryeos_engine::contracts::PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             requested_by: inputs.principal.clone(),
             project_context,
             subject_resolution_authority:
@@ -2341,7 +2346,9 @@ fn resolve_execution_dependencies(
             })?;
         let resolution = engine
             .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                ),
                 item_ref: canonical.clone(),
                 expected_kind: None,
                 project_root,
