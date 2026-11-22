@@ -49,8 +49,11 @@ pub const OBJECT_NOT_IN_SCOPE: &str = "object_not_in_scope";
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadRoot {
-    /// The caller's own head of `project_path`, with that head's history.
-    ProjectHead { project_path: String },
+    /// The caller's own head under `project_name`, with that head's history.
+    /// There is no owner field: another owner's head is not readable here.
+    ProjectHead {
+        project_name: ryeos_state::project_identity::ProjectName,
+    },
     /// A thread the caller owns.
     ThreadResult { thread_id: String },
     /// An installed bundle's exported files.
@@ -67,7 +70,7 @@ pub enum ReadRoot {
 impl ReadRoot {
     fn describe(&self) -> String {
         match self {
-            Self::ProjectHead { project_path } => format!("project_head {project_path}"),
+            Self::ProjectHead { project_name } => format!("project_head {project_name}"),
             Self::ThreadResult { thread_id } => format!("thread_result {thread_id}"),
             Self::BundleExport { bundle_name } => format!("bundle_export {bundle_name}"),
             Self::Placement { placement_id } => format!("placement {placement_id}"),
@@ -140,7 +143,7 @@ pub fn resolve_scope(
     ctx.require_verified()
         .map_err(|_| not_in_scope("an unauthenticated caller has no readable root"))?;
     let resolved = match root {
-        ReadRoot::ProjectHead { project_path } => resolve_project_head(project_path, ctx, state)?,
+        ReadRoot::ProjectHead { project_name } => resolve_project_head(project_name, ctx, state)?,
         ReadRoot::ThreadResult { thread_id } => resolve_thread_result(thread_id, ctx, state)?,
         ReadRoot::BundleExport { bundle_name } => resolve_bundle_export(bundle_name, ctx, state)?,
         ReadRoot::Placement { placement_id } => resolve_placement(placement_id, ctx, state)?,
@@ -207,19 +210,16 @@ pub fn require_large_object_in_scope(
 // ── root resolution ────────────────────────────────────────────────────────
 
 fn resolve_project_head(
-    project_path: &str,
+    project_name: &ryeos_state::project_identity::ProjectName,
     ctx: &HandlerContext,
     state: &AppState,
 ) -> Result<ResolvedRoot, HandlerError> {
-    let canonical = ryeos_executor::execution::project_source::canonical_project_ref(project_path)
-        .map_err(|error| HandlerError::BadRequest(format!("project_path: {error}")))?;
-    let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)
-        .map_err(|_| not_in_scope("the caller has no project head namespace"))?
-        .to_owned();
-    let project_hash = lillux::sha256_hex(canonical.as_bytes());
+    // The caller's own head only: the owner is the authenticated principal.
+    let key = ryeos_state::project_identity::ProjectHeadKey::owned_by(&ctx.fingerprint, project_name)
+        .map_err(|_| not_in_scope("the caller has no project head namespace"))?;
     let head = state
         .state_store
-        .with_state_db(|db| db.read_project_head(&principal_key, &project_hash))
+        .with_state_db(|db| db.read_project_head(&key))
         .map_err(internal)?;
     // An absent head is a project that was never pushed: the root exists and
     // reaches nothing. A push in progress asks `objects/has` here; everything
@@ -552,14 +552,20 @@ mod tests {
     #[test]
     fn root_serialises_with_its_kind_tag_and_rejects_unknown_fields() {
         let root: ReadRoot = serde_json::from_value(serde_json::json!({
-            "kind": "project_head", "project_path": "/p"
+            "kind": "project_head", "project_name": "p"
         }))
         .unwrap();
         assert_eq!(
             root,
             ReadRoot::ProjectHead {
-                project_path: "/p".into()
+                project_name: ryeos_state::project_identity::ProjectName::new("p").unwrap()
             }
+        );
+        assert!(
+            serde_json::from_value::<ReadRoot>(serde_json::json!({
+                "kind": "project_head", "project_name": "p", "owner": "fp:x"
+            }))
+            .is_err()
         );
         assert!(
             serde_json::from_value::<ReadRoot>(serde_json::json!({

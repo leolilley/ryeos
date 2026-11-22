@@ -23,8 +23,9 @@ pub struct ExplicitExpectedHash(Option<String>);
 pub struct Request {
     /// Principal-bound durable upload capability returned by `objects/put`.
     pub staging_id: String,
-    /// Project path (used to derive the project hash).
-    pub project_path: String,
+    /// The project name. The head is keyed by (the caller, this name), and
+    /// the snapshot's `.ai/project.yaml` must declare the same name.
+    pub project_name: ryeos_state::project_identity::ProjectName,
     /// CAS hash of the `ProjectSnapshot` to point HEAD at.
     pub snapshot_hash: String,
     /// Exact principal HEAD observed when the server minted `staging_id`.
@@ -46,28 +47,20 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         ctx.authenticated_origin_site_id.as_deref(),
     )?;
 
-    // Compute principal-scoped project key before acquiring mutation locks.
-    //
-    // project_ref must be canonical. Both push HEAD writes (here) and
-    // execute HEAD reads (project_source.rs) go through
-    // `canonical_project_ref` — the single source of truth — so both
-    // sides agree on the hash key. The `NO_PROJECT_SENTINEL` is the
-    // only path string that bypasses canonicalize (per-principal scope
-    // for --no-project mode).
-    let canonical_project_path =
-        ryeos_executor::execution::project_source::canonical_project_ref(&req.project_path)
-            .map_err(|e| anyhow!("push_head: {}", e))?;
-    let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)?;
-    let project_hash = lillux::cas::sha256_hex(canonical_project_path.as_bytes());
-    let publication_key =
-        ryeos_state::DurableCasPublicationKey::project_head(principal_key, &project_hash)?;
+    // The head is the caller's own under the requested name: the owner is
+    // the authenticated principal, never request input.
+    let head_key =
+        ryeos_state::project_identity::ProjectHeadKey::owned_by(&ctx.fingerprint, &req.project_name)?;
+    let principal_key = head_key.owner_key();
+    let project_hash = head_key.name_hash();
+    let publication_key = ryeos_state::DurableCasPublicationKey::project_head(&head_key)?;
     let expected_previous_hash = req.expected_previous_hash.0.as_deref();
 
     // One publication critical section: serialize this project and staging
     // capability, then hold the shared CAS guard from closure verification
     // through signed HEAD publication and lease consumption.
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    let project_lock = crate::handlers::project_apply_snapshot::project_apply_lock(&project_hash);
+    let project_lock = crate::handlers::project_apply_snapshot::project_apply_lock(&head_key.ref_path());
     let _project_guard = project_lock.lock_owned().await;
     let authority = state
         .state_store
@@ -92,7 +85,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
         let current = state
             .state_store
-            .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+            .with_state_db(|db| db.read_project_head(&head_key))?;
         if current.as_deref() != Some(req.snapshot_hash.as_str()) {
             return Err(anyhow!(
                 "upload receipt target {} is no longer the current project HEAD",
@@ -157,6 +150,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .get_object(&snapshot.project_tree_hash)?
         .ok_or_else(|| anyhow!("project tree {} is missing", snapshot.project_tree_hash))?;
     let tree = ryeos_state::objects::ProjectTree::from_value(&tree_obj)?;
+    let declared =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name_in_tree(&cas, &tree)?;
+    if declared.as_ref() != Some(&req.project_name) {
+        return Err(anyhow!(
+            "project_name_mismatch: push-head names project {} but the snapshot declares {}",
+            req.project_name,
+            declared.map_or_else(|| "no name".to_owned(), |name| name.to_string())
+        ));
+    }
     let policy_obj = cas
         .get_object(&snapshot.effective_policy_hash)?
         .ok_or_else(|| {
@@ -180,7 +182,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // Otherwise, write a new ref.
     let current = state
         .state_store
-        .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+        .with_state_db(|db| db.read_project_head(&head_key))?;
     if current.as_deref() != Some(req.snapshot_hash.as_str()) {
         if current.as_deref() != expected_previous_hash {
             anyhow::bail!(
@@ -191,16 +193,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
         match expected_previous_hash {
             Some(expected) => state.state_store.advance_project_head_ref(
-                principal_key,
-                &project_hash,
+                &head_key,
                 &req.snapshot_hash,
                 expected,
                 &signer,
                 &cas_guard,
             ),
             None => state.state_store.write_project_head_ref(
-                principal_key,
-                &project_hash,
+                &head_key,
                 &req.snapshot_hash,
                 &signer,
                 &cas_guard,
@@ -222,6 +222,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     Ok(serde_json::json!({
         "principal_key": principal_key,
         "project_hash": project_hash,
+        "project_name": req.project_name,
         "snapshot_hash": req.snapshot_hash,
         "tree_entries": tree.files.len(),
     }))

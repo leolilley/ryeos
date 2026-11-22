@@ -732,7 +732,7 @@ impl RemoteClient {
     pub async fn objects_put(
         &self,
         staging_id: Option<&str>,
-        project_path: &str,
+        project_name: &ryeos_state::project_identity::ProjectName,
         blobs: &[BlobUpload],
         objects: &[Value],
     ) -> Result<ObjectsPutResponse> {
@@ -743,7 +743,7 @@ impl RemoteClient {
             .collect();
         let body = serde_json::json!({
             "staging_id": staging_id,
-            "project_path": project_path,
+            "project_name": project_name,
             "blobs": blobs,
             "blob_chunks": [],
             "objects": wrapped_objects,
@@ -783,7 +783,7 @@ impl RemoteClient {
     pub async fn objects_put_raw(
         &self,
         staging_id: Option<&str>,
-        project_path: &str,
+        project_name: &ryeos_state::project_identity::ProjectName,
         blobs: &[BlobUpload],
         objects: &[RawObjectUpload],
     ) -> Result<ObjectsPutResponse> {
@@ -794,14 +794,14 @@ impl RemoteClient {
         #[derive(serde::Serialize)]
         struct Request<'a> {
             staging_id: Option<&'a str>,
-            project_path: &'a str,
+            project_name: &'a ryeos_state::project_identity::ProjectName,
             blobs: &'a [BlobUpload],
             blob_chunks: &'static [BlobChunkUpload],
             objects: Vec<RawEntry<'a>>,
         }
         let request = Request {
             staging_id,
-            project_path,
+            project_name,
             blobs,
             blob_chunks: &[],
             objects: objects
@@ -854,12 +854,12 @@ impl RemoteClient {
     pub async fn objects_put_blob_chunk(
         &self,
         staging_id: &str,
-        project_path: &str,
+        project_name: &ryeos_state::project_identity::ProjectName,
         chunk: &BlobChunkUpload,
     ) -> Result<ObjectsPutResponse> {
         let body = serde_json::json!({
             "staging_id": staging_id,
-            "project_path": project_path,
+            "project_name": project_name,
             "blobs": [],
             "blob_chunks": [chunk],
             "objects": [],
@@ -1600,13 +1600,13 @@ impl RemoteClient {
     /// POST /push-head (authenticated).
     pub async fn push_head(
         &self,
-        project_path: &str,
+        project_name: &ryeos_state::project_identity::ProjectName,
         snapshot_hash: &str,
         staging_id: &str,
         expected_previous_hash: Option<&str>,
     ) -> Result<Value> {
         let mut body = serde_json::json!({
-            "project_path": project_path,
+            "project_name": project_name,
             "snapshot_hash": snapshot_hash,
             "staging_id": staging_id,
             "expected_previous_hash": expected_previous_hash,
@@ -5044,7 +5044,7 @@ mod tests {
 
     fn test_read_root() -> ReadRoot {
         ReadRoot::ProjectHead {
-            project_path: "/project".to_owned(),
+            project_name: ryeos_state::project_identity::ProjectName::new("project").unwrap(),
         }
     }
 

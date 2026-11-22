@@ -49,8 +49,9 @@ pub struct Request {
     /// batch; the server mints and returns one before storing any CAS bytes.
     #[serde(default)]
     pub staging_id: Option<String>,
-    /// Canonical publication target for this upload session.
-    pub project_path: String,
+    /// The project whose head this upload publishes, keyed by (the caller,
+    /// this name).
+    pub project_name: ryeos_state::project_identity::ProjectName,
     #[serde(default)]
     pub blobs: Vec<BlobEntry>,
     #[serde(default)]
@@ -176,8 +177,8 @@ fn typed_value_is_capsule(value: &Value) -> bool {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPutEnvelope {
-    #[serde(rename = "project_path")]
-    _project_path: String,
+    #[serde(rename = "project_name")]
+    _project_name: String,
     #[serde(default, rename = "staging_id")]
     _staging_id: Option<String>,
     #[serde(default)]
@@ -356,13 +357,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e:#}"))?;
     let recovery = authority.require_recovery()?;
-    let canonical_project_path =
-        ryeos_executor::execution::project_source::canonical_project_ref(&req.project_path)
-            .map_err(|error| anyhow::anyhow!("objects.put: {error}"))?;
-    let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)?;
-    let project_hash = lillux::sha256_hex(canonical_project_path.as_bytes());
-    let publication_key =
-        ryeos_state::DurableCasPublicationKey::project_head(principal_key, &project_hash)?;
+    // The caller's own head under the requested name; the owner is never
+    // request input.
+    let head_key =
+        ryeos_state::project_identity::ProjectHeadKey::owned_by(&ctx.fingerprint, &req.project_name)?;
+    let publication_key = ryeos_state::DurableCasPublicationKey::project_head(&head_key)?;
     let mut stage = match req.staging_id.as_deref() {
         Some(staging_id) => {
             let stage = recovery.open_durable_cas_upload_admitted(
@@ -377,7 +376,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         None => {
             let expected_previous_hash = state
                 .state_store
-                .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+                .with_state_db(|db| db.read_project_head(&head_key))?;
             recovery.begin_durable_cas_upload_admitted(
                 &cas_guard,
                 &ctx.fingerprint,
@@ -466,17 +465,17 @@ mod raw_ingress_controls {
     fn raw_preflight_accepts_empty_upload_and_rejects_ambiguous_envelopes() {
         assert!(
             validate_raw_object_put_request(
-                br#"{"project_path":"/project","blobs":[],"blob_chunks":[],"objects":[]}"#
+                br#"{"project_name":"project","blobs":[],"blob_chunks":[],"objects":[]}"#
             )
             .is_ok()
         );
         assert!(
-            validate_raw_object_put_request(br#"{"project_path":"/project","extra":true}"#)
+            validate_raw_object_put_request(br#"{"project_name":"project","extra":true}"#)
                 .is_err()
         );
         assert!(
             validate_raw_object_put_request(
-                br#"{"project_path":"/project","project_path":"/other"}"#
+                br#"{"project_name":"project","project_name":"other"}"#
             )
             .is_err()
         );
@@ -485,7 +484,7 @@ mod raw_ingress_controls {
     #[test]
     fn raw_preflight_bounds_entry_count_before_value_materialization() {
         let make_body = |count: usize| {
-            let mut raw = String::from(r#"{"project_path":"/project","blobs":["#);
+            let mut raw = String::from(r#"{"project_name":"project","blobs":["#);
             for index in 0..count {
                 if index > 0 {
                     raw.push(',');
@@ -517,7 +516,7 @@ mod raw_ingress_controls {
             out
         }
         let exact = format!(
-            "{{\"project_path\":\"/p\",\"blobs\":[{}],\"blob_chunks\":[{}],\"objects\":[{}]}}",
+            "{{\"project_name\":\"p\",\"blobs\":[{}],\"blob_chunks\":[{}],\"objects\":[{}]}}",
             entries(33_334, r#"{"data":""}"#),
             entries(
                 33_333,
@@ -528,7 +527,7 @@ mod raw_ingress_controls {
         assert!(validate_raw_object_put_request(exact.as_bytes()).is_ok());
 
         let one_over = format!(
-            "{{\"project_path\":\"/p\",\"blobs\":[{}],\"blob_chunks\":[{}],\"objects\":[{}]}}",
+            "{{\"project_name\":\"p\",\"blobs\":[{}],\"blob_chunks\":[{}],\"objects\":[{}]}}",
             entries(33_335, r#"{"data":""}"#),
             entries(
                 33_333,
@@ -545,7 +544,7 @@ mod raw_ingress_controls {
             "{{\"payload\":\"{}\"}}",
             "x".repeat(MAX_RAW_OBJECT_BYTES + 1)
         );
-        let raw = format!("{{\"project_path\":\"/project\",\"objects\":[{{\"value\":{value}}}]}}");
+        let raw = format!("{{\"project_name\":\"project\",\"objects\":[{{\"value\":{value}}}]}}");
         assert!(validate_raw_object_put_request(raw.as_bytes()).is_err());
     }
 
@@ -553,7 +552,7 @@ mod raw_ingress_controls {
     fn generic_object_raw_and_canonical_ceiling_accept_exact_and_reject_one_over() {
         let value_at = |raw_len: usize| format!("\"{}\"", "x".repeat(raw_len - 2));
         let make_body = |value: String| {
-            format!("{{\"project_path\":\"/p\",\"objects\":[{{\"value\":{value}}}]}}")
+            format!("{{\"project_name\":\"p\",\"objects\":[{{\"value\":{value}}}]}}")
         };
         assert!(
             validate_raw_object_put_request(make_body(value_at(MAX_RAW_OBJECT_BYTES)).as_bytes())
@@ -578,7 +577,7 @@ mod raw_ingress_controls {
                 "🧭".repeat(astral_count),
                 "a".repeat(ascii_count)
             );
-            format!("{{\"project_path\":\"/p\",\"objects\":[{{\"value\":{value}}}]}}")
+            format!("{{\"project_name\":\"p\",\"objects\":[{{\"value\":{value}}}]}}")
         };
         let exact = make_body(MAX_RAW_OBJECT_BYTES);
         assert!(validate_raw_object_put_request(exact.as_bytes()).is_ok());
@@ -592,7 +591,7 @@ mod raw_ingress_controls {
             "{{\"kind\":\"admitted_launch_capsule\",\"payload\":\"{}\"}}",
             "x".repeat(MAX_CAPSULE_OBJECT_BYTES + 1)
         );
-        let raw = format!("{{\"project_path\":\"/project\",\"objects\":[{{\"value\":{value}}}]}}");
+        let raw = format!("{{\"project_name\":\"project\",\"objects\":[{{\"value\":{value}}}]}}");
         assert!(validate_raw_object_put_request(raw.as_bytes()).is_err());
     }
 
@@ -607,7 +606,7 @@ mod raw_ingress_controls {
                 "x".repeat(raw_len - prefix.len() - suffix.len()),
                 suffix
             );
-            format!("{{\"project_path\":\"/p\",\"objects\":[{{\"value\":{value}}}]}}")
+            format!("{{\"project_name\":\"p\",\"objects\":[{{\"value\":{value}}}]}}")
         };
         for kind_json in [
             "\"admitted_launch_capsule\"",
@@ -644,7 +643,7 @@ mod raw_ingress_controls {
                 "a".repeat(ascii_count),
                 suffix
             );
-            format!("{{\"project_path\":\"/p\",\"objects\":[{{\"value\":{value}}}]}}")
+            format!("{{\"project_name\":\"p\",\"objects\":[{{\"value\":{value}}}]}}")
         };
         let exact = make_body(MAX_CAPSULE_OBJECT_BYTES);
         assert!(validate_raw_object_put_request(exact.as_bytes()).is_ok());
@@ -654,7 +653,7 @@ mod raw_ingress_controls {
 
     #[test]
     fn raw_preflight_rejects_duplicate_top_level_capsule_discriminator() {
-        let raw = br#"{"project_path":"/project","objects":[{"value":{"kind":"admitted_launch_capsule","kind":"ordinary","payload":1}}]}"#;
+        let raw = br#"{"project_name":"project","objects":[{"value":{"kind":"admitted_launch_capsule","kind":"ordinary","payload":1}}]}"#;
         assert!(validate_raw_object_put_request(raw).is_err());
     }
 
@@ -662,7 +661,7 @@ mod raw_ingress_controls {
     fn raw_preflight_rejects_oversized_encoded_inline_blob_before_decode() {
         let encoded_max = MAX_INLINE_BLOB_BYTES.saturating_add(2) / 3 * 4;
         let raw = format!(
-            "{{\"project_path\":\"/project\",\"blobs\":[{{\"data\":\"{}\"}}]}}",
+            "{{\"project_name\":\"project\",\"blobs\":[{{\"data\":\"{}\"}}]}}",
             "A".repeat(encoded_max + 1)
         );
         assert!(validate_raw_object_put_request(raw.as_bytes()).is_err());
@@ -672,7 +671,7 @@ mod raw_ingress_controls {
     fn raw_preflight_rejects_oversized_chunk_and_declared_blob_before_decode() {
         let encoded_max = MAX_BLOB_CHUNK_BYTES * 2;
         let raw = format!(
-            "{{\"project_path\":\"/project\",\"blob_chunks\":[{{\"hash\":\"h\",\"total_size\":{},\"offset\":0,\"data\":\"{}\"}}]}}",
+            "{{\"project_name\":\"project\",\"blob_chunks\":[{{\"hash\":\"h\",\"total_size\":{},\"offset\":0,\"data\":\"{}\"}}]}}",
             MAX_BLOB_BYTES + 1,
             "A".repeat(encoded_max + 1)
         );
@@ -699,7 +698,7 @@ mod raw_ingress_controls {
         let make_body = |size: usize| {
             let encoded = base64::engine::general_purpose::STANDARD.encode(vec![0u8; size]);
             format!(
-                "{{\"project_path\":\"/project\",\"blob_chunks\":[{{\"hash\":\"h\",\"total_size\":{},\"offset\":0,\"data\":\"{}\"}}]}}",
+                "{{\"project_name\":\"project\",\"blob_chunks\":[{{\"hash\":\"h\",\"total_size\":{},\"offset\":0,\"data\":\"{}\"}}]}}",
                 size + 1,
                 encoded
             )
@@ -725,7 +724,7 @@ mod raw_ingress_controls {
     #[test]
     fn raw_canonical_and_decoded_payload_aggregate_accepts_exact_and_rejects_one_over() {
         fn make_body(blob_bytes: usize) -> String {
-            let mut raw = String::from(r#"{"project_path":"/p","objects":["#);
+            let mut raw = String::from(r#"{"project_name":"p","objects":["#);
             for index in 0..3 {
                 if index != 0 {
                     raw.push(',');

@@ -290,6 +290,25 @@ impl ProjectDeclaration {
         Self::parse(&bytes).map(Some)
     }
 
+    /// The name a stored project tree declares, read from its CAS objects.
+    /// `Ok(None)` when the tree holds no declaration.
+    pub fn declared_name_in_tree(
+        cas: &lillux::CasStore,
+        tree: &crate::objects::ProjectTree,
+    ) -> Result<Option<ProjectName>> {
+        let Some(file_hash) = tree.files.get(PROJECT_DECLARATION_PATH) else {
+            return Ok(None);
+        };
+        let file = crate::objects::ProjectFile::from_value(
+            &cas.get_object(file_hash)?
+                .with_context(|| format!("{PROJECT_DECLARATION_PATH} file object is missing"))?,
+        )?;
+        let bytes = cas
+            .get_blob_bounded(&file.blob_hash, MAX_PROJECT_DECLARATION_BYTES)?
+            .with_context(|| format!("{PROJECT_DECLARATION_PATH} blob is missing"))?;
+        Ok(Some(Self::parse(&bytes)?.name))
+    }
+
     /// The name declared by the project tree at `root`, an existing
     /// directory. `Ok(None)` when it declares none.
     pub fn declared_name(root: &Path) -> Result<Option<ProjectName>> {
