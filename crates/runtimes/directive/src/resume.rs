@@ -360,11 +360,7 @@ pub async fn load_resume_state(
                     let own_full = fold_messages(
                         &replay_own_inputs_and_turns(callback, previous_thread_id).await?,
                     )?;
-                    let compacted: Vec<ProviderMessage> =
-                        folded.iter().map(|folded| folded.message.clone()).collect();
-                    let compacted_turns =
-                        crate::loop_guards::digests_from_messages(&compacted).len() as u32;
-                    own_signals(&own_full, compacted_turns)
+                    same_thread_signals(&own_full, &folded)
                 }
             };
             let messages: Vec<ProviderMessage> =
@@ -842,6 +838,32 @@ async fn replay_own_inputs_and_turns(
         )
         .await?
         .events)
+}
+
+/// What a same-thread recovery with a compaction has told the model: what the
+/// thread's own record shows (a compaction cannot take that back), together
+/// with what the compacted conversation still carries, which also covers
+/// notices a predecessor thread gave and the conversation holds. A finding in
+/// both keeps the earlier position, which is the earlier stop.
+fn same_thread_signals(
+    own_full: &[FoldedMessage],
+    compacted: &[FoldedMessage],
+) -> (WrapUpDelivered, crate::loop_guards::WarnedAt) {
+    let compacted_messages: Vec<ProviderMessage> = compacted
+        .iter()
+        .map(|folded| folded.message.clone())
+        .collect();
+    let compacted_turns =
+        crate::loop_guards::digests_from_messages(&compacted_messages).len() as u32;
+    let (own_delivered, mut warned) = own_signals(own_full, compacted_turns);
+    let (carried_delivered, carried_warned) = compacted_signals(compacted);
+    for (kind, position) in carried_warned {
+        warned
+            .entry(kind)
+            .and_modify(|existing| *existing = (*existing).min(position))
+            .or_insert(position);
+    }
+    (own_delivered.union(carried_delivered), warned)
 }
 
 /// The wrap-up reasons given and loop findings warned about, read from a
@@ -5562,6 +5584,44 @@ mod tests {
         let grace = 3i64;
         let position = warned[&crate::loop_guards::FindingKind::PingPong];
         assert_eq!(position + grace - i64::from(compacted_turns), 2 + grace - 5);
+    }
+
+    #[test]
+    fn same_thread_recovery_also_keeps_what_the_compacted_conversation_carries() {
+        // A notice a predecessor gave sits in the compacted conversation but
+        // not in this thread's own record; the thread's own dropped notice is
+        // only in its record. Both count as given.
+        let mut own = vec![
+            event_at("cognition_in", 1, json!({"turn": 1, "purpose": "turn"})),
+            event_at("cognition_out", 2, out(1, "one")),
+        ];
+        own.extend(kinded_input(
+            ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP,
+        ));
+        let own_full = fold_messages(&own).unwrap();
+        let mut window = windowed_events();
+        let carried: Vec<ReplayedEventRecord> =
+            kinded_input(ryeos_runtime::cognition::KIND_LIMIT_WRAP_UP)
+                .into_iter()
+                .chain(kinded_input("loop_warning_idle"))
+                .enumerate()
+                .map(|(i, mut event)| {
+                    event.chain_seq = 100 + i as i64;
+                    event
+                })
+                .collect();
+        window.splice(4..4, carried);
+        let compacted = fold_messages_anchored(&window, Some(26)).unwrap();
+        let (delivered, warned) = same_thread_signals(&own_full, &compacted);
+        assert_eq!(
+            delivered,
+            WrapUpDelivered {
+                deadline: true,
+                turn_limit: true
+            }
+        );
+        // The carried warning follows the kept turns 3 and 4.
+        assert_eq!(warned.get(&crate::loop_guards::FindingKind::Idle), Some(&2));
     }
 
     #[test]

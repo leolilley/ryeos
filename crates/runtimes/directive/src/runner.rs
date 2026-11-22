@@ -9209,7 +9209,10 @@ mod tests {
         ledger_runner_with_policy(mock, make_policy())
     }
 
-    fn ledger_runner_with_policy(mock: Arc<ScriptedLedger>, policy: EnvelopePolicy) -> Runner {
+    fn ledger_runner_with_policy(
+        mock: Arc<dyn RuntimeCallbackAPI>,
+        policy: EnvelopePolicy,
+    ) -> Runner {
         let provider = ProviderConfig {
             category: None,
             family: ProtocolFamily::ChatCompletions,
@@ -9236,12 +9239,7 @@ mod tests {
             harness: Harness::new(&policy, 0, None),
             continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(usd("1")),
-            callback: CallbackClient::from_inner(
-                mock as Arc<dyn RuntimeCallbackAPI>,
-                "T-test",
-                "/project",
-                "tat-test",
-            ),
+            callback: CallbackClient::from_inner(mock, "T-test", "/project", "tat-test"),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
             provider_config: provider,
@@ -9494,6 +9492,283 @@ mod tests {
         runner.wrap_up_delivered.turn_limit = true;
         runner.run_deadline_boundary().await.unwrap();
         assert!(mock.recorded("append_event").is_empty());
+    }
+
+    /// One thread's durable record held in memory: appends are stored under
+    /// the next chain sequence and replays filter as the daemon does.
+    #[derive(Default)]
+    struct EventStore {
+        events: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl EventStore {
+        fn push(&self, event_type: &str, payload: Value) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((event_type.to_string(), payload));
+        }
+
+        fn push_input(&self, input: &ryeos_runtime::CognitionInput) {
+            for payload in ryeos_runtime::encode_cognition_in_payloads(input).unwrap() {
+                self.push("cognition_in", payload);
+            }
+        }
+
+        fn inputs_of_kind(&self, kind: &str) -> usize {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(event_type, payload)| {
+                    event_type == "cognition_in"
+                        && payload.get("kind").and_then(Value::as_str) == Some(kind)
+                })
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeCallbackAPI for EventStore {
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({"thread": {}}))
+        }
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            event_type: &str,
+            payload: Value,
+        ) -> Result<Value, CallbackError> {
+            self.push(event_type, payload);
+            Ok(json!({}))
+        }
+        async fn append_events(
+            &self,
+            _: &str,
+            events: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
+            for event in events {
+                self.push(
+                    event["event_type"].as_str().unwrap(),
+                    event["payload"].clone(),
+                );
+            }
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
+            let types: Option<Vec<String>> = params
+                .get("event_types")
+                .and_then(|types| serde_json::from_value(types.clone()).ok());
+            let after = params
+                .get("after_chain_seq")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let events = self
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(index, (event_type, payload))| (index as i64 + 1, event_type, payload))
+                .filter(|(seq, event_type, _)| {
+                    *seq > after
+                        && types
+                            .as_ref()
+                            .is_none_or(|types| types.iter().any(|t| t == *event_type))
+                })
+                .map(
+                    |(chain_seq, event_type, payload)| ryeos_runtime::ReplayedEventRecord {
+                        chain_seq,
+                        event_type: event_type.clone(),
+                        payload: payload.clone(),
+                    },
+                )
+                .collect();
+            Ok(serde_json::to_value(ryeos_runtime::ReplayResponse {
+                events,
+                next_cursor: None,
+            })
+            .unwrap())
+        }
+        async fn bundle_events_append(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn bundle_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn vault_put(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_get(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: i64,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+    }
+
+    /// A completed text-only turn, in the record and in the live conversation.
+    fn record_same_turn(store: &EventStore, runner: &mut Runner, turn: u32) {
+        store.push("cognition_in", json!({"turn": turn, "purpose": "turn"}));
+        store.push(
+            "cognition_out",
+            json!({
+                "turn": turn,
+                "parts": [{"type": "text", "text": "same"}],
+                "finish": "stop",
+                "provider_accounting": {"replayed_from": "ab".repeat(32)},
+            }),
+        );
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![Part::text("same")],
+        ));
+    }
+
+    fn conversation_turns(runner: &Runner) -> usize {
+        crate::loop_guards::digests_from_messages(&runner.messages).len()
+    }
+
+    #[tokio::test]
+    async fn a_live_compaction_keeps_the_wrap_up_and_the_grace_a_loop_warning_had_used() {
+        use crate::loop_guards::FindingKind;
+        let store = Arc::new(EventStore::default());
+        let mut runner = ledger_runner_with_policy(store.clone(), make_policy());
+        runner.execution.loop_guards = crate::directive::LoopGuardsConfig {
+            no_progress_turns: 1,
+            grace_turns: 5,
+            ..Default::default()
+        };
+        runner.compaction.keep_turns = 3;
+        store.push_input(&ryeos_runtime::CognitionInput::text("launch", "THE TASK").pinned());
+        runner.messages.push(ProviderMessage::user("THE TASK"));
+        record_same_turn(&store, &mut runner, 1);
+        record_same_turn(&store, &mut runner, 2);
+        // Two turns that only repeat what was seen: warned, at turn count 2.
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(runner.loop_warned.get(&FindingKind::NoProgress), Some(&2));
+        // The deadline notice is given too.
+        let notice = ryeos_runtime::CognitionInput::text("harness", "Deadline notice")
+            .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP);
+        runner.callback.emit_cognition_input(&notice).await.unwrap();
+        runner
+            .messages
+            .push(ProviderMessage::user("Deadline notice"));
+        runner.wrap_up_delivered.deadline = true;
+        for turn in 3..=5 {
+            record_same_turn(&store, &mut runner, turn);
+        }
+        // Grace 5: without a compaction the stop lands at turn count 7.
+        let outcome = runner.finish_compaction("pressure", None).await;
+        assert!(matches!(outcome, Ok(CompactionOutcome::Compacted)));
+        // The kept turns are 3, 4 and 5; the notice and the warning, both
+        // recorded before turn 3, are summarised away.
+        assert_eq!(conversation_turns(&runner), 3);
+        assert!(
+            runner.messages.iter().all(|message| {
+                message
+                    .text()
+                    .is_none_or(|text| !text.starts_with("Deadline notice"))
+            }),
+            "the compaction dropped the notice from the conversation"
+        );
+        // (i) the flag stays set, so the model is not told again.
+        assert!(runner.wrap_up_delivered.deadline);
+        // (ii) the three turns since the warning are kept: position 3 - 3.
+        assert_eq!(runner.loop_warned.get(&FindingKind::NoProgress), Some(&0));
+        // A fresh process recovering the same record reaches the same state.
+        let recovered = crate::resume::load_resume_state(
+            &runner.callback,
+            "T-test",
+            crate::resume::CarryPolicy {
+                carry_turns: u32::MAX,
+                start_tokens: u64::MAX,
+                ceiling_tokens: u64::MAX,
+            },
+            crate::resume::ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(recovered.wrap_up_delivered.deadline);
+        assert_eq!(
+            recovered.loop_warned.get(&FindingKind::NoProgress),
+            Some(&0)
+        );
+        // Still found, not warned afresh, and not stopped yet.
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(store.inputs_of_kind("loop_warning_no_progress"), 1);
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![Part::text("same")],
+        ));
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        // Two turns after the compaction (turn count 5 = 0 + grace) the run is
+        // stopped: the same two turns it had left without the compaction.
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![Part::text("same")],
+        ));
+        let stop = runner
+            .loop_guard_boundary()
+            .await
+            .unwrap()
+            .expect("stopped");
+        assert!(stop.starts_with("loop_detected: "), "{stop}");
+        assert_eq!(store.inputs_of_kind("loop_warning_no_progress"), 1);
     }
 
     fn push_turn(runner: &mut Runner, index: u32, tool: &str, result: &str) {
