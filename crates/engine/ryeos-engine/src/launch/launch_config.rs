@@ -52,26 +52,6 @@ struct LayerLoadPolicy<'a> {
     logical_project: &'a crate::contracts::LogicalProject,
 }
 
-/// The project a config layer's signer scope is matched against. A live
-/// project is its own; a pinned generation is matched only on the logical
-/// project it stands for, never on its temporary checkout.
-fn layer_signer_project_root<'a>(
-    space: ItemSpace,
-    logical_project: &'a crate::contracts::LogicalProject,
-    pinned: bool,
-    ai_root: &'a Path,
-) -> Option<&'a Path> {
-    use crate::contracts::LogicalProject;
-    if space != ItemSpace::Project {
-        return None;
-    }
-    match logical_project {
-        LogicalProject::Stated(path) => Some(path),
-        LogicalProject::MaterializedLive if !pinned => ai_root.parent(),
-        LogicalProject::MaterializedLive | LogicalProject::Absent(_) => None,
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 enum LaunchConfigDependencyState {
@@ -1167,12 +1147,13 @@ fn load_layer(
                 .split_once(':')
                 .map(|(kind, _)| kind)
                 .unwrap_or("config"),
-            layer_signer_project_root(
-                root.space,
-                policy.logical_project,
-                project_content.is_some(),
-                &root.ai_root,
-            ),
+            // Only a project layer belongs to a project; its identity is the
+            // one admission established, never the layer's own path.
+            if root.space == ItemSpace::Project {
+                policy.logical_project
+            } else {
+                &crate::trust::NO_PROJECT
+            },
         ),
     )
     .map_err(|error| {
@@ -1536,7 +1517,7 @@ mod tests {
 
     fn project_roots(project_root: &Path) -> ResolutionRoots {
         ResolutionRoots {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
@@ -1863,7 +1844,7 @@ composer: handler:ryeos/core/identity
         for engine in [&plain, &with_node_config] {
             for logical in [
                 LogicalProject::Stated(own.clone()),
-                LogicalProject::MaterializedLive,
+                LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             ] {
                 let roots =
                     engine.launch_config_roots(&project_roots(&own).with_logical_project(logical));

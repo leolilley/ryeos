@@ -428,7 +428,7 @@ metadata:
         let parsers = dispatcher_with_canonical_bundle_descriptors();
 
         let roots = ResolutionRoots {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             owned_namespaces: Vec::new(),
             ordered: vec![
                 ResolutionRoot {

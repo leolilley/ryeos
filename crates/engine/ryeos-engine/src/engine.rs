@@ -2450,7 +2450,7 @@ impl Engine {
         // Build resolution roots (system-first order)
         let roots = self.resolution_roots(
             project_root.clone(),
-            ctx.effective_logical_project(project_root.as_deref()),
+            ctx.signer_project().clone(),
         );
 
         tracing::debug!(item_ref = %item_ref, "resolving item");
@@ -2558,7 +2558,7 @@ impl Engine {
         );
 
         let resolved = ResolvedItem {
-            logical_project: ctx.effective_logical_project(project_root.as_deref()),
+            logical_project: ctx.signer_project().clone(),
             canonical_ref: item_ref.clone(),
             kind: item_ref.kind.clone(),
             source_path: result.winner_path,
@@ -2727,7 +2727,7 @@ impl Engine {
             )?;
             let roots = self.resolution_roots(
                 Some(project_root.to_path_buf()),
-                ctx.effective_logical_project(Some(project_root)),
+                ctx.signer_project().clone(),
             );
             let (output, probed_absent) =
                 crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
@@ -3186,7 +3186,7 @@ impl Engine {
         )?;
         let roots = self.resolution_roots(
             materialized_project_root.clone(),
-            ctx.effective_logical_project(materialized_project_root.as_deref()),
+            ctx.signer_project().clone(),
         );
         let (output, probed_absent) = crate::resolution::run_resolution_pipeline_with_probes(
             &verified_root.resolved.canonical_ref,
@@ -3249,7 +3249,7 @@ impl Engine {
         )?;
         let roots = self.resolution_roots(
             Some(materialized_project_root.clone()),
-            ctx.effective_logical_project(Some(materialized_project_root.as_path())),
+            ctx.signer_project().clone(),
         );
         let project_content = admitted.project_content_for_root(&materialized_project_root)?;
         let (output, probed_absent) =
@@ -3387,7 +3387,7 @@ impl Engine {
             "engine_generation_identity": self.request_engine_generation_identity(),
             "trust_identity": &request_authority.effective_trust_identity,
             "subject_digest": subject_digest,
-            "signer_project_root": project_root.map(|root| root.display().to_string()),
+            "signer_project": item.logical_project.to_string(),
         });
         let key = lillux::canonical_json(&key_material)
             .map(|canonical| lillux::sha256_hex(canonical.as_bytes()))
@@ -3923,7 +3923,7 @@ impl Engine {
         }
         let roots = self.resolution_roots(
             request.project_root.clone(),
-            request.effective_logical_project(),
+            request.signer_project().clone(),
         );
         let request_snapshot = self.effective_request_snapshot_current(
             request.project_root.as_deref(),
@@ -3959,7 +3959,7 @@ impl Engine {
         }
         let roots = self.resolution_roots(
             request.project_root.clone(),
-            request.effective_logical_project(),
+            request.signer_project().clone(),
         );
         let snapshot = self.effective_request_snapshot_from_project_content(
             project_root,
@@ -4150,7 +4150,7 @@ impl Engine {
         };
         let roots = self.resolution_roots(
             project_root.clone(),
-            ctx.effective_logical_project(project_root.as_deref()),
+            ctx.signer_project().clone(),
         );
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
@@ -4202,7 +4202,7 @@ impl Engine {
             };
             let roots = self.resolution_roots(
                 project_root.clone(),
-                ctx.effective_logical_project(project_root.as_deref()),
+                ctx.signer_project().clone(),
             );
             let request_snapshot = self.effective_request_snapshot_current(
                 project_root.as_deref(),
@@ -4335,7 +4335,7 @@ impl Engine {
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
             let roots = self.resolution_roots(
                 Some(project_root.to_path_buf()),
-                ctx.effective_logical_project(Some(project_root)),
+                ctx.signer_project().clone(),
             );
             let project_content = admitted.project_content_for_root(project_root)?;
             let plan = crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
@@ -5485,7 +5485,7 @@ formats:
         let engine = test_engine().with_node_config_root(PathBuf::from("/node-config"));
         let ordinary = engine.resolution_roots(
             Some(PathBuf::from("/project")),
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         assert_eq!(ordinary.ordered.len(), engine.bundle_roots.len() + 1);
         assert!(
@@ -5932,7 +5932,7 @@ formats:
         let engine = test_engine();
         let roots = engine.resolution_roots(
             Some(PathBuf::from("/workspace/project")),
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         assert!(roots.ordered.iter().any(|r| r.space == ItemSpace::Project));
         let project_root = roots
@@ -5957,7 +5957,7 @@ formats:
         ]);
         let roots = engine.resolution_roots(
             Some(PathBuf::from("/workspace/project")),
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         assert_eq!(roots.ordered.len(), 2);
@@ -6006,7 +6006,7 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6103,7 +6103,7 @@ formats:
         .with_trust_store(trust_store);
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6149,7 +6149,7 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6192,7 +6192,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6240,7 +6240,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6305,7 +6305,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6354,7 +6354,7 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6423,7 +6423,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6483,7 +6483,7 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6715,7 +6715,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

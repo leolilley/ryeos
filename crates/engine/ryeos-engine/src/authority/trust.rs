@@ -1279,13 +1279,30 @@ mod tests {
             SignerScope {
                 spaces,
                 kinds: kinds.iter().map(|k| k.to_string()).collect(),
-                projects: projects.iter().map(|p| p.to_string()).collect(),
+                projects: projects.iter().map(|p| p.parse().unwrap()).collect(),
             },
             status,
         );
         record.event = "e".repeat(64);
         record
     }
+
+    const PROJECT_OWNER: &str =
+        "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// A stated project owned by [`PROJECT_OWNER`].
+    fn stated_project(name: &str) -> &'static LogicalProject {
+        Box::leak(Box::new(LogicalProject::Stated(
+            format!("{PROJECT_OWNER}/{name}").parse().unwrap(),
+        )))
+    }
+
+    fn absent_project() -> &'static LogicalProject {
+        &NO_STATED_PROJECT
+    }
+
+    static NO_STATED_PROJECT: LogicalProject =
+        LogicalProject::Absent(LogicalProjectAbsence::NotStated);
 
     fn publisher_record(vk: &VerifyingKey, status: SignerStatus) -> SignerRecord {
         record_for(
@@ -1519,7 +1536,7 @@ mod tests {
             verify_item_signature(&content, &header, &envelope, &store, &bundle_ctx()).unwrap();
         assert_eq!(bundle_class, TrustClass::Trusted);
 
-        let ctx = SignerContext::project("tool", Some(Path::new("/work/p")));
+        let ctx = SignerContext::project("tool", stated_project("p"));
         let (project_class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &ctx).unwrap();
         assert_eq!(project_class, TrustClass::Untrusted);
@@ -1565,10 +1582,10 @@ mod tests {
         );
         let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
-        let ok = SignerContext::project("knowledge", None);
+        let ok = SignerContext::project("knowledge", absent_project());
         let (class, _) = verify_item_signature(&content, &header, &envelope, &store, &ok).unwrap();
         assert_eq!(class, TrustClass::Trusted);
-        let bad = SignerContext::project("tool", None);
+        let bad = SignerContext::project("tool", absent_project());
         let (class, _) = verify_item_signature(&content, &header, &envelope, &store, &bad).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
     }
@@ -1589,7 +1606,7 @@ mod tests {
         let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
         for kind in ["knowledge", "directive", "tool"] {
-            let ctx = SignerContext::project(kind, Some(Path::new("/work/p")));
+            let ctx = SignerContext::project(kind, stated_project("p"));
             let (class, _) =
                 verify_item_signature(&content, &header, &envelope, &store, &ctx).unwrap();
             assert_eq!(class, TrustClass::Untrusted, "{kind}");
@@ -1611,16 +1628,16 @@ mod tests {
             SignerStatus::Active,
         );
         let live = TrustStore::from_registry(node_vk, vec![record]).unwrap();
-        let entries = live.launch_signer_entries(&live, Some(Path::new("/work/p")));
+        let entries = live.launch_signer_entries(&live, stated_project("p"));
         assert!(entries.iter().all(|entry| entry.endorsements.is_none()));
         let store = TrustStore::from_signer_entries(&entries).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
         for kind in ["knowledge", "directive", "tool", "config"] {
-            for root in [Some(Path::new("/work/p")), None] {
+            for root in [stated_project("p"), absent_project()] {
                 let ctx = SignerContext::project(kind, root);
                 let (class, _) =
                     verify_item_signature(&content, &header, &envelope, &store, &ctx).unwrap();
-                assert_eq!(class, TrustClass::Untrusted, "{kind} {root:?}");
+                assert_eq!(class, TrustClass::Untrusted, "{kind} {root}");
             }
         }
     }
@@ -1666,11 +1683,11 @@ mod tests {
         let (sk, vk, fp) = gen_key();
         let store = TrustStore::from_registry(vk, Vec::new()).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
-        let project = SignerContext::project("knowledge", Some(Path::new("/work/p")));
+        let project = SignerContext::project("knowledge", stated_project("p"));
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &project).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
-        let node = SignerContext::new(SignerSpace::Node, "node", None);
+        let node = SignerContext::node("node");
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &node).unwrap();
         assert_eq!(class, TrustClass::Trusted);
@@ -1685,24 +1702,65 @@ mod tests {
             SignerRole::ProjectAuthor,
             vec![SignerSpace::Project],
             &["*"],
-            &["/work/listed"],
+            &["fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/listed"],
             SignerStatus::Active,
         );
         let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
         let (content, envelope, header) = signed_with_header(&sk, &fp);
 
-        let listed = SignerContext::project("tool", Some(Path::new("/work/listed")));
+        let listed = SignerContext::project("tool", stated_project("listed"));
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &listed).unwrap();
         assert_eq!(class, TrustClass::Trusted);
-        let other = SignerContext::project("tool", Some(Path::new("/work/other")));
+        let other = SignerContext::project("tool", stated_project("other"));
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &other).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
-        let none = SignerContext::project("tool", None);
+        let none = SignerContext::project("tool", absent_project());
         let (class, _) =
             verify_item_signature(&content, &header, &envelope, &store, &none).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
+    }
+
+    #[test]
+    fn scoped_entries_match_only_a_stated_identity_and_own_binds_the_signers_key() {
+        let signer = "a".repeat(64);
+        let other = "b".repeat(64);
+        let stated = |owner: &str, name: &str| {
+            LogicalProject::Stated(format!("fp:{owner}/{name}").parse().unwrap())
+        };
+        let scoped = SignerScope {
+            spaces: vec![SignerSpace::Project],
+            kinds: vec!["*".to_owned()],
+            projects: vec!["own:demo".parse().unwrap()],
+        };
+        let space = SignerSpace::Project;
+        assert!(scoped.admits(space, "tool", &stated(&signer, "demo"), &signer));
+        // Another owner's project of the same name is never matched.
+        assert!(!scoped.admits(space, "tool", &stated(&other, "demo"), &signer));
+        assert!(!scoped.admits(space, "tool", &stated(&signer, "other"), &signer));
+        // A scoped signer never matches an absent identity.
+        for reason in [
+            LogicalProjectAbsence::NotRegistered,
+            LogicalProjectAbsence::ForeignHeadNotHeld,
+            LogicalProjectAbsence::NotStated,
+        ] {
+            assert!(!scoped.admits(space, "tool", &LogicalProject::Absent(reason), &signer));
+        }
+        // An unscoped signer admits every project context, absent included.
+        let unscoped = SignerScope {
+            projects: Vec::new(),
+            ..scoped.clone()
+        };
+        assert!(unscoped.admits(
+            space,
+            "tool",
+            &LogicalProject::Absent(LogicalProjectAbsence::NotRegistered),
+            &signer
+        ));
+        // A path is not a scope.
+        assert!("/work/listed".parse::<ProjectScopeEntry>().is_err());
+        assert!(format!("fp:{other}/demo").parse::<ProjectScopeEntry>().is_ok());
     }
 
     #[test]

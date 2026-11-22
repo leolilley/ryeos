@@ -711,7 +711,7 @@ fn resolve_executor_chain(
                     &crate::trust::SignerContext::new(
                         source_space,
                         &ref_.kind,
-                        roots.signer_project_root_under(project_authority.map(|(root, _)| root)),
+                        roots.signer_project(),
                     ),
                 )
                 .map_err(|error| crate::trust::patch_canonical_ref(error, &resolved_id))?;
@@ -2009,7 +2009,7 @@ metadata:
         let content_hash = crate::item_resolution::content_hash(&content);
 
         let resolved = ResolvedItem {
-            logical_project: LogicalProject::MaterializedLive,
+            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
             canonical_ref: CanonicalRef::parse(canonical_ref).unwrap(),
             kind: kind.to_string(),
             source_path,
@@ -2209,7 +2209,7 @@ config:
                 name: "bundle-release".into(),
                 canonical_root: installed.path().to_path_buf(),
             }],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let context = test_plan_context(Some(project.path().to_path_buf()));
         let caller = json!({"resolved_config":{"forged":true},"release_input":{}});
@@ -2295,7 +2295,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project.path().join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         for endpoint in [
             None,
@@ -2406,7 +2406,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project.path().join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         for (authored, expected) in [
@@ -2519,7 +2519,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let plan = build_plan(BuildPlanInput {
@@ -2635,7 +2635,7 @@ config:
         let by_checkout = ResolutionRoots::from_flat(
             Some(checkout.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let refusal = resolve(&by_checkout).unwrap_err().to_string();
         assert!(
@@ -2686,7 +2686,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let err = build_plan(BuildPlanInput {
@@ -2764,7 +2764,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let err = build_plan(BuildPlanInput {
@@ -2818,7 +2818,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let err = build_plan(BuildPlanInput {
@@ -2928,7 +2928,7 @@ config:
         let project_roots = ResolutionRoots::from_flat(
             Some(temp.path().join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         assert!(check(&item, &ctx, &project_roots, Some(logical)).is_err());
         let local_ctx = test_plan_context(Some(temp.path().to_path_buf()));
@@ -3433,7 +3433,7 @@ config:
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         let err = build_plan(BuildPlanInput {
@@ -3669,7 +3669,7 @@ category: ryeos/core/subprocess\n";
         let roots = ResolutionRoots::from_flat(
             Some(project_dir.join(AI_DIR)),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
 
         // 5. Build plan — this walks the full 3-hop chain

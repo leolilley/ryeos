@@ -1086,7 +1086,7 @@ mod tests {
                     canonical_root: PathBuf::from("/bundles/root/nested"),
                 },
             ],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let selected = roots
             .authoritative_root(
@@ -1363,7 +1363,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project.clone()),
             vec![bundle.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let item = CanonicalRef::parse("tool:demo/x").unwrap();
         let result = resolve_item_full(&roots, &schema, &item).unwrap();
@@ -1377,7 +1377,7 @@ mod tests {
         let mut roots = ResolutionRoots::from_flat(
             Some(project.to_path_buf()),
             vec![bundle.to_path_buf()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         roots.owned_namespaces = vec![OwnedNamespace {
             bundle: "core".to_owned(),
@@ -1402,7 +1402,7 @@ mod tests {
         let roots = ResolutionRoots::from_registered(
             Some(project.clone()),
             &installed,
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let item = CanonicalRef::parse("tool:core/x").unwrap();
         match resolve_item_full(&roots, &schema, &item) {
@@ -1578,7 +1578,7 @@ mod tests {
         let roots = ResolutionRoots::from_registered(
             Some(project.clone()),
             &installed,
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let schema = shadow_refusing_schema("views");
 
@@ -1649,7 +1649,7 @@ mod tests {
         let roots = ResolutionRoots::from_registered(
             Some(project.clone()),
             &installed,
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let schema = make_kind_schema("views", vec![(".yaml", "yaml")]);
         let item = CanonicalRef::parse("view:shared/x").unwrap();
@@ -1693,7 +1693,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project.clone()),
             vec![bundle.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let schema = bundle_only_schema();
         let item = CanonicalRef::parse("service:health/status").unwrap();
@@ -1729,7 +1729,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project.clone()),
             vec![bundle.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let schema = bundle_only_schema();
         let item = CanonicalRef::parse("service:planted/x").unwrap();
@@ -1889,7 +1889,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![system_root],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -1910,7 +1910,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![system_root.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -1933,7 +1933,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![bundle_root.clone()],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -1972,7 +1972,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -2020,7 +2020,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -2037,7 +2037,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root),
             vec![],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:nonexistent").unwrap();
 
@@ -2066,7 +2066,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root),
             vec![system_root],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
@@ -2168,7 +2168,7 @@ mod tests {
         let roots = ResolutionRoots::from_flat(
             Some(project_root.clone()),
             vec![system_root],
-            LogicalProject::MaterializedLive,
+            LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
         );
         let ref_ = CanonicalRef::parse("tool:trace_tool").unwrap();
 
