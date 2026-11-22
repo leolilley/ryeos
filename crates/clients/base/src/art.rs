@@ -60,6 +60,105 @@ impl<'de> Deserialize<'de> for ArtRef {
     }
 }
 
+/// The item-ref prefix of a picture record.
+pub const PICTURE_REF_PREFIX: &str = "picture:";
+
+/// The row word a subject carries when its picture binding failed to resolve:
+/// the card draws the flat mark and no other tier is consulted.
+pub const PICTURE_STATE_UNAVAILABLE: &str = "unavailable";
+
+/// Why a picture binding is malformed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PictureBindingError {
+    /// The ref does not name an item of the picture kind.
+    NotAPictureRef,
+    /// The ref's id is empty or holds a character outside `[a-z0-9_-]` and
+    /// `/` separators between non-empty segments.
+    MalformedRef,
+    /// The role is empty or holds a character outside `[a-z0-9_-]`.
+    MalformedRole,
+}
+
+impl std::fmt::Display for PictureBindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotAPictureRef => "a picture binding must name an item of kind picture",
+            Self::MalformedRef => "the picture ref's id is malformed",
+            Self::MalformedRole => "the picture role must be a short lowercase word",
+        })
+    }
+}
+
+impl std::error::Error for PictureBindingError {}
+
+fn is_word(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-')
+}
+
+/// A picture named by item ref, never by hash: the daemon resolves the ref to
+/// the signed record and supplies the hash, so a re-signed picture follows
+/// the record. `role` picks one rendition by its opaque role word; absent
+/// means the record's first rendition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PictureBinding {
+    pub picture: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+impl PictureBinding {
+    /// Check the ref is a well-formed picture item ref and the role a word.
+    pub fn validate(&self) -> Result<(), PictureBindingError> {
+        let id = self
+            .picture
+            .strip_prefix(PICTURE_REF_PREFIX)
+            .ok_or(PictureBindingError::NotAPictureRef)?;
+        if id.len() > 200 || id.split('/').any(|segment| !is_word(segment, 100)) {
+            return Err(PictureBindingError::MalformedRef);
+        }
+        if let Some(role) = &self.role
+            && !is_word(role, 64)
+        {
+            return Err(PictureBindingError::MalformedRole);
+        }
+        Ok(())
+    }
+
+    /// Path of the signed record under a bundle's `.ai`, as the picture index
+    /// names it: `pictures/<id>.yaml`. `None` for a malformed binding.
+    pub fn record_path(&self) -> Option<String> {
+        self.validate().ok()?;
+        Some(format!(
+            "pictures/{}.yaml",
+            self.picture.strip_prefix(PICTURE_REF_PREFIX)?
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPictureBinding {
+    picture: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for PictureBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RawPictureBinding::deserialize(deserializer)?;
+        let binding = PictureBinding {
+            picture: raw.picture,
+            role: raw.role,
+        };
+        binding.validate().map_err(serde::de::Error::custom)?;
+        Ok(binding)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +176,33 @@ mod tests {
             serde_json::json!({"sha256": "a".repeat(64), "media_type": "image/webp", "url": "x"}),
         ] {
             assert!(serde_json::from_value::<ArtRef>(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn a_picture_binding_names_a_picture_item_and_an_optional_role_word() {
+        let ok = serde_json::json!({"picture": "picture:ryeos/atlas-grey", "role": "hero"});
+        let binding = serde_json::from_value::<PictureBinding>(ok).unwrap();
+        assert_eq!(
+            binding.record_path().as_deref(),
+            Some("pictures/ryeos/atlas-grey.yaml")
+        );
+        let bare = serde_json::json!({"picture": "picture:a"});
+        assert!(serde_json::from_value::<PictureBinding>(bare).is_ok());
+        for bad in [
+            serde_json::json!({"picture": "view:ryeos/x"}),
+            serde_json::json!({"picture": "ryeos/atlas-grey"}),
+            serde_json::json!({"picture": "picture:"}),
+            serde_json::json!({"picture": "picture:../etc"}),
+            serde_json::json!({"picture": "picture:a//b"}),
+            serde_json::json!({"picture": "picture:/a"}),
+            serde_json::json!({"picture": "picture:A"}),
+            serde_json::json!({"picture": "picture:a", "role": ""}),
+            serde_json::json!({"picture": "picture:a", "role": "Hero"}),
+            serde_json::json!({"picture": "picture:a", "sha256": "x"}),
+            serde_json::json!({"picture": "picture:a", "url": "x"}),
+        ] {
+            assert!(serde_json::from_value::<PictureBinding>(bad).is_err());
         }
     }
 }

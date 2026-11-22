@@ -37,7 +37,9 @@ use ryeos_bundle::pictures::{
     MAX_PICTURE_BYTES, PictureEntry, inspect_image, picture_manifest_ref_path,
     verify_bundle_pictures,
 };
-use ryeos_client_base::art::is_art_hash;
+use ryeos_client_base::art::{
+    ART_MEDIA_TYPES, ArtRef, PictureBinding, PictureBindingError, is_art_hash,
+};
 use ryeos_engine::engine::Engine;
 use ryeos_engine::trust::TrustStore;
 
@@ -55,6 +57,9 @@ const HASH_CAPTURE: &str = "sha256";
 pub struct ArtIndex {
     /// Every bundle's copy of each hash, in bundle order.
     entries: BTreeMap<String, Vec<PictureEntry>>,
+    /// Renditions of each signed record (`pictures/<id>.yaml`), in record
+    /// order, taken from the first verifying bundle that ships the record.
+    records: BTreeMap<String, Vec<PictureEntry>>,
 }
 
 impl ArtIndex {
@@ -62,9 +67,21 @@ impl ArtIndex {
     /// verification contributes none of them; the failure is logged.
     pub fn build(bundle_roots: &[PathBuf], trust_store: &TrustStore) -> Self {
         let mut entries = BTreeMap::new();
+        let mut records: BTreeMap<String, Vec<PictureEntry>> = BTreeMap::new();
         for root in bundle_roots {
             match verify_bundle_pictures(root, trust_store, false) {
                 Ok(pictures) => {
+                    let mut by_record: BTreeMap<String, Vec<PictureEntry>> = BTreeMap::new();
+                    for entry in pictures.entries.values() {
+                        by_record
+                            .entry(entry.record.clone())
+                            .or_default()
+                            .push(entry.clone());
+                    }
+                    for (record, mut renditions) in by_record {
+                        renditions.sort_by_key(|entry| entry.rendition_index);
+                        records.entry(record).or_insert(renditions);
+                    }
                     for (sha256, entry) in pictures.entries {
                         // Equal hashes are equal bytes; every bundle's copy is
                         // kept so a corrupt one can fall through to a good one.
@@ -78,12 +95,50 @@ impl ArtIndex {
                 ),
             }
         }
-        Self { entries }
+        Self { entries, records }
     }
 
     /// Every installed copy of `sha256`, empty when none.
     pub fn candidates(&self, sha256: &str) -> &[PictureEntry] {
         self.entries.get(sha256).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Resolve a picture binding to one verified rendition of the signed
+    /// record it names. The ref is looked up only among the verified bundles'
+    /// records, in bundle order; a project can never supply one. A failure is
+    /// a refusal, never a substitute: the caller shows the picture as
+    /// unavailable and consults no other tier.
+    pub fn resolve_binding(
+        &self,
+        binding: &PictureBinding,
+    ) -> Result<ResolvedPicture, PictureRefusal> {
+        binding.validate().map_err(PictureRefusal::Malformed)?;
+        let record = binding
+            .record_path()
+            .ok_or(PictureRefusal::Malformed(PictureBindingError::MalformedRef))?;
+        let renditions = self
+            .records
+            .get(&record)
+            .filter(|renditions| !renditions.is_empty())
+            .ok_or(PictureRefusal::NotIndexed)?;
+        let entry = match &binding.role {
+            None => &renditions[0],
+            Some(role) => renditions
+                .iter()
+                .find(|entry| entry.role == *role)
+                .ok_or_else(|| PictureRefusal::UnknownRole(role.clone()))?,
+        };
+        let media_type = entry.media_type.mime();
+        if !ART_MEDIA_TYPES.contains(&media_type) {
+            return Err(PictureRefusal::MediaTypeNotAllowed);
+        }
+        Ok(ResolvedPicture {
+            art: ArtRef {
+                sha256: entry.sha256.clone(),
+                media_type: media_type.to_owned(),
+            },
+            role: entry.role.clone(),
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -93,6 +148,29 @@ impl ArtIndex {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// One rendition a picture binding resolved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPicture {
+    pub art: ArtRef,
+    /// The rendition's role word.
+    pub role: String,
+}
+
+/// Why a picture binding did not resolve. Every refusal leaves the subject
+/// with `picture_state: unavailable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PictureRefusal {
+    /// The binding is malformed, or names an item that is not a picture.
+    Malformed(PictureBindingError),
+    /// No verified bundle ships the record, including a record whose bundle
+    /// failed picture verification.
+    NotIndexed,
+    /// The record has no rendition with this role.
+    UnknownRole(String),
+    /// The rendition's media type is not one a picture may be served as.
+    MediaTypeNotAllowed,
 }
 
 struct CachedIndex {
@@ -476,5 +554,90 @@ impl CompiledResponseMode for CompiledArtMode {
             engine: ctx.state.engine.clone(),
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_bundle::pictures::PictureMediaType;
+
+    fn entry(record: &str, role: &str, index: usize, hash_seed: char) -> PictureEntry {
+        PictureEntry {
+            sha256: hash_seed.to_string().repeat(64),
+            media_type: PictureMediaType::Webp,
+            role: role.to_owned(),
+            rendition_index: index,
+            width: 16,
+            height: 10,
+            bytes: 52,
+            blob_path: PathBuf::from("/nonexistent"),
+            record: record.to_owned(),
+        }
+    }
+
+    fn index() -> ArtIndex {
+        let mut records = BTreeMap::new();
+        records.insert(
+            "pictures/ryeos/atlas.yaml".to_owned(),
+            vec![
+                entry("pictures/ryeos/atlas.yaml", "hero", 0, 'a'),
+                entry("pictures/ryeos/atlas.yaml", "card", 1, 'b'),
+            ],
+        );
+        ArtIndex {
+            entries: BTreeMap::new(),
+            records,
+        }
+    }
+
+    fn binding(picture: &str, role: Option<&str>) -> PictureBinding {
+        PictureBinding {
+            picture: picture.to_owned(),
+            role: role.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_binding_resolves_to_the_first_rendition_or_the_named_role() {
+        let index = index();
+        let first = index
+            .resolve_binding(&binding("picture:ryeos/atlas", None))
+            .unwrap();
+        assert_eq!(first.art.sha256, "a".repeat(64));
+        assert_eq!(first.art.media_type, "image/webp");
+        assert_eq!(first.role, "hero");
+        let card = index
+            .resolve_binding(&binding("picture:ryeos/atlas", Some("card")))
+            .unwrap();
+        assert_eq!(card.art.sha256, "b".repeat(64));
+    }
+
+    #[test]
+    fn every_failed_binding_is_a_refusal_and_never_a_substitute() {
+        let index = index();
+        assert_eq!(
+            index.resolve_binding(&binding("picture:ryeos/missing", None)),
+            Err(PictureRefusal::NotIndexed)
+        );
+        assert_eq!(
+            index.resolve_binding(&binding("picture:ryeos/atlas", Some("wide"))),
+            Err(PictureRefusal::UnknownRole("wide".to_owned()))
+        );
+        assert_eq!(
+            index.resolve_binding(&binding("view:ryeos/atlas", None)),
+            Err(PictureRefusal::Malformed(
+                PictureBindingError::NotAPictureRef
+            ))
+        );
+        assert_eq!(
+            index.resolve_binding(&binding("picture:../atlas", None)),
+            Err(PictureRefusal::Malformed(PictureBindingError::MalformedRef))
+        );
+        // A record whose bundle failed verification contributes nothing.
+        assert_eq!(
+            ArtIndex::default().resolve_binding(&binding("picture:ryeos/atlas", None)),
+            Err(PictureRefusal::NotIndexed)
+        );
     }
 }
