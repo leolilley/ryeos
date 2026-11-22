@@ -1772,7 +1772,7 @@ mod tests {
 
         // A value that names no installed theme (the earlier palette ids and
         // light/dark values included) is not applied; the presentation
-        let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
+        // follows the platform.
         for refused in ["dark", "night", "theme:ryeos/neon"] {
             let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
             send(&mut core, id, preference(refused));
