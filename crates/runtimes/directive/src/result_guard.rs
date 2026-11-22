@@ -36,7 +36,7 @@ pub struct GuardedResult {
     pub truncated_reason: Option<&'static str>,
     pub spill: Option<GuardedSpill>,
     /// The duplicate-guard key this call added, so a re-render can take it
-    /// back with [`ResultGuard::forget`].
+    /// back with [`ResultGuard::withdraw`].
     pub key: Option<String>,
 }
 
@@ -62,7 +62,7 @@ impl ResultGuard {
     }
 
     /// Take back the key a call added: its result was rendered again.
-    pub fn forget(&mut self, key: &str) {
+    pub fn withdraw(&mut self, key: &str) {
         self.seen_hashes.remove(key);
     }
 
@@ -497,11 +497,11 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_a_render_lets_the_cut_text_be_first_again() {
+    fn withdrawing_a_render_lets_the_cut_text_be_first_again() {
         let mut guard = ResultGuard::new();
         let body = "w".repeat(8000);
         let first = guard.process(&body, &small_config(), SpillMode::Allowed);
-        guard.forget(first.key.as_deref().unwrap());
+        guard.withdraw(first.key.as_deref().unwrap());
         let again = guard.process(&body, &small_config(), SpillMode::Disabled("x"));
         assert!(again.duplicate_of.is_none());
     }

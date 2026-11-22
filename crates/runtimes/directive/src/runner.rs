@@ -206,7 +206,7 @@ impl RenderedToolResult {
             return self;
         };
         if let Some(key) = &spilled.key {
-            result_guard.forget(key);
+            result_guard.withdraw(key);
         }
         let guarded = result_guard.process(
             &spilled.raw,
