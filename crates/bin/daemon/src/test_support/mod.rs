@@ -1271,6 +1271,14 @@ impl DaemonHarness {
         let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
         let scoped = process_scopes::required();
+        // A hosted-class node's floor asks for the enclosure, not for
+        // per-execution scopes, so it starts as the init of its own enclosure;
+        // every other node starts in a delegated cgroup subtree.
+        let placement = if matches!(bundle_selection, FastBundleSelection::DevelopmentHosted) {
+            process_scopes::Placement::Enclosure
+        } else {
+            process_scopes::Placement::Controller
+        };
         if scoped {
             process_scopes::prepare(
                 &state_path,
@@ -1279,6 +1287,7 @@ impl DaemonHarness {
                     user_space.path(),
                     core_bundle_tmp.path(),
                 ],
+                placement,
             )?;
         }
         let mut cmd = match process_scopes::launch_command(&state_path)? {
@@ -1341,7 +1350,14 @@ impl DaemonHarness {
         )
         .await?;
         if scoped {
-            process_scopes::assert_scope_capabilities_provided(&state_path)?;
+            match placement {
+                process_scopes::Placement::Controller => {
+                    process_scopes::assert_scope_capabilities_provided(&state_path)?
+                }
+                process_scopes::Placement::Enclosure => {
+                    process_scopes::assert_enclosure_capabilities_provided(&state_path)?
+                }
+            }
         }
 
         let harness = Self {

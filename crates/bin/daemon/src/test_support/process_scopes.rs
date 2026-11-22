@@ -67,7 +67,21 @@ pub fn skip_or_fail_unqualified(reason: &str) {
     eprintln!("skipped: this host cannot qualify process scopes: {reason}");
 }
 
+/// How a prepared node is started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// In a delegated cgroup subtree under a protected host-runtime binding,
+    /// for node classes whose floor asks for per-execution process scopes.
+    Controller,
+    /// As pid 1 of a private pid, user, mount and cgroup namespace, for node
+    /// classes whose floor asks for the enclosure instead (a hosted node: its
+    /// jobs die with it because it is the init of its enclosure, and it
+    /// configures no per-execution scopes).
+    Enclosure,
+}
+
 struct Registration {
+    placement: Placement,
     binding: PathBuf,
     daemon: PathBuf,
     owned: Vec<PathBuf>,
@@ -150,11 +164,25 @@ pub fn tempdir() -> Result<tempfile::TempDir> {
 /// Provision the delegation and protected binding for the node at
 /// `state_path` and make `owned` (every tree the node reads or writes) belong
 /// to the node account. Called once, before the first start.
-pub fn prepare(state_path: &Path, owned: &[&Path]) -> Result<()> {
+pub fn prepare(state_path: &Path, owned: &[&Path], placement: Placement) -> Result<()> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     lillux::require_administrator().with_context(|| {
         format!("{REQUIRE_PROCESS_SCOPES_ENV}=1 needs the test process to run as an administrator")
     })?;
+    if placement == Placement::Enclosure {
+        // The node is the administrator inside an identity-mapped namespace,
+        // so every tree it uses keeps its owner and needs no hand-over.
+        registry().lock().unwrap().insert(
+            state_path.to_path_buf(),
+            Registration {
+                placement,
+                binding: PathBuf::new(),
+                daemon: super::ryeosd_binary(),
+                owned: Vec::new(),
+            },
+        );
+        return Ok(());
+    }
     let (uid, gid) = account()?;
     let mut owned: Vec<PathBuf> = owned.iter().map(|path| path.to_path_buf()).collect();
     owned.push(state_path.to_path_buf());
@@ -198,6 +226,7 @@ pub fn prepare(state_path: &Path, owned: &[&Path]) -> Result<()> {
     registry().lock().unwrap().insert(
         state_path.to_path_buf(),
         Registration {
+            placement,
             binding: binding_path,
             daemon: installed_daemon()?,
             owned,
@@ -215,6 +244,9 @@ pub fn launch_command(state_path: &Path) -> Result<Option<tokio::process::Comman
     let Some(registration) = registry.get(state_path) else {
         return Ok(None);
     };
+    if registration.placement == Placement::Enclosure {
+        return Ok(Some(enclosure_command(&registration.daemon, state_path)));
+    }
     let (uid, gid) = account()?;
     chown_tree(&registration.owned, uid, gid)?;
     // The same placement, credential drop and inherited binding as the
@@ -236,6 +268,33 @@ pub fn launch_command(state_path: &Path) -> Result<Option<tokio::process::Comman
         command.env("RUST_LOG", filter);
     }
     Ok(Some(command))
+}
+
+/// The command that starts a node as pid 1 of a private enclosure. The
+/// identity maps cover every account the harness uses, so the node, running
+/// as the administrator of its own user namespace, reads and writes the same
+/// trees under the same ownership. `--kill-child` ends the enclosure when the
+/// wrapper dies, which is how the harness stops it.
+fn enclosure_command(daemon: &Path, state_path: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("unshare");
+    command
+        .args([
+            "--user",
+            "--map-users=0:0:65536",
+            "--map-groups=0:0:65536",
+            "--pid",
+            "--fork",
+            "--kill-child",
+            "--cgroup",
+            "--mount-proc",
+        ])
+        .arg(daemon)
+        .arg("--app-root")
+        .arg(state_path);
+    if let Some(filter) = std::env::var_os("RYEOSD_TEST_RUST_LOG") {
+        command.env("RUST_LOG", filter);
+    }
+    command
 }
 
 /// The processes still in the node's controller leaf, for a start refused
@@ -329,6 +388,36 @@ pub fn assert_scope_capabilities_provided(state_path: &Path) -> Result<()> {
         missing.is_empty() && report.floor.admitted,
         "the node did not qualify its per-scope capabilities; missing: [{}]; unmet floor: {:?}",
         missing.join("; "),
+        report.floor.unmet
+    );
+    Ok(())
+}
+
+/// Fail with the cause when an enclosure node's own capability report does
+/// not show both enclosure names provided. The harness only started the
+/// namespace; the report is what the node proved about it.
+pub fn assert_enclosure_capabilities_provided(state_path: &Path) -> Result<()> {
+    let report =
+        ryeos_node::capability_report::SignedNodeCapabilityReport::read_verified(state_path)?
+            .context("the node recorded no capability report")?
+            .report;
+    for needed in [
+        lillux::process_control::RECOVERY_ENCLOSURE_TRUSTED_INIT,
+        lillux::process_control::TERMINATION_ENCLOSURE_TRUSTED_INIT,
+    ] {
+        anyhow::ensure!(
+            report.provided.contains_key(needed),
+            "the enclosure node did not provide {needed}: {}",
+            report
+                .missing
+                .get(needed)
+                .map(String::as_str)
+                .unwrap_or("not provided")
+        );
+    }
+    anyhow::ensure!(
+        report.floor.admitted,
+        "the enclosure node's floor is unmet: {:?}",
         report.floor.unmet
     );
     Ok(())
