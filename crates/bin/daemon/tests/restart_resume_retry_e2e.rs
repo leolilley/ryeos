@@ -189,6 +189,7 @@ async fn a_restart_during_an_issued_attempt_is_retried_and_voids_the_dead_output
     }
     tokio::time::sleep(Duration::from_secs(1)).await;
     let recorded = stream_fragments(&chain_event_list(&rig.h, &id).await);
+    eprintln!("EVIDENCE fragments recorded before the kill: {recorded}");
     cut_and_restart(&mut rig, 1).await;
 
     let (status, _) = wait_terminal(&rig.h, &id, Duration::from_secs(120)).await;
