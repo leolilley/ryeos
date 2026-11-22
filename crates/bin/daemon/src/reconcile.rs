@@ -250,21 +250,6 @@ fn dedicated_session_forbids_resume(session_state: Option<&str>) -> bool {
     session_state == Some("terminal")
 }
 
-/// A dedicated session parked on a candidate it holds or builds (`freezing`
-/// through `discarding`, the states a worker retirement does not reuse) has no
-/// worker by design: it waits for its owner's next command or for a handoff.
-/// Its root row is running with no process, but that is not a crash, so a
-/// restart must neither resume it, spend its resume budget, nor finalize it
-/// failed; the chain head stays where the owner left it. A session whose lease
-/// ended settles `terminal` through the startup lease reconcile instead, and
-/// [`dedicated_session_forbids_resume`] covers it from there.
-fn dedicated_session_holds_root(session_state: Option<&str>) -> bool {
-    matches!(
-        session_state,
-        Some("freezing" | "frozen" | "verifying" | "qualifying" | "publish_ready" | "discarding")
-    )
-}
-
 /// Pure mapping from `(launch_metadata, current_attempts)` to a
 /// reconciler action. Extracted so it can be unit-tested without
 /// touching the daemon state.
@@ -2301,19 +2286,6 @@ async fn reconcile_active_threads_inner(
                     "latched-stop resume re-arm ignored: attachment identity changed"
                 );
             }
-        }
-        let parked_session_state = state
-            .state_store
-            .dedicated_session(&thread.thread_id)?
-            .map(|session| session.state);
-        if dedicated_session_holds_root(parked_session_state.as_deref()) {
-            tracing::info!(
-                thread_id = %thread.thread_id,
-                session_state = ?parked_session_state,
-                reason = "dedicated_session_parked",
-                "dedicated session is parked without a worker by design — holding its root: no resume, no budget spent, chain head unmoved"
-            );
-            continue;
         }
         let attempts = match state.state_store.get_resume_attempts(&thread.thread_id) {
             Ok(n) => n,
@@ -4663,40 +4635,6 @@ fn converge_reserved_follow(
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn a_session_parked_on_its_candidate_holds_its_root() {
-        for state in [
-            "freezing",
-            "frozen",
-            "verifying",
-            "qualifying",
-            "publish_ready",
-            "discarding",
-        ] {
-            assert!(dedicated_session_holds_root(Some(state)), "{state}");
-        }
-        // A session that is working, recovering, publishing or settled is
-        // judged by the ordinary resume decision (or by its own guard).
-        for state in [
-            "admitted",
-            "binding",
-            "idle",
-            "turn_running",
-            "awaiting_approval",
-            "recovering",
-            "outcome_unknown",
-            "draining",
-            "publishing",
-            "terminal",
-        ] {
-            assert!(!dedicated_session_holds_root(Some(state)), "{state}");
-        }
-        assert!(!dedicated_session_holds_root(None));
-        // The terminal guard stays separate and still applies.
-        assert!(dedicated_session_forbids_resume(Some("terminal")));
-        assert!(!dedicated_session_forbids_resume(Some("frozen")));
-    }
     #[test]
     fn only_a_terminal_dedicated_session_forbids_native_resume() {
         use super::dedicated_session_forbids_resume as forbids;
