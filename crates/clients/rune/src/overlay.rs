@@ -3,6 +3,7 @@
 //! is selected; this only draws it.
 
 use rune::{El, col, el, row, text};
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::ui::RyeOsUiEvent;
 use ryeos_client_base::ui::view_model::{RyeOsOverlayRowVm, RyeOsSurfaceChoiceVm, RyeOsViewModel};
 
@@ -12,21 +13,21 @@ use crate::marks::{self, WorkDot};
 use crate::theme::{self, Tokens};
 
 /// Width of the sheet, before a narrow window takes it in.
-const SHEET_WIDTH: f32 = 920.0;
+const SHEET_WIDTH: f32 = LAYOUT.px.overlay.sheet_width;
 /// The sheet's top, from the screen's.
-const SHEET_TOP: f32 = 150.0;
-const SHEET_RADIUS: f32 = 22.0;
-const ROW_HEIGHT: f32 = 46.0;
+const SHEET_TOP: f32 = LAYOUT.px.overlay.sheet_top;
+const SHEET_RADIUS: f32 = LAYOUT.px.overlay.sheet_radius;
+const ROW_HEIGHT: f32 = LAYOUT.px.overlay.row_height;
 /// A work row's corner radius.
-const ROW_RADIUS: f32 = 10.0;
+const ROW_RADIUS: f32 = LAYOUT.px.overlay.row_radius;
 /// The find line's height, and a Surface card's size.
-const FIND_HEIGHT: f32 = 60.0;
-const CARD_WIDTH: f32 = 206.0;
-const CARD_HEIGHT: f32 = 118.0;
+const FIND_HEIGHT: f32 = LAYOUT.px.overlay.find_height;
+const CARD_WIDTH: f32 = LAYOUT.px.overlay.card_width;
+const CARD_HEIGHT: f32 = LAYOUT.px.overlay.card_height;
 /// A window narrower than this cannot hold the sheet at its width with four
 /// cards in a row (four cards, three gaps, the sheet's padding and border, and
 /// 16 either side): the cards wrap and the two work columns stack.
-const TIGHT_WIDTH: f32 = 4.0 * CARD_WIDTH + 3.0 * 12.0 + 48.0 + 2.0 + 32.0;
+const TIGHT_WIDTH: f32 = LAYOUT.px.overlay.tight_width;
 /// The find line's prompt. The line is a place to type that finds anything;
 /// until the core carries a query the prompt is all it draws.
 const FIND_PROMPT: &str = "Find a view, a bundle, a thread, a command";
