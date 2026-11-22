@@ -43,6 +43,243 @@ pub struct ContinuationRuntimeConfig {
     /// alone; pinned inputs over the continuation threshold are refused.
     #[serde(default = "default_successor_start_tokens")]
     pub successor_start_tokens: u64,
+    /// When and how a conversation is compacted before it outgrows the window.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+    /// Most continuation predecessors a chain may have; reaching it fails the
+    /// run with `continuation_chain_limit` instead of continuing. The daemon
+    /// keeps a higher backstop of its own.
+    #[serde(default = "default_chain_depth_limit")]
+    pub chain_depth_limit: u32,
+}
+
+fn default_chain_depth_limit() -> u32 {
+    12
+}
+
+/// What a compaction's summary is, as a mechanical switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryMode {
+    /// A bounded model call writes the summary.
+    Model,
+    /// The summary is a fixed note naming how much was removed.
+    None,
+}
+
+/// What a context-pressure crossing does when no hook says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionOnPressure {
+    /// Compact at the trigger.
+    Compact,
+    /// Only a hook's `compact` action starts a compaction.
+    Observe,
+}
+
+/// The summary call of a compaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryConfig {
+    #[serde(default = "default_summary_mode")]
+    pub mode: SummaryMode,
+    /// The system text the summary call is given.
+    #[serde(default = "default_summary_instruction")]
+    pub instruction: String,
+    /// Output cap of the summary call, in tokens.
+    #[serde(default = "default_summary_max_output_tokens")]
+    pub max_output_tokens: u64,
+    /// The share of the model window the summary call's input may fill. The
+    /// oldest part beyond it is left out of the call and the rendering says so.
+    #[serde(default = "default_summary_input_ratio")]
+    pub input_ratio: f64,
+}
+
+impl Default for SummaryConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_summary_mode(),
+            instruction: default_summary_instruction(),
+            max_output_tokens: default_summary_max_output_tokens(),
+            input_ratio: default_summary_input_ratio(),
+        }
+    }
+}
+
+fn default_summary_mode() -> SummaryMode {
+    SummaryMode::Model
+}
+fn default_summary_instruction() -> String {
+    "Summarize the conversation below so work can continue from the summary alone. Keep the \
+     decisions made, facts found, files and identifiers named, work done and work still open. \
+     Answer with the summary only."
+        .to_string()
+}
+fn default_summary_max_output_tokens() -> u64 {
+    2_000
+}
+fn default_summary_input_ratio() -> f64 {
+    0.6
+}
+
+/// The compaction policy: signed data, with the defaults below. A node turns
+/// it on by setting `enabled`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Share of the model window at which live context starts a compaction.
+    #[serde(default = "default_compaction_trigger_ratio")]
+    pub trigger_ratio: f64,
+    /// Newest assistant turns a compaction keeps whole.
+    #[serde(default = "default_compaction_keep_turns")]
+    pub keep_turns: u32,
+    /// Turns that must settle after a compaction before the next one.
+    #[serde(default = "default_compaction_min_turns_between")]
+    pub min_turns_between: u32,
+    /// A compaction that shrinks the conversation by less than this share is
+    /// recorded as ineffective.
+    #[serde(default = "default_compaction_min_reduction_ratio")]
+    pub min_reduction_ratio: f64,
+    #[serde(default = "default_compaction_on_pressure")]
+    pub on_pressure: CompactionOnPressure,
+    /// Rejection codes a compaction answers. The runtime does not know what
+    /// any code means; the provider entry's rejection rows name them.
+    #[serde(default = "default_compaction_overflow_codes")]
+    pub overflow_codes: Vec<String>,
+    /// Most overflow recoveries one chain may spend.
+    #[serde(default = "default_compaction_max_overflow_recoveries")]
+    pub max_overflow_recoveries_per_chain: u32,
+    #[serde(default)]
+    pub summary: SummaryConfig,
+    #[serde(default)]
+    pub clip: ClipConfig,
+}
+
+/// Whether a compaction clips the older tool results of the turns it keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipMode {
+    Clip,
+    Keep,
+}
+
+/// Clipping of the kept turns' older tool results (see `ClipRule`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipConfig {
+    #[serde(default = "default_clip_mode")]
+    pub tool_results: ClipMode,
+    #[serde(default = "default_clip_over_bytes")]
+    pub over_bytes: u64,
+    #[serde(default = "default_clip_part_bytes")]
+    pub head_bytes: u64,
+    #[serde(default = "default_clip_part_bytes")]
+    pub tail_bytes: u64,
+    /// Newest tool results left whole.
+    #[serde(default = "default_clip_keep_recent")]
+    pub keep_recent: u32,
+}
+
+impl Default for ClipConfig {
+    fn default() -> Self {
+        Self {
+            tool_results: default_clip_mode(),
+            over_bytes: default_clip_over_bytes(),
+            head_bytes: default_clip_part_bytes(),
+            tail_bytes: default_clip_part_bytes(),
+            keep_recent: default_clip_keep_recent(),
+        }
+    }
+}
+
+fn default_clip_mode() -> ClipMode {
+    ClipMode::Clip
+}
+fn default_clip_over_bytes() -> u64 {
+    8 * 1024
+}
+fn default_clip_part_bytes() -> u64 {
+    2 * 1024
+}
+fn default_clip_keep_recent() -> u32 {
+    4
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trigger_ratio: default_compaction_trigger_ratio(),
+            keep_turns: default_compaction_keep_turns(),
+            min_turns_between: default_compaction_min_turns_between(),
+            min_reduction_ratio: default_compaction_min_reduction_ratio(),
+            on_pressure: default_compaction_on_pressure(),
+            overflow_codes: default_compaction_overflow_codes(),
+            max_overflow_recoveries_per_chain: default_compaction_max_overflow_recoveries(),
+            summary: SummaryConfig::default(),
+            clip: ClipConfig::default(),
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// Refuse values that cannot work: ratios outside their range, no kept
+    /// turns, no overflow codes while the policy is on.
+    pub fn validate(&self) -> Result<(), String> {
+        let ratio = |name: &str, value: f64, low_open: bool| -> Result<(), String> {
+            let ok = value.is_finite()
+                && value <= 1.0
+                && if low_open { value > 0.0 } else { value >= 0.0 };
+            ok.then_some(())
+                .ok_or_else(|| format!("compaction.{name} {value} is outside its range"))
+        };
+        ratio("trigger_ratio", self.trigger_ratio, true)?;
+        ratio("summary.input_ratio", self.summary.input_ratio, true)?;
+        if !(self.min_reduction_ratio.is_finite() && (0.0..1.0).contains(&self.min_reduction_ratio))
+        {
+            return Err(format!(
+                "compaction.min_reduction_ratio {} is outside [0, 1)",
+                self.min_reduction_ratio
+            ));
+        }
+        if self.keep_turns == 0 {
+            return Err("compaction.keep_turns must be at least 1".to_string());
+        }
+        if self.summary.max_output_tokens == 0 {
+            return Err("compaction.summary.max_output_tokens must be at least 1".to_string());
+        }
+        if self.enabled && self.overflow_codes.is_empty() {
+            return Err(
+                "compaction.overflow_codes may not be empty while compaction is enabled"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn default_compaction_trigger_ratio() -> f64 {
+    0.70
+}
+fn default_compaction_keep_turns() -> u32 {
+    6
+}
+fn default_compaction_min_turns_between() -> u32 {
+    4
+}
+fn default_compaction_min_reduction_ratio() -> f64 {
+    0.25
+}
+fn default_compaction_on_pressure() -> CompactionOnPressure {
+    CompactionOnPressure::Compact
+}
+fn default_compaction_overflow_codes() -> Vec<String> {
+    vec!["provider_context_length_exceeded".to_string()]
+}
+fn default_compaction_max_overflow_recoveries() -> u32 {
+    2
 }
 
 fn default_context_threshold_ratio() -> f64 {
@@ -66,6 +303,8 @@ impl Default for ContinuationRuntimeConfig {
             carry_turns_default: default_carry_turns(),
             carry_turns_cap: default_carry_turns_cap(),
             successor_start_tokens: default_successor_start_tokens(),
+            compaction: CompactionConfig::default(),
+            chain_depth_limit: default_chain_depth_limit(),
         }
     }
 }
@@ -290,6 +529,13 @@ impl LoopGuardsConfig {
         if longest > u64::from(self.window_turns) {
             anyhow::bail!(
                 "execution.loop_guards pingpong_cycles x pingpong_max_period exceeds window_turns, so the longest alternation could never be seen"
+            );
+        }
+        let carry = crate::loop_guards::carry_len(self);
+        if carry > ryeos_runtime::GuardCarry::MAX_DIGESTS {
+            anyhow::bail!(
+                "execution.loop_guards need {carry} turns of history (the longest of window_turns, no_progress_turns + 1, pingpong_cycles x pingpong_max_period, repeat_threshold and idle_turns, plus grace_turns), over the {} a compaction record can carry; lower window_turns or grace_turns",
+                ryeos_runtime::GuardCarry::MAX_DIGESTS
             );
         }
         Ok(())
@@ -996,6 +1242,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_compaction_policy_refuses_values_that_cannot_work() {
+        assert!(CompactionConfig::default().validate().is_ok());
+        for bad in [
+            "trigger_ratio: 0\n",
+            "trigger_ratio: 1.5\n",
+            "min_reduction_ratio: 1\n",
+            "keep_turns: 0\n",
+            "summary:\n    input_ratio: 0\n",
+            "enabled: true\n  overflow_codes: []\n",
+        ] {
+            let config: CompactionConfig =
+                serde_yaml::from_str(&bad.replace("\n  ", "\n")).unwrap();
+            assert!(config.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_compaction_policy_is_off_by_default_and_every_field_is_defaulted() {
+        let config: ContinuationRuntimeConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!config.compaction.enabled);
+        assert_eq!(config.compaction.trigger_ratio, 0.70);
+        assert_eq!(config.compaction.keep_turns, 6);
+        assert_eq!(config.compaction.min_turns_between, 4);
+        assert_eq!(config.compaction.max_overflow_recoveries_per_chain, 2);
+        assert_eq!(
+            config.compaction.overflow_codes,
+            ["provider_context_length_exceeded"]
+        );
+        assert_eq!(config.compaction.summary.mode, SummaryMode::Model);
+        assert_eq!(config.compaction.on_pressure, CompactionOnPressure::Compact);
+
+        let tuned: ContinuationRuntimeConfig = serde_yaml::from_str(
+            "compaction:\n  enabled: true\n  on_pressure: observe\n  summary:\n    mode: none\n",
+        )
+        .unwrap();
+        assert!(tuned.compaction.enabled);
+        assert_eq!(tuned.compaction.on_pressure, CompactionOnPressure::Observe);
+        assert_eq!(tuned.compaction.summary.mode, SummaryMode::None);
+        // The section refuses fields it does not know.
+        assert!(
+            serde_yaml::from_str::<ContinuationRuntimeConfig>("compaction:\n  trigger: 1\n")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn an_assistant_message_keeps_reasoning_text_then_calls_in_order() {
         let message = ProviderMessage::assistant(
             Some("checking".to_string()),
@@ -1223,6 +1515,8 @@ mod tests {
             "loop_guards:\n  idle_turns: 0\n",
             "loop_guards:\n  window_turns: 4\n  repeat_threshold: 5\n",
             "loop_guards:\n  window_turns: 8\n  pingpong_cycles: 4\n  pingpong_max_period: 4\n",
+            // 250 + 10 turns of history is more than a record carries.
+            "loop_guards:\n  window_turns: 250\n  grace_turns: 10\n",
         ] {
             let cfg: ExecutionConfig = serde_yaml::from_str(bad).unwrap();
             assert!(cfg.validate().is_err(), "{bad}");

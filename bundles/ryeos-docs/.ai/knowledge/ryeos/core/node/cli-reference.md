@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T18:59:48Z:ac3fa4a5c88252650af8fea2870be23ac5a95b5365edabbeba87c054359b756c:eTgSSBd2e3nWTXdPVZ4F4bmRtUhU6vRhSutD8XmvPcrrRiWydkahKW2ztkF9l/ffeNB8khpbSaolbJxVH5g0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T11:42:21Z:0bcbe4dbe2243b4cca156f574e3dcd8b9a9d01fcd56864f4122db50c70b44d15:DtSIcqpLMyVuDQs+5E8OFLL2OspUEXX0T+rqKBomBvMchA4XG/z/Kdp5u+h4W39TqRv4CspZW9f/Ta9qpHXUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -343,7 +343,13 @@ on its next upgrade; no project heads are involved, so it is the heads-free form
 The cut carries the stored external terminal observation's required `basis`
 field (how the lifecycle adapter settled a termination: it states the basis it
 relied on), which a store written at epoch 142 lacks. The same epoch also
-carries the turn marker's required `purpose` field. The cut ships together with
+carries the turn marker's required `purpose` field (a stored-shape change: a
+marker without it is refused on resume with `resume_marker_without_purpose`) and the
+compaction record's required `guard_carry` field (recent loop-guard digests, wrap-up
+flags and warned ages; null when loop guards are off; a record without the field is
+refused on resume). It also moves the provider retry policy digest to v3
+(`retry_after_max_ms`): the reset clears in-flight threads whose retry decisions
+sealed a v2 digest, and recovery refuses one it still meets. The cut ships together with
 lifecycle adapter protocol v4, so the order on a node is: drain (settle or
 terminate every lease, qualification occurrence and termination in flight),
 stop the daemon gracefully, install the re-signed bundles, run the reset above,

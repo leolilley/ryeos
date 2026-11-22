@@ -303,8 +303,8 @@ impl StateStore {
             )?;
             if machine_depth >= crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH {
                 bail!(
-                    "continuation depth limit reached ({machine_depth}/{}); the autonomous \
-                     chain will not continue",
+                    "continuation_chain_limit: continuation depth limit reached ({machine_depth}/{}); \
+                     the autonomous chain will not continue",
                     crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH
                 );
             }
