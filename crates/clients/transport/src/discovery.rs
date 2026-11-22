@@ -16,7 +16,7 @@ pub async fn discover_audience(daemon_url: &str) -> Result<DiscoveredAudience, T
     let base_url = normalize_daemon_base_url(daemon_url)?;
     let url = format!("{base_url}/public-key");
 
-    let client = reqwest::Client::builder()
+    let client = ryeos_http_egress::client_builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())

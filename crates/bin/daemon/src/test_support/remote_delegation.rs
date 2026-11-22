@@ -25,7 +25,9 @@ async fn origin_service(
         ),
     });
     let bytes = serde_json::to_vec(&body)?;
-    let mut request = reqwest::Client::new()
+    let mut request = ryeos_http_egress::client_builder()
+        .build()
+        .expect("the HTTP client builds")
         .post(format!("http://{origin}/execute"))
         .header("content-type", "application/json")
         .body(bytes.clone());

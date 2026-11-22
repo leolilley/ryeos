@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T21:46:02Z:e7cb05b486972e86ab0845bdcc6f3dffcbc25dd96be5a03704027f5bd3eddfaa:Px8rx3pNBn21hrwaZdevRKF2BJzhLI1yREwNs0i+PUr+GxtUZW6plGvBtSMzX7yOfg3XcJgQTtPdwQ4pdzRTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T01:37:20Z:83c2a07b51cb7aa33cdddac58288435324683c654d8bbbadf5d5e99a412266cc:m6jiP0/9+cTHzF/PEFNAF+5t276isIURJayTlUjdGCPjq/aPs7CDc5s+ngueoqwWv5d5O3n6SeSPbFda/ySoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -33,6 +33,8 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `accounting.failure_policy` | auto | Fail closed for unavailable usage with a finite token/spend budget; otherwise warn |
 | `accounting.budget_mode` | settled | Settle after each attempt; may overshoot a finite budget by one attempt |
 | `tool_images` | see below | Ceilings on the images a run's tools return |
+| `tool_output` | see below | How an oversize tool result is shown to the model and stored |
+| `loop_guards` | see below | Detection of a run that repeats itself or stops making progress |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
 
 ## Retry Behavior
@@ -171,6 +173,100 @@ An image over the dimension limit is dropped as `image_dimensions`.
 The per-run counters are rebuilt from the record on resume and continuation.
 The node's `thread_attachments` policy still bounds every append, and a model's
 own `image_input.accepts.max_bytes_per_image` can lower the per-image limit.
+
+## Oversize tool results
+
+A tool result longer than `spill_threshold_bytes` is stored whole as a thread
+attachment beside its `tool_call_result` event, and the model sees a preview:
+a first line that says the result is partial and names the attachment, then the
+first `preview_head_bytes` and the last `preview_tail_bytes` of the text.
+
+```
+[tool result partial: 120000 bytes, full result stored as attachment <hash>; the full result is not available to you]
+[first 24576 bytes]
+...
+[... 87232 bytes omitted ...]
+[last 8192 bytes]
+...
+```
+
+The model cannot read the stored text back; it is kept for the operator and
+the record. The guard's record carries `spill` (attachment hash, bytes stored,
+total bytes, preview head and tail bytes) and the result's `attachment_refs`
+name the attachment after any images. A result longer than `max_stored_bytes`
+stores its first `max_stored_bytes` bytes and the preview says so.
+
+```yaml
+tool_output:
+  spill_threshold_bytes: 65536
+  preview_head_bytes: 24576
+  preview_tail_bytes: 8192
+  max_stored_bytes: 4194304   # keep within the node's thread_attachments limit
+  hard_cut_bytes: 102400      # the cut used when a result is not stored
+```
+
+`preview_head_bytes + preview_tail_bytes` must stay below
+`spill_threshold_bytes`, and `max_stored_bytes` must be at least the threshold;
+a config that breaks either is refused at load.
+
+When the node refuses the stored copy, the result is recorded again, cut at
+`hard_cut_bytes`, with `truncated_reason` naming the cause, and the run goes on:
+
+| `truncated_reason` | Cause |
+| --- | --- |
+| `spill_media_type_not_admitted` | the node's `thread_attachments` policy does not accept `text/plain`; storing stays off for the rest of the run |
+| `spill_over_attachment_limit` | the result is over the node's per-attachment byte limit |
+| `spill_attachment_budget_spent` | the append or the run is out of attachments |
+
+The first refusal of a run is logged. A node installed before `text/plain` was
+added to the shipped `thread_attachments` policy keeps its installed policy
+until it resets its policy generation (`reset policy-generation`); until then
+oversize results are cut with `spill_media_type_not_admitted`.
+
+## Loop and stall guards
+
+Four detectors run at the start of each turn over what the conversation holds.
+They compare hashes of each turn's calls, results and text, never content, and
+rebuild from the conversation, so a recovered run reaches the same verdict.
+
+| Finding | Meaning |
+| --- | --- |
+| `repetition` | the same call with the same result `repeat_threshold` times in the last `window_turns` turns, including the latest turn |
+| `ping_pong` | an alternation of different calling turns (period up to `pingpong_max_period`) repeated `pingpong_cycles` whole cycles, the later cycles giving no result the first did not |
+| `no_progress` | `no_progress_turns` consecutive turns whose every result and text had been seen before |
+| `idle` | `idle_turns` consecutive turns with no call and no text |
+
+A finding the model has not been told about is delivered once as a durable
+harness input (kind `loop_warning_<finding>`). If the same finding is still
+present `grace_turns` turns after the warning, the run fails with the typed code
+`loop_detected`. A finding that goes away (the run changed course) is forgotten.
+
+```yaml
+loop_guards:
+  enabled: true
+  window_turns: 16
+  repeat_threshold: 5
+  pingpong_cycles: 4
+  pingpong_max_period: 4
+  no_progress_turns: 8
+  idle_turns: 3
+  grace_turns: 2
+```
+
+`enabled: false` turns every detector off; there is no zero-means-off value, and
+a config that sets a threshold to zero, or one a window could never reach
+(`repeat_threshold` over `window_turns`, `pingpong_cycles` x `pingpong_max_period`
+over `window_turns`), is refused at load.
+
+## Turn-limit wrap-up
+
+When the run has a turn limit, the last turn it allows is a wrap-up turn: before
+that turn the model is told, once, as a durable harness input (kind
+`limit_wrap_up`), that it is the last and to finish. The limit stays a hard cap:
+a run that does not finish on that turn still ends with `turn limit exceeded`.
+With a limit of one turn the first turn carries the notice. When the run
+deadline's wrap-up phase falls on the same turn, one input (kind
+`deadline_limit_wrap_up`) names both reasons.
 
 ## Config Resolution Chain
 

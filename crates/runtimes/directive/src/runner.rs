@@ -109,6 +109,19 @@ struct RenderedToolResult {
     /// The images dropped by those checks; the content ends with a note for
     /// each.
     dropped: Vec<ryeos_runtime::DroppedImage>,
+    /// The stored full text when the content is a preview of it.
+    spilled: Option<SpilledRender>,
+}
+
+/// A result whose full text is stored beside its event. The raw text is kept
+/// until the event is accepted, so a node that refuses the upload can be
+/// answered with the cut text instead.
+#[derive(Debug)]
+struct SpilledRender {
+    stored: crate::result_guard::GuardedSpill,
+    /// The duplicate-guard key the preview added.
+    key: Option<String>,
+    raw: String,
 }
 
 /// One image of a rendered tool result.
@@ -166,6 +179,52 @@ impl RenderedToolResult {
         self
     }
 
+    /// The attachments the result's event must carry: its new images, then its
+    /// spilled text.
+    fn uploads(&self) -> Vec<ryeos_runtime::callback::EventAttachment> {
+        let mut uploads: Vec<_> = self
+            .images
+            .iter()
+            .filter_map(|image| image.upload.clone())
+            .collect();
+        if let Some(spilled) = &self.spilled {
+            uploads.push(spilled.stored.upload.clone());
+        }
+        uploads
+    }
+
+    /// This result cut instead of stored, because the node refused the stored
+    /// copy; `reason` is recorded as the cause. Image notes keep their place
+    /// after the text.
+    fn without_spill(
+        mut self,
+        reason: &'static str,
+        result_guard: &mut ResultGuard,
+        output: &crate::directive::ToolOutputConfig,
+    ) -> Self {
+        let Some(spilled) = self.spilled.take() else {
+            return self;
+        };
+        if let Some(key) = &spilled.key {
+            result_guard.withdraw(key);
+        }
+        let guarded = result_guard.process(
+            &spilled.raw,
+            output,
+            crate::result_guard::SpillMode::Disabled(reason),
+        );
+        let notes: Vec<(usize, &str)> = self
+            .dropped
+            .iter()
+            .map(|image| (image.position as usize, image.code.as_str()))
+            .collect();
+        self.content = crate::tool_images::with_drop_notes(&guarded.content, &notes);
+        self.duplicate_of = guarded.duplicate_of;
+        self.truncated = guarded.truncated;
+        self.truncated_reason = guarded.truncated_reason;
+        self
+    }
+
     /// The rendering of a result whose parts passed the image checks: the
     /// guard sees the tool's text alone, then a note for each dropped image
     /// follows it, so truncation and duplicate collapse never remove a note.
@@ -174,12 +233,20 @@ impl RenderedToolResult {
         raw_size: u64,
         settled: crate::tool_images::Settled,
         result_guard: &mut ResultGuard,
+        output: &crate::directive::ToolOutputConfig,
+        spill_mode: crate::result_guard::SpillMode,
     ) -> Self {
-        let guarded = result_guard.process_bytes(settled.guarded_input().as_bytes());
+        let guarded =
+            result_guard.process_bytes(settled.guarded_input().as_bytes(), output, spill_mode);
         let content = crate::tool_images::with_drop_notes(
             &String::from_utf8_lossy(&guarded.bytes),
             &settled.dropped,
         );
+        let spilled = guarded.spill.map(|stored| SpilledRender {
+            stored,
+            key: guarded.key.clone(),
+            raw: settled.guarded_input().to_string(),
+        });
         let dropped = settled
             .dropped
             .iter()
@@ -194,8 +261,9 @@ impl RenderedToolResult {
             raw_size,
             truncated: guarded.truncated,
             duplicate_of: guarded.duplicate_of,
-            truncated_reason: guarded.truncated.then_some("result_guard"),
+            truncated_reason: guarded.truncated_reason,
             status: ToolResultStatus::Ok,
+            spilled,
             images: settled
                 .images
                 .into_iter()
@@ -223,7 +291,13 @@ impl RenderedToolResult {
             call_id: call_id.to_string(),
             tool: self.tool.clone(),
             status: self.status,
-            attachment_refs: ryeos_runtime::ToolResultPayload::image_attachment_hashes(&parts),
+            attachment_refs: {
+                let mut refs = ryeos_runtime::ToolResultPayload::image_attachment_hashes(&parts);
+                if let Some(spilled) = &self.spilled {
+                    refs.push(spilled.stored.record.attachment.clone());
+                }
+                refs
+            },
             parts,
             guard: ryeos_runtime::ToolResultGuard {
                 result_size_bytes: self.raw_size,
@@ -231,8 +305,29 @@ impl RenderedToolResult {
                 truncated_reason: self.truncated_reason.map(str::to_string),
                 duplicate_of: self.duplicate_of.clone(),
                 dropped_images: self.dropped.clone(),
+                spill: self
+                    .spilled
+                    .as_ref()
+                    .map(|spilled| spilled.stored.record.clone()),
             },
         }
+    }
+}
+
+const SPILL_MEDIA_TYPE_NOT_ADMITTED: &str = "spill_media_type_not_admitted";
+const SPILL_OVER_ATTACHMENT_LIMIT: &str = "spill_over_attachment_limit";
+const SPILL_ATTACHMENT_BUDGET_SPENT: &str = "spill_attachment_budget_spent";
+
+/// The `truncated_reason` for a stored result the node refused, read from the
+/// node's own refusal text: the media type is not admitted, the bytes are over
+/// its per-attachment limit, or the run's attachment count is spent.
+fn spill_refusal_reason(refusal: &str) -> &'static str {
+    if refusal.contains("media type") {
+        SPILL_MEDIA_TYPE_NOT_ADMITTED
+    } else if refusal.contains("bytes (node limit") {
+        SPILL_OVER_ATTACHMENT_LIMIT
+    } else {
+        SPILL_ATTACHMENT_BUDGET_SPENT
     }
 }
 
@@ -635,6 +730,11 @@ pub struct Runner {
     image_store: crate::provider_adapter::images::ImageStore,
     /// What this run has stored of tool images, against the signed limits.
     image_run: crate::tool_images::ImageRunState,
+    /// Whether an oversize tool result may be stored beside its event. A node
+    /// that refuses the media type turns it off for the rest of the run.
+    spill_mode: crate::result_guard::SpillMode,
+    /// The first refusal of a stored result is logged; later ones are not.
+    spill_refusal_logged: bool,
     provider_config: ProviderConfig,
     provider_id: String,
     /// Profile name that matched during daemon preflight.
@@ -677,7 +777,10 @@ pub struct Runner {
     /// Whether the run-deadline wrap-up input is already in the transcript.
     /// Rebuilt from the replayed record on resume, so a recovered or
     /// continued segment never repeats it.
-    wrap_up_delivered: bool,
+    wrap_up_delivered: crate::resume::WrapUpDelivered,
+    /// The loop findings the model was warned about, each with the turn
+    /// count when it was warned.
+    loop_warned: std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -751,6 +854,40 @@ fn wrap_up_message(remaining_ms: u64, outputs_declared: bool) -> String {
         "Deadline notice: about {seconds} seconds remain before this run is stopped. \
          Do not start new lines of work. Record what you have, hand off anything \
          unfinished, and wrap up now. {finish}"
+    )
+}
+
+fn limit_wrap_up_message(outputs_declared: bool) -> String {
+    let finish = if outputs_declared {
+        "Finish with `directive_return` carrying every declared output."
+    } else {
+        "Finish with your best result."
+    };
+    format!(
+        "Turn limit notice: this is the last turn this run is allowed. Do not start \
+         new lines of work. Record what you have, hand off anything unfinished, and \
+         wrap up now. {finish}"
+    )
+}
+
+fn loop_warning_message(finding: &crate::loop_guards::Finding, grace_turns: u32) -> String {
+    let pattern = match finding.kind {
+        crate::loop_guards::FindingKind::Repetition => {
+            "the same call keeps returning the same result"
+        }
+        crate::loop_guards::FindingKind::PingPong => {
+            "you are alternating between the same calls and getting nothing new"
+        }
+        crate::loop_guards::FindingKind::NoProgress => {
+            "your recent turns have only shown you results you had already seen"
+        }
+        crate::loop_guards::FindingKind::Idle => "your recent turns made no call and said nothing",
+    };
+    format!(
+        "Loop notice: {pattern} (turns {} to {}). Change your approach, or finish with \
+         what you have. If this continues for {grace_turns} more turns the run will be \
+         stopped.",
+        finding.first_turn, finding.last_turn
     )
 }
 
@@ -1452,6 +1589,8 @@ impl Runner {
             result_guard: ResultGuard::new(),
             image_store: crate::provider_adapter::images::ImageStore::default(),
             image_run: crate::tool_images::ImageRunState::default(),
+            spill_mode: crate::result_guard::SpillMode::Allowed,
+            spill_refusal_logged: false,
             provider_config,
             provider_id,
             matched_profile,
@@ -1471,7 +1610,8 @@ impl Runner {
             directive_outputs: outputs,
             return_nudge,
             return_nudge_sent: false,
-            wrap_up_delivered: false,
+            wrap_up_delivered: crate::resume::WrapUpDelivered::default(),
+            loop_warned: std::collections::BTreeMap::new(),
             continuation_config: continuation,
             sampling,
             reasoning,
@@ -1482,7 +1622,7 @@ impl Runner {
             // honest aggregate connection-establishment boundary, which can
             // include DNS, TCP, proxy negotiation, and TLS. Response versions
             // are observed after negotiation rather than forced here.
-            http_client: reqwest::Client::builder()
+            http_client: ryeos_http_egress::client_builder()
                 .pool_max_idle_per_host(8)
                 .dns_resolver(std::sync::Arc::new(
                     crate::provider_transport_timing::InstrumentedDnsResolver,
@@ -1545,7 +1685,8 @@ impl Runner {
         let resume_disposition = resume.disposition;
         let resume_active_provider_turn = resume.active_provider_turn;
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
-        let wrap_up_delivered = resume.deadline_wrap_up_delivered;
+        let wrap_up_delivered = resume.wrap_up_delivered;
+        let loop_warned = resume.loop_warned.clone();
         let trailing_length_turns = resume.trailing_length_turns;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
@@ -1626,6 +1767,7 @@ impl Runner {
         runner.resume_active_provider_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
         runner.wrap_up_delivered = wrap_up_delivered;
+        runner.loop_warned = loop_warned;
         runner.consecutive_length_turns = trailing_length_turns;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
@@ -1667,43 +1809,106 @@ impl Runner {
         )
     }
 
-    /// The run deadline's boundary at the start of a turn. At the hard stop
-    /// the run stops; in the wrap-up phase the model is told once, as a
-    /// durable harness input, that time is short. A recovered provider turn
-    /// takes no new input, since its transcript is already fixed.
+    /// The run's boundary at the start of a turn. At the deadline's hard stop
+    /// the run stops. Otherwise the model is told once, as a durable harness
+    /// input, about each wrap-up reason that has come due: time is short
+    /// (the deadline's wrap-up phase), or the next turn is the last the turn
+    /// limit allows. Both due on the same turn give one input naming both. A
+    /// recovered provider turn takes no new input, since its transcript is
+    /// already fixed.
     async fn run_deadline_boundary(&mut self) -> Result<RunDeadlineBoundary, String> {
-        let Some(clock) = self.harness.run_clock() else {
+        let clock = self.harness.run_clock();
+        let now_ms = lillux::time::timestamp_millis();
+        let phase = clock.as_ref().map(|clock| clock.phase_at(now_ms));
+        if phase == Some(RunPhase::HardStop) {
+            return Ok(RunDeadlineBoundary::HardStop);
+        }
+        if self.resume_active_provider_turn.is_some() {
+            return Ok(RunDeadlineBoundary::Proceed);
+        }
+        let deadline_due = phase == Some(RunPhase::WrapUp) && !self.wrap_up_delivered.deadline;
+        let limit_due = self.harness.final_turn_next() && !self.wrap_up_delivered.turn_limit;
+        let Some(kind) = ryeos_runtime::cognition::wrap_up_kind(deadline_due, limit_due) else {
             return Ok(RunDeadlineBoundary::Proceed);
         };
-        let now_ms = lillux::time::timestamp_millis();
-        match clock.phase_at(now_ms) {
-            RunPhase::HardStop => Ok(RunDeadlineBoundary::HardStop),
-            RunPhase::WrapUp
-                if !self.wrap_up_delivered && self.resume_active_provider_turn.is_none() =>
-            {
-                let text = wrap_up_message(
-                    clock.remaining_ms(now_ms),
-                    self.directive_outputs
-                        .as_deref()
-                        .is_some_and(|outputs| !outputs.is_empty()),
-                );
-                // Deliberately not pinned: its text is a time-left figure, which
-                // is stale in a successor. A successor whose carried conversation
-                // lacks the notice is told again.
-                let input = ryeos_runtime::CognitionInput::text("harness", &text)
-                    .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP);
-                self.callback
-                    .emit_cognition_input(&input)
-                    .await
-                    .map_err(|e| {
-                        format!("resume-critical deadline wrap-up input append failed: {e}")
-                    })?;
-                self.messages.push(ProviderMessage::user(text));
-                self.wrap_up_delivered = true;
-                Ok(RunDeadlineBoundary::Proceed)
-            }
-            RunPhase::WrapUp | RunPhase::Running => Ok(RunDeadlineBoundary::Proceed),
+        let outputs_declared = self
+            .directive_outputs
+            .as_deref()
+            .is_some_and(|outputs| !outputs.is_empty());
+        let mut sections = Vec::new();
+        if let (true, Some(clock)) = (deadline_due, clock.as_ref()) {
+            sections.push(wrap_up_message(
+                clock.remaining_ms(now_ms),
+                outputs_declared,
+            ));
         }
+        if limit_due {
+            sections.push(limit_wrap_up_message(outputs_declared));
+        }
+        let text = sections.join("\n\n");
+        // Deliberately not pinned: its text is a time-left figure or a turn
+        // count, which is stale in a successor. A successor whose carried
+        // conversation lacks the notice is told again.
+        let input = ryeos_runtime::CognitionInput::text("harness", &text).with_kind(kind);
+        self.callback
+            .emit_cognition_input(&input)
+            .await
+            .map_err(|e| format!("resume-critical wrap-up input append failed: {e}"))?;
+        self.messages.push(ProviderMessage::user(text));
+        self.wrap_up_delivered.deadline |= deadline_due;
+        self.wrap_up_delivered.turn_limit |= limit_due;
+        Ok(RunDeadlineBoundary::Proceed)
+    }
+
+    /// The loop and stall detectors at the start of a turn. A finding the
+    /// model has not been warned about gets a durable harness warning; the same
+    /// finding still present `grace_turns` turns after its warning stops the run
+    /// with the typed failure `loop_detected`. Returns the stop's error text.
+    async fn loop_guard_boundary(&mut self) -> Result<Option<String>, String> {
+        let config = self.execution.loop_guards.clone();
+        if !config.enabled || self.resume_active_provider_turn.is_some() {
+            return Ok(None);
+        }
+        let digests = crate::loop_guards::digests_from_messages(&self.messages);
+        let turns = digests.len() as u32;
+        let findings = crate::loop_guards::detect(&digests, &config);
+        // A warned kind that is no longer found starts over.
+        self.loop_warned
+            .retain(|kind, _| findings.iter().any(|finding| finding.kind == *kind));
+        for finding in findings {
+            match self.loop_warned.get(&finding.kind) {
+                None => {
+                    let text = loop_warning_message(&finding, config.grace_turns);
+                    let kind = format!(
+                        "{}{}",
+                        ryeos_runtime::cognition::KIND_LOOP_WARNING_PREFIX,
+                        finding.kind.code()
+                    );
+                    let input =
+                        ryeos_runtime::CognitionInput::text("harness", &text).with_kind(kind);
+                    self.callback
+                        .emit_cognition_input(&input)
+                        .await
+                        .map_err(|e| {
+                            format!("resume-critical loop warning input append failed: {e}")
+                        })?;
+                    self.messages.push(ProviderMessage::user(text));
+                    self.loop_warned.insert(finding.kind, turns);
+                    return Ok(None);
+                }
+                Some(warned_at) if turns >= warned_at + config.grace_turns => {
+                    return Ok(Some(format!(
+                        "loop_detected: the run repeated itself ({}: turns {} to {}) and did not change course {} turns after being told",
+                        finding.kind.code(),
+                        finding.first_turn,
+                        finding.last_turn,
+                        config.grace_turns
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(None)
     }
 
     async fn poll_pending_input(&mut self) -> Result<bool, String> {
@@ -1872,6 +2077,17 @@ impl Runner {
                         Ok(RunDeadlineBoundary::Proceed) => {}
                         Ok(RunDeadlineBoundary::HardStop) => {
                             state = State::DeadlineStopped;
+                            continue;
+                        }
+                        Err(error) => {
+                            state = State::RecoveryRequired { error };
+                            continue;
+                        }
+                    }
+                    match self.loop_guard_boundary().await {
+                        Ok(None) => {}
+                        Ok(Some(error)) => {
+                            state = State::Errored { error };
                             continue;
                         }
                         Err(error) => {
@@ -4010,6 +4226,7 @@ impl Runner {
                                     status: ToolResultStatus::Ok,
                                     images: Vec::new(),
                                     dropped: Vec::new(),
+                                    spilled: None,
                                 };
                                 if let Err(e) = self
                                     .callback
@@ -4055,6 +4272,7 @@ impl Runner {
                         status: ToolResultStatus::Error,
                         images: Vec::new(),
                         dropped: Vec::new(),
+                        spilled: None,
                     };
                     if let Err(e) = self
                         .callback
@@ -4507,7 +4725,8 @@ impl Runner {
                         "deadline_at_ms": self.harness.run_clock().map(|clock| clock.end_at_ms()),
                         "stopped_at_ms": stopped_at_ms,
                         "turn": turn,
-                        "wrap_up_delivered": self.wrap_up_delivered,
+                        "wrap_up_delivered": self.wrap_up_delivered.deadline,
+                        "limit_wrap_up_delivered": self.wrap_up_delivered.turn_limit,
                     });
                     // The runtime settles its own deadline stop over the
                     // callback, so the thread records the structured result
@@ -4721,17 +4940,27 @@ impl Runner {
             crate::tool_images::Envelope::Parts(parts) => Some(parts),
         };
         let Some(parts) = parts else {
-            let guarded = self.result_guard.process_bytes(&raw_bytes);
+            let guarded = self.result_guard.process_bytes(
+                &raw_bytes,
+                &self.execution.tool_output,
+                self.spill_mode,
+            );
+            let spilled = guarded.spill.map(|stored| SpilledRender {
+                stored,
+                key: guarded.key.clone(),
+                raw: String::from_utf8_lossy(&raw_bytes).into_owned(),
+            });
             return RenderedToolResult {
                 tool: tool_name.to_string(),
                 content: String::from_utf8_lossy(&guarded.bytes).to_string(),
                 raw_size,
                 truncated: guarded.truncated,
                 duplicate_of: guarded.duplicate_of,
-                truncated_reason: guarded.truncated.then_some("result_guard"),
+                truncated_reason: guarded.truncated_reason,
                 status: ToolResultStatus::Ok,
                 images: Vec::new(),
                 dropped: Vec::new(),
+                spilled,
             };
         };
         match crate::tool_images::admit_parts(
@@ -4748,6 +4977,8 @@ impl Runner {
                 raw_size,
                 settled,
                 &mut self.result_guard,
+                &self.execution.tool_output,
+                self.spill_mode,
             ),
         }
     }
@@ -4782,6 +5013,7 @@ impl Runner {
             status: ToolResultStatus::Error,
             images: Vec::new(),
             dropped: Vec::new(),
+            spilled: None,
         }
     }
 
@@ -4830,16 +5062,39 @@ impl Runner {
     ) -> Result<(), String> {
         let mut rendered = rendered;
         let mut payload = rendered.payload(&operation_id, &call_id);
-        let uploads = rendered
-            .images
-            .iter()
-            .filter_map(|image| image.upload.clone())
-            .collect();
-        if let Err(error) = self
+        let mut emitted = self
             .callback
-            .emit_tool_result_with_attachments(&payload, uploads)
-            .await
+            .emit_tool_result_with_attachments(&payload, rendered.uploads())
+            .await;
+        if let Err(error) = &emitted
+            && rendered.spilled.is_some()
+            && let Some(refused) =
+                error.downcast_ref::<ryeos_runtime::callback::AttachmentRefused>()
         {
+            // The node would not store the full text. Its refusal appended
+            // nothing, so the result goes in again cut, with the cause named,
+            // and the run goes on.
+            let reason = spill_refusal_reason(&refused.0);
+            if !self.spill_refusal_logged {
+                self.spill_refusal_logged = true;
+                tracing::warn!(
+                    reason,
+                    %refused,
+                    "node refused a stored tool result; oversize results are cut instead"
+                );
+            }
+            if reason == SPILL_MEDIA_TYPE_NOT_ADMITTED {
+                self.spill_mode = crate::result_guard::SpillMode::Disabled(reason);
+            }
+            rendered =
+                rendered.without_spill(reason, &mut self.result_guard, &self.execution.tool_output);
+            payload = rendered.payload(&operation_id, &call_id);
+            emitted = self
+                .callback
+                .emit_tool_result_with_attachments(&payload, rendered.uploads())
+                .await;
+        }
+        if let Err(error) = emitted {
             // The node's attachment policy can be tighter than the signed
             // image limits. Its refusal appended nothing, so the result goes
             // in again without its images and the run goes on.
@@ -6098,6 +6353,93 @@ mod tests {
         ]));
     }
 
+    fn spill_settled(text: String) -> crate::tool_images::Settled {
+        crate::tool_images::Settled {
+            text,
+            images: Vec::new(),
+            dropped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_spilled_result_records_its_stored_text_and_validates() {
+        let output = crate::directive::ToolOutputConfig::default();
+        let mut guard = ResultGuard::new();
+        let big = "x".repeat(200 * 1024);
+        let rendered = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big.clone()),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Allowed,
+        );
+        assert_eq!(rendered.truncated_reason, Some("result_spilled"));
+        assert!(
+            rendered
+                .content
+                .starts_with(ryeos_runtime::TOOL_RESULT_PARTIAL_PREFIX)
+        );
+        assert!(rendered.content.len() < 40 * 1024);
+        let payload = rendered.payload(&"a".repeat(64), "call-1");
+        payload.validate().unwrap();
+        let spill = payload.guard.spill.as_ref().expect("spill recorded");
+        assert_eq!(payload.attachment_refs, vec![spill.attachment.clone()]);
+        assert_eq!(rendered.uploads().len(), 1);
+        assert_eq!(rendered.uploads()[0].bytes(), big.as_bytes());
+    }
+
+    #[test]
+    fn a_refused_spill_is_recorded_again_cut_with_its_cause() {
+        let output = crate::directive::ToolOutputConfig::default();
+        let mut guard = ResultGuard::new();
+        let big = "x".repeat(200 * 1024);
+        let rendered = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big.clone()),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Allowed,
+        );
+        let cut = rendered.without_spill(SPILL_MEDIA_TYPE_NOT_ADMITTED, &mut guard, &output);
+        assert!(cut.spilled.is_none());
+        assert!(cut.uploads().is_empty());
+        assert_eq!(cut.truncated_reason, Some(SPILL_MEDIA_TYPE_NOT_ADMITTED));
+        assert!(cut.content.ends_with("[...truncated at 100KB]"));
+        let payload = cut.payload(&"a".repeat(64), "call-1");
+        payload.validate().unwrap();
+        assert!(payload.attachment_refs.is_empty());
+        assert!(payload.guard.spill.is_none());
+        // The cut text is the one that was recorded, so the same result again
+        // collapses to it (the preview's key was taken back, not left behind).
+        let again = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Disabled(SPILL_MEDIA_TYPE_NOT_ADMITTED),
+        );
+        assert!(again.duplicate_of.is_some());
+    }
+
+    #[test]
+    fn node_refusals_map_to_typed_spill_reasons() {
+        assert_eq!(
+            spill_refusal_reason("attachment media type 'text/plain' is not accepted by this node"),
+            "spill_media_type_not_admitted"
+        );
+        assert_eq!(
+            spill_refusal_reason("attachment is 5000000 bytes (node limit 4194304)"),
+            "spill_over_attachment_limit"
+        );
+        assert_eq!(
+            spill_refusal_reason("append carries 17 attachments (node limit 16 per turn)"),
+            "spill_attachment_budget_spent"
+        );
+    }
+
     #[test]
     fn a_dropped_image_note_survives_truncation_and_duplicate_collapse() {
         let settled = |text: String| crate::tool_images::Settled {
@@ -6109,7 +6451,14 @@ mod tests {
         let mut guard = ResultGuard::new();
         // Over the guard's ceiling: the text is cut, the note is not.
         let big = "x".repeat(150 * 1024);
-        let first = RenderedToolResult::from_settled("t", 1, settled(big.clone()), &mut guard);
+        let first = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled(big.clone()),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(first.truncated);
         assert_eq!(first.truncated_reason, Some("result_guard"));
         assert!(
@@ -6120,12 +6469,26 @@ mod tests {
         assert!(first.content.contains("[...truncated at 100KB]"));
         // The same text again collapses to the duplicate marker, and the note
         // still follows it.
-        let second = RenderedToolResult::from_settled("t", 1, settled(big), &mut guard);
+        let second = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled(big),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(second.duplicate_of.is_some());
         assert!(second.content.starts_with("[duplicate result omitted"));
         assert!(second.content.ends_with(&format!("\n{note}")));
         // The drop is recorded in its own field, not as a truncation.
-        let small = RenderedToolResult::from_settled("t", 1, settled("hi".into()), &mut guard);
+        let small = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled("hi".into()),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(!small.truncated);
         assert_eq!(small.truncated_reason, None);
         let payload = small.payload(&"a".repeat(64), "call-1");
@@ -6153,8 +6516,14 @@ mod tests {
             images: Vec::new(),
             dropped: vec![(2, crate::tool_images::IMAGE_OVERSIZE)],
         };
-        let mut rendered =
-            RenderedToolResult::from_settled("t", 1, settled, &mut ResultGuard::new());
+        let mut rendered = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled,
+            &mut ResultGuard::new(),
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         // Positions 1 and 3 were admitted around the dropped second image.
         rendered.images = vec![image(1), image(3)];
         let dropped = rendered.without_images(crate::tool_images::IMAGE_LIMIT);
@@ -8248,13 +8617,184 @@ mod tests {
     async fn a_recovered_run_does_not_repeat_the_wrap_up_notice() {
         let mock = Arc::new(ScriptedLedger::new("authority"));
         let mut runner = ledger_runner_with_policy(mock.clone(), deadline_policy(25_000));
-        runner.wrap_up_delivered = true;
+        runner.wrap_up_delivered.deadline = true;
         assert!(matches!(
             runner.run_deadline_boundary().await,
             Ok(RunDeadlineBoundary::Proceed)
         ));
         assert!(mock.recorded("append_event").is_empty());
         assert!(runner.messages.is_empty());
+    }
+
+    fn turn_limit_policy(turns: u32, end_in_ms: Option<i64>) -> EnvelopePolicy {
+        let mut policy = match end_in_ms {
+            Some(end) => deadline_policy(end),
+            None => EnvelopePolicy {
+                effective_caps: vec![],
+                hard_limits: HardLimits::default(),
+            },
+        };
+        policy.hard_limits.turns = turns;
+        policy
+    }
+
+    #[tokio::test]
+    async fn the_last_permitted_turn_is_told_to_wrap_up_once() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(3, None));
+        // Before turns 1 and 2 of 3: nothing is said.
+        for _ in 0..2 {
+            assert!(matches!(
+                runner.run_deadline_boundary().await,
+                Ok(RunDeadlineBoundary::Proceed)
+            ));
+            runner.harness.record_turn();
+        }
+        assert!(mock.recorded("append_event").is_empty());
+        // Before turn 3, the last the limit allows, it is told, once.
+        runner.run_deadline_boundary().await.unwrap();
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0]["payload"]["kind"], "limit_wrap_up");
+        assert!(appended[0]["payload"].get("pinned").is_none());
+        runner.run_deadline_boundary().await.unwrap();
+        assert_eq!(mock.recorded("append_event").len(), 1);
+        assert!(
+            runner.messages[0]
+                .text()
+                .unwrap()
+                .starts_with("Turn limit notice")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_limit_of_one_tells_the_first_turn() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(1, None));
+        runner.run_deadline_boundary().await.unwrap();
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0]["payload"]["kind"], "limit_wrap_up");
+    }
+
+    #[tokio::test]
+    async fn no_turn_limit_means_no_turn_limit_notice() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(0, None));
+        for _ in 0..5 {
+            runner.run_deadline_boundary().await.unwrap();
+            runner.harness.record_turn();
+        }
+        assert!(mock.recorded("append_event").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_deadline_and_the_turn_limit_due_together_give_one_input_naming_both() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner =
+            ledger_runner_with_policy(mock.clone(), turn_limit_policy(1, Some(25_000)));
+        runner.run_deadline_boundary().await.unwrap();
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1, "one input, not two");
+        assert_eq!(appended[0]["payload"]["kind"], "deadline_limit_wrap_up");
+        let text = runner.messages[0].text().unwrap();
+        assert!(text.contains("Deadline notice") && text.contains("Turn limit notice"));
+        assert!(runner.wrap_up_delivered.deadline && runner.wrap_up_delivered.turn_limit);
+        runner.run_deadline_boundary().await.unwrap();
+        assert_eq!(mock.recorded("append_event").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_recovered_run_does_not_repeat_the_turn_limit_notice() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(1, None));
+        runner.wrap_up_delivered.turn_limit = true;
+        runner.run_deadline_boundary().await.unwrap();
+        assert!(mock.recorded("append_event").is_empty());
+    }
+
+    fn push_turn(runner: &mut Runner, index: u32, tool: &str, result: &str) {
+        let id = format!("c{index}");
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![Part::tool_call(&id, tool, json!({"p": "same"}))],
+        ));
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Tool,
+            vec![Part::ToolResult(ryeos_provider_contract::ToolResultPart {
+                call_id: id,
+                parts: vec![Part::text(result)],
+                status: ToolResultStatus::Ok,
+            })],
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_loop_is_warned_once_then_stopped_after_the_grace_turns() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner(mock.clone());
+        for index in 1..=4 {
+            push_turn(&mut runner, index, "read", "same");
+        }
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        // The fifth identical turn crosses the repeat threshold.
+        push_turn(&mut runner, 5, "read", "same");
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        let appended = mock.recorded("append_event");
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0]["payload"]["kind"], "loop_warning_repetition");
+        assert!(
+            runner
+                .messages
+                .last()
+                .unwrap()
+                .text()
+                .unwrap()
+                .starts_with("Loop notice")
+        );
+        // Not repeated while the grace turns run.
+        push_turn(&mut runner, 6, "read", "same");
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(mock.recorded("append_event").len(), 1);
+        // Two turns after the warning (grace_turns = 2) the run is stopped.
+        push_turn(&mut runner, 7, "read", "same");
+        let stop = runner
+            .loop_guard_boundary()
+            .await
+            .unwrap()
+            .expect("stopped");
+        assert!(stop.starts_with("loop_detected: "), "{stop}");
+        assert!(stop.contains("repetition"));
+        assert_eq!(mock.recorded("append_event").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_changes_course_after_the_warning_is_not_stopped() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner(mock.clone());
+        for index in 1..=5 {
+            push_turn(&mut runner, index, "read", "same");
+        }
+        runner.loop_guard_boundary().await.unwrap();
+        // Different calls with new results: the repetition is out of the window
+        // eventually; here a different tool starts, the count of the same
+        // call stays at five, so keep going until it leaves the window.
+        for index in 6..=24 {
+            push_turn(&mut runner, index, "write", &format!("new{index}"));
+            assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_guards_never_warn_or_stop() {
+        let mock = Arc::new(ScriptedLedger::new("authority"));
+        let mut runner = ledger_runner(mock.clone());
+        runner.execution.loop_guards.enabled = false;
+        for index in 1..=20 {
+            push_turn(&mut runner, index, "read", "same");
+            assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        }
+        assert!(mock.recorded("append_event").is_empty());
     }
 
     #[tokio::test]

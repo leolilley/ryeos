@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T19:47:34Z:94f8c18bda61616beac9010b7c165bb14a024bd149322cfe63fe2a0736d99036:knPiR+5M5JvCkpB/PsWEIV38r2H8KTgBe/8xLVEmoBDeNxRPoTju3bka4fk/eeCyQcPmeiUZzMuEsSudV17wAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T04:38:07Z:b02a0860107dc32eda42355d43528f3c6f365e49c3609cb3f0ede3869c059efb:9uLuUc9X18dsElPYuf6as3PrVFCs2h4cAh4Bbv5b9VZYUZjIQ/1NB17Y6m2nbjKWWX0mpHLFqWN4qVdb8DdgCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -188,6 +188,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
@@ -460,8 +461,6 @@ policies:
       - ryeos.execute.service.node/status
       - ryeos.execute.service.projects/list
       - ryeos.execute.service.events/chain_replay
-      - ryeos.execute.service.projects/add
-      - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input
       - ryeos.execute.service.commands/dispatch
       - ryeos.execute.service.commands/submit
@@ -479,7 +478,6 @@ policies:
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log
-      - ryeos.read.project.live
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16

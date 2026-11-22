@@ -170,6 +170,201 @@ pub struct ExecutionConfig {
     /// policy and the model's own limits.
     #[serde(default)]
     pub tool_images: ToolImagesConfig,
+    /// How an oversize tool result is shown to the model and stored.
+    #[serde(default)]
+    pub tool_output: ToolOutputConfig,
+    /// Detection of a run that repeats itself or stops making progress.
+    #[serde(default)]
+    pub loop_guards: LoopGuardsConfig,
+}
+
+/// Signed thresholds for the loop and stall detectors. A finding first warns
+/// the model with a durable harness input; the same finding still present
+/// `grace_turns` turns later stops the run with the typed failure
+/// `loop_detected`. `enabled: false` turns every detector off explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LoopGuardsConfig {
+    #[serde(default = "default_loop_guards_enabled")]
+    pub enabled: bool,
+    /// Turns a repetition is counted over.
+    #[serde(default = "default_loop_window_turns")]
+    pub window_turns: u32,
+    /// The same call with the same result this many times in the window.
+    #[serde(default = "default_loop_repeat_threshold")]
+    pub repeat_threshold: u32,
+    /// An alternation of calls repeated this many full cycles with nothing new.
+    #[serde(default = "default_loop_pingpong_cycles")]
+    pub pingpong_cycles: u32,
+    /// Longest alternation period looked for, in turns.
+    #[serde(default = "default_loop_pingpong_max_period")]
+    pub pingpong_max_period: u32,
+    /// Consecutive turns whose results and text were all seen before.
+    #[serde(default = "default_loop_no_progress_turns")]
+    pub no_progress_turns: u32,
+    /// Consecutive turns with neither a tool call nor text.
+    #[serde(default = "default_loop_idle_turns")]
+    pub idle_turns: u32,
+    /// Turns between a warning and the stop for the same finding.
+    #[serde(default = "default_loop_grace_turns")]
+    pub grace_turns: u32,
+}
+
+fn default_loop_guards_enabled() -> bool {
+    true
+}
+
+fn default_loop_window_turns() -> u32 {
+    16
+}
+
+fn default_loop_repeat_threshold() -> u32 {
+    5
+}
+
+fn default_loop_pingpong_cycles() -> u32 {
+    4
+}
+
+fn default_loop_pingpong_max_period() -> u32 {
+    4
+}
+
+fn default_loop_no_progress_turns() -> u32 {
+    8
+}
+
+fn default_loop_idle_turns() -> u32 {
+    3
+}
+
+fn default_loop_grace_turns() -> u32 {
+    2
+}
+
+impl Default for LoopGuardsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_loop_guards_enabled(),
+            window_turns: default_loop_window_turns(),
+            repeat_threshold: default_loop_repeat_threshold(),
+            pingpong_cycles: default_loop_pingpong_cycles(),
+            pingpong_max_period: default_loop_pingpong_max_period(),
+            no_progress_turns: default_loop_no_progress_turns(),
+            idle_turns: default_loop_idle_turns(),
+            grace_turns: default_loop_grace_turns(),
+        }
+    }
+}
+
+impl LoopGuardsConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.window_turns == 0
+            || self.repeat_threshold < 2
+            || self.pingpong_cycles < 2
+            || self.pingpong_max_period < 2
+            || self.no_progress_turns == 0
+            || self.idle_turns == 0
+            || self.grace_turns == 0
+        {
+            anyhow::bail!(
+                "execution.loop_guards thresholds must be positive, repeat_threshold and pingpong_cycles at least 2, pingpong_max_period at least 2; set `enabled: false` to turn the detectors off"
+            );
+        }
+        if self.repeat_threshold > self.window_turns {
+            anyhow::bail!(
+                "execution.loop_guards repeat_threshold exceeds window_turns, so a repetition could never be seen"
+            );
+        }
+        let longest = u64::from(self.pingpong_cycles) * u64::from(self.pingpong_max_period);
+        if longest > u64::from(self.window_turns) {
+            anyhow::bail!(
+                "execution.loop_guards pingpong_cycles x pingpong_max_period exceeds window_turns, so the longest alternation could never be seen"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Signed thresholds for oversize tool results. A result longer than
+/// `spill_threshold_bytes` is stored whole beside its event and the model sees
+/// a head-and-tail preview that says it is partial. When the node cannot store
+/// it, the result is cut at `hard_cut_bytes` instead and the record names why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutputConfig {
+    #[serde(default = "default_tool_spill_threshold_bytes")]
+    pub spill_threshold_bytes: u64,
+    #[serde(default = "default_tool_preview_head_bytes")]
+    pub preview_head_bytes: u64,
+    #[serde(default = "default_tool_preview_tail_bytes")]
+    pub preview_tail_bytes: u64,
+    /// Most bytes of one result stored; keep it within the node's
+    /// `thread_attachments` per-attachment limit, which refuses a larger one.
+    #[serde(default = "default_tool_spill_stored_bytes")]
+    pub max_stored_bytes: u64,
+    /// The cut applied when a result is not stored.
+    #[serde(default = "default_tool_hard_cut_bytes")]
+    pub hard_cut_bytes: u64,
+}
+
+fn default_tool_spill_threshold_bytes() -> u64 {
+    64 * 1024
+}
+
+fn default_tool_preview_head_bytes() -> u64 {
+    24 * 1024
+}
+
+fn default_tool_preview_tail_bytes() -> u64 {
+    8 * 1024
+}
+
+fn default_tool_spill_stored_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
+fn default_tool_hard_cut_bytes() -> u64 {
+    100 * 1024
+}
+
+impl Default for ToolOutputConfig {
+    fn default() -> Self {
+        Self {
+            spill_threshold_bytes: default_tool_spill_threshold_bytes(),
+            preview_head_bytes: default_tool_preview_head_bytes(),
+            preview_tail_bytes: default_tool_preview_tail_bytes(),
+            max_stored_bytes: default_tool_spill_stored_bytes(),
+            hard_cut_bytes: default_tool_hard_cut_bytes(),
+        }
+    }
+}
+
+impl ToolOutputConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.spill_threshold_bytes == 0
+            || self.preview_head_bytes == 0
+            || self.preview_tail_bytes == 0
+            || self.max_stored_bytes == 0
+            || self.hard_cut_bytes == 0
+        {
+            anyhow::bail!("execution.tool_output limits must all be positive");
+        }
+        if self.preview_head_bytes + self.preview_tail_bytes >= self.spill_threshold_bytes {
+            anyhow::bail!(
+                "execution.tool_output preview_head_bytes + preview_tail_bytes must be below spill_threshold_bytes, or the preview would not be smaller than the result it replaces"
+            );
+        }
+        if self.max_stored_bytes < self.spill_threshold_bytes {
+            anyhow::bail!(
+                "execution.tool_output max_stored_bytes must be at least spill_threshold_bytes"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Signed ceilings on the images a run's tools may return. The per-run
@@ -359,6 +554,8 @@ impl Default for ExecutionConfig {
             on_output_limit: None,
             accounting: AttemptAccountingConfig::default(),
             tool_images: ToolImagesConfig::default(),
+            tool_output: ToolOutputConfig::default(),
+            loop_guards: LoopGuardsConfig::default(),
         }
     }
 }
@@ -398,6 +595,8 @@ impl ExecutionConfig {
             }
         }
         self.tool_images.validate()?;
+        self.tool_output.validate()?;
+        self.loop_guards.validate()?;
         // `budget_mode: hard` is structurally valid configuration; whether the
         // route is ledger-eligible (Paid/ExplicitlyFree sealed authority) is a
         // launch fact and is enforced at runtime start, not here.
@@ -962,6 +1161,54 @@ mod tests {
             serde_yaml::from_str("tool_images:\n  max_images_per_run: 0\n").unwrap();
         assert!(zero.validate().is_err());
         assert!(serde_yaml::from_str::<ExecutionConfig>("tool_images:\n  unknown: 1\n").is_err());
+    }
+
+    #[test]
+    fn tool_output_limits_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.tool_output, ToolOutputConfig::default());
+        defaults.validate().unwrap();
+        let tight: ExecutionConfig = serde_yaml::from_str(
+            "tool_output:\n  spill_threshold_bytes: 1000\n  preview_head_bytes: 400\n  preview_tail_bytes: 100\n  max_stored_bytes: 5000\n",
+        )
+        .unwrap();
+        tight.validate().unwrap();
+        // A preview that is not smaller than the threshold would not bound
+        // anything.
+        let wide: ExecutionConfig = serde_yaml::from_str(
+            "tool_output:\n  spill_threshold_bytes: 1000\n  preview_head_bytes: 900\n  preview_tail_bytes: 100\n",
+        )
+        .unwrap();
+        assert!(wide.validate().is_err());
+        let zero: ExecutionConfig =
+            serde_yaml::from_str("tool_output:\n  hard_cut_bytes: 0\n").unwrap();
+        assert!(zero.validate().is_err());
+        let small_store: ExecutionConfig =
+            serde_yaml::from_str("tool_output:\n  max_stored_bytes: 10\n").unwrap();
+        assert!(small_store.validate().is_err());
+        assert!(serde_yaml::from_str::<ExecutionConfig>("tool_output:\n  unknown: 1\n").is_err());
+    }
+
+    #[test]
+    fn loop_guards_default_parse_and_validate() {
+        let defaults: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(defaults.loop_guards, LoopGuardsConfig::default());
+        defaults.validate().unwrap();
+        let off: ExecutionConfig =
+            serde_yaml::from_str("loop_guards:\n  enabled: false\n  repeat_threshold: 0\n")
+                .unwrap();
+        off.validate().unwrap();
+        for bad in [
+            "loop_guards:\n  repeat_threshold: 1\n",
+            "loop_guards:\n  grace_turns: 0\n",
+            "loop_guards:\n  idle_turns: 0\n",
+            "loop_guards:\n  window_turns: 4\n  repeat_threshold: 5\n",
+            "loop_guards:\n  window_turns: 8\n  pingpong_cycles: 4\n  pingpong_max_period: 4\n",
+        ] {
+            let cfg: ExecutionConfig = serde_yaml::from_str(bad).unwrap();
+            assert!(cfg.validate().is_err(), "{bad}");
+        }
+        assert!(serde_yaml::from_str::<ExecutionConfig>("loop_guards:\n  unknown: 1\n").is_err());
     }
 
     #[test]
