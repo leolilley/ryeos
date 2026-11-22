@@ -3945,6 +3945,7 @@ mod tests {
             session_id: "session:mismatched".to_string(),
             root_attachment_id: "mismatch".into(),
             binding_attachments: vec![super::super::binding::UiBindingAttachment {
+                named_items: Vec::new(),
                 binding_attachment_id: "mismatch".into(),
                 binding_generation: 1,
                 binding_digest: "mismatch".into(),
@@ -4408,6 +4409,7 @@ mod tests {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
             root_attachment_id: "broken".into(),
             binding_attachments: vec![super::super::binding::UiBindingAttachment {
+                named_items: Vec::new(),
                 binding_attachment_id: "broken".into(),
                 binding_generation: 1,
                 binding_digest: "broken".into(),

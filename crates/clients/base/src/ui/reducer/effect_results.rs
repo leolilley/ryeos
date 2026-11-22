@@ -139,10 +139,8 @@ impl RyeOsCore {
                 .error
                 .as_ref()
                 .is_some_and(|error| error.code == "ui_binding_stale")
-            && let RyeOsEffectKind::InvokeBinding { request, .. }
-            | RyeOsEffectKind::FetchSource { request, .. } = &expected
         {
-            self.note_stale_attachment(&request.binding_attachment_id);
+            self.note_stale_effect(&expected);
         }
 
         if result.ok

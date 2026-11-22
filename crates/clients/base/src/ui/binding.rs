@@ -794,6 +794,13 @@ pub struct UiBindingAttachment {
     pub subject: UiBindingSubject,
     pub posture: UiEffectivePosture,
     pub binding_request_bounds: UiBindingRequestBounds,
+    /// Every item the daemon resolved this binding from: the Surface, its
+    /// views and view sets, and their extends-chain members. The daemon
+    /// computes it from the compiled binding, so it is covered by the binding
+    /// digest. A seat matches an `item.hint` against it and revises only the
+    /// attachments that name the hinted item.
+    #[serde(default)]
+    pub named_items: Vec<String>,
 }
 
 impl UiBindingAttachment {

@@ -181,6 +181,12 @@ impl AdmittedBindingAttachment {
                 }
             },
             binding_request_bounds,
+            named_items: self
+                .compiled_binding
+                .binding
+                .named_item_refs()
+                .into_iter()
+                .collect(),
         }
     }
 }

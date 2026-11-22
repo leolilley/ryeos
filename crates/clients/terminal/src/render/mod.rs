@@ -827,6 +827,7 @@ mod tests {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
             root_attachment_id: "shared-attachment".into(),
             binding_attachments: vec![ryeos_client_base::ui::UiBindingAttachment {
+                named_items: Vec::new(),
                 binding_attachment_id: "centre-attachment".into(),
                 binding_generation: 1,
                 binding_digest: "surface-binding".into(),
