@@ -799,7 +799,6 @@ pub struct UiBindingAttachment {
     /// computes it from the compiled binding, so it is covered by the binding
     /// digest. A seat matches an `item.hint` against it and revises only the
     /// attachments that name the hinted item.
-    #[serde(default)]
     pub named_items: Vec<String>,
 }
 
