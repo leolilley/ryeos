@@ -11527,6 +11527,7 @@ mod usage_status_producer_tests {
             code: 429,
             detail: "rate limited".to_string(),
             body: String::new(),
+            retry_after_ms: None,
         });
         assert_eq!(failed_attempt_usage_status(&status), None);
     }

@@ -4713,10 +4713,12 @@ mod tests {
         impl Fn(u32, u32) -> ReplayedEventRecord,
     ) {
         let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            chain_seq: 0,
             event_type: event_type.to_string(),
             payload,
         };
         let correction = |turn: u32, position: u32| ReplayedEventRecord {
+            chain_seq: 0,
             event_type: "cognition_in".to_string(),
             payload: json!({
                 "origin": "harness",
