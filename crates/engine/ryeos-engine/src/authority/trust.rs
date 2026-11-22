@@ -1550,8 +1550,49 @@ mod tests {
         let mut record = publisher_record(&pub_vk, SignerStatus::Active);
         record.schema = "ryeos/trust-signer/v0".to_string();
         write_record(root.path(), &record, &node_sk);
-        let err = TrustStore::load_node_registry(root.path()).unwrap_err();
-        assert_eq!(err.code(), "trust_record_schema_unsupported");
+        // Only that signer is unusable: the registry still loads, without it,
+        // and the refusal is reported by name.
+        let store = TrustStore::load_node_registry(root.path()).unwrap();
+        assert!(store.signer(&record.fingerprint).is_none());
+        let (records, refused) =
+            load_signer_records_reporting(&signers_dir(root.path()), &node_vk).unwrap();
+        assert!(records.is_empty());
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].code(), "trust_record_schema_unsupported");
+    }
+
+    #[test]
+    fn a_v1_record_without_project_entries_reads_and_one_with_entries_is_refused_alone() {
+        let (node_sk, node_vk, _) = gen_key();
+        let (_, publisher_vk, _) = gen_key2();
+        let author_vk = SigningKey::from_bytes(&[77; 32]).verifying_key();
+        let root = tempfile::tempdir().unwrap();
+        write_identity(root.path(), &node_vk);
+        let mut unscoped = publisher_record(&publisher_vk, SignerStatus::Active);
+        unscoped.schema = SIGNER_RECORD_SCHEMA_V1.to_string();
+        write_record(root.path(), &unscoped, &node_sk);
+        let mut scoped = record_for(
+            &author_vk,
+            SignerRole::ProjectAuthor,
+            vec![SignerSpace::Project],
+            &["*"],
+            &["own:alpha"],
+            SignerStatus::Active,
+        );
+        scoped.schema = SIGNER_RECORD_SCHEMA_V1.to_string();
+        write_record(root.path(), &scoped, &node_sk);
+        let (records, refused) =
+            load_signer_records_reporting(&signers_dir(root.path()), &node_vk).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.fingerprint.as_str())
+                .collect::<Vec<_>>(),
+            vec![unscoped.fingerprint.as_str()]
+        );
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].code(), "trust_record_schema_unsupported");
+        assert!(refused[0].to_string().contains(&scoped.file_name()));
     }
 
     #[test]
