@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T23:54:42Z:6d076bf70b49c1bbdfe6238482b1c62a356387c8cd57181f043ebd527f86a699:Xy3CVCtOaF9qisKNjkGF0jDT/eD2U7yWXrcwI+kxKHjxDF0gv0Eois9Cb7BYvzuhl/euopo95mPletgYnPA1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:45:45Z:6d076bf70b49c1bbdfe6238482b1c62a356387c8cd57181f043ebd527f86a699:Xy3CVCtOaF9qisKNjkGF0jDT/eD2U7yWXrcwI+kxKHjxDF0gv0Eois9Cb7BYvzuhl/euopo95mPletgYnPA1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]

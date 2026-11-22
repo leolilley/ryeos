@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T23:54:42Z:b67b648ec43717cefd2ea2fbeb253a077711ae13c49a31520874eebfa81d5faf:YK5MlibvjHAv44gwvCAHefUoQOxNwtO0UOHj4l5ACKE/8AuIr76IiVEo0Mm2S0G7OFNGksmtpRWIS/OY59maCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:45:45Z:9faed569c1c3a78ba18812073d078fc3925758373ea13c9aee941058d44885e4:XWsZ2g6YXrybIsd/NEJZLRSFg2HcPw2vUFe3b5SN5/jZDsDXgKsaALg9xjhVnixTHey6AsXZtP4YBgy0mEkyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -94,6 +94,8 @@ directive is not repeatable, the route is a local worker or has no ledger, the
 policy does not name `mid_stream`, or the ceiling is spent) the turn is not
 resumed and the thread fails with the typed code
 `provider_attempt_outcome_unknown`; no second contact is made.
+
+Resume itself is bounded separately: after a hard crash a turn is resumed at most once; planned restarts re-arm. A turn cut by a second hard crash is therefore failed by the resume budget, not retried, whatever `max_retries` allows.
 
 ### Output limit
 
