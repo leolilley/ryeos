@@ -3032,7 +3032,7 @@ mod tests {
         }
         let return_operation = directive_tool_operation_id(&source, 1, return_index);
         events.push(ReplayedEventRecord {
- chain_seq: 0,
+            chain_seq: 0,
             event_type: "tool_call_start".to_string(),
             payload: json!({"operation_id":return_operation,"call_id":"call-return","tool":DIRECTIVE_RETURN_TOOL}),
         });

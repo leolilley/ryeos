@@ -6485,7 +6485,9 @@ impl Runner {
         let reason = ProviderRetryReason::MidStream {
             live_output_events_emitted: 0,
         };
-        let Some(delay) = retry_delay_for_reason(&reason, attempt_number, &self.execution) else {
+        // A restart cut carries no Retry-After: nothing observed a response.
+        let Ok(delay) = retry_delay_for_reason(&reason, attempt_number, None, &self.execution)
+        else {
             return Ok(None);
         };
         let decision = ProviderRetryDecision {
@@ -6497,6 +6499,7 @@ impl Runner {
             backoff_ms: u64::try_from(delay.as_millis())
                 .map_err(|_| anyhow::anyhow!("provider retry backoff exceeds u64"))?,
             reason,
+            retry_after_ms: None,
             failure_digest: HexDigest::new(lillux::sha256_hex(
                 RESTART_CUT_FAILURE_MARKER.as_bytes(),
             ))
