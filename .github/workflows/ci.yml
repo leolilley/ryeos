@@ -1671,6 +1671,13 @@ jobs:
       - name: Prepare the runner
         run: ./scripts/ci/prepare-runner.sh
 
+      # A hosted-class node starts as pid 1 of its own user namespace with an
+      # identity map of uids and gids 0-65535, so the administrator that
+      # launches it needs that range in its subordinate id allowance.
+      - name: Allow the administrator an identity id map
+        run: |
+          echo 'root:0:65536' | sudo -n tee -a /etc/subuid /etc/subgid >/dev/null
+
       - name: Probe the cgroup host
         shell: bash
         run: |
@@ -1842,17 +1849,12 @@ jobs:
 
       - name: Claude Code worker follow (real isolation)
         if: ${{ !cancelled() }}
-        # Shortcut register entry D15-claude-follow (.tmp/shortcuts-register-20261120.md):
-        # claude_code_worker_follow_e2e cannot qualify on a cgroup-delegated node.
-        # Cure: a pid-namespace-enclosure harness node variant; remove
-        # continue-on-error when it lands.
-        # Known red: the suite's development-hosted profile needs a node that
-        # is the init of its own enclosure, which a cgroup-delegated node does
-        # not provide. It stays here as a visible failing step (the error says
-        # why) and does not fail the job until an enclosure variant exists.
+        # The suite's development-hosted nodes start as pid 1 of their own
+        # user, pid, mount and cgroup namespace (the enclosure placement).
+        # continue-on-error stays until the suite has passed here once.
         continue-on-error: true
         run: |
-          "$RUNNER_TEMP/run-suite" claude_code_worker_follow_e2e 6 0 || { echo "::error title=claude_code_worker_follow_e2e::cannot qualify in the cgroup-delegated lane (needs enclosure_trusted_init)"; exit 1; }
+          "$RUNNER_TEMP/run-suite" claude_code_worker_follow_e2e 6 0 || { echo "::error title=claude_code_worker_follow_e2e::the suite failed in the enclosure placement; see the test output above"; exit 1; }
 
       - name: No suite skips on its own
         run: |

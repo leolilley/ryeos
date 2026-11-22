@@ -626,25 +626,6 @@ async fn start_node() -> Result<(DaemonHarness, FastFixture)> {
         |_| {},
     )
     .await
-    .map_err(real_isolation_requires_enclosure)
-}
-
-/// This suite starts the development-hosted profile, whose floor requires the
-/// node to be the init of its own enclosure (`recovery:enclosure_trusted_init`,
-/// `termination:enclosure_trusted_init`). The real process-scope lane starts
-/// the node in a delegated cgroup subtree, which provides the scope
-/// capabilities instead and cannot provide that one, so a startup refusal
-/// there is the lane's missing enclosure, never a transient failure. Say so.
-fn real_isolation_requires_enclosure(error: anyhow::Error) -> anyhow::Error {
-    if common::process_scopes::required() {
-        error.context(
-            "the claude-code follow suite needs a node that is the init of its own enclosure \
-             (enclosure_trusted_init); the process-scope lane's cgroup-delegated node does not \
-             provide it, so this suite cannot qualify in the lane",
-        )
-    } else {
-        error
-    }
 }
 
 /// [`start_node`] plus the short-turn fixture bundle.
@@ -657,7 +638,6 @@ async fn start_node_with_short_turn() -> Result<(DaemonHarness, FastFixture)> {
         |_| {},
     )
     .await
-    .map_err(real_isolation_requires_enclosure)
 }
 
 /// The token counts the stub reports for `PROMPT` and `text`.
