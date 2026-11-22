@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
     // Send the mint request with a client that does NOT auto-follow redirects:
     // a 3xx on a signed POST must fail loud, never be silently downgraded to a
     // GET (which would invalidate the method/path/body-bound signature).
-    let client = reqwest::Client::builder()
+    let client = ryeos_http_egress::client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
