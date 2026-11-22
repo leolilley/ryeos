@@ -125,9 +125,9 @@ fn replay_codex(text: &str) -> Vec<(String, Outcome)> {
             Ok(()) => {
                 let queue = events.lock().unwrap();
                 match queue.events.get(before) {
-                    Some(event) => Outcome::Event(
-                        event["event_type"].as_str().unwrap_or_default().to_owned(),
-                    ),
+                    Some(event) => {
+                        Outcome::Event(event["event_type"].as_str().unwrap_or_default().to_owned())
+                    }
                     None => Outcome::Dropped,
                 }
             }
