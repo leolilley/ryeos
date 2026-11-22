@@ -305,7 +305,7 @@ fn compile_saved_surface_context(
         .transpose()?;
     let canonical = project
         .as_ref()
-        .map(|project| canonical_project_root(&project.root))
+        .map(|project| canonical_project_root(&project.root, &state.config.app_root))
         .transpose()?;
     let authority = canonical
         .as_ref()
@@ -677,7 +677,7 @@ pub async fn handle_projects_add(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let req: AddProjectRequest = parse_request(params)?;
-    let root = canonical_project_root(&req.root)?;
+    let root = canonical_project_root(&req.root, &state.config.app_root)?;
     let root_text = root.display().to_string();
     let store = locked_principal_store(&ctx, &state).await?;
     let mut projects = store.load_projects()?;
@@ -861,7 +861,7 @@ pub async fn handle_projects_open(
             .find(|entry| entry.local_id == req.local_id)
             .ok_or(HandlerError::NotFound)?
     };
-    let canonical = canonical_project_root(&project.root)?;
+    let canonical = canonical_project_root(&project.root, &state.config.app_root)?;
     let root = canonical.display().to_string();
     let project_authority = Arc::new(
         lillux::PinnedDirectory::open(&canonical)?
@@ -1098,7 +1098,7 @@ pub async fn handle_particular_view_set_resume(
     };
     let canonical_project = project
         .as_ref()
-        .map(|project| canonical_project_root(&project.root))
+        .map(|project| canonical_project_root(&project.root, &state.config.app_root))
         .transpose()?;
     let project_authority = canonical_project
         .as_ref()
@@ -1666,7 +1666,7 @@ fn apply_config_update_staged(
     validate_ui_config(config)
 }
 
-fn canonical_project_root(root: &str) -> Result<PathBuf> {
+fn canonical_project_root(root: &str, app_root: &Path) -> Result<PathBuf> {
     let path = PathBuf::from(root);
     if !path.is_absolute() {
         return Err(HandlerError::BadRequest("project root must be absolute".into()).into());
@@ -1677,6 +1677,8 @@ fn canonical_project_root(root: &str) -> Result<PathBuf> {
     if !canonical.is_dir() {
         return Err(HandlerError::BadRequest("project root is not a directory".into()).into());
     }
+    ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(&canonical, app_root)
+        .map_err(|refusal| HandlerError::Forbidden(refusal.to_string()))?;
     Ok(canonical)
 }
 
@@ -1915,7 +1917,7 @@ pub(crate) fn authorize_launch_project(
     state: &AppState,
     requested_root: &str,
 ) -> Result<(lillux::PinnedDirectory, Option<String>)> {
-    let requested = canonical_project_root(requested_root)?;
+    let requested = canonical_project_root(requested_root, &state.config.app_root)?;
     let authority = lillux::PinnedDirectory::open(&requested)?
         .context("authorized UI project root disappeared")?;
     if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_ok() {
@@ -2525,7 +2527,7 @@ mod tests {
 
     #[test]
     fn relative_project_root_is_rejected() {
-        let err = canonical_project_root("relative/path").unwrap_err();
+        let err = canonical_project_root("relative/path", Path::new("/data/ryeos")).unwrap_err();
         assert!(err.to_string().contains("project root must be absolute"));
     }
 
