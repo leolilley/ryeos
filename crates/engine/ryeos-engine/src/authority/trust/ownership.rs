@@ -81,6 +81,9 @@ pub enum OwnerRefusal {
     /// The store has no node registry to resolve against (a store rebuilt
     /// from a launch envelope or built in memory).
     Unavailable,
+    /// The succession chain loops through these keys. Valid operations
+    /// cannot produce a cycle, so the registry is damaged.
+    ChainCorrupt { keys: Vec<String> },
 }
 
 impl OwnerRefusal {
@@ -89,6 +92,7 @@ impl OwnerRefusal {
             Self::KeyNotActive { .. } => "owner_key_not_active",
             Self::NotAFingerprint(_) => "owner_not_a_key_fingerprint",
             Self::Unavailable => "owner_resolution_unavailable",
+            Self::ChainCorrupt { .. } => "owner_chain_corrupt",
         }
     }
 }
@@ -106,6 +110,12 @@ impl std::fmt::Display for OwnerRefusal {
             }
             Self::Unavailable => formatter.write_str(
                 "owner_resolution_unavailable: this trust store holds no node registry to resolve a project owner",
+            ),
+            Self::ChainCorrupt { keys } => write!(
+                formatter,
+                "owner_chain_corrupt: the key succession chain loops through {}; the signer \
+                 registry is damaged; restore it from a backup of the node state",
+                keys.join(" -> ")
             ),
         }
     }
@@ -172,9 +182,9 @@ impl SuccessionGraph {
     }
 
     /// The root of `fingerprint`'s backward chain: follow predecessors until
-    /// a key with none (or one the registry holds no record for). Cycle-safe:
-    /// a repeated key ends the walk at the last new one.
-    pub fn root_of(&self, fingerprint: &str) -> String {
+    /// a key with none (or one the registry holds no record for). A chain
+    /// that loops is refused as `owner_chain_corrupt`, naming the keys.
+    pub fn root_of(&self, fingerprint: &str) -> Result<String, OwnerRefusal> {
         let mut current = fingerprint.to_owned();
         let mut seen = vec![current.clone()];
         while let Some(predecessor) = self
@@ -183,12 +193,13 @@ impl SuccessionGraph {
             .and_then(|node| node.predecessor.clone())
         {
             if seen.contains(&predecessor) {
-                break;
+                seen.push(predecessor);
+                return Err(OwnerRefusal::ChainCorrupt { keys: seen });
             }
             seen.push(predecessor.clone());
             current = predecessor;
         }
-        current
+        Ok(current)
     }
 
     /// The ownership policy. `fingerprint` is `fp:<64 lowercase hex>`
@@ -209,7 +220,7 @@ impl SuccessionGraph {
                 status: node.status,
             });
         }
-        let root = self.root_of(fingerprint);
+        let root = self.root_of(fingerprint)?;
         let via = if root == fingerprint {
             OwnerVia::Solo
         } else {
@@ -221,18 +232,34 @@ impl SuccessionGraph {
         })
     }
 
-    /// The principal a statement `fingerprint` signed in the past speaks
-    /// for: the solo principal of its chain root, for an active or retired
-    /// key (a retired key's signatures still verify, so what it stated for
-    /// its principal still stands); `None` for a revoked key or one with no
-    /// record. For judging stored statements such as endorsements, never for
-    /// acting: acting goes through [`Self::ownership_of`].
-    pub fn statement_principal_of(&self, fingerprint: &str) -> Option<PrincipalId> {
-        let node = self.nodes.get(fingerprint)?;
+    /// The principal a signature by `fingerprint` speaks for when it is
+    /// verified: the solo principal of its chain root, for an active or
+    /// retired key (verification follows "retired verifies, revoked does
+    /// not"); `Ok(None)` for a revoked key or one with no record. For judging
+    /// signed items (`own:` scopes) and stored statements (endorsements),
+    /// never for acting: acting goes through [`Self::ownership_of`].
+    pub fn signing_principal_of(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<PrincipalId>, OwnerRefusal> {
+        let Some(node) = self.nodes.get(fingerprint) else {
+            return Ok(None);
+        };
         if node.status == SignerStatus::Revoked {
-            return None;
+            return Ok(None);
         }
-        PrincipalId::solo(&format!("fp:{}", self.root_of(fingerprint))).ok()
+        let root = self.root_of(fingerprint)?;
+        PrincipalId::solo(&format!("fp:{root}"))
+            .map(Some)
+            .map_err(|error| OwnerRefusal::NotAFingerprint(format!("{error:#}")))
+    }
+
+    /// Keys whose succession chain is corrupt (loops), for doctor.
+    pub fn corrupt_chains(&self) -> Vec<OwnerRefusal> {
+        self.nodes
+            .keys()
+            .filter_map(|key| self.root_of(key).err())
+            .collect()
     }
 
     /// Every principal some key in this registry roots, with its root key
@@ -241,7 +268,9 @@ impl SuccessionGraph {
     pub fn principals(&self) -> Vec<PrincipalSummary> {
         let mut by_root: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for node in self.nodes.values() {
-            let root = self.root_of(&node.fingerprint);
+            let Ok(root) = self.root_of(&node.fingerprint) else {
+                continue;
+            };
             let entry = by_root.entry(root).or_default();
             if node.status == SignerStatus::Active {
                 entry.push(node.fingerprint.clone());
@@ -395,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cycle_in_a_corrupt_chain_ends_the_walk() {
+    fn a_cycle_in_a_corrupt_chain_is_refused_by_name() {
         let records = [
             record(1, SignerRole::Operator, SignerStatus::Active),
             record(2, SignerRole::Operator, SignerStatus::Active),
@@ -403,9 +432,19 @@ mod tests {
         // Each key names the other; the first event per key wins, so 2 has
         // predecessor 1 and 1 has predecessor 2.
         let graph = SuccessionGraph::build(&records, &[succeeded(1, 2, 1), succeeded(2, 1, 2)]);
-        // The walk terminates and gives some root in the cycle.
-        assert!(graph.ownership_of(&fp(1)).is_ok());
-        assert!(graph.ownership_of(&fp(2)).is_ok());
+        // A loop means a damaged registry: refused, naming the keys.
+        for key in [fp(1), fp(2)] {
+            assert_eq!(
+                graph.ownership_of(&key).unwrap_err().code(),
+                "owner_chain_corrupt"
+            );
+            assert_eq!(
+                graph.signing_principal_of(&key).unwrap_err().code(),
+                "owner_chain_corrupt"
+            );
+        }
+        assert_eq!(graph.corrupt_chains().len(), 2);
+        assert!(graph.principals().is_empty());
     }
 
     #[test]
@@ -416,10 +455,12 @@ mod tests {
             record(3, SignerRole::Operator, SignerStatus::Active),
         ];
         let graph = SuccessionGraph::build(&records, &[succeeded(1, 2, 1), succeeded(2, 3, 2)]);
-        assert_eq!(graph.statement_principal_of(&fp(1)), Some(solo(1)));
-        assert_eq!(graph.statement_principal_of(&fp(2)), None);
-        assert_eq!(graph.statement_principal_of(&fp(3)), Some(solo(1)));
-        assert_eq!(graph.statement_principal_of(&fp(9)), None);
+        assert_eq!(graph.signing_principal_of(&fp(1)).unwrap(), Some(solo(1)));
+        assert_eq!(graph.signing_principal_of(&fp(2)).unwrap(), None);
+        assert_eq!(graph.signing_principal_of(&fp(3)).unwrap(), Some(solo(1)));
+        assert_eq!(graph.signing_principal_of(&fp(9)).unwrap(), None);
+        // Acting is separate: the retired key still owns nothing.
+        assert!(graph.ownership_of(&fp(1)).is_err());
     }
 
     #[test]

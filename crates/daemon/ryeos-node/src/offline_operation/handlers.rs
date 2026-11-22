@@ -1643,9 +1643,12 @@ fn registration_owner(
         .records()
         .filter(|record| record.role == ryeos_engine::trust::SignerRole::Authoring)
         .filter_map(|record| {
-            trust
-                .succession()
-                .and_then(|graph| graph.statement_principal_of(&record.fingerprint))
+            trust.succession().and_then(|graph| {
+                graph
+                    .signing_principal_of(&record.fingerprint)
+                    .ok()
+                    .flatten()
+            })
         })
         .any(|principal| principal == owner);
     ensure!(

@@ -712,7 +712,7 @@ impl EndorsementIndex {
             // the index is built is judging it at every use.
             let owned = trust
                 .succession()
-                .and_then(|graph| graph.statement_principal_of(endorser))
+                .and_then(|graph| graph.signing_principal_of(endorser).ok().flatten())
                 .is_some_and(|principal| &principal == body.project.owner());
             if !owned {
                 continue;

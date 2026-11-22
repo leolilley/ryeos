@@ -586,9 +586,7 @@ impl TrustStore {
             .map(|entry| {
                 (
                     entry.fingerprint.clone(),
-                    self.owner_for(&entry.fingerprint)
-                        .ok()
-                        .map(|owner| owner.principal),
+                    self.signing_principal_of(&entry.fingerprint),
                 )
             })
             .collect();
@@ -653,6 +651,19 @@ impl TrustStore {
             .as_deref()
             .ok_or(OwnerRefusal::Unavailable)?;
         graph.ownership_of(key.strip_prefix("fp:").unwrap_or(key))
+    }
+
+    /// The principal a signature by `key` speaks for when verified: its
+    /// chain root's solo principal for an active or retired key; `None` for
+    /// a revoked key, a key with no record, a corrupt chain, or a store with
+    /// no registry graph. For judging signed items and stored statements,
+    /// never for acting.
+    pub fn signing_principal_of(&self, key: &str) -> Option<PrincipalId> {
+        self.succession
+            .as_deref()?
+            .signing_principal_of(key.strip_prefix("fp:").unwrap_or(key))
+            .ok()
+            .flatten()
     }
 
     /// Whether `key` speaks for `principal` on this node. Decides project
@@ -838,10 +849,10 @@ impl TrustStore {
                     scope: record.scope.clone(),
                 };
             }
-            let owner = self
-                .owner_for(fingerprint)
-                .ok()
-                .map(|owner| owner.principal);
+            // Verification follows "retired verifies, revoked does not", so
+            // an `own:` scope is judged on the signing principal, not on
+            // whether the key may still act.
+            let owner = self.signing_principal_of(fingerprint);
             if record
                 .scope
                 .admits(context.space, context.kind, context.project, owner.as_ref())
@@ -1927,6 +1938,75 @@ mod tests {
                 .parse::<ProjectScopeEntry>()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn own_scope_verification_follows_retired_verifies_and_revoked_does_not() {
+        let (root_sk, root_vk, root_fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let successor_vk = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let successor_fp = compute_fingerprint(&successor_vk);
+        let succeeded = TrustEvent {
+            schema: "x".into(),
+            seq: 1,
+            previous: None,
+            kind: TrustEventKind::Succeeded,
+            signer: successor_fp.clone(),
+            record_digest: String::new(),
+            request_digest: String::new(),
+            operator: String::new(),
+            predecessor: Some(root_fp.clone()),
+        };
+        let store_with = |root_status: SignerStatus| {
+            TrustStore::from_registry(
+                node_vk,
+                vec![
+                    record_for(
+                        &root_vk,
+                        SignerRole::ProjectAuthor,
+                        vec![SignerSpace::Project],
+                        &["*"],
+                        &["own:demo"],
+                        root_status,
+                    ),
+                    record_for(
+                        &successor_vk,
+                        SignerRole::ProjectAuthor,
+                        vec![SignerSpace::Project],
+                        &["*"],
+                        &["own:demo"],
+                        SignerStatus::Active,
+                    ),
+                ],
+            )
+            .unwrap()
+            .with_succession_chain(std::slice::from_ref(&succeeded))
+        };
+        let retired = store_with(SignerStatus::Retired);
+        let principal = retired.signing_principal_of(&root_fp).unwrap();
+        assert_eq!(
+            retired.signing_principal_of(&successor_fp),
+            Some(principal.clone())
+        );
+        let demo = LogicalProject::Stated(format!("{principal}/demo").parse().unwrap());
+        let (content, envelope, header) = signed_with_header(&root_sk, &root_fp);
+        // A retired key's own:-scoped items still verify after rotation.
+        let ctx = SignerContext::project("tool", &demo);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &retired, &ctx).unwrap();
+        assert_eq!(class, TrustClass::Trusted);
+        // Acting is separate: the retired key owns nothing.
+        assert_eq!(
+            retired.owner_for(&root_fp).unwrap_err().code(),
+            "owner_key_not_active"
+        );
+        assert!(!retired.speaks_for(&root_fp, &principal));
+        assert!(retired.speaks_for(&successor_fp, &principal));
+        // A revoked key's items verify nowhere, and it has no signing
+        // principal for own:.
+        let revoked = store_with(SignerStatus::Revoked);
+        assert_eq!(revoked.signing_principal_of(&root_fp), None);
+        assert!(verify_item_signature(&content, &header, &envelope, &revoked, &ctx).is_err());
     }
 
     #[test]
