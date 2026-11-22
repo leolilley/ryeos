@@ -13,8 +13,8 @@ use serde::Serialize;
 
 pub use ryeos_app::project_registry::{
     LoadedRegistration, MAX_REGISTERED_PATHS, PROJECT_REGISTRATION_SCHEMA, PROJECTS_DIR,
-    ProjectRegistration, inspect_checkout, live_signer_project, load_registrations, owner_key,
-    projects_dir, read_registration, validate_checkout_path,
+    ProjectRegistration, inspect_checkout, live_signer_project, load_registrations,
+    owner_directory_name, projects_dir, read_registration, validate_checkout_path,
 };
 
 /// What a register or unregister request asks for, after the handler has
@@ -56,7 +56,7 @@ pub fn register(change: &RegistrationChange<'_>) -> Result<RegistrationOutcome> 
     let projects = lillux::PinnedDirectory::open_or_create(&projects_dir(change.app_root))
         .context("establish the project registrations directory")?;
     let owner_directory = projects
-        .open_or_create_child(OsStr::new(owner_key(change.identity)?), 0o700)
+        .open_or_create_child(OsStr::new(&owner_directory_name(change.identity)), 0o700)
         .context("establish the owner's registrations directory")?;
     let _lock = owner_directory.lock_exclusive()?;
     let file_name = format!("{}.yaml", change.identity.name());
@@ -114,7 +114,7 @@ pub fn unregister(change: &RegistrationChange<'_>) -> Result<RegistrationOutcome
         return Ok(unchanged(Vec::new()));
     };
     let Some(owner_directory) =
-        projects.open_child_directory(OsStr::new(owner_key(change.identity)?))?
+        projects.open_child_directory(OsStr::new(&owner_directory_name(change.identity)))?
     else {
         return Ok(unchanged(Vec::new()));
     };

@@ -930,6 +930,7 @@ pub(crate) fn write_verified_project_head_ref_in_directory(
     principal_key: &str,
     project_hash: &str,
     project_snapshot_hash: &str,
+    advancer: &crate::head_advance::HeadAdvancer,
     signer: &dyn Signer,
     trust_store: &TrustStore,
     project_lock: &ProjectHeadLock,
@@ -961,6 +962,15 @@ pub(crate) fn write_verified_project_head_ref_in_directory(
         );
     }
     ensure_pinned_ref_lock(&project_lock._lock_file, &head_directory, "project HEAD")?;
+    crate::head_advance::record_head_advance(
+        &head_directory,
+        &expected_ref_path,
+        None,
+        project_snapshot_hash,
+        advancer,
+        signer,
+        trust_store,
+    )?;
     write_project_head_ref_unchecked_in_head_directory(
         &head_directory,
         principal_key,
@@ -1066,6 +1076,9 @@ fn read_verified_closed_head_directory(
                 head = read_verified_ref_in_directory(directory, &name, trust_store)
                     .with_context(|| format!("failed to verify {label} {expected_ref_path}"))?;
             }
+            // Node-signed records of which key advanced the head; read only
+            // by exact (previous, new) lookup.
+            advance if advance.starts_with(crate::head_advance::HEAD_ADVANCE_PREFIX) => {}
             _ => anyhow::bail!(
                 "unexpected regular file in {label} namespace: {}",
                 directory.path().join(&name).display()
@@ -1600,6 +1613,7 @@ pub(crate) fn advance_verified_project_head_ref_in_directory(
     project_hash: &str,
     new_snapshot_hash: &str,
     expected_current_hash: &str,
+    advancer: &crate::head_advance::HeadAdvancer,
     signer: &dyn Signer,
     trust_store: &TrustStore,
     project_lock: &ProjectHeadLock,
@@ -1645,6 +1659,16 @@ pub(crate) fn advance_verified_project_head_ref_in_directory(
     }
     ensure_pinned_ref_lock(&project_lock._lock_file, &head_directory, "project HEAD")
         .map_err(ProjectHeadAdvanceRefusal::before_write)?;
+    crate::head_advance::record_head_advance(
+        &head_directory,
+        &expected_ref_path,
+        Some(expected_current_hash),
+        new_snapshot_hash,
+        advancer,
+        signer,
+        trust_store,
+    )
+    .map_err(ProjectHeadAdvanceRefusal::before_write)?;
     write_project_head_ref_unchecked_in_head_directory(
         &head_directory,
         principal_key,
@@ -3128,11 +3152,16 @@ mod tests {
         let project_lock =
             ProjectHeadLock::acquire_in_refs_directory(&refs_directory, "principal-a", "project-a")
                 .unwrap();
+        let advancer = crate::head_advance::HeadAdvancer {
+            key: format!("fp:{}", signer.fingerprint()),
+            via_root: None,
+        };
         write_verified_project_head_ref_in_directory(
             &refs_directory,
             "principal-a",
             "project-a",
             &first,
+            &advancer,
             &signer,
             &trust,
             &project_lock,
@@ -3198,6 +3227,7 @@ mod tests {
             "project-a",
             &second,
             &first,
+            &advancer,
             &signer,
             &trust,
             &project_lock,

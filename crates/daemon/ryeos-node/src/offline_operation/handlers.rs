@@ -1588,8 +1588,9 @@ pub struct ProjectRegistrationArguments {
     /// `.ai/project.yaml` declares and requires the two to agree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// `fp:<64 lowercase hex>`; defaults to the node's operator. Never the
-    /// node key or the authoring key.
+    /// The owner principal, `pid:v1:<64 lowercase hex>`; defaults to the
+    /// principal the node's operator key acts for. Never the principal of
+    /// the node key or of the authoring key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }
@@ -1606,32 +1607,49 @@ impl ProjectRegistrationArguments {
             ryeos_state::project_identity::ProjectName::new(name.as_str())?;
         }
         if let Some(owner) = &self.owner {
-            ryeos_state::refs::principal_storage_key(owner)?;
+            owner.parse::<ryeos_state::principal_id::PrincipalId>()?;
         }
         Ok(())
     }
 }
 
-/// The owner a registration names: the operator by default; never the node
-/// key or the authoring key, which sign on the node's behalf and own no
-/// project.
-fn registration_owner(ctx: &HandlerContext<'_>, requested: Option<&str>) -> Result<String> {
+/// The owner principal a registration names: by default the principal the
+/// operator key acts for, from the node's ownership resolver; an explicit
+/// owner is the operator granting that principal a place on this node. Never
+/// the principal of the node key or of the authoring key, which sign on the
+/// node's behalf and own no project.
+fn registration_owner(
+    ctx: &HandlerContext<'_>,
+    requested: Option<&str>,
+) -> Result<ryeos_state::principal_id::PrincipalId> {
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(ctx.app_root)
+        .map_err(|error| anyhow::anyhow!("load the node signer registry: {error}"))?;
     let owner = match requested {
-        Some(owner) => owner.to_owned(),
-        None => operator_public(ctx)?.principal_id(),
+        Some(owner) => owner.parse::<ryeos_state::principal_id::PrincipalId>()?,
+        None => {
+            ryeos_app::project_owner::owner_for_in(&trust, &operator_public(ctx)?.principal_id())?
+                .principal
+        }
     };
-    let key = ryeos_state::refs::principal_storage_key(&owner)?;
+    let node_owner = trust
+        .owner_for(ctx.node.fingerprint())
+        .map(|resolved| resolved.principal)
+        .ok();
     ensure!(
-        key != ctx.node.fingerprint(),
+        node_owner.as_ref() != Some(&owner),
         "project_owner_is_node_key: the node key signs on the node's behalf and owns no project"
     );
-    let signers = ryeos_engine::trust::load_signer_records(
-        &ryeos_engine::trust::signers_dir(ctx.app_root),
-        ctx.node.verifying_key(),
-    )?;
+    let authoring_owns = trust
+        .records()
+        .filter(|record| record.role == ryeos_engine::trust::SignerRole::Authoring)
+        .filter_map(|record| {
+            trust
+                .succession()
+                .and_then(|graph| graph.statement_principal_of(&record.fingerprint))
+        })
+        .any(|principal| principal == owner);
     ensure!(
-        !signers.iter().any(|record| record.fingerprint == key
-            && record.role == ryeos_engine::trust::SignerRole::Authoring),
+        !authoring_owns,
         "project_owner_is_authoring_key: the authoring key signs runtime drafts and owns no project"
     );
     Ok(owner)
@@ -1659,7 +1677,7 @@ pub(super) fn project_register(ctx: &HandlerContext<'_>) -> Result<Value> {
         "project_name_mismatch: {} declares `{declared}`, not `{name}`",
         path.display()
     );
-    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name)?;
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name);
     let outcome =
         crate::project_registry::register(&crate::project_registry::RegistrationChange {
             app_root: ctx.app_root,
@@ -1690,7 +1708,7 @@ pub(super) fn project_unregister(ctx: &HandlerContext<'_>) -> Result<Value> {
             path.display()
         ),
     };
-    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name)?;
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name);
     let outcome =
         crate::project_registry::unregister(&crate::project_registry::RegistrationChange {
             app_root: ctx.app_root,

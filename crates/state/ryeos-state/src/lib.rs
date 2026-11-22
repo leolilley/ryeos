@@ -19,6 +19,7 @@ pub mod event_types;
 pub mod external_content;
 pub mod external_execution;
 pub mod gc;
+pub mod head_advance;
 pub mod head_cache;
 pub mod ignore;
 pub mod immutable_testimony;

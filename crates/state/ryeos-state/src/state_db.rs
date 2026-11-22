@@ -6254,6 +6254,7 @@ impl StateDb {
         &self,
         key: &crate::project_identity::ProjectHeadKey,
         project_snapshot_hash: &str,
+        advancer: &crate::head_advance::HeadAdvancer,
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
@@ -6269,6 +6270,7 @@ impl StateDb {
             &key.owner_component(),
             key.name_hash(),
             project_snapshot_hash,
+            advancer,
             signer,
             self.trust_store.as_ref(),
             &_project_lock,
@@ -6285,6 +6287,7 @@ impl StateDb {
         key: &crate::project_identity::ProjectHeadKey,
         new_snapshot_hash: &str,
         expected_current_hash: &str,
+        advancer: &crate::head_advance::HeadAdvancer,
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
@@ -6305,6 +6308,7 @@ impl StateDb {
             key.name_hash(),
             new_snapshot_hash,
             expected_current_hash,
+            advancer,
             signer,
             self.trust_store.as_ref(),
             &_project_lock,
@@ -9728,8 +9732,18 @@ mod tests {
         let principal_snapshot_hash = "c".repeat(64);
         let deployed_snapshot_hash = "d".repeat(64);
 
-        db.write_project_head_ref(&head_key, &principal_snapshot_hash, &signer, &guard)
-            .unwrap();
+        let advancer = crate::head_advance::HeadAdvancer {
+            key: format!("fp:{}", signer.fingerprint()),
+            via_root: None,
+        };
+        db.write_project_head_ref(
+            &head_key,
+            &principal_snapshot_hash,
+            &advancer,
+            &signer,
+            &guard,
+        )
+        .unwrap();
         db.write_deployed_project_ref(
             &deployed_project_hash,
             &deployed_snapshot_hash,
