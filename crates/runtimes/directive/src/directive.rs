@@ -956,6 +956,12 @@ pub struct UsageUpdate {
     pub anomalies: Vec<String>,
 }
 
+/// Whether a reply has nothing to act on: no tool call and no text beyond
+/// whitespace. A reply holding only reasoning is empty.
+pub fn is_empty_reply(message: &ProviderMessage) -> bool {
+    !message.has_tool_calls() && message.text().is_none_or(|text| text.trim().is_empty())
+}
+
 /// Normalize a provider-specific finish reason string to a canonical enum.
 /// Case-insensitive: Gemini sends uppercase `"STOP"`, Anthropic sends
 /// lowercase `"end_turn"`, OpenAI sends lowercase `"stop"`.
@@ -975,6 +981,28 @@ pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_reply_has_no_call_and_no_text_beyond_whitespace() {
+        use ryeos_provider_contract::ReasoningPart;
+        let reasoning = Part::Reasoning(ReasoningPart {
+            text: Some("thinking".to_string()),
+            artefact: None,
+        });
+        let assistant = |parts: Vec<Part>| ProviderMessage::new(Role::Assistant, parts);
+        assert!(is_empty_reply(&assistant(vec![])));
+        assert!(is_empty_reply(&assistant(vec![reasoning.clone()])));
+        assert!(is_empty_reply(&assistant(vec![Part::text(" \n\t ")])));
+        assert!(is_empty_reply(&assistant(vec![
+            reasoning.clone(),
+            Part::text("")
+        ])));
+        assert!(!is_empty_reply(&assistant(vec![Part::text("answer")])));
+        assert!(!is_empty_reply(&assistant(vec![
+            reasoning,
+            Part::tool_call("c1", "t", serde_json::json!({})),
+        ])));
+    }
 
     #[test]
     fn an_assistant_message_keeps_reasoning_text_then_calls_in_order() {

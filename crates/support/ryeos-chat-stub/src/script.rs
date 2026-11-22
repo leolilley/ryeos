@@ -18,6 +18,8 @@
 //!     text: "late"
 //!   - text: "cut"                  # headers and two chunks, then the connection drops
 //!     cut_after_chunks: 2
+//!   - reasoning: "thinking"       # no text, no calls: an empty reply, finish stop
+//!   - finish_reason: content_filter  # an empty reply the provider withheld
 //!   - text: "stalled"              # headers, then nothing for 60 s, then the rest
 //!     stall: { after_chunks: 0, ms: 60000 }
 //! ```

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T10:53:33Z:2ed7de7d5316d5b865b8b03cc517fb4d5a0c4143592d05477cce18ed09d6d20f:ZdHCJVOOuGDN4O33O4Vg6RN0QL8mZ7cWFPLiaVF4v9C0sWoUOAfKZUvM3rhylPPSloUzF3EUCTBrks0AqtkICA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T15:16:46Z:906ff475f389a131326092c9f4cb45d25453c65ade88130bba98c38e0af7f1be:pJK/2JPgaJ5I2oq5F4c8jd7D9y3xzDNc1Dc49mqaVStehJmkk+Tg7bS65bSPY9rntavyKgaDwmYX8Fkv78oUBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.1.0"
@@ -324,3 +324,7 @@ A reply that writes a tool call as text is not a result when the provider entry
 declares `malformed_replies` (see the model provider guide): the runtime takes a
 corrected turn, and fails with `malformed_reply_retries_exhausted` when the
 corrections run out.
+
+A reply with no tool call and no text is retried silently unless the provider entry
+declares `empty_replies`: the runtime then takes a corrected turn, and fails with
+`empty_reply_retries_exhausted` when the corrections run out.

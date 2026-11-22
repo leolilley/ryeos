@@ -366,6 +366,10 @@ const OUTPUT_LIMIT_ERROR: &str = "provider_output_limit_reached: provider ended 
 /// marker the last reply matched.
 const MALFORMED_REPLY_ERROR_CODE: &str = "malformed_reply_retries_exhausted";
 
+/// Code that starts the failure text of a run whose empty replies the
+/// provider's signed policy could not correct.
+const EMPTY_REPLY_ERROR_CODE: &str = "empty_reply_retries_exhausted";
+
 /// The model-visible error for a call whose arguments did not parse.
 fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
     format!(
@@ -813,6 +817,13 @@ pub struct Runner {
     /// Malformed replies in a row that were corrected. Derived from the
     /// record on resume.
     consecutive_malformed_replies: u32,
+    /// Empty replies in a row that were corrected. Derived from the record on
+    /// resume.
+    consecutive_empty_replies: u32,
+    /// Whether the latest recorded reply ended at a normal stop finish. The
+    /// empty-reply correction applies only then: a content-filter, unknown or
+    /// output-limit finish is a different condition and is never nudged past.
+    last_reply_stopped: bool,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
     /// The provider turn a restart cut. Set on resume of an unfinished
@@ -1710,6 +1721,8 @@ impl Runner {
             turn_malformed_calls: Vec::new(),
             consecutive_length_turns: 0,
             consecutive_malformed_replies: 0,
+            consecutive_empty_replies: 0,
+            last_reply_stopped: false,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
             restart_cut_turn: None,
@@ -1759,6 +1772,8 @@ impl Runner {
         let loop_warned = resume.loop_warned.clone();
         let trailing_length_turns = resume.trailing_length_turns;
         let trailing_malformed_replies = resume.trailing_malformed_replies;
+        let trailing_empty_replies = resume.trailing_empty_replies;
+        let last_final_stopped = resume.last_final_stopped;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
@@ -1842,6 +1857,8 @@ impl Runner {
         runner.loop_warned = loop_warned;
         runner.consecutive_length_turns = trailing_length_turns;
         runner.consecutive_malformed_replies = trailing_malformed_replies;
+        runner.consecutive_empty_replies = trailing_empty_replies;
+        runner.last_reply_stopped = last_final_stopped;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -3184,6 +3201,9 @@ impl Runner {
                             } else {
                                 0
                             };
+                            self.last_reply_stopped = crate::directive::normalize_finish_reason(
+                                resp.finish_reason.as_deref(),
+                            ) == FinishReason::Stop;
                             self.messages.push(resp.message.clone());
                             if resp.message.has_tool_calls() {
                                 block_at_directive_recovery_test_cut(
@@ -3710,6 +3730,7 @@ impl Runner {
                         Some(msg) => {
                             if msg.has_tool_calls() {
                                 self.consecutive_malformed_replies = 0;
+                                self.consecutive_empty_replies = 0;
                                 let occurrences = msg
                                     .calls()
                                     .iter()
@@ -3751,6 +3772,7 @@ impl Runner {
                                 }
                             } else if self.consecutive_length_turns > 0 {
                                 self.consecutive_malformed_replies = 0;
+                                self.consecutive_empty_replies = 0;
                                 // The turn ended at the output limit and made no
                                 // tool call: its text is incomplete, so it must
                                 // not finalize. Record the policy's message as a
@@ -3804,6 +3826,7 @@ impl Runner {
                                 // another turn is taken within the policy's
                                 // bound and the turn limit. Otherwise the run
                                 // fails, and the reply is never the result.
+                                self.consecutive_empty_replies = 0;
                                 let streak = self.consecutive_malformed_replies.saturating_add(1);
                                 tracing::warn!(
                                     turn,
@@ -3834,6 +3857,9 @@ impl Runner {
                                         self.messages.pop();
                                         self.messages.push(ProviderMessage::user(policy.message));
                                         self.consecutive_malformed_replies = streak;
+                                        warnings.push(format!(
+                                            "malformed reply corrected: turn {turn}, {streak} in a row"
+                                        ));
                                         State::CheckingLimits
                                     }
                                 } else {
@@ -3844,8 +3870,64 @@ impl Runner {
                                         ),
                                     }
                                 }
+                            } else if let Some(policy) =
+                                self.provider_config.empty_replies.clone().filter(|_| {
+                                    self.last_reply_stopped
+                                        && crate::directive::is_empty_reply(&msg)
+                                })
+                            {
+                                // A normal stop with no tool call and no text
+                                // beyond whitespace (a reply holding only
+                                // reasoning counts) is empty. The reply is
+                                // dropped from the conversation, the policy's
+                                // message takes its place, and another turn is
+                                // taken within the policy's bound and the turn
+                                // limit. Other finishes (output limit, content
+                                // filter, unknown) never reach here.
+                                self.consecutive_malformed_replies = 0;
+                                let streak = self.consecutive_empty_replies.saturating_add(1);
+                                tracing::warn!(
+                                    turn,
+                                    streak,
+                                    max_consecutive = policy.max_consecutive,
+                                    "provider reply is empty"
+                                );
+                                if streak <= policy.max_consecutive && self.can_start_another_turn()
+                                {
+                                    let input = ryeos_runtime::CognitionInput::text(
+                                        "harness",
+                                        &policy.message,
+                                    )
+                                    .with_kind(
+                                        ryeos_runtime::cognition::empty_reply_kind(turn, streak),
+                                    );
+                                    if let Err(e) = self.callback.emit_cognition_input(&input).await
+                                    {
+                                        State::RecoveryRequired {
+                                            error: format!(
+                                                "resume-critical empty_reply input append failed: {e}"
+                                            ),
+                                        }
+                                    } else {
+                                        self.messages.pop();
+                                        self.messages.push(ProviderMessage::user(policy.message));
+                                        self.consecutive_empty_replies = streak;
+                                        warnings.push(format!(
+                                            "empty reply corrected: turn {turn}, {streak} in a row"
+                                        ));
+                                        State::CheckingLimits
+                                    }
+                                } else {
+                                    State::Errored {
+                                        error: format!(
+                                            "{EMPTY_REPLY_ERROR_CODE}: the provider's reply was empty and no correction was left (allowed in a row: {})",
+                                            policy.max_consecutive
+                                        ),
+                                    }
+                                }
                             } else if let Some(content) = msg.content_value() {
                                 self.consecutive_malformed_replies = 0;
+                                self.consecutive_empty_replies = 0;
                                 // Steer pre-finalize drain (finding C): a no-tool
                                 // content response is about to finalize. If an
                                 // operator input is pending, fold it and take
@@ -3871,6 +3953,7 @@ impl Runner {
                                     State::Finalizing { result: content }
                                 }
                             } else {
+                                self.consecutive_empty_replies = 0;
                                 State::CheckingContinuation
                             }
                         }
@@ -7002,6 +7085,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -7085,6 +7169,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -7144,6 +7229,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -7202,6 +7288,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -7275,6 +7362,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -7453,6 +7541,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -7531,6 +7620,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -7606,6 +7696,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -7665,6 +7756,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -8665,6 +8757,7 @@ mod tests {
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {

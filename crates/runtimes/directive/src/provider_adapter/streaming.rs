@@ -4650,6 +4650,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4689,6 +4690,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let body = super::build_request_body(
@@ -4738,6 +4740,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
 
@@ -4832,6 +4835,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let _ =
@@ -4863,6 +4867,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -4915,6 +4920,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let mut body = json!({});
@@ -4967,6 +4973,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             cache_marks: None,
             request_rejections: None,
             malformed_replies: None,
+            empty_replies: None,
             profiles: vec![],
         };
         let mut body = json!({"contents": []});

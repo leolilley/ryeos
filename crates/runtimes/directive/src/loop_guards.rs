@@ -276,6 +276,7 @@ fn idle(digests: &[TurnDigest], config: &LoopGuardsConfig) -> Option<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::directive::ProviderMessageExt;
 
     fn call(turn: u32, tool: &str, args: &str, result: &str) -> TurnDigest {
         TurnDigest {
@@ -374,6 +375,39 @@ mod tests {
         let mut spoke = digests.clone();
         spoke[3].text = Some("hello".to_string());
         assert!(!kinds(&spoke).contains(&FindingKind::Idle));
+    }
+
+    #[test]
+    fn corrected_empty_replies_leave_no_digest_so_idle_does_not_fire() {
+        let task = ProviderMessage::user("Do task");
+        let empty = || ProviderMessage::new(Role::Assistant, vec![]);
+        // Without a correction the three empty replies stay in the
+        // conversation and the guard sees them.
+        let uncorrected = vec![task.clone(), empty(), empty(), empty()];
+        assert!(
+            detect(
+                &digests_from_messages(&uncorrected),
+                &LoopGuardsConfig::default()
+            )
+            .iter()
+            .any(|finding| finding.kind == FindingKind::Idle)
+        );
+        // With the policy each empty reply was replaced by the correction, a
+        // user message, so no digest records it.
+        let corrected = vec![
+            task,
+            ProviderMessage::user("answer or call"),
+            ProviderMessage::user("answer or call"),
+            ProviderMessage::user("answer or call"),
+        ];
+        assert!(digests_from_messages(&corrected).is_empty());
+        assert!(
+            detect(
+                &digests_from_messages(&corrected),
+                &LoopGuardsConfig::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]

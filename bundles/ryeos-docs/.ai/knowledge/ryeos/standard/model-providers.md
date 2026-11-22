@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T10:53:23Z:022383f8ee0703d87618838d99e5b239cbe51255f53e756c0dd7e4bb5b89baf5:XP/bcszHMM3NHN4nYp0WyD1kCAkHCGImBBpzulnX+e7/zZsuU6y77pKWCo27tIDjXDWjeyif1U7MJ+w+bKSMCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T15:16:46Z:a5fb6e6b7cbf921d497828a185a84a9a408d0e8841fe0d179c3e5522e03bd9fd:8Zh5sVGcxeTKUOcQQEBWCg6WUQsKg1P968/J0G690GXS808bgR2TX7yYHdZOJcu2x5mbasgcjRs8YEe7h6doAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -425,6 +425,51 @@ All three fields are required: 1 to 16 markers of 1 to 128 bytes (no control
 characters, none a substring of another), a message of 1 to 4096 bytes, and
 `max_consecutive` from 1 to 8. The runtime reads the strings as opaque data and
 gives none a meaning. It reads the field with `deny_unknown_fields`, so refresh
+the runtime payload and the bundle's provider configs together.
+
+## Empty replies
+
+Some reasoning models sometimes end a turn with no tool call and no text: a reply
+that holds only reasoning, or only whitespace. Without a policy the run retries
+silently with the same conversation, and the only bound is the idle loop guard or
+the turn and spend limits. `empty_replies` sits at the top level of the provider
+entry, next to `malformed_replies` but separate from it (an empty reply has no
+marker, so it is a different condition); a profile's value replaces the entry's
+whole. It is absent by default, and an entry without it behaves as before.
+
+```yaml
+empty_replies:
+  max_consecutive: 2
+  message: "Your last reply was empty. Call a tool or give your answer."
+```
+
+A reply is empty when it has no tool call and no text beyond whitespace, and it
+ended at a normal stop finish. Reasoning parts do not count as text. The policy
+never applies to a reply that ended at the output limit (that has its own
+`on_output_limit` path), to a content-filter or safety finish (a reply the
+provider withheld is left as it is today, never nudged past), to a cancelled,
+interrupted or cut stream, or to a finish reason the runtime does not recognise.
+
+The runtime drops the empty reply from the conversation sent next, records the
+entry's `message` as a harness input of kind
+`empty_reply_turn_<turn>_streak_<n>` (the record names the turn it corrects, and
+readers show it as runtime-authored, never as a user message), and takes another
+turn. The dropped reply stays in the durable record with its reasoning parts. A
+reply that is not empty resets the streak. After `max_consecutive` corrections in
+a row, or when no turn is left, the run fails with `empty_reply_retries_exhausted`.
+Each correction adds a run warning (`empty reply corrected: turn <turn>, <n> in a
+row`), so a run that succeeded after several nudges does not look clean. The
+streak resets, so the per-streak bound does not cap the empty replies in a whole
+run; the turn and spend limits do.
+
+Both fields are required: `max_consecutive` from 1 to 8, and a message of 1 to
+4096 bytes without control characters. A value of 0 or above 8 is refused when
+the config loads. The popped replies leave no digest, so with the policy active
+the idle loop guard does not see the corrected empty replies. The two settings
+are not coupled: a `max_consecutive` above 5 is looser than the idle guard's
+default (`idle_turns` 3 plus `grace_turns` 2 is five calls), and with the guard
+enabled the policy then hides empties from a guard that would have stopped the
+run sooner. The runtime reads the field with `deny_unknown_fields`, so refresh
 the runtime payload and the bundle's provider configs together.
 
 ## Provider cache usage
