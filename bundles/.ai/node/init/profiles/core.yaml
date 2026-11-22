@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T22:16:20Z:2a3fc666639dea98994c0655da4394e4809accfba69e404eea088efe80df8082:JTFDw5/7lj6zxoaQJhxeTNxs6TJhr0iaQ9CKV0kDqGoGe9VkZUStw+KyxDb4uPIvEoYTbTamiFnR7gO0mFHlAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T05:13:27Z:4896d8e4e087e49afddd76ad5168c754dc7f8067500f368f4d94c0d2e2a44857:AR2pnAV16rOBH87eH5nGm1ybHEtjTgs7n3UluJ/VEuJxpAz1e53XUFZuoVkses+9e/xKkWCVyF/dcRbxml6cBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -164,6 +164,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T22:16:20Z:b650f902bdf5fd8e53c2ab9c75282053a8b9bb2d65ce8cc18f316b5fc65be0ba:10dOwQW0y3TS6TFmhbmtuMpSQVFGWYXDomwn2n6tNILicCeCuLgFgHatNvItAxiuEbOSGY8EOwBPfnCj0lRACQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T05:13:27Z:c07bed90ba844a443682e5d85b91b052a29a48bd57eadf15cff7925a973df674:L3rySrffpGkqANjYUVvYkwkk7fsdvNjiAJ0KxQmxWR+7PINc5jlv/f0aj6VD3XR2MwagPanobnvyUQIwAFFbDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -167,6 +167,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by

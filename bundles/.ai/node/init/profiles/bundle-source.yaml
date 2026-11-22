@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T22:16:20Z:c6b9bee31cdc4886ce317d7fea77d580effae18dd3e68f2635a7681e7d4a6914:VX5waSzd5pRBbDchZBBli4S8kDnGo6MDH3ve2uFot10jPtT0Tyk2QEHAPRkGLZNi5gze3QoHph/HTzJQ314SCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T05:13:27Z:a6b4132bc72fbe5ac51e98b5e1a0a63b34129471eabdcb3b65d3adc5f159a5b1:3vDfFHBmBkSb3j5wns7YNFve0g2FfYlfh8jtqHfeJk3/iZShTG4nZ7hPBMntiIMqtvNPAZyzls68b4EbcWj4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -171,6 +171,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by

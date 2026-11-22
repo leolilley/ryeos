@@ -109,6 +109,19 @@ struct RenderedToolResult {
     /// The images dropped by those checks; the content ends with a note for
     /// each.
     dropped: Vec<ryeos_runtime::DroppedImage>,
+    /// The stored full text when the content is a preview of it.
+    spilled: Option<SpilledRender>,
+}
+
+/// A result whose full text is stored beside its event. The raw text is kept
+/// until the event is accepted, so a node that refuses the upload can be
+/// answered with the cut text instead.
+#[derive(Debug)]
+struct SpilledRender {
+    stored: crate::result_guard::GuardedSpill,
+    /// The duplicate-guard key the preview added.
+    key: Option<String>,
+    raw: String,
 }
 
 /// One image of a rendered tool result.
@@ -166,6 +179,52 @@ impl RenderedToolResult {
         self
     }
 
+    /// The attachments the result's event must carry: its new images, then its
+    /// spilled text.
+    fn uploads(&self) -> Vec<ryeos_runtime::callback::EventAttachment> {
+        let mut uploads: Vec<_> = self
+            .images
+            .iter()
+            .filter_map(|image| image.upload.clone())
+            .collect();
+        if let Some(spilled) = &self.spilled {
+            uploads.push(spilled.stored.upload.clone());
+        }
+        uploads
+    }
+
+    /// This result cut instead of stored, because the node refused the stored
+    /// copy; `reason` is recorded as the cause. Image notes keep their place
+    /// after the text.
+    fn without_spill(
+        mut self,
+        reason: &'static str,
+        result_guard: &mut ResultGuard,
+        output: &crate::directive::ToolOutputConfig,
+    ) -> Self {
+        let Some(spilled) = self.spilled.take() else {
+            return self;
+        };
+        if let Some(key) = &spilled.key {
+            result_guard.withdraw(key);
+        }
+        let guarded = result_guard.process(
+            &spilled.raw,
+            output,
+            crate::result_guard::SpillMode::Disabled(reason),
+        );
+        let notes: Vec<(usize, &str)> = self
+            .dropped
+            .iter()
+            .map(|image| (image.position as usize, image.code.as_str()))
+            .collect();
+        self.content = crate::tool_images::with_drop_notes(&guarded.content, &notes);
+        self.duplicate_of = guarded.duplicate_of;
+        self.truncated = guarded.truncated;
+        self.truncated_reason = guarded.truncated_reason;
+        self
+    }
+
     /// The rendering of a result whose parts passed the image checks: the
     /// guard sees the tool's text alone, then a note for each dropped image
     /// follows it, so truncation and duplicate collapse never remove a note.
@@ -174,12 +233,20 @@ impl RenderedToolResult {
         raw_size: u64,
         settled: crate::tool_images::Settled,
         result_guard: &mut ResultGuard,
+        output: &crate::directive::ToolOutputConfig,
+        spill_mode: crate::result_guard::SpillMode,
     ) -> Self {
-        let guarded = result_guard.process_bytes(settled.guarded_input().as_bytes());
+        let guarded =
+            result_guard.process_bytes(settled.guarded_input().as_bytes(), output, spill_mode);
         let content = crate::tool_images::with_drop_notes(
             &String::from_utf8_lossy(&guarded.bytes),
             &settled.dropped,
         );
+        let spilled = guarded.spill.map(|stored| SpilledRender {
+            stored,
+            key: guarded.key.clone(),
+            raw: settled.guarded_input().to_string(),
+        });
         let dropped = settled
             .dropped
             .iter()
@@ -194,8 +261,9 @@ impl RenderedToolResult {
             raw_size,
             truncated: guarded.truncated,
             duplicate_of: guarded.duplicate_of,
-            truncated_reason: guarded.truncated.then_some("result_guard"),
+            truncated_reason: guarded.truncated_reason,
             status: ToolResultStatus::Ok,
+            spilled,
             images: settled
                 .images
                 .into_iter()
@@ -223,7 +291,13 @@ impl RenderedToolResult {
             call_id: call_id.to_string(),
             tool: self.tool.clone(),
             status: self.status,
-            attachment_refs: ryeos_runtime::ToolResultPayload::image_attachment_hashes(&parts),
+            attachment_refs: {
+                let mut refs = ryeos_runtime::ToolResultPayload::image_attachment_hashes(&parts);
+                if let Some(spilled) = &self.spilled {
+                    refs.push(spilled.stored.record.attachment.clone());
+                }
+                refs
+            },
             parts,
             guard: ryeos_runtime::ToolResultGuard {
                 result_size_bytes: self.raw_size,
@@ -231,8 +305,29 @@ impl RenderedToolResult {
                 truncated_reason: self.truncated_reason.map(str::to_string),
                 duplicate_of: self.duplicate_of.clone(),
                 dropped_images: self.dropped.clone(),
+                spill: self
+                    .spilled
+                    .as_ref()
+                    .map(|spilled| spilled.stored.record.clone()),
             },
         }
+    }
+}
+
+const SPILL_MEDIA_TYPE_NOT_ADMITTED: &str = "spill_media_type_not_admitted";
+const SPILL_OVER_ATTACHMENT_LIMIT: &str = "spill_over_attachment_limit";
+const SPILL_ATTACHMENT_BUDGET_SPENT: &str = "spill_attachment_budget_spent";
+
+/// The `truncated_reason` for a stored result the node refused, read from the
+/// node's own refusal text: the media type is not admitted, the bytes are over
+/// its per-attachment limit, or the run's attachment count is spent.
+fn spill_refusal_reason(refusal: &str) -> &'static str {
+    if refusal.contains("media type") {
+        SPILL_MEDIA_TYPE_NOT_ADMITTED
+    } else if refusal.contains("bytes (node limit") {
+        SPILL_OVER_ATTACHMENT_LIMIT
+    } else {
+        SPILL_ATTACHMENT_BUDGET_SPENT
     }
 }
 
@@ -635,6 +730,11 @@ pub struct Runner {
     image_store: crate::provider_adapter::images::ImageStore,
     /// What this run has stored of tool images, against the signed limits.
     image_run: crate::tool_images::ImageRunState,
+    /// Whether an oversize tool result may be stored beside its event. A node
+    /// that refuses the media type turns it off for the rest of the run.
+    spill_mode: crate::result_guard::SpillMode,
+    /// The first refusal of a stored result is logged; later ones are not.
+    spill_refusal_logged: bool,
     provider_config: ProviderConfig,
     provider_id: String,
     /// Profile name that matched during daemon preflight.
@@ -1452,6 +1552,8 @@ impl Runner {
             result_guard: ResultGuard::new(),
             image_store: crate::provider_adapter::images::ImageStore::default(),
             image_run: crate::tool_images::ImageRunState::default(),
+            spill_mode: crate::result_guard::SpillMode::Allowed,
+            spill_refusal_logged: false,
             provider_config,
             provider_id,
             matched_profile,
@@ -4010,6 +4112,7 @@ impl Runner {
                                     status: ToolResultStatus::Ok,
                                     images: Vec::new(),
                                     dropped: Vec::new(),
+                                    spilled: None,
                                 };
                                 if let Err(e) = self
                                     .callback
@@ -4055,6 +4158,7 @@ impl Runner {
                         status: ToolResultStatus::Error,
                         images: Vec::new(),
                         dropped: Vec::new(),
+                        spilled: None,
                     };
                     if let Err(e) = self
                         .callback
@@ -4721,17 +4825,27 @@ impl Runner {
             crate::tool_images::Envelope::Parts(parts) => Some(parts),
         };
         let Some(parts) = parts else {
-            let guarded = self.result_guard.process_bytes(&raw_bytes);
+            let guarded = self.result_guard.process_bytes(
+                &raw_bytes,
+                &self.execution.tool_output,
+                self.spill_mode,
+            );
+            let spilled = guarded.spill.map(|stored| SpilledRender {
+                stored,
+                key: guarded.key.clone(),
+                raw: String::from_utf8_lossy(&raw_bytes).into_owned(),
+            });
             return RenderedToolResult {
                 tool: tool_name.to_string(),
                 content: String::from_utf8_lossy(&guarded.bytes).to_string(),
                 raw_size,
                 truncated: guarded.truncated,
                 duplicate_of: guarded.duplicate_of,
-                truncated_reason: guarded.truncated.then_some("result_guard"),
+                truncated_reason: guarded.truncated_reason,
                 status: ToolResultStatus::Ok,
                 images: Vec::new(),
                 dropped: Vec::new(),
+                spilled,
             };
         };
         match crate::tool_images::admit_parts(
@@ -4748,6 +4862,8 @@ impl Runner {
                 raw_size,
                 settled,
                 &mut self.result_guard,
+                &self.execution.tool_output,
+                self.spill_mode,
             ),
         }
     }
@@ -4782,6 +4898,7 @@ impl Runner {
             status: ToolResultStatus::Error,
             images: Vec::new(),
             dropped: Vec::new(),
+            spilled: None,
         }
     }
 
@@ -4830,16 +4947,39 @@ impl Runner {
     ) -> Result<(), String> {
         let mut rendered = rendered;
         let mut payload = rendered.payload(&operation_id, &call_id);
-        let uploads = rendered
-            .images
-            .iter()
-            .filter_map(|image| image.upload.clone())
-            .collect();
-        if let Err(error) = self
+        let mut emitted = self
             .callback
-            .emit_tool_result_with_attachments(&payload, uploads)
-            .await
+            .emit_tool_result_with_attachments(&payload, rendered.uploads())
+            .await;
+        if let Err(error) = &emitted
+            && rendered.spilled.is_some()
+            && let Some(refused) =
+                error.downcast_ref::<ryeos_runtime::callback::AttachmentRefused>()
         {
+            // The node would not store the full text. Its refusal appended
+            // nothing, so the result goes in again cut, with the cause named,
+            // and the run goes on.
+            let reason = spill_refusal_reason(&refused.0);
+            if !self.spill_refusal_logged {
+                self.spill_refusal_logged = true;
+                tracing::warn!(
+                    reason,
+                    %refused,
+                    "node refused a stored tool result; oversize results are cut instead"
+                );
+            }
+            if reason == SPILL_MEDIA_TYPE_NOT_ADMITTED {
+                self.spill_mode = crate::result_guard::SpillMode::Disabled(reason);
+            }
+            rendered =
+                rendered.without_spill(reason, &mut self.result_guard, &self.execution.tool_output);
+            payload = rendered.payload(&operation_id, &call_id);
+            emitted = self
+                .callback
+                .emit_tool_result_with_attachments(&payload, rendered.uploads())
+                .await;
+        }
+        if let Err(error) = emitted {
             // The node's attachment policy can be tighter than the signed
             // image limits. Its refusal appended nothing, so the result goes
             // in again without its images and the run goes on.
@@ -6098,6 +6238,93 @@ mod tests {
         ]));
     }
 
+    fn spill_settled(text: String) -> crate::tool_images::Settled {
+        crate::tool_images::Settled {
+            text,
+            images: Vec::new(),
+            dropped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_spilled_result_records_its_stored_text_and_validates() {
+        let output = crate::directive::ToolOutputConfig::default();
+        let mut guard = ResultGuard::new();
+        let big = "x".repeat(200 * 1024);
+        let rendered = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big.clone()),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Allowed,
+        );
+        assert_eq!(rendered.truncated_reason, Some("result_spilled"));
+        assert!(
+            rendered
+                .content
+                .starts_with(ryeos_runtime::TOOL_RESULT_PARTIAL_PREFIX)
+        );
+        assert!(rendered.content.len() < 40 * 1024);
+        let payload = rendered.payload(&"a".repeat(64), "call-1");
+        payload.validate().unwrap();
+        let spill = payload.guard.spill.as_ref().expect("spill recorded");
+        assert_eq!(payload.attachment_refs, vec![spill.attachment.clone()]);
+        assert_eq!(rendered.uploads().len(), 1);
+        assert_eq!(rendered.uploads()[0].bytes(), big.as_bytes());
+    }
+
+    #[test]
+    fn a_refused_spill_is_recorded_again_cut_with_its_cause() {
+        let output = crate::directive::ToolOutputConfig::default();
+        let mut guard = ResultGuard::new();
+        let big = "x".repeat(200 * 1024);
+        let rendered = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big.clone()),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Allowed,
+        );
+        let cut = rendered.without_spill(SPILL_MEDIA_TYPE_NOT_ADMITTED, &mut guard, &output);
+        assert!(cut.spilled.is_none());
+        assert!(cut.uploads().is_empty());
+        assert_eq!(cut.truncated_reason, Some(SPILL_MEDIA_TYPE_NOT_ADMITTED));
+        assert!(cut.content.ends_with("[...truncated at 100KB]"));
+        let payload = cut.payload(&"a".repeat(64), "call-1");
+        payload.validate().unwrap();
+        assert!(payload.attachment_refs.is_empty());
+        assert!(payload.guard.spill.is_none());
+        // The cut text is the one that was recorded, so the same result again
+        // collapses to it (the preview's key was taken back, not left behind).
+        let again = RenderedToolResult::from_settled(
+            "t",
+            big.len() as u64,
+            spill_settled(big),
+            &mut guard,
+            &output,
+            crate::result_guard::SpillMode::Disabled(SPILL_MEDIA_TYPE_NOT_ADMITTED),
+        );
+        assert!(again.duplicate_of.is_some());
+    }
+
+    #[test]
+    fn node_refusals_map_to_typed_spill_reasons() {
+        assert_eq!(
+            spill_refusal_reason("attachment media type 'text/plain' is not accepted by this node"),
+            "spill_media_type_not_admitted"
+        );
+        assert_eq!(
+            spill_refusal_reason("attachment is 5000000 bytes (node limit 4194304)"),
+            "spill_over_attachment_limit"
+        );
+        assert_eq!(
+            spill_refusal_reason("append carries 17 attachments (node limit 16 per turn)"),
+            "spill_attachment_budget_spent"
+        );
+    }
+
     #[test]
     fn a_dropped_image_note_survives_truncation_and_duplicate_collapse() {
         let settled = |text: String| crate::tool_images::Settled {
@@ -6109,7 +6336,14 @@ mod tests {
         let mut guard = ResultGuard::new();
         // Over the guard's ceiling: the text is cut, the note is not.
         let big = "x".repeat(150 * 1024);
-        let first = RenderedToolResult::from_settled("t", 1, settled(big.clone()), &mut guard);
+        let first = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled(big.clone()),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(first.truncated);
         assert_eq!(first.truncated_reason, Some("result_guard"));
         assert!(
@@ -6120,12 +6354,26 @@ mod tests {
         assert!(first.content.contains("[...truncated at 100KB]"));
         // The same text again collapses to the duplicate marker, and the note
         // still follows it.
-        let second = RenderedToolResult::from_settled("t", 1, settled(big), &mut guard);
+        let second = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled(big),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(second.duplicate_of.is_some());
         assert!(second.content.starts_with("[duplicate result omitted"));
         assert!(second.content.ends_with(&format!("\n{note}")));
         // The drop is recorded in its own field, not as a truncation.
-        let small = RenderedToolResult::from_settled("t", 1, settled("hi".into()), &mut guard);
+        let small = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled("hi".into()),
+            &mut guard,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert!(!small.truncated);
         assert_eq!(small.truncated_reason, None);
         let payload = small.payload(&"a".repeat(64), "call-1");
@@ -6153,8 +6401,14 @@ mod tests {
             images: Vec::new(),
             dropped: vec![(2, crate::tool_images::IMAGE_OVERSIZE)],
         };
-        let mut rendered =
-            RenderedToolResult::from_settled("t", 1, settled, &mut ResultGuard::new());
+        let mut rendered = RenderedToolResult::from_settled(
+            "t",
+            1,
+            settled,
+            &mut ResultGuard::new(),
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         // Positions 1 and 3 were admitted around the dropped second image.
         rendered.images = vec![image(1), image(3)];
         let dropped = rendered.without_images(crate::tool_images::IMAGE_LIMIT);

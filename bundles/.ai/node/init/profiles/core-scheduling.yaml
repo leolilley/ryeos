@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T22:16:20Z:2efd4e5e63d8954f076955ed79955998607bdeb4dc77aef539bbd7900058a9ad:M8Caycyt3AbI/lYL7oTRBKotT/duU/x3ozKBMwOeN+YMMpuPV1pUTbWawoGb0Xuct2i57VNVEg6NEEeEMjOMAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T05:13:27Z:164a2f7e2d4af76e5b7923d7b539ad4d5032eefa9fa7af74ab2a186e5198e23c:MZerAjU3ZLOJOI71GbZrpkSlSTt9QDJ4pul97AbEQCuGQGKi678b/lNzNbs0+OtbNp1s88dGCATrJuCE1xzWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -167,6 +167,7 @@ policies:
       - image/jpeg
       - image/png
       - image/webp
+      - text/plain
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
