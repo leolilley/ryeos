@@ -284,14 +284,14 @@ pub fn finalize_pinned_qualification_launch(
     // and consumer slot instead of assuming dispatch preflight projected a
     // resolved selection into the root ResolutionOutput.
     let subject_authority = &plan_context.subject_resolution_authority;
-    // A pinned generation's checkout is temporary: with no stated logical
-    // project the launch is refused rather than judged on that path.
-    let logical_project_root = project_authority
-        .logical_project_root(&plan_context.current_site_id)
-        .context("pinned qualification names no logical project; its checkout is not judged")?;
+    // The pinned authority's logical project, when it states one. A pinned
+    // verifier lane may legitimately state none (its tools are judged by
+    // bundle trust), so an absent root is not refused here.
     let roots = request_engine
         .resolution_roots(Some(project_root.to_path_buf()))
-        .with_logical_project_root(Some(logical_project_root));
+        .with_logical_project_root(
+            project_authority.logical_project_root(&plan_context.current_site_id),
+        );
     let selectors = prepared
         .product_selections
         .iter()
