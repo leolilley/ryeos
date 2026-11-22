@@ -15,6 +15,7 @@ mod expression_inventory_tests;
 mod harness;
 mod image_sniff;
 mod launch_records;
+mod loop_guards;
 mod provider_adapter;
 mod provider_transport_timing;
 mod result_guard;
