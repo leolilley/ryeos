@@ -877,9 +877,9 @@ mod tests {
         assert_eq!(DESCRIPTOR.required_caps, &[REQUIRED_CAP]);
     }
 
+    /// Fields drop in declaration order: the state goes before its store
+    /// owner, and the owner before the node directory.
     struct GateFixture {
-        _node: tempfile::TempDir,
-        _owner: ryeos_app::test_support::TestStateStore,
         state: Arc<AppState>,
         operator: HandlerContext,
         operator_principal: String,
@@ -887,6 +887,8 @@ mod tests {
         project: PathBuf,
         head: String,
         other_snapshot: String,
+        _owner: ryeos_app::test_support::TestStateStore,
+        _node: tempfile::TempDir,
     }
 
     fn write_head(state: &AppState, principal: &str, project: &Path, snapshot: &str) {
@@ -938,8 +940,6 @@ mod tests {
             None,
         );
         GateFixture {
-            _node: node,
-            _owner: owner,
             state: Arc::new(state),
             operator: operator_context,
             operator_principal: principal,
@@ -947,6 +947,8 @@ mod tests {
             project,
             head,
             other_snapshot,
+            _owner: owner,
+            _node: node,
         }
     }
 
