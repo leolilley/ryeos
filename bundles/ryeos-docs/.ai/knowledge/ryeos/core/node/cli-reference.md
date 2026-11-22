@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T13:52:39Z:c61b521f8f63370d0c590fcee4c8e7e1c3f5a730fa8524f4c1b433403feea67f:7a31kGoG3OlPurKilLA69nioz5A8pVTKe39q/lQZ+W+9rvLndSfVQIdD642EsVuJQvQuTsB5SZSiU+uolQczBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T18:13:08Z:86e664e6ce2708d6b226afa41d40991f4667545e3c47ab48540dc7440528ed92:XEiHoRlXLfj3m0naupCwKTGhHY4kdxBIuZTDECxA6rPW1OqasKm+qpkv5dD6s0fuxkWTm/FZWykpFogE/Th8AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -345,6 +345,27 @@ The fix, named exactly in each row and refusal, is
 `ryeos node external-execution retire <section>/<id>` on the stopped node, then
 compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
+
+Operator note for the runtime schema cut to epoch 143: every node must run
+`ryeos node reset execution-history --confirm --schema-cut-from 142 --schema-cut-to 143`
+on its next upgrade; no project heads are involved, so it is the heads-free form.
+The cut carries the stored external terminal observation's required `basis`
+field (how the lifecycle adapter settled a termination: it states the basis it
+relied on), which a store written at epoch 142 lacks. The same epoch also
+carries the turn marker's required `purpose` field (a stored-shape change: a
+marker without it is refused on resume with `resume_marker_without_purpose`) and the
+compaction record's required `guard_carry` field (recent loop-guard digests, wrap-up
+flags and warned ages; null when loop guards are off; a record without the field is
+refused on resume). It also moves the provider retry policy digest to v3
+(`retry_after_max_ms`): the reset clears in-flight threads whose retry decisions
+sealed a v2 digest, and recovery refuses one it still meets. The cut ships together with
+lifecycle adapter protocol v4, so the order on a node is: drain (settle or
+terminate every lease, qualification occurrence and termination in flight),
+stop the daemon gracefully, install the re-signed bundles, run the reset above,
+start, run `ryeos node doctor`, recompose each binding it names as stranded
+(`ryeos node external-execution recompose`, plus `compose` for production and
+qualification bindings, provisioning credentials again where compose names a new
+generation), then run the rig preflight before any live spend.
 
 Operator note for the runtime schema cut to epoch 142: every node must run
 `ryeos node reset execution-history --confirm --schema-cut-from 141 --schema-cut-to 142`

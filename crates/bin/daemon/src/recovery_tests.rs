@@ -2867,3 +2867,250 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
     assert_eq!(worker.state, WorkerProcessState::Dead);
     assert_eq!(worker.cleanup_state, "reaped");
 }
+
+/// A real worker process in its own group, with the thread that reaps it, so
+/// a hard kill can prove the group gone.
+#[cfg(target_os = "linux")]
+struct LiveWorkerProcess {
+    pid: u32,
+    reaper: std::thread::JoinHandle<std::process::ExitStatus>,
+}
+
+/// Seed the root and dedicated session `thread_id`, then give the session a
+/// live worker row for a real child process and put the session in
+/// `session_state`. With `foreign_namespace` the recorded identity is in a
+/// pid namespace this node cannot judge, so the worker can never be proved
+/// retired and no signal is sent to it.
+#[cfg(target_os = "linux")]
+fn seed_session_with_live_worker(
+    state: &AppState,
+    thread_id: &str,
+    project: &std::path::Path,
+    session_state: &str,
+    foreign_namespace: bool,
+) -> LiveWorkerProcess {
+    seed_dedicated_session_root(state, thread_id, project);
+    let mut command = std::process::Command::new("sleep");
+    command
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = lillux::child_group::spawn_in_own_group(&mut command).unwrap();
+    let pid = child.id();
+    let mut identity = ryeos_app::process::capture_execution_process_identity(
+        i64::from(pid),
+        Some(i64::from(pid)),
+    )
+    .unwrap();
+    if foreign_namespace {
+        identity.pid_namespace = "pid:[1]".to_owned();
+    }
+    let reaper = std::thread::spawn(move || child.wait().unwrap());
+    let worker = format!("worker-{thread_id}");
+    let now = lillux::time::timestamp_millis() as i64;
+    state
+        .state_store
+        .with_runtime_sql_for_test(|connection| {
+            connection.execute(
+                "INSERT INTO worker_process (
+                    worker_instance_id, boot_identity_hash, session_capsule_hash,
+                    boot_epoch, lifecycle_generation, process_identity,
+                    control_channel_identity, state, daemon_generation_id,
+                    placement_thread_id, cleanup_state, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, 1, 1, ?4, 'fd:fixture', 'live', ?5, ?6, 'owned', ?7, ?7)",
+                rusqlite::params![
+                    worker,
+                    "e".repeat(64),
+                    "a".repeat(64),
+                    serde_json::to_string(&identity).unwrap(),
+                    ryeos_app::runtime_db::daemon_generation_id(),
+                    thread_id,
+                    now,
+                ],
+            )?;
+            Ok(connection.execute(
+                "UPDATE dedicated_session SET state=?1 WHERE placement_thread_id=?2",
+                rusqlite::params![session_state, thread_id],
+            )?)
+        })
+        .unwrap();
+    LiveWorkerProcess { pid, reaper }
+}
+
+#[cfg(target_os = "linux")]
+fn session_test_project(root: &std::path::Path) -> std::path::PathBuf {
+    let project = root.join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(project.join(ryeos_engine::AI_DIR)).unwrap();
+    project
+}
+
+/// A finalised root leaves its session's live worker nobody to drive it: in
+/// every running or recoverable state the worker is retired by its recorded
+/// identity and reaped, the session goes terminal with the typed reason, and
+/// the credential lock is released.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_finalised_root_retires_the_live_worker_of_every_running_session_state() {
+    use ryeos_app::dedicated_session_service::{
+        SESSION_SETTLED_ROOT_FINALIZED_REASON, SESSION_STATE_POLICY, SessionLocalSettle,
+        SessionSettleGround, settle_session_without_worker,
+    };
+    let running: Vec<&str> = SESSION_STATE_POLICY
+        .iter()
+        .filter(|policy| policy.worker_fence_moves_session)
+        .map(|policy| policy.state)
+        .collect();
+    assert_eq!(running.len(), 8);
+    for session_state in running {
+        let (_tmpdir, _state_owner, state) = build_test_state();
+        let projects = tempfile::tempdir().unwrap();
+        let project = session_test_project(projects.path());
+        let thread_id = "T-finalised-live-worker";
+        let process =
+            seed_session_with_live_worker(&state, thread_id, &project, session_state, false);
+
+        let outcome =
+            settle_session_without_worker(&state, thread_id, SessionSettleGround::RootFinalized)
+                .unwrap();
+
+        assert_eq!(outcome, SessionLocalSettle::Settled, "{session_state}");
+        let exit = process.reaper.join().unwrap();
+        assert!(!exit.success(), "{session_state}: the worker was killed");
+        assert!(
+            !lillux::diagnostic_process_is_live(process.pid),
+            "{session_state}"
+        );
+        let worker = state
+            .state_store
+            .worker_process(&format!("worker-{thread_id}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker.state, WorkerProcessState::Dead, "{session_state}");
+        assert_eq!(worker.cleanup_state, "reaped", "{session_state}");
+        let session = state
+            .state_store
+            .dedicated_session(thread_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.state, "terminal", "{session_state}");
+        assert_eq!(
+            session.terminal_reason.as_deref(),
+            Some(SESSION_SETTLED_ROOT_FINALIZED_REASON),
+            "{session_state}"
+        );
+        let profile = state
+            .state_store
+            .credential_profile(&format!("profile-{thread_id}"))
+            .unwrap()
+            .unwrap();
+        assert!(profile.lock_owner.is_none(), "{session_state}");
+    }
+}
+
+/// The candidate-holding states keep their worker row, session state and
+/// credential lock exactly as they were; no process is signalled.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_finalised_root_leaves_a_candidate_holding_session_untouched() {
+    use ryeos_app::dedicated_session_service::{
+        SessionLocalSettle, SessionSettleGround, settle_session_without_worker,
+    };
+    for session_state in ["freezing", "frozen"] {
+        let (_tmpdir, _state_owner, state) = build_test_state();
+        let projects = tempfile::tempdir().unwrap();
+        let project = session_test_project(projects.path());
+        let thread_id = "T-finalised-held-session";
+        let process =
+            seed_session_with_live_worker(&state, thread_id, &project, session_state, false);
+
+        let outcome =
+            settle_session_without_worker(&state, thread_id, SessionSettleGround::RootFinalized)
+                .unwrap();
+
+        assert_eq!(
+            outcome,
+            SessionLocalSettle::Skipped("state_not_settleable"),
+            "{session_state}"
+        );
+        assert!(
+            lillux::diagnostic_process_is_live(process.pid),
+            "{session_state}"
+        );
+        let worker = state
+            .state_store
+            .worker_process(&format!("worker-{thread_id}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker.state, WorkerProcessState::Live, "{session_state}");
+        assert_eq!(worker.cleanup_state, "owned", "{session_state}");
+        let session = state
+            .state_store
+            .dedicated_session(thread_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.state, session_state);
+        let profile = state
+            .state_store
+            .credential_profile(&format!("profile-{thread_id}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            profile.lock_owner.as_deref(),
+            Some(format!("worker-{thread_id}").as_str()),
+            "{session_state}"
+        );
+        lillux::child_group::signal_group(process.pid, lillux::child_group::GroupSignal::Kill);
+        process.reaper.join().unwrap();
+    }
+}
+
+/// A worker whose retirement cannot be proved is fenced as unproved and the
+/// session keeps its credential lock; it is not terminalised.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_finalised_root_fences_an_unprovable_worker_and_keeps_the_lock() {
+    use ryeos_app::dedicated_session_service::{
+        SessionLocalSettle, SessionSettleGround, settle_session_without_worker,
+    };
+    let (_tmpdir, _state_owner, state) = build_test_state();
+    let projects = tempfile::tempdir().unwrap();
+    let project = session_test_project(projects.path());
+    let thread_id = "T-finalised-unproved-worker";
+    let process = seed_session_with_live_worker(&state, thread_id, &project, "idle", true);
+
+    let outcome =
+        settle_session_without_worker(&state, thread_id, SessionSettleGround::RootFinalized)
+            .unwrap();
+
+    assert_eq!(outcome, SessionLocalSettle::WorkerFenced);
+    assert!(
+        lillux::diagnostic_process_is_live(process.pid),
+        "no signal goes through a foreign-namespace identity"
+    );
+    let worker = state
+        .state_store
+        .worker_process(&format!("worker-{thread_id}"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(worker.state, WorkerProcessState::Dead);
+    assert_eq!(worker.cleanup_state, "unproved");
+    let session = state
+        .state_store
+        .dedicated_session(thread_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.state, "outcome_unknown");
+    let profile = state
+        .state_store
+        .credential_profile(&format!("profile-{thread_id}"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        profile.lock_owner.as_deref(),
+        Some(format!("worker-{thread_id}").as_str())
+    );
+    lillux::child_group::signal_group(process.pid, lillux::child_group::GroupSignal::Kill);
+    process.reaper.join().unwrap();
+}

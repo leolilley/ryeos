@@ -585,7 +585,12 @@ pub(crate) enum ExternalAllocationResolution {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExternalTerminationResolution {
-    Terminal { provider_observation_digest: String },
+    Terminal {
+        provider_observation_digest: String,
+        /// Why the adapter judged the occurrence terminal. Logged, not
+        /// stored: the stored observation does not carry it.
+        basis: ryeos_external_execution_contract::TerminalBasis,
+    },
     Pending,
 }
 
@@ -9219,8 +9224,15 @@ impl ExternalPlacementReconciliation {
         };
         if let ExternalTerminationResolution::Terminal {
             provider_observation_digest,
+            basis,
         } = resolution
         {
+            tracing::info!(
+                placement,
+                ?basis,
+                provider_observation_digest,
+                "external occurrence termination observed terminal"
+            );
             require_lifecycle_capability(
                 self.backend.as_ref(),
                 LifecycleCapability::ExactTerminalObservation,
@@ -9235,6 +9247,7 @@ impl ExternalPlacementReconciliation {
                     termination_request_digest: intent.termination_request_digest,
                     terminal_state: "terminated".into(),
                     provider_observation_digest,
+                    basis,
                 },
             )?;
         }
@@ -11238,6 +11251,7 @@ pub mod test_support {
                 termination_request_digest,
                 terminal_state: "terminated".into(),
                 provider_observation_digest: provider_observation_digest.to_owned(),
+                basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
             },
         )?;
         state.state_store.settle_worker_process(
@@ -11864,6 +11878,7 @@ mod tests {
             Ok(match self.reconciled_termination {
                 "terminal" => ExternalTerminationResolution::Terminal {
                     provider_observation_digest: "2".repeat(64),
+                    basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
                 },
                 "pending" => ExternalTerminationResolution::Pending,
                 _ => bail!("fixture selected an unknown termination resolution"),
@@ -13711,6 +13726,7 @@ mod tests {
                 .push(contract.backend_artifact_hash.clone());
             Ok(ExternalTerminationResolution::Terminal {
                 provider_observation_digest: "2".repeat(64),
+                basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
             })
         }
     }
@@ -15058,6 +15074,7 @@ mod tests {
         assert!(!db.begin_external_termination("T-one", &intent).unwrap());
         let ExternalTerminationResolution::Terminal {
             provider_observation_digest,
+            ..
         } = backend
             .reconcile_termination(&contract, &credential, &reservation, &occurrence, &intent)
             .unwrap()
@@ -15074,6 +15091,7 @@ mod tests {
                 termination_request_digest: intent.termination_request_digest,
                 terminal_state: "terminated".into(),
                 provider_observation_digest,
+                basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
             },
         )
         .unwrap();
