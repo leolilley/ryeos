@@ -4896,7 +4896,7 @@ fn ui_browser_sessions_check(
             FAIL,
             serde_json::json!({
                 "error": format!("{error:#}"),
-                "fix": "publish a complete valid `.ai/node/policies/` generation whose ui_browser_sessions section is schema 5 (session_ttl_secs, session_idle_secs, launch_token_ttl_secs, session_scopes); then run `ryeos node doctor` again",
+                "fix": "publish a complete valid `.ai/node/policies/` generation whose ui_browser_sessions section is schema 6 (session_ttl_secs, session_idle_secs, launch_token_ttl_secs, session_scopes, max_art_grants); then run `ryeos node doctor` again",
             }),
         ),
     }

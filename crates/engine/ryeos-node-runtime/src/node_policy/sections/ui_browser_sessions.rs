@@ -34,7 +34,7 @@ pub const SESSION_TTL_SECS_CEILING: u64 = 24 * 60 * 60;
 pub const LAUNCH_TOKEN_TTL_SECS_CEILING: u64 = 300;
 
 /// The only schema this section accepts.
-pub const CURRENT_SCHEMA: u32 = 5;
+pub const CURRENT_SCHEMA: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +54,9 @@ pub struct UiBrowserSessionPolicy {
     pub max_live_binding_attachments_per_session: u32,
     pub max_presentations_per_session: u32,
     pub max_surface_instances_per_presentation: u32,
+    /// Most picture hashes one session's grant set may hold: pictures a
+    /// service run for the session handed it, beyond those its bindings name.
+    pub max_art_grants: u32,
     pub shared_presentation: SharedPresentationPolicyLimits,
     pub seat: SeatPolicy,
     /// The origin (`scheme://host[:port]`, no path) a browser reaches this
@@ -94,7 +97,8 @@ impl UiBrowserSessionPolicy {
             bail!(
                 "UI browser-session node policy schema {} is not current ({CURRENT_SCHEMA}); \
                  re-issue the ui_browser_sessions section at schema {CURRENT_SCHEMA} with \
-                 session_ttl_secs, session_idle_secs, launch_token_ttl_secs and session_scopes",
+                 session_ttl_secs, session_idle_secs, launch_token_ttl_secs, session_scopes and \
+                 max_art_grants",
                 self.schema
             );
         }
@@ -150,6 +154,7 @@ impl UiBrowserSessionPolicy {
                 "max_surface_instances_per_presentation",
                 u64::from(self.max_surface_instances_per_presentation),
             ),
+            ("max_art_grants", u64::from(self.max_art_grants)),
             (
                 "shared_presentation.max_declaration_bytes",
                 self.shared_presentation.max_declaration_bytes,
@@ -310,6 +315,7 @@ mod tests {
             .unwrap();
         assert_eq!(policy.max_live_binding_attachments_per_session, 16);
         assert_eq!(policy.max_session_bootstrap_bytes, 4194304);
+        assert_eq!(policy.max_art_grants, 256);
         assert_eq!(policy.shared_presentation.max_declaration_bytes, 65536);
         assert_eq!(policy.seat.kind, "seat_session");
         assert_eq!(policy.seat.max_replay_frame_events, 64);
@@ -375,7 +381,7 @@ mod tests {
 
     fn current_body() -> Value {
         serde_json::json!({
-            "schema": 5,
+            "schema": 6,
             "session_ttl_secs": 28800,
             "session_idle_secs": 3600,
             "launch_token_ttl_secs": 60,
@@ -384,6 +390,7 @@ mod tests {
             "max_live_binding_attachments_per_session": 16,
             "max_presentations_per_session": 16,
             "max_surface_instances_per_presentation": 16,
+            "max_art_grants": 256,
             "shared_presentation": {
                 "max_declaration_bytes": 65536,
                 "max_dialogs": 16,
@@ -413,6 +420,7 @@ mod tests {
             "max_live_binding_attachments_per_session",
             "max_presentations_per_session",
             "max_surface_instances_per_presentation",
+            "max_art_grants",
             "shared_presentation",
             "seat",
         ] {
@@ -425,6 +433,7 @@ mod tests {
             "max_live_binding_attachments_per_session",
             "max_presentations_per_session",
             "max_surface_instances_per_presentation",
+            "max_art_grants",
         ] {
             let mut zero = original.clone();
             zero[name] = serde_json::json!(0);
@@ -467,7 +476,7 @@ mod tests {
         let mut seat_unknown = original.clone();
         seat_unknown["seat"]["fallback"] = serde_json::json!(1);
         bad.push(seat_unknown);
-        for predecessor in [1, 2, 3, 4] {
+        for predecessor in [1, 2, 3, 4, 5] {
             let mut stale = original.clone();
             stale["schema"] = serde_json::json!(predecessor);
             bad.push(stale);
@@ -575,14 +584,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_four_is_refused_with_the_cure() {
+    fn schema_five_is_refused_with_the_cure() {
         let mut body = current_body();
-        body["schema"] = serde_json::json!(4);
+        body["schema"] = serde_json::json!(5);
         let error = UiBrowserSessionPolicySection
             .parse(&context(), &body)
             .err()
             .unwrap();
-        assert!(format!("{error:#}").contains("schema 5"), "{error:#}");
+        assert!(format!("{error:#}").contains("schema 6"), "{error:#}");
     }
 
     #[test]
