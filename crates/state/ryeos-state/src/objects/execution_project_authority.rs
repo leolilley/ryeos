@@ -706,6 +706,7 @@ impl ExecutionProjectAuthority {
                     environment: left_environment,
                     capability_ceiling: left_capabilities,
                     child_policy: left_child_policy,
+                    signer_project: left_signer_project,
                 },
                 Self::PinnedGeneration {
                     stable_project_identity: right_identity,
@@ -717,8 +718,10 @@ impl ExecutionProjectAuthority {
                     environment: right_environment,
                     capability_ceiling: right_capabilities,
                     child_policy: right_child_policy,
+                    signer_project: right_signer_project,
                 },
             ) => Ok(left_identity == right_identity
+                && left_signer_project == right_signer_project
                 && left_display_path == right_display_path
                 && left_base == right_base
                 && left_realization == right_realization
@@ -1102,9 +1105,11 @@ impl ExecutionProjectAuthority {
                 environment,
                 capability_ceiling,
                 child_policy,
+                signer_project,
             } => serde_json::json!({
                 "schema_version": 1,
                 "kind": "live_project",
+                "signer_project": signer_project,
                 "authority_id": authority_id,
                 "authored_project_identity": authored_project_identity,
                 "canonical_root": canonical_root,
@@ -1123,9 +1128,11 @@ impl ExecutionProjectAuthority {
                 environment,
                 capability_ceiling,
                 child_policy,
+                signer_project,
             } => serde_json::json!({
                 "schema_version": 1,
                 "kind": "pinned_generation",
+                "signer_project": signer_project,
                 "stable_project_identity": stable_project_identity,
                 "base_snapshot_hash": base_snapshot_hash,
                 "snapshot_hash": snapshot_hash,
@@ -1475,42 +1482,35 @@ mod tests {
     }
 
     #[test]
-    fn logical_project_root_is_the_local_project_path() {
-        const HERE: &str = "site:here";
-        // A legacy local identity.
+    fn the_signer_project_is_sealed_and_never_derived_from_a_path() {
+        use crate::project_identity::{LogicalProject, LogicalProjectAbsence};
+        // A pinned generation states nothing until admission seals it, however
+        // its display path or stable identity reads.
+        let pinned = pinned_for("site:here:/srv/projects/alpha", Some("/srv/projects/alpha"));
         assert_eq!(
-            pinned_for("local:/srv/projects/alpha", Some("/srv/projects/alpha"))
-                .logical_project_root(HERE),
-            Some(PathBuf::from("/srv/projects/alpha"))
+            pinned.signer_project(),
+            LogicalProject::Absent(LogicalProjectAbsence::NotStated)
         );
-        // A pinned head launched on this node is stamped with its own site.
+        let identity: crate::project_identity::ProjectIdentity =
+            format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap();
+        let sealed = pinned
+            .with_signer_project(LogicalProject::Stated(identity.clone()))
+            .unwrap();
+        assert_eq!(sealed.signer_project(), LogicalProject::Stated(identity.clone()));
+        // A projectless authority states none, and nothing else is projectless.
         assert_eq!(
-            pinned_for("site:here:/srv/projects/alpha", Some("/srv/projects/alpha"))
-                .logical_project_root(HERE),
-            Some(PathBuf::from("/srv/projects/alpha"))
+            ExecutionProjectAuthority::PROJECTLESS.signer_project(),
+            LogicalProject::Absent(LogicalProjectAbsence::Projectless)
         );
-        // A project another site names is not a project of this node.
-        assert_eq!(
-            pinned_for(
-                "site:other:/srv/projects/alpha",
-                Some("/srv/projects/alpha")
-            )
-            .logical_project_root(HERE),
-            None
+        assert!(
+            ExecutionProjectAuthority::PROJECTLESS
+                .with_signer_project(LogicalProject::Stated(identity))
+                .is_err()
         );
-        // The site prefix must name the whole site, not a prefix of it.
-        assert_eq!(
-            pinned_for("site:her:/srv/projects/alpha", Some("/srv/projects/alpha"))
-                .logical_project_root(HERE),
-            None
-        );
-        assert_eq!(
-            pinned_for("local:/srv/projects/alpha", None).logical_project_root(HERE),
-            None
-        );
-        assert_eq!(
-            ExecutionProjectAuthority::PROJECTLESS.logical_project_root(HERE),
-            None
+        assert!(
+            sealed
+                .with_signer_project(LogicalProject::Absent(LogicalProjectAbsence::Projectless))
+                .is_err()
         );
     }
 
