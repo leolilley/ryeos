@@ -41,6 +41,11 @@ on:
         required: true
         default: false
         type: boolean
+      process_scope_suite:
+        description: "Run only this process-scope e2e suite (empty: every suite)"
+        required: false
+        default: ""
+        type: string
       rust_2024_audit:
         description: "Inventory Rust 2024 compatibility diagnostics"
         required: true
@@ -1679,6 +1684,12 @@ jobs:
       - name: Allow the administrator an identity id map
         run: |
           echo 'root:0:65536' | sudo -n tee -a /etc/subuid /etc/subgid >/dev/null
+      # The enclosure's pid 1 is tini, the init the shipped image runs.
+      - name: Install the enclosure init
+        run: |
+          sudo -n apt-get update
+          sudo -n apt-get install -y --no-install-recommends tini
+          test -x /usr/bin/tini
 
       - name: Probe the cgroup host
         shell: bash
@@ -1841,18 +1852,20 @@ jobs:
           if [[ -d "$staged" ]]; then echo "RYEOS_TEST_HANDLER_BIN_DIR=$staged" >> "$GITHUB_ENV"; fi
 
       - name: Session secret delivery (real isolation)
+        if: ${{ !inputs.process_scope_suite || inputs.process_scope_suite == 'session_secret_delivery_e2e' }}
         run: |
           "$RUNNER_TEMP/run-suite" session_secret_delivery_e2e 7 0
 
       - name: Handoff crash recovery (real isolation)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && (!inputs.process_scope_suite || inputs.process_scope_suite == 'handoff_crash_recovery_e2e') }}
         run: |
           "$RUNNER_TEMP/run-suite" handoff_crash_recovery_e2e 17 0
 
       - name: Claude Code worker follow (real isolation)
-        if: ${{ !cancelled() }}
-        # The suite's development-hosted nodes start as pid 1 of their own
-        # user, pid, mount and cgroup namespace (the enclosure placement).
+        if: ${{ !cancelled() && (!inputs.process_scope_suite || inputs.process_scope_suite == 'claude_code_worker_follow_e2e') }}
+        # The suite's development-hosted nodes start as the only child of tini,
+        # pid 1 of their own user, pid, mount and cgroup namespace (the
+        # enclosure placement, the shipped image's shape).
         # continue-on-error stays until the suite has passed here once.
         continue-on-error: true
         run: |

@@ -73,10 +73,11 @@ pub enum Placement {
     /// In a delegated cgroup subtree under a protected host-runtime binding,
     /// for node classes whose floor asks for per-execution process scopes.
     Controller,
-    /// As pid 1 of a private pid, user, mount and cgroup namespace, for node
-    /// classes whose floor asks for the enclosure instead (a hosted node: its
-    /// jobs die with it because it is the init of its enclosure, and it
-    /// configures no per-execution scopes).
+    /// As the only child of `tini`, pid 1 of a private pid, user, mount and
+    /// cgroup namespace, for node classes whose floor asks for the enclosure
+    /// instead (a hosted node: its jobs die with it because its parent is a
+    /// trusted init that exits with it, and it configures no per-execution
+    /// scopes). This is the shape of the shipped image.
     Enclosure,
 }
 
@@ -270,7 +271,11 @@ pub fn launch_command(state_path: &Path) -> Result<Option<tokio::process::Comman
     Ok(Some(command))
 }
 
-/// The command that starts a node as pid 1 of a private enclosure. The
+/// The command that starts a node in a private enclosure whose pid 1 is
+/// `tini`, as in the shipped image. The node is not pid 1 itself: process
+/// identity refuses pid 1 and process group 1, so a node that is the init of
+/// its namespace cannot start. With `tini` as pid 1 the node grades the
+/// enclosure as trusted (`tini` is in the profile's `enclosure_inits`). The
 /// identity maps cover every account the harness uses, so the node, running
 /// as the administrator of its own user namespace, reads and writes the same
 /// trees under the same ownership. `--kill-child` ends the enclosure when the
@@ -287,6 +292,8 @@ fn enclosure_command(daemon: &Path, state_path: &Path) -> tokio::process::Comman
             "--kill-child",
             "--cgroup",
             "--mount-proc",
+            "tini",
+            "--",
         ])
         .arg(daemon)
         .arg("--app-root")
