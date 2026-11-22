@@ -782,6 +782,20 @@ pub async fn handle_projects_resolve(
     Ok(json!({ "project": project_view(project, None, true) }))
 }
 
+/// The row of one principal's own registry for `local_id`. The registry a
+/// store loads is that principal's alone, so another principal's row, or an
+/// id nobody registered, is absent here and opens nothing.
+fn registered_project(
+    projects: ProjectsFile,
+    local_id: &str,
+) -> std::result::Result<ProjectEntry, HandlerError> {
+    projects
+        .projects
+        .into_iter()
+        .find(|entry| entry.local_id == local_id)
+        .ok_or(HandlerError::NotFound)
+}
+
 pub async fn handle_projects_open(
     params: Value,
     ctx: HandlerContext,
@@ -854,12 +868,7 @@ pub async fn handle_projects_open(
         .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let project = {
         let store = locked_principal_store(&ctx, &state).await?;
-        store
-            .load_projects()?
-            .projects
-            .into_iter()
-            .find(|entry| entry.local_id == req.local_id)
-            .ok_or(HandlerError::NotFound)?
+        registered_project(store.load_projects()?, &req.local_id)?
     };
     let canonical = canonical_project_root(&project.root)?;
     let root = canonical.display().to_string();
@@ -915,6 +924,7 @@ pub async fn handle_projects_open(
     let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
     let append_limit = completed_admission_append_limit(&state)?;
     let mut admitted_result = None;
+    let mut journal_failure: Option<String> = None;
     let root_resolution = root_attachment
         .project_authority
         .as_ref()
@@ -994,11 +1004,42 @@ pub async fn handle_projects_open(
                             });
                             validate_completed_admission_size(&result,&producer,&req.creation_request_id,
                                 request_bounds.max_request_bytes,append_limit.min(request_bounds.max_seat_append_bytes))?;
+                            // The node's own record, written before the grant is
+                            // observable: a node that cannot journal it admits
+                            // nothing. The seat rows are producer-authored and
+                            // do not stand in for it.
+                            let attachment_id = attachment.coordinate().binding_attachment_id;
+                            if let Err(error) = ryeos_node::node_journal::NodeJournal::for_app_root(
+                                &state.config.app_root,
+                                (*state.identity).clone(),
+                            )
+                            .record_project_attachment_opened(
+                                &ryeos_node::node_journal::ProjectAttachmentFacts {
+                                    principal: session.principal_id.as_str(),
+                                    local_id: &project.local_id,
+                                    root: &root,
+                                    session_id: &session.session_id,
+                                    presentation_id: &producer.presentation_id,
+                                    requesting_attachment_id: &origin
+                                        .coordinate()
+                                        .binding_attachment_id,
+                                    attachment_id: &attachment_id,
+                                    creation_request_id: &req.creation_request_id,
+                                },
+                            ) {
+                                journal_failure = Some(error.to_string());
+                                return Err(crate::browser_session::AttachmentStoreError::PresentationInvalid);
+                            }
                             admitted_result = Some(result);
                             Ok(())
                         },
                     )
-                    .map_err(|error| anyhow::Error::from(HandlerError::Conflict(error.to_string())))
+                    .map_err(|error| match journal_failure.take() {
+                        Some(failure) => anyhow::Error::from(HandlerError::Internal(format!(
+                            "project attachment was not admitted: {failure}"
+                        ))),
+                        None => anyhow::Error::from(HandlerError::Conflict(error.to_string())),
+                    })
                     })?;
                 published.ok_or_else(|| anyhow::Error::from(HandlerError::Conflict("seat action anchor changed before publication".into())))
             })?
@@ -2227,6 +2268,56 @@ mod tests {
         assert!(
             validate_completed_admission_size(&result, &producer, &operation, 0, 65536).is_err()
         );
+    }
+
+    #[test]
+    fn a_project_opens_only_from_the_callers_own_registry() {
+        let app_root = tempfile::tempdir().unwrap();
+        let resolver = HostedPrincipalResolver::for_app_root(app_root.path());
+        let owner =
+            PrincipalStore::resolve_with(&resolver, &format!("fp:{}", "a".repeat(64))).unwrap();
+        let caller =
+            PrincipalStore::resolve_with(&resolver, &format!("fp:{}", "b".repeat(64))).unwrap();
+        let row = |local_id: &str, root: &str| ProjectEntry {
+            local_id: local_id.into(),
+            name: local_id.into(),
+            root: root.into(),
+            added_at: "2026-11-22T00:00:00Z".into(),
+            tags: Vec::new(),
+        };
+        owner
+            .write_yaml(
+                &owner.paths().projects_config(),
+                &ProjectsFile {
+                    version: PROJECTS_VERSION,
+                    projects: vec![row("owned-by-other", "/srv/other")],
+                },
+            )
+            .unwrap();
+        caller
+            .write_yaml(
+                &caller.paths().projects_config(),
+                &ProjectsFile {
+                    version: PROJECTS_VERSION,
+                    projects: vec![row("mine", "/srv/mine")],
+                },
+            )
+            .unwrap();
+
+        let found = registered_project(caller.load_projects().unwrap(), "mine").unwrap();
+        assert_eq!(found.root, "/srv/mine");
+        // Another principal's row, and an id nobody registered, are both absent.
+        for local_id in ["owned-by-other", "never-registered"] {
+            assert!(
+                matches!(
+                    registered_project(caller.load_projects().unwrap(), local_id),
+                    Err(HandlerError::NotFound)
+                ),
+                "{local_id} must not open for a caller that did not register it"
+            );
+        }
+        // The other principal's own registry still holds its row.
+        assert!(registered_project(owner.load_projects().unwrap(), "owned-by-other").is_ok());
     }
 
     #[test]

@@ -70,6 +70,10 @@ pub enum JournalType {
     EndorsementAccepted,
     #[serde(rename = "endorsement.revoked")]
     EndorsementRevoked,
+    /// A session attachment was granted authority over a registered project
+    /// root. Written by the daemon before the grant becomes observable.
+    #[serde(rename = "project.attachment_opened")]
+    ProjectAttachmentOpened,
 }
 
 impl JournalType {
@@ -81,6 +85,7 @@ impl JournalType {
             Self::NodeExitUnknown => "node.exit_unknown",
             Self::EndorsementAccepted => "endorsement.accepted",
             Self::EndorsementRevoked => "endorsement.revoked",
+            Self::ProjectAttachmentOpened => "project.attachment_opened",
         }
     }
 }
@@ -485,6 +490,16 @@ impl NodeJournal {
         self.append(endorsement_draft(JournalType::EndorsementRevoked, facts))
     }
 
+    /// Record that a session attachment gained authority over a registered
+    /// project root. `subject_ref` is the registry id, `actor` the principal
+    /// whose registry row it is.
+    pub fn record_project_attachment_opened(
+        &self,
+        facts: &ProjectAttachmentFacts<'_>,
+    ) -> Result<SignedJournalRecord, JournalError> {
+        self.append(project_attachment_draft(facts))
+    }
+
     /// Record a handled exit.
     pub fn record_exit(&self, exit: &ExitFacts<'_>) -> Result<(), JournalError> {
         self.append(exited_draft(exit)).map(|_| ())
@@ -528,6 +543,39 @@ pub struct EndorsementFacts<'a> {
     pub delegation: Option<&'a str>,
     /// Revocation reason.
     pub reason: Option<&'a str>,
+}
+
+/// What the journal records about a project attachment opening.
+pub struct ProjectAttachmentFacts<'a> {
+    /// The calling principal, whose own registry row is opened.
+    pub principal: &'a str,
+    /// The registry id of the opened project.
+    pub local_id: &'a str,
+    /// The canonical registered root the attachment now holds.
+    pub root: &'a str,
+    pub session_id: &'a str,
+    pub presentation_id: &'a str,
+    /// The attachment that asked for the open.
+    pub requesting_attachment_id: &'a str,
+    /// The attachment that now carries the project authority.
+    pub attachment_id: &'a str,
+    pub creation_request_id: &'a str,
+}
+
+fn project_attachment_draft(facts: &ProjectAttachmentFacts<'_>) -> JournalDraft {
+    let mut draft = JournalDraft::new(JournalType::ProjectAttachmentOpened)
+        .with("root", bounded(facts.root))
+        .with("session_id", bounded(facts.session_id))
+        .with("presentation_id", bounded(facts.presentation_id))
+        .with(
+            "requesting_attachment_id",
+            bounded(facts.requesting_attachment_id),
+        )
+        .with("attachment_id", bounded(facts.attachment_id))
+        .with("creation_request_id", bounded(facts.creation_request_id));
+    draft.subject_ref = Some(facts.local_id.to_owned());
+    draft.actor = Some(facts.principal.to_owned());
+    draft
 }
 
 fn endorsement_draft(record_type: JournalType, facts: &EndorsementFacts<'_>) -> JournalDraft {

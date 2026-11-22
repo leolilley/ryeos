@@ -414,8 +414,8 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         Some(producer.clone()),
         bound.project_authored_source,
         async {
-            if bound.target.source_safe {
-                execute_read_only_service(
+            if runs_unrecorded(&bound.target) {
+                execute_unrecorded_service(
                     &item_ref,
                     bound.params,
                     &state,
@@ -1606,7 +1606,15 @@ pub(crate) fn prepare_item_ref(
     })
 }
 
-async fn execute_read_only_service(
+/// Whether a compiled target runs on the unrecorded daemon-service executor:
+/// a read-only source, or a service that declares a session transition. The
+/// declaration is the only key; compilation already refused it on anything
+/// but a trusted-bundle, session-local, non-read-only service.
+fn runs_unrecorded(target: &crate::compiled_binding::CompiledUiTarget) -> bool {
+    target.source_safe || target.result_effect.is_some()
+}
+
+async fn execute_unrecorded_service(
     item_ref: &str,
     params: Value,
     state: &AppState,
@@ -1651,12 +1659,13 @@ async fn execute_read_only_service(
             ))
         })?;
 
-    // Read-only UI sources are in-process daemon queries. They need the live
-    // project only as a resolution/input scope; manufacturing project
-    // execution provenance for them both over-authorizes the handler and
-    // wrongly demands `ryeos.write.project.live`. Availability, signed
-    // required_caps, audit policy, and session-local context are still
-    // enforced by the shared verified service executor.
+    // Read-only UI sources and declared session transitions are in-process
+    // daemon work. They need the live project only as a resolution/input
+    // scope; manufacturing project execution provenance for them both
+    // over-authorizes the handler and wrongly demands
+    // `ryeos.write.project.live`. Availability, signed required_caps, audit
+    // policy, and session-local context are still enforced by the shared
+    // verified service executor.
     let result = ryeos_executor::executor::execute_service_verified(
         verified,
         item_ref,
@@ -2077,6 +2086,19 @@ mod tests {
             result_effect,
             parameter_schema: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn only_a_declared_transition_or_a_read_only_source_runs_unrecorded() {
+        // A service that declares no effect keeps the recorded lane, whatever
+        // its result carries.
+        assert!(!runs_unrecorded(&target(None)));
+        assert!(runs_unrecorded(&target(Some(
+            CompiledUiResultEffect::SurfaceOpening
+        ))));
+        let mut read_only = target(None);
+        read_only.source_safe = true;
+        assert!(runs_unrecorded(&read_only));
     }
 
     fn session(user_principal_id: Option<String>) -> BrowserSession {

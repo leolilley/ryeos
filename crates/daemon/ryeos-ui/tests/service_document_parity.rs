@@ -133,6 +133,22 @@ fn ui_result_effects_and_dispatch_read_through_the_runtime_extractors() {
         let read = extract_ui_result_effect(&document.metadata)
             .unwrap_or_else(|error| panic!("{service_ref}: {error}"));
         assert_eq!(read, Some(effect), "{service_ref}");
+        // The lane runs these on the unrecorded executor, which refuses a
+        // recorded service, and compilation refuses a read-only or
+        // non-session-local declaration.
+        assert!(
+            !ryeos_app::service_registry::extract_record_thread(&document.metadata).unwrap(),
+            "{service_ref} must declare record_thread: false"
+        );
+        assert!(
+            !ryeos_app::service_registry::extract_ui_read_only(&document.metadata).unwrap(),
+            "{service_ref} must not be read-only"
+        );
+        assert_eq!(
+            extract_ui_dispatch(&document.metadata).unwrap(),
+            ryeos_app::service_registry::UiDispatchMode::SessionLocal,
+            "{service_ref}"
+        );
     }
     for (service_ref, document) in &documents {
         extract_ui_dispatch(&document.metadata)

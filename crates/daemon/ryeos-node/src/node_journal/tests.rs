@@ -549,3 +549,41 @@ fn endorsement_events_are_journaled_with_their_digest_endorser_and_head() {
         "endorsement.revoked"
     );
 }
+
+#[test]
+fn project_attachment_opening_is_journaled_with_who_root_attachment_and_time() {
+    let fx = Fixture::new();
+    let principal = format!("fp:{}", "d".repeat(64));
+    let record = fx
+        .journal()
+        .record_project_attachment_opened(&ProjectAttachmentFacts {
+            principal: &principal,
+            local_id: "proj-1",
+            root: "/srv/projects/alpha",
+            session_id: "session-1",
+            presentation_id: "presentation-1",
+            requesting_attachment_id: "attachment-root",
+            attachment_id: "attachment-new",
+            creation_request_id: "creation-1",
+        })
+        .unwrap();
+
+    assert_eq!(
+        record.body.record_type,
+        JournalType::ProjectAttachmentOpened
+    );
+    assert_eq!(record.body.subject_ref.as_deref(), Some("proj-1"));
+    assert_eq!(record.body.actor.as_deref(), Some(principal.as_str()));
+    assert_eq!(record.body.detail["root"], "/srv/projects/alpha");
+    assert_eq!(record.body.detail["attachment_id"], "attachment-new");
+    assert_eq!(
+        record.body.detail["requesting_attachment_id"],
+        "attachment-root"
+    );
+    assert!(!record.body.recorded_at.is_empty());
+    assert_eq!(
+        serde_json::to_value(JournalType::ProjectAttachmentOpened).unwrap(),
+        "project.attachment_opened"
+    );
+    assert_eq!(fx.journal().read().unwrap().records.len(), 1);
+}

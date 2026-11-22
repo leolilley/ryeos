@@ -3830,6 +3830,7 @@ dependencies = [
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-node",
  "ryeos-node-runtime",
  "ryeos-runtime",
  "ryeos-scheduler",

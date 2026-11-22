@@ -95,6 +95,33 @@ fn operator_signs_view(
     .seq
 }
 
+/// Every file under `root` with its bytes, by relative path.
+fn tree_snapshot(
+    root: &std::path::Path,
+) -> anyhow::Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>> {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+            } else {
+                out.insert(
+                    path.strip_prefix(root)?.to_path_buf(),
+                    std::fs::read(&path)?,
+                );
+            }
+        }
+        Ok(())
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out)?;
+    Ok(out)
+}
+
 /// The value a route answers with, whether or not the route wraps it under
 /// `result`: the object that carries `key`.
 fn locate<'a>(value: &'a Value, key: &str) -> &'a Value {
@@ -531,6 +558,7 @@ async fn a_live_seat_picks_up_a_revised_project_view_through_hint_revise_and_reb
 
     // Open the project Surface through the presentation's open-surface
     // operation: prepare it on the seat, dispatch it, retain its result.
+    let tree_before_open = tree_snapshot(&project)?;
     let presentation_id = PresentationId::try_new(seat.presentation_id().to_owned())
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
     let origin = RyeOsViewInstanceKey::shared_dialog(&presentation_id, "surfaces")
@@ -589,6 +617,11 @@ async fn a_live_seat_picks_up_a_revised_project_view_through_hint_revise_and_reb
         )],
     )
     .await?;
+    assert_eq!(
+        tree_snapshot(&project)?,
+        tree_before_open,
+        "opening a Surface writes nothing under the project"
+    );
     let surface_id = transition["surface"]["surface_instance_id"]
         .as_str()
         .expect("the opened Surface has an instance id")
@@ -809,6 +842,125 @@ async fn a_live_seat_picks_up_a_revised_project_view_through_hint_revise_and_reb
         other_tap.hints().is_empty(),
         "an unrelated session hears nothing: {:?}",
         other_tap.hints()
+    );
+    Ok(())
+}
+
+/// A seat on a session minted without a project, ready to prepare operations.
+async fn projectless_seat(harness: &DaemonHarness) -> anyhow::Result<Seat> {
+    let (session_id, root) = mint_session(harness, None).await?;
+    let producer = claim_producer(harness, &session_id, &root).await?;
+    let current = session_current(harness, &session_id).await?;
+    let bounds = descriptor_of(&current, root["binding_attachment_id"].as_str().unwrap())
+        ["binding_request_bounds"]
+        .clone();
+    Ok(Seat {
+        session_id,
+        producer,
+        root,
+        bounds,
+        next_engine_seq: 0,
+    })
+}
+
+/// The binding request for one affordance of a view in the shared
+/// presentation, carrying a selected record.
+fn affordance_request(seat: &Seat, view_ref: &str, affordance: &str, record: Value) -> Value {
+    json!({
+        "binding_attachment_id": seat.root["binding_attachment_id"],
+        "binding_generation": seat.root["binding_generation"],
+        "binding_digest": seat.root["binding_digest"],
+        "coordinate": {
+            "kind": "affordance",
+            "view_ref": view_ref,
+            "affordance_id": affordance,
+        },
+        "payload": {"kind": "selection", "record": record},
+    })
+}
+
+/// A service that declares no session transition keeps the recorded lane, so
+/// a standard browser session, which holds no live-project write capability,
+/// is still refused: the transition lane did not widen it. `projects/add`
+/// is such a service and registers any directory the node can read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_declaring_service_stays_refused_on_a_session_without_write_authority()
+-> anyhow::Result<()> {
+    let (harness, _fixture) = DaemonHarness::start_fast_with(|_, _, _| Ok(()), |_| {}).await?;
+    let seat = projectless_seat(&harness).await?;
+    let directory = tempfile::tempdir()?;
+    let (status, refused) = cookie_post(
+        &harness,
+        "/ui/api/invocations/dispatch",
+        &seat.session_id,
+        json!({
+            "producer": seat.producer,
+            "binding": affordance_request(
+                &seat,
+                "view:ryeos/projects/list",
+                "register-project",
+                json!({"root": directory.path().to_str().unwrap()}),
+            ),
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "register-project: {refused}");
+    assert!(
+        refused.to_string().contains("write.project.live"),
+        "the refusal names the missing live-project write capability: {refused}"
+    );
+    Ok(())
+}
+
+/// Opening a registered project reaches only the calling principal's own
+/// registry. An id that principal never registered opens nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_an_unregistered_project_id_is_refused_by_the_lane() -> anyhow::Result<()> {
+    let (harness, _fixture) = DaemonHarness::start_fast_with(|_, _, _| Ok(()), |_| {}).await?;
+    let mut seat = projectless_seat(&harness).await?;
+    let presentation_id = PresentationId::try_new(seat.presentation_id().to_owned())
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    let origin = RyeOsViewInstanceKey::shared_dialog(&presentation_id, "projects")
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    let request = affordance_request(
+        &seat,
+        "view:ryeos/projects/list",
+        "open-project",
+        json!({"local_id": "never-registered"}),
+    );
+    let admission = seat.prepared_operation(
+        json!({
+            "kind": "admission",
+            "purpose": "open_surface",
+            "surface_open_target": {
+                "selection": {"kind": "authored", "surface_ref": "surface:ryeos/ui/project"},
+                "placement": {"kind": "new_surface"},
+            },
+            "particular_selection": null,
+            "invocation_origin": origin,
+            "request": request,
+            "success_notice": null,
+        }),
+        "00000000-0000-4000-8000-000000000001",
+    );
+    seat.append(&harness, &[(PREPARED, serde_json::to_value(&admission)?)])
+        .await?;
+    let (status, refused) = cookie_post(
+        &harness,
+        "/ui/api/invocations/dispatch",
+        &seat.session_id,
+        json!({
+            "presentation_operation_id": admission.operation_id,
+            "producer": seat.producer,
+            "binding": admission.admission().expect("admission body").request,
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unregistered id: {refused}");
+    assert!(
+        refused.get("ui_transition").is_none()
+            && refused.pointer("/result/ui_transition").is_none(),
+        "nothing was opened: {refused}"
     );
     Ok(())
 }
