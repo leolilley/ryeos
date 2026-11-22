@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:48:14Z:cbf092fd4f1ee82e3d07e2c71170c7bc478fc14fed8eb35300089c6c32dc1faa:3XrYDHZc0gRQVnL8TDVbRKjqTweJQML6aVHzR6+w6tuSMEgXrWvOPbgVbJyLfmv0CH1AjOxOHmA/x+o8P05nBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T19:08:16Z:c8378b003b3904f5adb383b7ed18a18386a832c6bda3a2463eaae06d8a755711:aHpLRb1+bPHm7rgwXIAe2Y4bQ9NDY1R1hwJhM20W5g3DYJsLwRTssQqdSXdKX1G9MkKPuhO9N/TahhDt+rZSBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -196,7 +196,7 @@ A record carries the signer's fingerprint and public key, a label, and:
 | Field | Values |
 |---|---|
 | `role` | `publisher`, `operator`, `project_author`, `authoring` |
-| `scope` | `spaces` (bundle, project, node), `kinds` (item kinds, or all), `projects` (project roots, for `project_author`) |
+| `scope` | `spaces` (bundle, project, node), `kinds` (item kinds, or all), `projects` (owner+name identities `fp:<owner>/<name>` or `own:<name>`; empty is unscoped) |
 | `status` | `active`, `retired`, `revoked` |
 
 Defaults: a publisher is scoped to the bundle space for every kind; the
@@ -206,20 +206,38 @@ admits nothing), and that scope is the only one it may hold: its registry scope
 never decides trust, so items it signs are untrusted until an operator endorses
 them (see [Endorsements](#endorsements)).
 
-`scope.projects` names projects by their logical project path: the absolute
-project path as the node knows it. A run against a live project matches by that
-path. A run against a pinned generation, a copy-on-write workspace or a pushed
-head is materialized at a per-generation checkout, so it matches by the
-project's original path instead, but only when the node's stable project
-identity for it is local: `local:<path>`, or `<site>:<path>` where `<site>` is
-this node's own site id (how a pinned head launched on this node is stamped).
-The checkout path never matches. A run whose logical project is unknown (for
-example a head whose project identity names another site) is judged as no
-project, so a signer scoped to specific projects is untrusted there.
+`scope.projects` names projects by owner+name identity, never by path. An
+entry is `fp:<owner>/<name>` (a named owner) or `own:<name>` (the signer's own
+key as owner). A project's name is what its tree declares in
+`.ai/project.yaml` (`schema: 1`, `name: <name>`); the owner never comes from the
+tree. A scoped signer is trusted only where the node has established that
+identity:
 
-A signer with an empty `projects` list may sign for every project.
-`ryeos trust scope <fp> --project <root>` replaces the list;
-`ryeos trust scope <fp> --any-project` clears it again.
+- a live checkout the launcher registered under its own owner
+  (`ryeos project register`), whose tree still declares that name, launched by a
+  principal holding `ryeos.write.project.live`;
+- a pushed head this node holds for that owner and name at exactly the run's
+  snapshot.
+
+The identity is sealed when a run is admitted and is never re-derived on
+resume. Anywhere else (an unregistered checkout, another owner's project of the
+same name, a pinned generation whose owner's head this node does not hold) the
+run states no identity, and a scoped signer is untrusted there. A UI session in
+that position reports "no project identity for this session".
+
+A signer with an empty `projects` list is unscoped: it is trusted in every
+project context, identified or not. Registration matters only for scoped
+signers. `ryeos node doctor` lists unscoped project-space signers other than the
+operator and the authoring key under `unscoped_project_signers`.
+
+`ryeos trust scope <fp> --project fp:<owner>/<name>` (or `own:<name>`) replaces
+the list; `ryeos trust scope <fp> --any-project` clears it. Adding the project
+space needs one of the two, so a scope never becomes all-projects by accident;
+a scope that leaves the project space drops its projects. A signer record
+written before owner+name identity that still lists project paths is refused
+by name (`trust_record_schema_unsupported`): only that signer is unusable, the
+node starts, and `ryeos node doctor` names it under `signer_records_refused`.
+Re-scope it with an identity, or out of the project space.
 
 The scope is checked on every verification. A signer outside its scope is
 not trusted for that item: in project space the item is
@@ -379,7 +397,7 @@ were.
 | Form | Names | Covers |
 |---|---|---|
 | per-change | the exact items: ref, kind and the digest of the signed bytes after the signature line | those bytes only; one changed byte returns the item to `untrusted_project` |
-| standing | kinds within one project, optionally until a time | whatever the authoring key signs of those kinds in that project |
+| standing | kinds within one project (`fp:<operator>/<name>`), optionally until a time | whatever the authoring key signs of those kinds where that identity is established |
 
 ```bash
 ryeos --project . endorse --item view:acme/home --item surface:acme/main
@@ -389,7 +407,13 @@ ryeos endorse revoke --endorsement <digest> --reason "no longer wanted"
 ```
 
 `ryeos endorse` signs the endorsement with the operator key inside the CLI; the
-daemon never holds that key. It reads the node's endorsement ledger head, signs
+daemon never holds that key. The project is the checkout's declared name owned
+by the endorsing operator, `fp:<operator>/<name>`; the CLI prints it before
+signing and refuses a checkout that declares no name, and the node refuses an
+endorsement for a project another key owns. An endorsement covers items only
+where that identity is established (a registration or a held head), the same
+gate a scoped signer meets; `ryeos node doctor` lists endorsements that cover
+nothing on the node under `endorsements_covering_nothing`. It reads the node's endorsement ledger head, signs
 a body that carries the project, the endorser, the exact targets, the time, a
 nonce and that head, and submits it to the running node. The node checks the
 signature against its signer registry (the endorser must be an active
