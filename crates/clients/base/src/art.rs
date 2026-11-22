@@ -94,9 +94,9 @@ impl std::error::Error for PictureBindingError {}
 fn is_word(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        })
 }
 
 /// A picture named by item ref, never by hash: the daemon resolves the ref to
