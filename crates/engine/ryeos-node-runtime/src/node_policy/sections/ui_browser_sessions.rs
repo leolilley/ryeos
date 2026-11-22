@@ -94,13 +94,12 @@ pub struct SharedPresentationPolicyLimits {
 impl UiBrowserSessionPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != CURRENT_SCHEMA {
-            bail!(
-                "UI browser-session node policy schema {} is not current ({CURRENT_SCHEMA}); \
-                 re-issue the ui_browser_sessions section at schema {CURRENT_SCHEMA} with \
-                 session_ttl_secs, session_idle_secs, launch_token_ttl_secs, session_scopes and \
-                 max_art_grants",
-                self.schema
-            );
+            return Err(crate::node_policy::generation::SectionSchemaStale {
+                section: SECTION_NAME.to_owned(),
+                stored: self.schema,
+                required: CURRENT_SCHEMA,
+            }
+            .into());
         }
         for (name, value, ceiling) in [
             (
@@ -285,6 +284,22 @@ impl NodePolicySection for UiBrowserSessionPolicySection {
         _context: &NodePolicyContext,
         body: &Value,
     ) -> anyhow::Result<Arc<dyn ErasedNodePolicy>> {
+        // The schema is read before the typed body: a body at an earlier
+        // schema lacks fields the current one requires, and must be refused as
+        // stale, not as a missing field.
+        if let Some(stored) = body
+            .get("schema")
+            .and_then(Value::as_u64)
+            .and_then(|schema| u32::try_from(schema).ok())
+            .filter(|schema| *schema != CURRENT_SCHEMA)
+        {
+            return Err(crate::node_policy::generation::SectionSchemaStale {
+                section: SECTION_NAME.to_owned(),
+                stored,
+                required: CURRENT_SCHEMA,
+            }
+            .into());
+        }
         let record: UiBrowserSessionPolicy =
             serde_json::from_value(body.clone()).context("parse UI browser-session node policy")?;
         record.validate()?;
@@ -585,13 +600,22 @@ mod tests {
 
     #[test]
     fn schema_five_is_refused_with_the_cure() {
+        // A real schema-5 body has no `max_art_grants`.
         let mut body = current_body();
         body["schema"] = serde_json::json!(5);
+        body.as_object_mut().unwrap().remove("max_art_grants");
         let error = UiBrowserSessionPolicySection
             .parse(&context(), &body)
             .err()
             .unwrap();
         assert!(format!("{error:#}").contains("schema 6"), "{error:#}");
+        let stale = error
+            .downcast_ref::<crate::node_policy::generation::SectionSchemaStale>()
+            .expect("the refusal is typed");
+        assert_eq!(
+            (stale.section.as_str(), stale.stored, stale.required),
+            (SECTION_NAME, 5, 6)
+        );
     }
 
     #[test]

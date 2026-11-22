@@ -59,6 +59,104 @@ impl std::fmt::Display for NodePolicySectionsMissing {
 
 impl std::error::Error for NodePolicySectionsMissing {}
 
+/// A section compiler refused a body because it is stored at a schema other
+/// than the one this release reads. The generation loader turns it into
+/// [`NodePolicySectionSchemaStale`], which knows the generation and the cure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionSchemaStale {
+    pub section: String,
+    pub stored: u32,
+    pub required: u32,
+}
+
+impl std::fmt::Display for SectionSchemaStale {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "`{}` node policy is stored at schema {}; this release requires schema {} and \
+             reads no earlier schema",
+            self.section, self.stored, self.required
+        )
+    }
+}
+
+impl std::error::Error for SectionSchemaStale {}
+
+/// The installed generation holds a section at a schema this release no
+/// longer reads, so the node does not load. The cure is the stopped-node
+/// policy generation replacement. `profile` and `host_class` are the node's
+/// own, when the caller could read them from the node's substrate identity;
+/// otherwise the command shows placeholders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePolicySectionSchemaStale {
+    pub directory: PathBuf,
+    pub section: String,
+    pub stored: u32,
+    pub required: u32,
+    /// The section was operator-applied, or the generation does not record
+    /// which sections were, so the replacement must be told to take the
+    /// profile's body for it.
+    pub reset_section_needed: bool,
+    pub profile: Option<String>,
+    pub host_class: Option<String>,
+}
+
+impl NodePolicySectionSchemaStale {
+    /// This refusal with the node's own installed profile and host class.
+    pub fn with_installed_profile(
+        mut self,
+        profile: Option<String>,
+        host_class: Option<String>,
+    ) -> Self {
+        self.profile = profile;
+        self.host_class = host_class;
+        self
+    }
+
+    /// The exact stopped-node command that cures this refusal.
+    pub fn cure_command(&self) -> String {
+        let profile = self.profile.as_deref().unwrap_or("<profile>");
+        let host_class = self.host_class.as_deref().unwrap_or("<host-class>");
+        let reset = if self.reset_section_needed {
+            format!(" --reset-section {}", self.section)
+        } else {
+            String::new()
+        };
+        format!(
+            "ryeos node reset policy-generation --node-profile {profile} \
+             --host-class {host_class}{reset} --confirm"
+        )
+    }
+}
+
+impl std::fmt::Display for NodePolicySectionSchemaStale {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the node policy generation at {} holds a `{}` section at schema {}, but this \
+             release requires schema {} and reads no earlier schema; with the daemon stopped, \
+             run `{}` (add --source <seed-root> unless the image seed is at /usr/share/ryeos)",
+            self.directory.display(),
+            self.section,
+            self.stored,
+            self.required,
+            self.cure_command(),
+        )?;
+        if self.reset_section_needed {
+            write!(
+                formatter,
+                "; --reset-section {} is needed because that section was operator-applied or \
+                 the generation does not record which were, and it re-applies the profile's \
+                 body, so re-apply your own changes afterwards with `ryeos node policy-apply`",
+                self.section
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for NodePolicySectionSchemaStale {}
+
 /// The stopped-node command that replaces a policy generation from the
 /// release's profile, as an operator types it.
 pub const POLICY_GENERATION_RESET_COMMAND: &str = "ryeos node reset policy-generation \
@@ -756,7 +854,28 @@ fn load_policy_generation_from_directory(
         }
         .into());
     }
+    let recorded = operator_sections.clone();
     validate_policy_generation(policy_table, policies, operator_sections, directory.path())
+        .map_err(|error| {
+            let Some(stale) = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<SectionSchemaStale>())
+            else {
+                return error;
+            };
+            NodePolicySectionSchemaStale {
+                directory: directory.path().to_path_buf(),
+                section: stale.section.clone(),
+                stored: stale.stored,
+                required: stale.required,
+                reset_section_needed: recorded
+                    .as_ref()
+                    .is_none_or(|sections| sections.contains(&stale.section)),
+                profile: None,
+                host_class: None,
+            }
+            .into()
+        })
 }
 
 /// A generation's node-signed members, read without compiling any section.
@@ -1700,6 +1819,68 @@ mod tests {
         assert!(
             message.contains(POLICY_GENERATION_RESET_COMMAND) && message.contains(section),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn a_stale_section_schema_refuses_with_the_exact_cure() {
+        let section = crate::node_policy::sections::ui_browser_sessions::SECTION_NAME;
+        let fixture = CarryFixture::new();
+        let mut installed = fixture.profile.policies().clone();
+        let body = installed.get_mut(section).unwrap();
+        body["schema"] = serde_json::json!(5);
+        body.as_object_mut().unwrap().remove("max_art_grants");
+
+        // An operator-applied section also needs --reset-section.
+        fixture.install(&installed, Some(&[section]));
+        let error = load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table)
+            .expect_err("a schema-5 section does not load");
+        let stale = error
+            .downcast_ref::<NodePolicySectionSchemaStale>()
+            .expect("the refusal is typed")
+            .clone();
+        assert_eq!((stale.stored, stale.required), (5, 6));
+        assert!(stale.reset_section_needed);
+        let filled = stale
+            .clone()
+            .with_installed_profile(Some("standard".to_owned()), Some("local".to_owned()));
+        assert_eq!(
+            filled.cure_command(),
+            "ryeos node reset policy-generation --node-profile standard --host-class local \
+             --reset-section ui_browser_sessions --confirm"
+        );
+        let message = filled.to_string();
+        assert!(
+            message.contains(&filled.cure_command())
+                && message.contains("schema 5")
+                && message.contains("schema 6"),
+            "{message}"
+        );
+
+        // The named cure works: without the reset the operator-applied body is
+        // carried and refused; with it the replacement validates.
+        fixture
+            .cut(&PolicyCarryChoices::default())
+            .expect_err("the stale operator body is not carried");
+        fixture
+            .cut(&PolicyCarryChoices {
+                reset: sections(&[section]),
+                ..PolicyCarryChoices::default()
+            })
+            .expect("the reset replacement validates");
+
+        // A profile-sourced section needs no --reset-section.
+        fixture.install(&installed, Some(&[]));
+        let error = load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table)
+            .expect_err("a schema-5 section does not load");
+        let stale = error.downcast_ref::<NodePolicySectionSchemaStale>().unwrap();
+        assert!(!stale.reset_section_needed);
+        assert!(
+            stale
+                .cure_command()
+                .ends_with("--host-class <host-class> --confirm"),
+            "{}",
+            stale.cure_command()
         );
     }
 
