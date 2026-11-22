@@ -338,3 +338,107 @@ async fn consecutive_output_limit_turns_are_bounded() {
     // Two recovered turns, then the third ends the thread.
     assert_eq!(rig.stub.requests().await.len(), 3);
 }
+
+fn retry_after_script(header: &str) -> String {
+    format!(
+        "steps:\n  - fail: {{ status: 429, body: \"slow down\", retry_after: \"{header}\" }}\n  - text: \"done\"\n"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_longer_than_the_backoff_is_waited_out_and_recorded() {
+    let rig = start_rig(
+        &retry_after_script("3"),
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let thread_id = launch_on(&rig).await.expect("launch");
+    let (status, elapsed) = wait_terminal(&rig.h, &thread_id, MAX_WAIT).await;
+    assert_eq!(status, "completed");
+    assert!(
+        elapsed >= Duration::from_secs(3),
+        "the retry came before the provider's Retry-After: {elapsed:?}"
+    );
+    assert_eq!(rig.stub.requests().await.len(), 2);
+    let retries = chain_payloads(&rig.h, &thread_id, "provider_retry").await;
+    assert_eq!(retries.len(), 1, "{retries:?}");
+    let decision = &retries[0]["retry_advance"]["decision"];
+    assert_eq!(decision["backoff_ms"], 3000, "{decision}");
+    assert_eq!(decision["retry_after_ms"], 3000, "{decision}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_over_the_cap_is_refused_with_its_typed_reason() {
+    let rig = start_rig(
+        &retry_after_script("120"),
+        RigOptions {
+            exec_yaml: Some(execution("retry_after_max_ms: 5000\n")),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "failed");
+    assert_eq!(rig.stub.requests().await.len(), 1);
+    assert!(
+        chain_payloads(&rig.h, &thread_id, "provider_retry")
+            .await
+            .is_empty()
+    );
+    let detail = stub_rig::thread_detail(&rig.h, &thread_id, 4000).await;
+    assert!(
+        detail.contains("provider_retry_after_exceeds_cap"),
+        "{detail}"
+    );
+    assert!(detail.contains("120000"), "{detail}");
+    assert!(detail.contains("5000"), "{detail}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_cap_ignores_the_retry_after_header() {
+    let rig = start_rig(
+        &retry_after_script("120"),
+        RigOptions {
+            exec_yaml: Some(execution("retry_after_max_ms: 0\n")),
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let (thread_id, status) = run_to_terminal(&rig).await;
+    assert_eq!(status, "completed");
+    let retries = chain_payloads(&rig.h, &thread_id, "provider_retry").await;
+    let decision = &retries[0]["retry_advance"]["decision"];
+    assert_eq!(decision["backoff_ms"], 100, "{decision}");
+    assert!(decision.get("retry_after_ms").is_none(), "{decision}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_that_would_outrun_the_run_deadline_is_refused() {
+    let rig = start_rig(
+        &retry_after_script("30"),
+        RigOptions {
+            exec_yaml: Some(execution("")),
+            header_extra: "limits:\n  wrap_up_seconds: 0\n  deadline:\n    reserve_seconds: 20\n",
+            ..RigOptions::default()
+        },
+    )
+    .await
+    .expect("start rig");
+    let thread_id = stub_rig::launch_on_with(&rig, serde_json::json!({"run_timeout": 40}))
+        .await
+        .expect("launch");
+    let (status, _) = wait_terminal(&rig.h, &thread_id, MAX_WAIT).await;
+    assert_eq!(status, "failed");
+    assert_eq!(rig.stub.requests().await.len(), 1);
+    let detail = stub_rig::thread_detail(&rig.h, &thread_id, 4000).await;
+    assert!(
+        detail.contains("provider_retry_exceeds_run_deadline"),
+        "{detail}"
+    );
+}

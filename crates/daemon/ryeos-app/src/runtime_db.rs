@@ -2756,7 +2756,11 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // no longer decodes. An epoch-142 store is a predecessor and is reset without
 // decoding; every node needs `ryeos node reset execution-history`
 // (`--schema-cut-from 142 --schema-cut-to 143`) on its next upgrade, heads-free.
-// The turn marker's required `purpose` field also moves in this epoch.
+// The turn marker's required `purpose` field also moves in this epoch. The
+// provider retry policy digest (`ryeos.directive.provider-retry-policy`) moved
+// from v2 to v3 inside the cut, adding `retry_after_max_ms`; the reset clears
+// every in-flight thread whose retry decisions sealed a v2 digest, and recovery
+// refuses one it still meets rather than re-deriving it.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 143;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0

@@ -3569,6 +3569,7 @@ mod tests {
                     b"retry-policy",
                 ))
                 .unwrap(),
+                retry_after_ms: None,
             },
             1_000,
         )

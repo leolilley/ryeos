@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T10:13:35Z:8bcc39ff59b9f7f7d3da169cee24fcb96b01b8169f18c91c721c506c346713be:AVHunrneQbJVdXTbPOTzYRo4/4sem6X+8c0yLJNz/w4i9jlaMupddsPZPPgh0pNwgTC6o/M+K7OCQ7P8whiXBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T09:46:53Z:8c0955f82a9c84512275087e5f4d67d87f3ca99a0ed7dd3200e0511b50237417:XqEQLEPWjGP2+00Dn5lPqLakA5I63cp72/9D11Yn3pLiJhzJN89BKxr9PQq6AkxdeuOVB9+ES7VEfGukEI+EBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -378,7 +378,7 @@ A row matches a refused response when its status is listed and the response body
 first matching row wins. A match makes the thread fail with that `code`, and a
 refusal a row names is never retried, whatever `retry_status_codes` says. A
 refusal no row matches stays `directive_failed` and follows the ordinary retry
-rules. Only a response that carried a status can match, so an uncertain outcome
+rules (including the `Retry-After` handling described in `execution-config`). Only a response that carried a status can match, so an uncertain outcome
 (a timeout, a cut stream) is never reclassified.
 
 `code` is an opaque token chosen by the entry: lowercase letters, digits and

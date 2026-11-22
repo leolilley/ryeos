@@ -146,6 +146,13 @@ pub struct ExecutionConfig {
     /// The delay is `backoff_base_ms * 2^attempt`, capped here.
     #[serde(default = "default_backoff_max_ms")]
     pub backoff_max_ms: u64,
+    /// Longest wait, in milliseconds, the runtime will honour when a retryable
+    /// provider response carries `Retry-After`. The delay is then the larger of
+    /// the backoff and the provider's ask; an ask above this value is not
+    /// waited out and the run fails with `provider_retry_after_exceeds_cap`.
+    /// `0` ignores the header. Must be `0` or at least `backoff_base_ms`.
+    #[serde(default = "default_retry_after_max_ms")]
+    pub retry_after_max_ms: u64,
     /// Retry policy for provider failures that leave it unknown whether the
     /// provider acted (timeout, send failure after the connection, a stream
     /// cut after content began). Absent means such outcomes are never retried.
@@ -515,6 +522,10 @@ fn default_backoff_max_ms() -> u64 {
     60_000
 }
 
+fn default_retry_after_max_ms() -> u64 {
+    60_000
+}
+
 fn default_backoff_base_ms() -> u64 {
     1000
 }
@@ -550,6 +561,7 @@ impl Default for ExecutionConfig {
             tool_preload: false,
             tool_concurrency: default_tool_concurrency(),
             backoff_max_ms: default_backoff_max_ms(),
+            retry_after_max_ms: default_retry_after_max_ms(),
             unknown_outcome_retry: None,
             on_output_limit: None,
             accounting: AttemptAccountingConfig::default(),
@@ -572,6 +584,13 @@ impl ExecutionConfig {
             anyhow::bail!(
                 "execution.backoff_max_ms ({}) must not be below execution.backoff_base_ms ({})",
                 self.backoff_max_ms,
+                self.backoff_base_ms
+            );
+        }
+        if self.retry_after_max_ms != 0 && self.retry_after_max_ms < self.backoff_base_ms {
+            anyhow::bail!(
+                "execution.retry_after_max_ms ({}) must be 0 (ignore Retry-After) or at least execution.backoff_base_ms ({})",
+                self.retry_after_max_ms,
                 self.backoff_base_ms
             );
         }
@@ -1257,6 +1276,35 @@ mod tests {
             serde_yaml::from_str::<ExecutionConfig>("on_output_limit:\n  max_consecutive: 1\n")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn retry_after_cap_defaults_to_a_minute_and_zero_means_ignore() {
+        let cfg: ExecutionConfig = serde_yaml::from_str("retries: 1\n").unwrap();
+        assert_eq!(cfg.retry_after_max_ms, 60_000);
+        assert_eq!(
+            ExecutionConfig::default().retry_after_max_ms,
+            cfg.retry_after_max_ms
+        );
+        cfg.validate().unwrap();
+        let ignore: ExecutionConfig = serde_yaml::from_str("retry_after_max_ms: 0\n").unwrap();
+        ignore.validate().unwrap();
+        let at_base: ExecutionConfig = serde_yaml::from_str(
+            "backoff_base_ms: 2000\nbackoff_max_ms: 9000\nretry_after_max_ms: 2000\n",
+        )
+        .unwrap();
+        at_base.validate().unwrap();
+    }
+
+    #[test]
+    fn a_retry_after_cap_below_the_backoff_base_is_refused_naming_both() {
+        let cfg: ExecutionConfig = serde_yaml::from_str(
+            "backoff_base_ms: 2000\nbackoff_max_ms: 9000\nretry_after_max_ms: 1999\n",
+        )
+        .unwrap();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("retry_after_max_ms (1999)"), "{error}");
+        assert!(error.contains("backoff_base_ms (2000)"), "{error}");
     }
 
     #[test]
