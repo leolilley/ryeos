@@ -5310,6 +5310,18 @@ async fn real_portable_worker_completes_cross_site_handoff_on_qualified_host() -
             break;
         }
     }
+    // The recovering session of the revoked-grant target settles before any
+    // replay, and as a cancellation: the node's startup recovery of the
+    // successor root is refused and its root-stop path
+    // (`abort_session_for_root_stop`) cancels the session. Assert that, so the
+    // replay comparison below can only be about the replay.
+    anyhow::ensure!(
+        private_projection_before_replay.pointer("/session/state")
+            == Some(&serde_json::json!("terminal"))
+            && private_projection_before_replay.pointer("/session/terminal_reason")
+                == Some(&serde_json::json!("cancelled")),
+        "with the operator grant revoked the target's startup recovery must settle the recovering successor session as cancelled before the replay: {private_projection_before_replay}"
+    );
     handoff
         .target
         .respawn_with(|command| {
