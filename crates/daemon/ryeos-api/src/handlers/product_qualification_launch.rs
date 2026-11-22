@@ -331,9 +331,10 @@ async fn handle_source(
     let checkout_id = format!("qualification-{}", reservation.reserved_thread_id);
     let (project, workspace_guard, provenance, lifecycle_authority, pinned_project_snapshot) =
         if let Some(snapshot_hash) = prepared.pinned_snapshot_hash() {
-            // The display locator is synthesized from immutable identity; no
-            // caller filesystem path is accepted or opened for this lane.
-            // A stated logical project (already head-gated) replaces it.
+            // With no stated logical project the locator is synthesized from
+            // immutable identity. A stated project is only the gated canonical
+            // path (operator caller, own head at this snapshot); it names the
+            // logical project and is never opened as a source.
             let display_path = stated_project
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("/ryeos/pinned-snapshots").join(snapshot_hash));
