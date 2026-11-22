@@ -310,8 +310,19 @@ fn clip_text(text: &str, rule: &ryeos_runtime::ClipRule) -> String {
     )
 }
 
+/// The run's loop-guard state at a compaction, for the record to carry.
+pub struct GuardSnapshot<'a> {
+    pub config: &'a crate::directive::LoopGuardsConfig,
+    /// The history already carried before this compaction.
+    pub prefix: &'a [ryeos_runtime::GuardTurn],
+    pub warned: &'a crate::loop_guards::WarnedAt,
+    pub wrap_up: ryeos_runtime::GuardWrapUp,
+}
+
 /// The compaction record for `plan`, with the sizes before and after and the
-/// seed every recovery reader starts from.
+/// seed every recovery reader starts from. `guard` is the run's loop-guard
+/// state, or `None` when the loop guards are off, which the record carries as
+/// `null`.
 pub fn build_record(
     basis: &CompactionBasis,
     plan: &Plan,
@@ -319,6 +330,7 @@ pub fn build_record(
     trigger: &str,
     policy: &CompactionConfig,
     images: Option<&ImageAcceptConfig>,
+    guard: Option<&GuardSnapshot<'_>>,
 ) -> Result<CompactionPayload> {
     let before: Vec<ProviderMessage> = basis
         .folded
@@ -350,6 +362,30 @@ pub fn build_record(
     let ineffective =
         (size_after as f64) > (size_before as f64) * (1.0 - policy.min_reduction_ratio);
     let previous = basis.anchor();
+    let seed = basis.seed_before_turn(plan.kept_from_turn)?;
+    let settled_turns = basis.completed_turns;
+    let guard_carry = guard.map(|guard| {
+        let conversation = crate::loop_guards::digests_from_messages(&before);
+        let replaced_turns = crate::loop_guards::digests_from_messages(&before[..plan.cut]).len();
+        // A flag the previous record carried stays set.
+        let earlier = previous
+            .and_then(|record| record.guard_carry.as_ref())
+            .map(|carry| carry.wrap_up)
+            .unwrap_or_default();
+        crate::loop_guards::build_carry(
+            guard.config,
+            guard.prefix,
+            &conversation,
+            replaced_turns,
+            guard.warned,
+            ryeos_runtime::GuardWrapUp {
+                deadline: guard.wrap_up.deadline || earlier.deadline,
+                turn_limit: guard.wrap_up.turn_limit || earlier.turn_limit,
+            },
+            // The same bound `CompactionPayload::validate` applies.
+            settled_turns.saturating_sub(seed.completed),
+        )
+    });
     let record = CompactionPayload {
         turn: summary.turn,
         trigger: trigger.to_string(),
@@ -360,8 +396,8 @@ pub fn build_record(
         summary_model_call: summary.model_call,
         omitted_from_input: summary.omitted_from_input,
         pinned: plan.pinned_inputs.clone(),
-        seed: basis.seed_before_turn(plan.kept_from_turn)?,
-        settled_turns: basis.completed_turns,
+        seed,
+        settled_turns,
         size_before,
         size_after,
         ineffective,
@@ -372,6 +408,7 @@ pub fn build_record(
             .map_or(0, |record| record.overflow_recoveries)
             .saturating_add(u32::from(trigger == "overflow")),
         clip,
+        guard_carry,
     };
     record.validate()?;
     let bytes = serde_json::to_vec(&record)?.len();
@@ -576,11 +613,13 @@ mod tests {
             compactions: 1,
             overflow_recoveries: 0,
             clip: None,
+            guard_carry: None,
         };
         let whole = serde_json::to_value(&record).unwrap();
         assert!(serde_json::from_value::<ryeos_runtime::CompactionPayload>(whole.clone()).is_ok());
         for field in [
             "clip",
+            "guard_carry",
             "omitted_from_input",
             "ineffective",
             "summary_model_call",

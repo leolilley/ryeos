@@ -723,6 +723,129 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+/// The loop and stall findings the detectors look for. A closed set of
+/// mechanical detectors, serialised as its code string, so a record naming any
+/// other finding does not decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingKind {
+    Repetition,
+    PingPong,
+    NoProgress,
+    Idle,
+}
+
+impl FindingKind {
+    pub const ALL: [FindingKind; 4] = [
+        Self::Repetition,
+        Self::PingPong,
+        Self::NoProgress,
+        Self::Idle,
+    ];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Repetition => "repetition",
+            Self::PingPong => "ping_pong",
+            Self::NoProgress => "no_progress",
+            Self::Idle => "idle",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.code() == code)
+    }
+}
+
+/// One tool call of a turn as the loop detectors see it: fingerprints of the
+/// call (tool name and arguments) and of its result (0 while unanswered).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardCall {
+    pub signature: u64,
+    pub result: u64,
+}
+
+/// One finished turn reduced to fingerprints: no content, only what the
+/// detectors compare. A fingerprint is below [`GUARD_FINGERPRINT_BOUND`] so it
+/// survives any JSON reader that holds numbers as doubles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardTurn {
+    pub calls: Vec<GuardCall>,
+    /// The fingerprint of the assistant's text, when it wrote any.
+    pub text: Option<u64>,
+}
+
+/// Fingerprints are 48 bits.
+pub const GUARD_FINGERPRINT_BOUND: u64 = 1 << 48;
+
+/// Which wrap-up reasons had been given when a record was written.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardWrapUp {
+    pub deadline: bool,
+    pub turn_limit: bool,
+}
+
+/// The loop-guard state a compaction carries, because the turns it replaces
+/// held it: the recent turns the detectors compare, which wrap-up notices the
+/// model was given, and how long ago each loop warning was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardCarry {
+    /// The history length this record was built to carry, from the loop-guard
+    /// settings in force. A resume whose settings want more than this reads a
+    /// history shorter than configured.
+    pub carry_len: u32,
+    /// The newest turns the compaction replaced, oldest first, at most
+    /// `carry_len`. The kept turns are not here; the conversation holds them.
+    pub recent_digests: Vec<GuardTurn>,
+    pub wrap_up: GuardWrapUp,
+    /// For each finding warned about: whole turns between the warning and the
+    /// record, counted over the recent digests followed by the kept turns.
+    pub loop_warned_turns_ago: std::collections::BTreeMap<FindingKind, u32>,
+}
+
+impl GuardCarry {
+    /// The most turns of history a record carries.
+    pub const MAX_DIGESTS: u32 = 256;
+
+    /// `kept_turns` is how many turns the record keeps whole.
+    pub fn validate(&self, kept_turns: u32) -> Result<()> {
+        if self.carry_len > Self::MAX_DIGESTS {
+            bail!(
+                "guard_carry carry_len {} exceeds {}",
+                self.carry_len,
+                Self::MAX_DIGESTS
+            );
+        }
+        let recent = self.recent_digests.len();
+        if recent > Self::MAX_DIGESTS as usize || recent > self.carry_len as usize {
+            bail!("guard_carry holds {recent} digests, over its carry_len or the bound");
+        }
+        for turn in &self.recent_digests {
+            let calls = turn.calls.iter().flat_map(|c| [c.signature, c.result]);
+            if calls
+                .chain(turn.text)
+                .any(|value| value >= GUARD_FINGERPRINT_BOUND)
+            {
+                bail!("guard_carry fingerprint is over {GUARD_FINGERPRINT_BOUND}");
+            }
+        }
+        // A warning's age is counted over the recent digests and the kept turns.
+        let reach = u64::try_from(recent).unwrap_or(u64::MAX) + u64::from(kept_turns);
+        if self
+            .loop_warned_turns_ago
+            .values()
+            .any(|age| u64::from(*age) > reach)
+        {
+            bail!("guard_carry warning age reaches back past the carried history");
+        }
+        Ok(())
+    }
+}
+
 /// A conversation compaction: the older part of the conversation replaced by
 /// a summary, the newest turns kept whole. Self-contained as a fold base: the
 /// pinned inputs and the summary are in it, and the window seed says where the
@@ -761,6 +884,11 @@ pub struct CompactionPayload {
     /// present on the record; `null` means not clipped.
     #[serde(deserialize_with = "required_option")]
     pub clip: Option<ClipRule>,
+    /// The loop-guard state the replaced turns held. Always present on the
+    /// record; `null` means the loop guards were off when it was written. A
+    /// record without the field is refused.
+    #[serde(deserialize_with = "required_option")]
+    pub guard_carry: Option<GuardCarry>,
 }
 
 impl CompactionPayload {
@@ -786,6 +914,12 @@ impl CompactionPayload {
         self.summary_message().validate()?;
         for input in &self.pinned {
             input.validate()?;
+        }
+        if let Some(carry) = &self.guard_carry {
+            // The turns kept whole are the turns completed since the window
+            // opened: `settled_turns` is the completed turns when the record
+            // was written and `seed.completed` those before the window.
+            carry.validate(self.settled_turns.saturating_sub(self.seed.completed))?;
         }
         Ok(())
     }
@@ -993,5 +1127,122 @@ mod tests {
             malformed_calls: Vec::new(),
         };
         assert!(payload.validate().is_err());
+    }
+
+    fn guard_carry() -> GuardCarry {
+        GuardCarry {
+            carry_len: 18,
+            recent_digests: vec![
+                GuardTurn {
+                    calls: vec![GuardCall {
+                        signature: 5,
+                        result: 9,
+                    }],
+                    text: None,
+                },
+                GuardTurn {
+                    calls: vec![],
+                    text: Some(7),
+                },
+            ],
+            wrap_up: GuardWrapUp {
+                deadline: true,
+                turn_limit: false,
+            },
+            loop_warned_turns_ago: [(FindingKind::PingPong, 3)].into(),
+        }
+    }
+
+    fn compaction(guard_carry: Option<GuardCarry>) -> CompactionPayload {
+        CompactionPayload {
+            turn: 0,
+            trigger: "pressure".to_string(),
+            replaces_from_turn: 1,
+            replaces_to_turn: 2,
+            kept_from_turn: 3,
+            summary: vec![Part::text("S")],
+            summary_model_call: false,
+            omitted_from_input: 0,
+            pinned: vec![],
+            seed: WindowSeed {
+                completed: 2,
+                ..WindowSeed::default()
+            },
+            // Turns 3 to 5 completed since the window opened: 3 kept turns.
+            settled_turns: 5,
+            size_before: 10,
+            size_after: 5,
+            ineffective: false,
+            compactions: 1,
+            overflow_recoveries: 0,
+            clip: None,
+            guard_carry,
+        }
+    }
+
+    #[test]
+    fn a_guard_carry_survives_the_wire_and_an_absent_one_is_null() {
+        let record = compaction(Some(guard_carry()));
+        record.validate().unwrap();
+        let wire = serde_json::to_value(&record).unwrap();
+        // The finding is its code string on the wire.
+        assert_eq!(
+            wire["guard_carry"]["loop_warned_turns_ago"],
+            json!({"ping_pong": 3})
+        );
+        let back: CompactionPayload = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, record);
+        // Guards off: present as null, and it decodes as such.
+        let off = serde_json::to_value(compaction(None)).unwrap();
+        assert_eq!(off["guard_carry"], Value::Null);
+        assert_eq!(
+            serde_json::from_value::<CompactionPayload>(off)
+                .unwrap()
+                .guard_carry,
+            None
+        );
+    }
+
+    #[test]
+    fn a_record_without_guard_carry_or_with_an_unknown_finding_is_refused() {
+        let mut wire = serde_json::to_value(compaction(Some(guard_carry()))).unwrap();
+        let mut unknown = wire.clone();
+        unknown["guard_carry"]["loop_warned_turns_ago"] = json!({"daydreaming": 1});
+        assert!(serde_json::from_value::<CompactionPayload>(unknown).is_err());
+        wire.as_object_mut().unwrap().remove("guard_carry");
+        assert!(serde_json::from_value::<CompactionPayload>(wire).is_err());
+    }
+
+    #[test]
+    fn validate_refuses_a_guard_carry_that_cannot_be_true() {
+        // Over the digest bound.
+        let mut over = guard_carry();
+        over.carry_len = GuardCarry::MAX_DIGESTS;
+        over.recent_digests = vec![
+            GuardTurn {
+                calls: vec![],
+                text: None
+            };
+            GuardCarry::MAX_DIGESTS as usize + 1
+        ];
+        assert!(compaction(Some(over)).validate().is_err());
+        // More digests than the carry_len it says it was built under.
+        let mut longer = guard_carry();
+        longer.carry_len = 1;
+        assert!(compaction(Some(longer)).validate().is_err());
+        // A carry_len over the bound.
+        let mut wide = guard_carry();
+        wide.carry_len = GuardCarry::MAX_DIGESTS + 1;
+        assert!(compaction(Some(wide)).validate().is_err());
+        // A warning older than the carried turns and the 3 kept turns: 2 + 3 = 5.
+        let mut old = guard_carry();
+        old.loop_warned_turns_ago.insert(FindingKind::Idle, 5);
+        compaction(Some(old.clone())).validate().unwrap();
+        old.loop_warned_turns_ago.insert(FindingKind::Idle, 6);
+        assert!(compaction(Some(old)).validate().is_err());
+        // A fingerprint over 48 bits.
+        let mut big = guard_carry();
+        big.recent_digests[1].text = Some(GUARD_FINGERPRINT_BOUND);
+        assert!(compaction(Some(big)).validate().is_err());
     }
 }

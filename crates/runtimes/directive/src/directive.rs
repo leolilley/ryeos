@@ -524,6 +524,13 @@ impl LoopGuardsConfig {
                 "execution.loop_guards pingpong_cycles x pingpong_max_period exceeds window_turns, so the longest alternation could never be seen"
             );
         }
+        let carry = crate::loop_guards::carry_len(self);
+        if carry > ryeos_runtime::GuardCarry::MAX_DIGESTS {
+            anyhow::bail!(
+                "execution.loop_guards need {carry} turns of history (the longest of window_turns, no_progress_turns + 1, pingpong_cycles x pingpong_max_period, repeat_threshold and idle_turns, plus grace_turns), over the {} a compaction record can carry; lower window_turns or grace_turns",
+                ryeos_runtime::GuardCarry::MAX_DIGESTS
+            );
+        }
         Ok(())
     }
 }
@@ -1489,6 +1496,8 @@ mod tests {
             "loop_guards:\n  idle_turns: 0\n",
             "loop_guards:\n  window_turns: 4\n  repeat_threshold: 5\n",
             "loop_guards:\n  window_turns: 8\n  pingpong_cycles: 4\n  pingpong_max_period: 4\n",
+            // 250 + 10 turns of history is more than a record carries.
+            "loop_guards:\n  window_turns: 250\n  grace_turns: 10\n",
         ] {
             let cfg: ExecutionConfig = serde_yaml::from_str(bad).unwrap();
             assert!(cfg.validate().is_err(), "{bad}");

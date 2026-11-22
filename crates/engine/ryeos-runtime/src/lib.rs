@@ -45,7 +45,8 @@ pub use callback::{
 pub use checkpoint::CheckpointWriter;
 pub use cognition::{
     ClipRule, CognitionFramePayload, CognitionInput, CognitionOutPayload, CognitionUsage,
-    CompactionPayload, DroppedImage, FINISH_INTERRUPTED, FrameRecord, FrameRequestOptions,
+    CompactionPayload, DroppedImage, FINISH_INTERRUPTED, FindingKind, FrameRecord,
+    FrameRequestOptions, GUARD_FINGERPRINT_BOUND, GuardCall, GuardCarry, GuardTurn, GuardWrapUp,
     MalformedCall, TOOL_RESULT_PARTIAL_PREFIX, TOOL_RESULT_SPILLED, ToolResultGuard,
     ToolResultPayload, ToolResultSpill, TurnMarker, WindowSeed,
 };

@@ -60,8 +60,16 @@ pub struct ResumeState {
     /// recovered or continued segment does not tell the model twice.
     pub wrap_up_delivered: WrapUpDelivered,
     /// The loop findings the model was already warned about, each with the
-    /// number of turns the conversation held when the warning was given.
+    /// number of turns the history held when the warning was given. The
+    /// history is `guard_prefix` followed by the conversation.
     pub loop_warned: crate::loop_guards::WarnedAt,
+    /// The turns before the conversation that the loop detectors still read:
+    /// a compaction's carried digests, or the turns of the predecessors a
+    /// successor's start did not carry. Oldest first, at most
+    /// `GuardCarry::MAX_DIGESTS`.
+    pub guard_prefix: Vec<crate::loop_guards::TurnDigest>,
+    /// How complete `guard_prefix` is, for the run's current settings to judge.
+    pub guard_history: GuardHistory,
     /// What the path has stored of tool images, against the run's limits.
     pub images: ImageRunState,
     /// Tool starts and child spawns counted before the replay window of the
@@ -344,71 +352,91 @@ pub async fn load_resume_state(
     // pinned inputs, then the most recent turns.
     let trailing_length_turns = trailing_length_turns(&events[own_start..])?;
     let frame = latest_frame(&events)?;
-    let (messages, wrap_up_delivered, loop_warned, start_over_ceiling) = match anchor.as_ref() {
-        // A compacted conversation is the compaction's own fold; it is not cut
-        // again. A successor's start must still fit the window.
-        Some(anchor) => {
-            let folded = fold_messages_anchored(&events, Some(anchor.chain_seq))?;
-            let (delivered, warned) = match mode {
-                // A successor's conversation is what it was given: a notice
-                // counts only if that conversation still holds it.
-                ResumeMode::Continuation => compacted_signals(&folded),
-                // Same-thread recovery never trims the thread's own events:
-                // what it has told the model is what it recorded, whether or
-                // not the compaction summarised the message away.
-                ResumeMode::NativeSameThread => {
-                    let own_full = fold_messages(
-                        &replay_own_inputs_and_turns(callback, previous_thread_id).await?,
-                    )?;
-                    same_thread_signals(&own_full, &folded)
-                }
-            };
-            let messages: Vec<ProviderMessage> =
-                folded.into_iter().map(|folded| folded.message).collect();
-            let over = mode == ResumeMode::Continuation
-                && crate::estimate::estimate_tokens(&messages, images) > carry.ceiling_tokens;
-            (messages, delivered, warned, over)
-        }
-        None => {
-            let predecessor = fold_messages(&events[..own_start])?;
-            let own = fold_messages(&events[own_start..])?;
-            let predecessor_notices: Vec<(ProviderMessage, WrapUpDelivered)> = predecessor
-                .iter()
-                .filter_map(|folded| {
-                    wrap_up_notice_reasons(folded).map(|r| (folded.message.clone(), r))
-                })
-                .collect();
-            let mut wrap_up_delivered = own
-                .iter()
-                .filter_map(wrap_up_notice_reasons)
-                .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
-            let mut messages = carry_into_successor(predecessor, &carry, images)?;
-            // A notice counts as delivered only if the conversation the model
-            // is given still holds it: a successor whose carried start trimmed
-            // it away is told again, with the time left now.
-            for (notice, reasons) in &predecessor_notices {
-                if messages.contains(notice) {
-                    wrap_up_delivered = wrap_up_delivered.union(*reasons);
-                }
+    let (messages, wrap_up_delivered, loop_warned, start_over_ceiling, guard_prefix, guard_history) =
+        match anchor.as_ref() {
+            // A compacted conversation is the compaction's own fold; it is not cut
+            // again. A successor's start must still fit the window.
+            Some(anchor) => {
+                let folded = fold_messages_anchored(&events, Some(anchor.chain_seq))?;
+                let kept_at_record = turns_before_event(&events, anchor.chain_seq);
+                let signals = anchored_signals(
+                    mode,
+                    anchor.payload.guard_carry.as_ref(),
+                    kept_at_record,
+                    &folded,
+                );
+                let messages: Vec<ProviderMessage> =
+                    folded.into_iter().map(|folded| folded.message).collect();
+                let over = mode == ResumeMode::Continuation
+                    && crate::estimate::estimate_tokens(&messages, images) > carry.ceiling_tokens;
+                (
+                    messages,
+                    signals.delivered,
+                    signals.warned,
+                    over,
+                    signals.prefix,
+                    signals.history,
+                )
             }
-            // A loop warning is positioned among the turns of the whole
-            // rebuilt conversation: the carried part first, then this
-            // thread's own messages.
-            let mut loop_warned = std::collections::BTreeMap::new();
-            let mut turns_so_far =
-                crate::loop_guards::digests_from_messages(&messages).len() as u32;
-            for folded in &own {
-                if folded.message.role == ryeos_provider_contract::Role::Assistant {
-                    turns_so_far += 1;
+            None => {
+                let predecessor = fold_messages(&events[..own_start])?;
+                let own = fold_messages(&events[own_start..])?;
+                let predecessor_digests = crate::loop_guards::digests_from_messages(
+                    &predecessor
+                        .iter()
+                        .map(|folded| folded.message.clone())
+                        .collect::<Vec<_>>(),
+                );
+                let predecessor_notices: Vec<(ProviderMessage, WrapUpDelivered)> = predecessor
+                    .iter()
+                    .filter_map(|folded| {
+                        wrap_up_notice_reasons(folded).map(|r| (folded.message.clone(), r))
+                    })
+                    .collect();
+                let mut wrap_up_delivered = own
+                    .iter()
+                    .filter_map(wrap_up_notice_reasons)
+                    .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
+                let mut messages = carry_into_successor(predecessor, &carry, images)?;
+                // A notice counts as delivered only if the conversation the model
+                // is given still holds it: a successor whose carried start trimmed
+                // it away is told again, with the time left now.
+                for (notice, reasons) in &predecessor_notices {
+                    if messages.contains(notice) {
+                        wrap_up_delivered = wrap_up_delivered.union(*reasons);
+                    }
                 }
-                if let Some(kind) = loop_warning_kind(folded) {
-                    loop_warned.insert(kind, i64::from(turns_so_far));
+                // The predecessor turns the carried start left out are still
+                // history the loop detectors read. A successor is made by the
+                // runtime (context window, a refused request) or by an operator,
+                // never by a model action, but a looping run fills its context
+                // and is continued, so detection must not start over there.
+                let carried = crate::loop_guards::digests_from_messages(&messages).len();
+                let prefix = successor_prefix(&predecessor_digests, carried);
+                // A loop warning is positioned among the turns of the whole
+                // history: the prefix, the carried part, then this thread's own
+                // messages.
+                let mut loop_warned = crate::loop_guards::WarnedAt::new();
+                let mut turns_so_far = (prefix.len() + carried) as u32;
+                for folded in &own {
+                    if folded.message.role == ryeos_provider_contract::Role::Assistant {
+                        turns_so_far += 1;
+                    }
+                    if let Some(kind) = loop_warning_kind(folded) {
+                        loop_warned.insert(kind, turns_so_far);
+                    }
                 }
+                messages.extend(own.into_iter().map(|folded| folded.message));
+                (
+                    messages,
+                    wrap_up_delivered,
+                    loop_warned,
+                    false,
+                    prefix,
+                    GuardHistory::Complete,
+                )
             }
-            messages.extend(own.into_iter().map(|folded| folded.message));
-            (messages, wrap_up_delivered, loop_warned, false)
-        }
-    };
+        };
     // The whole rebuilt conversation, predecessors' carry and own part, must
     // be one a provider accepts. A failed check is a typed refusal, not a
     // request that would be sent and rejected.
@@ -442,6 +470,8 @@ pub async fn load_resume_state(
         frame,
         wrap_up_delivered,
         loop_warned,
+        guard_prefix,
+        guard_history,
         images: recover_image_run_from(&events, &seed)?,
         tool_starts_before_window: seed.tool_starts,
         spawns_before_window: seed.spawns,
@@ -818,87 +848,138 @@ fn compacted_signals(folded: &[FoldedMessage]) -> (WrapUpDelivered, crate::loop_
             turns_so_far += 1;
         }
         if let Some(kind) = loop_warning_kind(message) {
-            warned.insert(kind, i64::from(turns_so_far));
+            warned.insert(kind, turns_so_far);
         }
     }
     (delivered, warned)
 }
 
-/// Every input and turn a thread recorded itself, from its first event: the
-/// thread's own record, not the replay window a compaction opens.
-async fn replay_own_inputs_and_turns(
-    callback: &CallbackClient,
-    thread_id: &str,
-) -> Result<Vec<ReplayedEventRecord>> {
-    Ok(callback
-        .replay_thread_with_budget(
-            thread_id,
-            Some(&["cognition_in", "cognition_out"]),
-            &mut RuntimeReplayBudget::default(),
-        )
-        .await?
-        .events)
+/// How much of the history the loop guards are configured to read the path
+/// still holds, as the record it was rebuilt from says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardHistory {
+    /// No compaction on the path: every turn is in the conversation or the
+    /// carried predecessor digests.
+    Complete,
+    /// A compaction record carried this much history (`carry_len` turns).
+    Carried { carry_len: u32 },
+    /// A compaction record written with the loop guards off: no history was
+    /// carried, so the turns it replaced were not measured.
+    NotRecorded,
 }
 
-/// What a same-thread recovery with a compaction has told the model: what the
-/// thread's own record shows (a compaction cannot take that back), together
-/// with what the compacted conversation still carries, which also covers
-/// notices a predecessor thread gave and the conversation holds. A finding in
-/// both keeps the earlier position, which is the earlier stop.
-fn same_thread_signals(
-    own_full: &[FoldedMessage],
-    compacted: &[FoldedMessage],
-) -> (WrapUpDelivered, crate::loop_guards::WarnedAt) {
-    let compacted_messages: Vec<ProviderMessage> = compacted
-        .iter()
-        .map(|folded| folded.message.clone())
-        .collect();
-    let compacted_turns =
-        crate::loop_guards::digests_from_messages(&compacted_messages).len() as u32;
-    let (own_delivered, mut warned) = own_signals(own_full, compacted_turns);
-    let (carried_delivered, carried_warned) = compacted_signals(compacted);
-    for (kind, position) in carried_warned {
-        warned
-            .entry(kind)
-            .and_modify(|existing| *existing = (*existing).min(position))
-            .or_insert(position);
+impl GuardHistory {
+    /// When the loop-guard settings now in force want more history than the
+    /// record carried (or any when it carried none), the history the detectors
+    /// read is shorter than configured: a quiet detector does not mean a clean
+    /// run. Returns the turns the record carried.
+    pub fn shortfall(self, config: &crate::directive::LoopGuardsConfig) -> Option<u32> {
+        if !config.enabled {
+            return None;
+        }
+        let wanted = crate::loop_guards::carry_len(config);
+        match self {
+            Self::Complete => None,
+            Self::Carried { carry_len } => (carry_len < wanted).then_some(carry_len),
+            Self::NotRecorded => Some(0),
+        }
     }
-    (own_delivered.union(carried_delivered), warned)
 }
 
-/// The wrap-up reasons given and loop findings warned about, read from a
-/// thread's whole own fold (no compaction applied), for a conversation a
-/// compaction has since shortened to `compacted_turns` turns. A warning keeps
-/// the grace it had used: its position is re-based so the turns since it are
-/// the same in the shorter conversation.
-fn own_signals(
-    own_full: &[FoldedMessage],
-    compacted_turns: u32,
-) -> (WrapUpDelivered, crate::loop_guards::WarnedAt) {
-    let delivered = own_full
-        .iter()
-        .filter_map(wrap_up_notice_reasons)
-        .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
-    let mut at_warning = crate::loop_guards::WarnedAt::new();
-    let mut turns_so_far = 0u32;
-    for message in own_full {
-        if message.message.role == ryeos_provider_contract::Role::Assistant {
-            turns_so_far += 1;
-        }
-        if let Some(kind) = loop_warning_kind(message) {
-            at_warning.insert(kind, i64::from(turns_so_far));
+/// What a rebuilt compacted conversation tells the guards.
+struct AnchoredSignals {
+    delivered: WrapUpDelivered,
+    warned: crate::loop_guards::WarnedAt,
+    prefix: Vec<crate::loop_guards::TurnDigest>,
+    history: GuardHistory,
+}
+
+/// The guard state of a conversation rebuilt from a compaction.
+///
+/// A compaction record carries the guard state the replaced turns held: the
+/// recent digests (the prefix the detectors read before the conversation), the
+/// wrap-up flags and each warning's age. A same-thread recovery takes the
+/// union of that with what the compacted conversation itself still holds
+/// (inputs recorded since, and notices a predecessor gave that the
+/// conversation carries). A successor is a new conversation: it keeps the
+/// prefix, but counts a notice or warning only if the conversation it was
+/// given still holds it. `kept_at_record` is the turns the record kept whole.
+fn anchored_signals(
+    mode: ResumeMode,
+    carry: Option<&ryeos_runtime::GuardCarry>,
+    kept_at_record: u32,
+    folded: &[FoldedMessage],
+) -> AnchoredSignals {
+    let prefix = carry
+        .map(|carry| carry.recent_digests.clone())
+        .unwrap_or_default();
+    let (mut delivered, mut warned) = compacted_signals(folded);
+    // Positions in the conversation count after the prefix.
+    let offset = u32::try_from(prefix.len()).unwrap_or(u32::MAX);
+    for position in warned.values_mut() {
+        *position = position.saturating_add(offset);
+    }
+    if mode == ResumeMode::NativeSameThread
+        && let Some(carry) = carry
+    {
+        delivered = delivered.union(WrapUpDelivered {
+            deadline: carry.wrap_up.deadline,
+            turn_limit: carry.wrap_up.turn_limit,
+        });
+        for (kind, position) in crate::loop_guards::warned_from_carry(carry, kept_at_record) {
+            // A finding in both keeps the earlier position: the earlier stop.
+            warned
+                .entry(kind)
+                .and_modify(|existing| *existing = (*existing).min(position))
+                .or_insert(position);
         }
     }
-    let warned = at_warning
-        .into_iter()
-        .map(|(kind, position)| {
-            (
-                kind,
-                crate::loop_guards::rebase_warning(turns_so_far, position, compacted_turns),
-            )
+    let history = match carry {
+        Some(carry) => GuardHistory::Carried {
+            carry_len: carry.carry_len,
+        },
+        None => GuardHistory::NotRecorded,
+    };
+    AnchoredSignals {
+        delivered,
+        warned,
+        prefix,
+        history,
+    }
+}
+
+/// The turns the window holds before the compaction event at `anchor_seq`: the
+/// kept turns the record kept whole. Counts the same finals the fold turns into
+/// assistant messages.
+fn turns_before_event(events: &[ReplayedEventRecord], anchor_seq: i64) -> u32 {
+    let end = events
+        .iter()
+        .position(|event| {
+            event.event_type == "cognition_compaction" && event.chain_seq == anchor_seq
         })
-        .collect();
-    (delivered, warned)
+        .unwrap_or(events.len());
+    let turns = events[..end]
+        .iter()
+        .filter(|event| {
+            event.event_type == "cognition_out"
+                && !is_stream_fragment(event)
+                && !is_compaction_summary_turn(event)
+                && !is_refusal_final(event)
+        })
+        .count();
+    u32::try_from(turns).unwrap_or(u32::MAX)
+}
+
+/// The history before a successor's conversation: the predecessors' turns its
+/// carried start left out, newest `GuardCarry::MAX_DIGESTS` at most.
+/// `carried_turns` is how many of the predecessors' last turns the start holds.
+fn successor_prefix(
+    predecessor: &[crate::loop_guards::TurnDigest],
+    carried_turns: usize,
+) -> Vec<crate::loop_guards::TurnDigest> {
+    let left_out = predecessor.len().saturating_sub(carried_turns);
+    let start = left_out.saturating_sub(ryeos_runtime::GuardCarry::MAX_DIGESTS as usize);
+    predecessor[start..left_out].to_vec()
 }
 
 /// The reasons a folded message gave, when it is a wrap-up notice.
@@ -5450,6 +5531,7 @@ mod tests {
             compactions: 1,
             overflow_recoveries: 0,
             clip: None,
+            guard_carry: None,
         }
     }
 
@@ -5520,90 +5602,77 @@ mod tests {
         assert!(empty.is_empty());
     }
 
-    /// The thread's whole own record: turns 1 and 2, then a deadline wrap-up
-    /// notice and a ping-pong warning (both before the compaction's kept
-    /// window), then the windowed events of `windowed_events`.
-    fn whole_own_record() -> Vec<ReplayedEventRecord> {
-        let mut events = vec![
-            event_at("cognition_in", 1, json!({"turn": 1, "purpose": "turn"})),
-            event_at("cognition_out", 2, out(1, "one")),
-            event_at("cognition_in", 3, json!({"turn": 2, "purpose": "turn"})),
-            event_at("cognition_out", 4, out(2, "two")),
-        ];
-        events.extend(
-            kinded_input(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
-                .into_iter()
-                .chain(kinded_input("loop_warning_ping_pong")),
-        );
-        events.extend(windowed_events());
-        events
+    fn digest(n: u64) -> crate::loop_guards::TurnDigest {
+        ryeos_runtime::GuardTurn {
+            calls: vec![],
+            text: Some(n),
+        }
+    }
+
+    /// A record's carry: a deadline wrap-up given, two replaced turns, and a
+    /// ping-pong warning three turns before the record.
+    fn carry_record() -> ryeos_runtime::GuardCarry {
+        ryeos_runtime::GuardCarry {
+            carry_len: 18,
+            recent_digests: vec![digest(1), digest(2)],
+            wrap_up: ryeos_runtime::GuardWrapUp {
+                deadline: true,
+                turn_limit: false,
+            },
+            loop_warned_turns_ago: [(crate::loop_guards::FindingKind::PingPong, 3)].into(),
+        }
     }
 
     #[test]
-    fn same_thread_recovery_remembers_a_wrap_up_a_compaction_dropped() {
-        let compacted_turns = |folded: &[FoldedMessage]| {
-            let messages: Vec<ProviderMessage> = folded.iter().map(|f| f.message.clone()).collect();
-            crate::loop_guards::digests_from_messages(&messages).len() as u32
-        };
-        let window = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
-        // The compacted conversation holds no notice: the successor rule
-        // reads nothing from it.
-        let (successor_delivered, successor_warned) = compacted_signals(&window);
-        assert_eq!(successor_delivered, WrapUpDelivered::default());
-        assert!(successor_warned.is_empty());
-        // Same-thread recovery reads the thread's own record instead.
-        let own_full = fold_messages(&whole_own_record()).unwrap();
-        let (delivered, _) = own_signals(&own_full, compacted_turns(&window));
+    fn the_record_tells_a_same_thread_recovery_what_a_compaction_dropped() {
+        // The compacted conversation holds no notice and no warning (both were
+        // summarised away), the record carries them.
+        let window = windowed_events();
+        let folded = fold_messages_anchored(&window, Some(26)).unwrap();
+        assert_eq!(turns_before_event(&window, 26), 2);
+        let signals = anchored_signals(
+            ResumeMode::NativeSameThread,
+            Some(&carry_record()),
+            2,
+            &folded,
+        );
         assert_eq!(
-            delivered,
+            signals.delivered,
             WrapUpDelivered {
                 deadline: true,
                 turn_limit: false
             }
         );
-    }
-
-    #[test]
-    fn same_thread_recovery_keeps_the_grace_a_dropped_warning_had_used() {
-        let window = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
-        let messages: Vec<ProviderMessage> = window.iter().map(|f| f.message.clone()).collect();
-        // Kept turns 3 and 4 plus turn 6.
-        let compacted_turns = crate::loop_guards::digests_from_messages(&messages).len() as u32;
-        assert_eq!(compacted_turns, 3);
-        let own_full = fold_messages(&whole_own_record()).unwrap();
-        let (_, warned) = own_signals(&own_full, compacted_turns);
-        // Warned after turn 2 of 5 turns (1, 2, 3, 4, 6): three turns have
-        // passed since. In the 3-turn conversation that is position 0.
+        assert_eq!(signals.prefix, vec![digest(1), digest(2)]);
+        // 2 carried + 2 kept turns, warned 3 turns before the record: position 1.
         assert_eq!(
-            warned.get(&crate::loop_guards::FindingKind::PingPong),
-            Some(&0)
+            signals
+                .warned
+                .get(&crate::loop_guards::FindingKind::PingPong),
+            Some(&1)
         );
-        // Grace 3: the warning's stop lands at position + 3 = 3 turns, which
-        // is 0 more turns than the 3 the conversation holds now; without the
-        // compaction it was 2 + 3 = 5 turns, again 0 more than the 5 held.
-        let grace = 3i64;
-        let position = warned[&crate::loop_guards::FindingKind::PingPong];
-        assert_eq!(position + grace - i64::from(compacted_turns), 2 + grace - 5);
+        assert_eq!(signals.history, GuardHistory::Carried { carry_len: 18 });
     }
 
     #[test]
-    fn same_thread_recovery_also_keeps_what_the_compacted_conversation_carries() {
-        // A notice a predecessor gave sits in the compacted conversation but
-        // not in this thread's own record; the thread's own dropped notice is
-        // only in its record. Both count as given.
-        let mut own = vec![
-            event_at("cognition_in", 1, json!({"turn": 1, "purpose": "turn"})),
-            event_at("cognition_out", 2, out(1, "one")),
-        ];
-        own.extend(kinded_input(
-            ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP,
-        ));
-        let own_full = fold_messages(&own).unwrap();
+    fn a_successor_keeps_the_prefix_but_not_a_notice_its_conversation_lacks() {
+        let folded = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let signals = anchored_signals(ResumeMode::Continuation, Some(&carry_record()), 2, &folded);
+        // The notice and the warning are in the record only, not in the
+        // conversation the successor was given: the existing rule applies.
+        assert_eq!(signals.delivered, WrapUpDelivered::default());
+        assert!(signals.warned.is_empty());
+        // The detectors still read the history the compaction carried.
+        assert_eq!(signals.prefix.len(), 2);
+    }
+
+    #[test]
+    fn a_same_thread_recovery_unions_the_record_with_what_the_conversation_holds() {
         let mut window = windowed_events();
         let carried: Vec<ReplayedEventRecord> =
             kinded_input(ryeos_runtime::cognition::KIND_LIMIT_WRAP_UP)
                 .into_iter()
-                .chain(kinded_input("loop_warning_idle"))
+                .chain(kinded_input("loop_warning_ping_pong"))
                 .enumerate()
                 .map(|(i, mut event)| {
                     event.chain_seq = 100 + i as i64;
@@ -5611,17 +5680,135 @@ mod tests {
                 })
                 .collect();
         window.splice(4..4, carried);
-        let compacted = fold_messages_anchored(&window, Some(26)).unwrap();
-        let (delivered, warned) = same_thread_signals(&own_full, &compacted);
+        let folded = fold_messages_anchored(&window, Some(26)).unwrap();
+        let signals = anchored_signals(
+            ResumeMode::NativeSameThread,
+            Some(&carry_record()),
+            2,
+            &folded,
+        );
+        // The limit notice is in the conversation, the deadline one in the record.
         assert_eq!(
-            delivered,
+            signals.delivered,
             WrapUpDelivered {
                 deadline: true,
                 turn_limit: true
             }
         );
-        // The carried warning follows the kept turns 3 and 4.
-        assert_eq!(warned.get(&crate::loop_guards::FindingKind::Idle), Some(&2));
+        // The conversation's own warning sits after the 2 carried and 2 kept
+        // turns (position 4); the record says 1: the earlier stop wins.
+        assert_eq!(
+            signals
+                .warned
+                .get(&crate::loop_guards::FindingKind::PingPong),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn history_shorter_than_configured_is_reported() {
+        let config = crate::directive::LoopGuardsConfig::default();
+        let off = crate::directive::LoopGuardsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        // Written with guards on and enough history: complete.
+        assert_eq!(
+            GuardHistory::Carried { carry_len: 18 }.shortfall(&config),
+            None
+        );
+        assert_eq!(GuardHistory::Complete.shortfall(&config), None);
+        // Written under a shorter setting: the record's length is reported.
+        assert_eq!(
+            GuardHistory::Carried { carry_len: 10 }.shortfall(&config),
+            Some(10)
+        );
+        // Written with the guards off, resumed with them on: nothing was
+        // measured, which must not read as a clean history.
+        assert_eq!(GuardHistory::NotRecorded.shortfall(&config), Some(0));
+        // With the guards off there is nothing to claim.
+        assert_eq!(GuardHistory::NotRecorded.shortfall(&off), None);
+        // A record with no carry is read as not recorded.
+        let folded = fold_messages_anchored(&windowed_events(), Some(26)).unwrap();
+        let signals = anchored_signals(ResumeMode::NativeSameThread, None, 2, &folded);
+        assert_eq!(signals.history, GuardHistory::NotRecorded);
+        assert!(signals.prefix.is_empty());
+    }
+
+    #[test]
+    fn a_successors_prefix_is_the_predecessor_turns_its_start_left_out() {
+        let digests: Vec<_> = (0..10).map(digest).collect();
+        // (carried turns, expected prefix length)
+        for (carried, expected) in [(3, 7), (0, 10), (10, 0), (25, 0)] {
+            assert_eq!(
+                successor_prefix(&digests, carried).len(),
+                expected,
+                "{carried}"
+            );
+        }
+        assert_eq!(successor_prefix(&digests, 3), digests[..7]);
+        // Never more than a record could carry, newest first kept.
+        let many: Vec<_> = (0..300).map(digest).collect();
+        let prefix = successor_prefix(&many, 0);
+        assert_eq!(prefix.len(), 256);
+        assert_eq!(prefix[255], digest(299));
+    }
+
+    #[tokio::test]
+    async fn a_successor_start_keeps_the_history_it_did_not_carry() {
+        // The predecessor ran six turns and warned about a loop after the
+        // second. A successor carrying two turns holds neither the warning nor
+        // the first four turns, but detection still reads those four.
+        let mut events = vec![ReplayedEventRecord {
+            chain_seq: 0,
+            event_type: "cognition_in".to_string(),
+            payload: serde_json::to_value(
+                ryeos_runtime::CognitionInput::text("launch", "task").pinned(),
+            )
+            .unwrap(),
+        }];
+        for turn in 1..=6 {
+            events.push(ReplayedEventRecord {
+                chain_seq: 0,
+                event_type: "cognition_out".to_string(),
+                payload: accounted_out(turn, &format!("a{turn}")),
+            });
+            if turn == 2 {
+                events.extend(kinded_input("loop_warning_idle"));
+            }
+        }
+        let callback = make_callback(events);
+        let state = load_resume_state(
+            &callback,
+            "T1",
+            CarryPolicy::turns(2),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.guard_prefix.len(), 4);
+        assert_eq!(state.guard_history, GuardHistory::Complete);
+        // The warning was in the turns the start left out: told again if found.
+        assert!(state.loop_warned.is_empty());
+        // Carrying everything leaves no prefix. A predecessor's warning is not
+        // a successor's own: as before, only this thread's own inputs count.
+        let whole = load_resume_state(
+            &callback,
+            "T1",
+            CarryPolicy::turns(8),
+            ResumeMode::Continuation,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(whole.guard_prefix.is_empty());
+        assert_eq!(
+            whole
+                .loop_warned
+                .get(&crate::loop_guards::FindingKind::Idle),
+            None
+        );
     }
 
     #[test]
@@ -5910,9 +6097,10 @@ mod tests {
         let plan = crate::compaction::plan(&basis.folded, policy.keep_turns).expect("a cut");
         assert_eq!(plan.kept_from_turn, 7);
         let summary = crate::compaction::fixed_note(&plan);
-        let record =
-            crate::compaction::build_record(&basis, &plan, summary, "pressure", &policy, None)
-                .unwrap();
+        let record = crate::compaction::build_record(
+            &basis, &plan, summary, "pressure", &policy, None, None,
+        )
+        .unwrap();
         // The rebuild reads the window from the kept turn's marker, with the
         // new record in it.
         let marker = events

@@ -2759,6 +2759,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // The turn marker's required `purpose` field also moves in this epoch: a
 // marker without it is refused on resume (`resume_marker_without_purpose`), so
 // an epoch-142 chain holding such markers is reset, never read.
+// The compaction record's required `guard_carry` field (recent loop-guard digests, wrap-up flags and warned ages; null when loop guards are off); a record without the field is refused on resume.
 const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 143;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0

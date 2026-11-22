@@ -800,6 +800,14 @@ pub struct Runner {
     /// The loop findings the model was warned about, each with the turn
     /// count when it was warned.
     loop_warned: crate::loop_guards::WarnedAt,
+    /// The turns before the conversation that the detectors still read: the
+    /// digests the latest compaction carried, or the predecessor turns a
+    /// successor's start left out. At most the settings' `carry_len`.
+    guard_prefix: Vec<crate::loop_guards::TurnDigest>,
+    /// How many turns of history the record this run resumed from carried,
+    /// when that is fewer than the settings want. Logged once; kept so the
+    /// state is inspectable.
+    guard_history_shortfall: Option<u32>,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -1697,6 +1705,8 @@ impl Runner {
             return_nudge_sent: false,
             wrap_up_delivered: crate::resume::WrapUpDelivered::default(),
             loop_warned: std::collections::BTreeMap::new(),
+            guard_prefix: Vec::new(),
+            guard_history_shortfall: None,
             continuation_config: continuation,
             sampling,
             reasoning,
@@ -1792,6 +1802,8 @@ impl Runner {
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
         let wrap_up_delivered = resume.wrap_up_delivered;
         let loop_warned = resume.loop_warned.clone();
+        let guard_prefix = resume.guard_prefix.clone();
+        let guard_history = resume.guard_history;
         let trailing_length_turns = resume.trailing_length_turns;
         let last_turn_coordinate = resume.last_turn_coordinate;
         let compaction_memo = resume.compaction.clone();
@@ -1883,6 +1895,20 @@ impl Runner {
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
         runner.wrap_up_delivered = wrap_up_delivered;
         runner.loop_warned = loop_warned;
+        runner.guard_prefix = guard_prefix;
+        runner.trim_guard_prefix();
+        if let Some(carried) = guard_history.shortfall(&runner.execution.loop_guards) {
+            runner.guard_history_shortfall = Some(carried);
+            // The loop detectors run on the history that exists. A compaction
+            // record written under shorter loop-guard settings (or with the
+            // guards off) carried less than these settings read, so a run
+            // that looks clean here may not be.
+            tracing::warn!(
+                carried_turns = carried,
+                configured_turns = crate::loop_guards::carry_len(&runner.execution.loop_guards),
+                "loop-guard history is shorter than configured: the compaction this run resumed from carried less than the current loop_guards settings read"
+            );
+        }
         runner.consecutive_length_turns = trailing_length_turns;
         runner.compaction_memo = compaction_memo;
         runner.chain_depth = chain_depth;
@@ -2082,6 +2108,18 @@ impl Runner {
             return Ok(CompactionOutcome::NothingToReplace);
         };
         let summary = summary.unwrap_or_else(|| crate::compaction::fixed_note(&plan));
+        let loop_guards = self.execution.loop_guards.clone();
+        let guard = loop_guards
+            .enabled
+            .then(|| crate::compaction::GuardSnapshot {
+                config: &loop_guards,
+                prefix: &self.guard_prefix,
+                warned: &self.loop_warned,
+                wrap_up: ryeos_runtime::GuardWrapUp {
+                    deadline: self.wrap_up_delivered.deadline,
+                    turn_limit: self.wrap_up_delivered.turn_limit,
+                },
+            });
         let record = crate::compaction::build_record(
             &basis,
             &plan,
@@ -2089,6 +2127,7 @@ impl Runner {
             trigger,
             &self.compaction,
             images.as_ref(),
+            guard.as_ref(),
         )
         .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
         let payload = ryeos_runtime::cognition::to_payload(&record)
@@ -2123,22 +2162,15 @@ impl Runner {
             .first()
             .filter(|message| message.role() == "system")
             .cloned();
-        let old_turns = crate::loop_guards::digests_from_messages(&self.messages).len() as u32;
         self.messages = system.into_iter().chain(rebuilt.messages).collect();
-        let new_turns = crate::loop_guards::digests_from_messages(&self.messages).len() as u32;
         self.result_guard = rebuilt.result_guard;
-        // A notice or warning this process already gave stays given: the
-        // rebuilt conversation may have summarised it away, and the model must
-        // not be told again nor its grace restarted. A delivered flag only
-        // ever turns on; a warning keeps the grace it had used, re-based onto
-        // the shorter conversation.
+        // The record carries the guard state the compaction replaced, written
+        // from this run's own state, so the rebuilt state is the one the run
+        // had. A delivered flag the process set stays set regardless.
         self.wrap_up_delivered = self.wrap_up_delivered.union(rebuilt.wrap_up_delivered);
-        self.loop_warned = crate::loop_guards::warnings_after_compaction(
-            &self.loop_warned,
-            old_turns,
-            rebuilt.loop_warned,
-            new_turns,
-        );
+        self.loop_warned = rebuilt.loop_warned;
+        self.guard_prefix = rebuilt.guard_prefix;
+        self.trim_guard_prefix();
         self.compaction_memo = Some(CompactionMemo::of(&record));
         block_at_directive_recovery_test_cut(&self.callback, "compaction_recorded").await;
         self.refused_code = None;
@@ -2273,6 +2305,15 @@ impl Runner {
         Ok(RunDeadlineBoundary::Proceed)
     }
 
+    /// Keep the carried history to what the settings read.
+    fn trim_guard_prefix(&mut self) {
+        let keep = crate::loop_guards::carry_len(&self.execution.loop_guards) as usize;
+        if self.guard_prefix.len() > keep {
+            let drop = self.guard_prefix.len() - keep;
+            self.guard_prefix.drain(..drop);
+        }
+    }
+
     /// The loop and stall detectors at the start of a turn. A finding the
     /// model has not been warned about gets a durable harness warning; the same
     /// finding still present `grace_turns` turns after its warning stops the run
@@ -2282,7 +2323,12 @@ impl Runner {
         if !config.enabled || self.resume_active_provider_turn.is_some() {
             return Ok(None);
         }
-        let digests = crate::loop_guards::digests_from_messages(&self.messages);
+        // The history the detectors read: the carried digests, then this
+        // conversation's own. Warning positions count over all of it.
+        let digests = crate::loop_guards::history(
+            &self.guard_prefix,
+            &crate::loop_guards::digests_from_messages(&self.messages),
+        );
         let turns = digests.len() as u32;
         let findings = crate::loop_guards::detect(&digests, &config);
         // A warned kind that is no longer found starts over.
@@ -2306,12 +2352,10 @@ impl Runner {
                             format!("resume-critical loop warning input append failed: {e}")
                         })?;
                     self.messages.push(ProviderMessage::user(text));
-                    self.loop_warned.insert(finding.kind, i64::from(turns));
+                    self.loop_warned.insert(finding.kind, turns);
                     return Ok(None);
                 }
-                Some(warned_at)
-                    if i64::from(turns) >= warned_at + i64::from(config.grace_turns) =>
-                {
+                Some(warned_at) if turns >= warned_at + config.grace_turns => {
                     return Ok(Some(format!(
                         "loop_detected: the run repeated itself ({}: turns {} to {}) and did not change course {} turns after being told",
                         finding.kind.code(),
@@ -9727,8 +9771,10 @@ mod tests {
         );
         // (i) the flag stays set, so the model is not told again.
         assert!(runner.wrap_up_delivered.deadline);
-        // (ii) the three turns since the warning are kept: position 3 - 3.
-        assert_eq!(runner.loop_warned.get(&FindingKind::NoProgress), Some(&0));
+        // (ii) the record carries the two replaced turns, so the warning keeps
+        // its place in the history of 2 carried + 3 kept turns.
+        assert_eq!(runner.guard_prefix.len(), 2);
+        assert_eq!(runner.loop_warned.get(&FindingKind::NoProgress), Some(&2));
         // A fresh process recovering the same record reaches the same state.
         let recovered = crate::resume::load_resume_state(
             &runner.callback,
@@ -9744,9 +9790,10 @@ mod tests {
         .await
         .unwrap();
         assert!(recovered.wrap_up_delivered.deadline);
+        assert_eq!(recovered.guard_prefix, runner.guard_prefix);
         assert_eq!(
             recovered.loop_warned.get(&FindingKind::NoProgress),
-            Some(&0)
+            Some(&2)
         );
         // Still found, not warned afresh, and not stopped yet.
         assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
@@ -9756,7 +9803,7 @@ mod tests {
             vec![Part::text("same")],
         ));
         assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
-        // Two turns after the compaction (turn count 5 = 0 + grace) the run is
+        // Two turns after the compaction (history of 7 = 2 + grace) the run is
         // stopped: the same two turns it had left without the compaction.
         runner.messages.push(ProviderMessage::new(
             ryeos_provider_contract::Role::Assistant,
@@ -9769,6 +9816,56 @@ mod tests {
             .expect("stopped");
         assert!(stop.starts_with("loop_detected: "), "{stop}");
         assert_eq!(store.inputs_of_kind("loop_warning_no_progress"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_compaction_with_the_loop_guards_off_carries_null_and_a_resume_says_so() {
+        let store = Arc::new(EventStore::default());
+        let mut runner = ledger_runner_with_policy(store.clone(), make_policy());
+        runner.execution.loop_guards.enabled = false;
+        runner.compaction.keep_turns = 2;
+        store.push_input(&ryeos_runtime::CognitionInput::text("launch", "THE TASK").pinned());
+        runner.messages.push(ProviderMessage::user("THE TASK"));
+        for turn in 1..=4 {
+            record_same_turn(&store, &mut runner, turn);
+        }
+        let outcome = runner.finish_compaction("pressure", None).await;
+        assert!(matches!(outcome, Ok(CompactionOutcome::Compacted)));
+        let records: Vec<Value> = store
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(event_type, _)| event_type == "cognition_compaction")
+            .map(|(_, payload)| payload.clone())
+            .collect();
+        assert_eq!(records.len(), 1);
+        // Present on the record, and null: the guards were off.
+        assert_eq!(records[0].get("guard_carry"), Some(&Value::Null));
+        // Resumed with the guards on, the history is reported as not measured.
+        let recovered = crate::resume::load_resume_state(
+            &runner.callback,
+            "T-test",
+            crate::resume::CarryPolicy {
+                carry_turns: u32::MAX,
+                start_tokens: u64::MAX,
+                ceiling_tokens: u64::MAX,
+            },
+            crate::resume::ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            recovered.guard_history,
+            crate::resume::GuardHistory::NotRecorded
+        );
+        assert_eq!(
+            recovered
+                .guard_history
+                .shortfall(&crate::directive::LoopGuardsConfig::default()),
+            Some(0)
+        );
     }
 
     fn push_turn(runner: &mut Runner, index: u32, tool: &str, result: &str) {
