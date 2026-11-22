@@ -1751,6 +1751,34 @@ composer: handler:ryeos/core/identity
         )
     }
 
+    /// Load a pinned project's config through the engine's launch-config
+    /// roots, the path every production launch takes.
+    fn pinned_load_through_engine(
+        engine: &crate::engine::Engine,
+        config: &ScopedConfig,
+        store: &TrustStore,
+        logical: Option<&str>,
+    ) -> Result<LaunchConfigSnapshotSet, EngineError> {
+        let checkout = PathBuf::from("/not-opened/generation-7/checkout");
+        let roots = engine.launch_config_roots(
+            &project_roots(&checkout).with_logical_project_root(logical.map(PathBuf::from)),
+        );
+        let content = TestProjectContent::default()
+            .with_file(".ai/config/scoped.yaml", config.document.as_bytes());
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        load_launch_config_snapshots_with_proof_under_project_authority(
+            &declarations(),
+            &roots,
+            &parsers,
+            &parsers,
+            &config.kinds,
+            store,
+            store,
+            &checkout,
+            &content,
+        )
+    }
+
     fn assert_untrusted(result: Result<LaunchConfigSnapshotSet, EngineError>) {
         match result {
             Err(EngineError::LaunchConfigPolicyDenied { code, .. }) => {
@@ -1769,6 +1797,38 @@ composer: handler:ryeos/core/identity
         assert!(pinned_load(&config, &store, Some("/work/registered-project")).is_ok());
         assert_untrusted(pinned_load(&config, &store, None));
         assert_untrusted(pinned_load(&config, &store, Some("/work/other-project")));
+    }
+
+    #[test]
+    fn launch_config_roots_keep_the_pinned_logical_project() {
+        let config = scoped_config();
+        let store = scoped_store(&config, Path::new("/work/registered-project"));
+        let plain = crate::engine::Engine::new(
+            crate::kind_registry::KindRegistry::empty(),
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        );
+        let with_node_config = plain
+            .clone()
+            .with_node_config_root(PathBuf::from("/not-opened/node-config"));
+        for engine in [&plain, &with_node_config] {
+            assert!(
+                pinned_load_through_engine(
+                    engine,
+                    &config,
+                    &store,
+                    Some("/work/registered-project")
+                )
+                .is_ok()
+            );
+            assert_untrusted(pinned_load_through_engine(engine, &config, &store, None));
+            assert_untrusted(pinned_load_through_engine(
+                engine,
+                &config,
+                &store,
+                Some("/work/other-project"),
+            ));
+        }
     }
 
     #[test]
