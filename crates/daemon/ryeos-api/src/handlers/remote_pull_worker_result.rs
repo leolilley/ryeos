@@ -170,11 +170,20 @@ impl PullIntent {
         Ok(())
     }
 
-    /// The sealed local head, which must be the delegator's own.
+    /// The sealed local head, parsed structurally. Whether it is the
+    /// delegator's own is decided on this node by [`Self::delegator_local_head`].
     fn local_head(&self) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
-        let head =
-            ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(&self.local_head_ref)?;
-        if head.owner_key() != self.delegator_fingerprint {
+        ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(&self.local_head_ref)
+    }
+
+    /// The sealed local head, which must be the delegator's own: the
+    /// delegator key must speak for the head's owner on this node now.
+    fn delegator_local_head(
+        &self,
+        state: &AppState,
+    ) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
+        let head = self.local_head()?;
+        if !ryeos_app::project_owner::speaks_for(state, &self.delegator_fingerprint, head.owner()) {
             bail!("hosted worker-result pull local head is not the delegator's own");
         }
         Ok(head)
@@ -248,11 +257,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let delegator_fingerprint = crate::remote::client::delegator_fingerprint(&ctx)?;
     let (local_project_path, remote, target_project_path, project_name) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
-    let local_head_ref = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &format!("fp:{delegator_fingerprint}"),
-        &project_name,
-    )?
-    .ref_path();
+    let delegator_owner =
+        ryeos_app::project_owner::owner_principal(&state, &delegator_fingerprint)?;
+    let local_head_ref =
+        ryeos_state::project_identity::ProjectHeadKey::owned_by(&delegator_owner, &project_name)
+            .ref_path();
     let client = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &ctx)?;
     let delegation_digest = client
         .delegation_digest()
@@ -580,7 +589,7 @@ fn validate_local_base(
     operation: &PullOperation,
 ) -> Result<(ryeos_state::PinnedStateAuthority, ProjectTree)> {
     let evidence = &operation.candidate_result.evidence;
-    let head = operation.intent.local_head()?;
+    let head = operation.intent.delegator_local_head(state)?;
     let current = state
         .state_store
         .with_state_db(|db| db.read_project_head(&head))?;
@@ -908,10 +917,9 @@ mod tests {
             target_project_path: "/target/project".to_owned(),
             project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
             local_head_ref: ryeos_state::project_identity::ProjectHeadKey::owned_by(
-                &format!("fp:{}", "a".repeat(64)),
+                &format!("pid:v1:{}", "a".repeat(64)).parse().unwrap(),
                 &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
             )
-            .unwrap()
             .ref_path(),
             delegator_fingerprint: "a".repeat(64),
             delegation_digest: "b".repeat(64),

@@ -12,6 +12,7 @@
 
 use anyhow::{Result, anyhow};
 use ryeos_engine::trust::{ResolvedOwner, TrustStore};
+use ryeos_state::head_advance::HeadAdvancer;
 use ryeos_state::principal_id::PrincipalId;
 
 /// The owner `key` acts for on this node, from `trust` (which must be the
@@ -65,4 +66,39 @@ pub fn require_speaks_for(
     owner: &PrincipalId,
 ) -> Result<()> {
     require_speaks_for_in(&state.engine.trust_store, key, owner)
+}
+
+/// The record of `key` advancing a head owned by `head_owner`, after
+/// checking on this node that `key` acts for that owner. This is the only
+/// way a head advance site obtains a [`HeadAdvancer`].
+pub fn head_advancer_in(
+    trust: &TrustStore,
+    key: &str,
+    head_owner: &PrincipalId,
+) -> Result<HeadAdvancer> {
+    let resolved = owner_for_in(trust, key)?;
+    if &resolved.principal != head_owner {
+        return Err(anyhow!(
+            "owner_not_spoken_for: key {key} does not act for project owner {head_owner} on \
+             this node (it resolves to {})",
+            resolved.principal
+        ));
+    }
+    let hex = key.strip_prefix("fp:").unwrap_or(key);
+    Ok(HeadAdvancer {
+        key: format!("fp:{hex}"),
+        via_root: match resolved.via {
+            ryeos_engine::trust::OwnerVia::Solo => None,
+            ryeos_engine::trust::OwnerVia::Lineage { root } => Some(root),
+        },
+    })
+}
+
+/// [`head_advancer_in`] against the running node's registry.
+pub fn head_advancer(
+    state: &crate::state::AppState,
+    key: &str,
+    head_owner: &PrincipalId,
+) -> Result<HeadAdvancer> {
+    head_advancer_in(&state.engine.trust_store, key, head_owner)
 }

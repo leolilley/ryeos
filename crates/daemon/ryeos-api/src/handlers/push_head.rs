@@ -50,8 +50,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     // The head is the caller's own under the requested name: the owner is
     // the authenticated principal, never request input.
-    let head_key = req.project.head_key(&ctx.fingerprint)?;
-    let principal_key = head_key.owner_key();
+    let owner = ryeos_app::project_owner::owner_principal(&state, &ctx.fingerprint)?;
+    let head_key = req.project.head_key(&owner);
+    let principal_key = head_key.owner_component();
     let project_hash = head_key.name_hash();
     let publication_key = ryeos_state::DurableCasPublicationKey::project_head(&head_key)?;
     let expected_previous_hash = req.expected_previous_hash.0.as_deref();
@@ -187,17 +188,21 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 current
             );
         }
+        let advancer =
+            ryeos_app::project_owner::head_advancer(&state, &ctx.fingerprint, head_key.owner())?;
         match expected_previous_hash {
             Some(expected) => state.state_store.advance_project_head_ref(
                 &head_key,
                 &req.snapshot_hash,
                 expected,
+                &advancer,
                 &signer,
                 &cas_guard,
             ),
             None => state.state_store.write_project_head_ref(
                 &head_key,
                 &req.snapshot_hash,
+                &advancer,
                 &signer,
                 &cas_guard,
             ),

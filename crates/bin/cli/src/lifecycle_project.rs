@@ -19,7 +19,7 @@ use crate::lifecycle_commands::parse_or_render_help;
 #[command(
     name = "ryeos project register",
     about = "Register a live checkout under its project name on a stopped node",
-    long_about = "Writes a node-signed registration of the checkout under fp:<owner>/<name>. The checkout's .ai/project.yaml must declare the name. The owner defaults to the node's operator. The node must be stopped. Registrations are inert until the owner+name trust cut; at the cut they become what lets a live checkout state its project identity.",
+    long_about = "Writes a node-signed registration of the checkout under pid:v1:<owner>/<name>. The checkout's .ai/project.yaml must declare the name. The owner defaults to the node's operator. The node must be stopped. Registrations are inert until the owner+name trust cut; at the cut they become what lets a live checkout state its project identity.",
     no_binary_name = true
 )]
 struct RegisterArgs {
@@ -30,7 +30,7 @@ struct RegisterArgs {
     #[arg(long)]
     name: Option<String>,
 
-    /// The owning principal, fp:<64 hex>; defaults to the node's operator.
+    /// The owning principal, pid:v1:<64 hex>; defaults to the node's operator.
     #[arg(long)]
     owner: Option<String>,
 
@@ -57,7 +57,7 @@ struct UnregisterArgs {
     #[arg(long)]
     name: Option<String>,
 
-    /// The owning principal, fp:<64 hex>; defaults to the node's operator.
+    /// The owning principal, pid:v1:<64 hex>; defaults to the node's operator.
     #[arg(long)]
     owner: Option<String>,
 
@@ -172,7 +172,7 @@ mod tests {
         let args = UnregisterArgs::try_parse_from([
             "/gone/demo",
             "--owner",
-            "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "pid:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         ])
         .unwrap();
         assert!(args.name.is_none());

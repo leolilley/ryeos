@@ -1737,7 +1737,7 @@ mod owner_signer_project_controls {
     use super::owner_signer_project;
 
     fn stated() -> LogicalProject {
-        LogicalProject::Stated(format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap())
+        LogicalProject::Stated(format!("pid:v1:{}/alpha", "a".repeat(64)).parse().unwrap())
     }
 
     #[test]
@@ -1935,7 +1935,7 @@ composer: handler:ryeos/core/identity
     }
 
     fn identity(name: &str) -> String {
-        format!("fp:{}/{name}", "a".repeat(64))
+        format!("pid:v1:{}/{name}", "a".repeat(64))
     }
 
     /// Runs the real owner-testimony verifier on the project identity the real

@@ -510,7 +510,7 @@ pub fn resolve_execution_project_authority(
                                 );
                             }
                             PinnedTerminalPublication::RetainCurrentHead {
-                                principal_key: destination.head.owner_key().to_owned(),
+                                principal_key: destination.head.owner_component(),
                                 project_hash: destination.head.name_hash().to_owned(),
                                 expected_hash: destination.expected_hash.clone(),
                             }
@@ -1013,10 +1013,8 @@ pub fn admission_signer_project(
             let destination = current_head_destination.ok_or_else(|| {
                 anyhow::anyhow!("a current-head run was admitted without its head lookup")
             })?;
-            let identity = ryeos_state::project_identity::ProjectIdentity::new(
-                acting_principal.to_owned(),
-                name.clone(),
-            )?;
+            let owner = ryeos_app::project_owner::owner_principal(state, acting_principal)?;
+            let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name.clone());
             if ryeos_state::project_identity::ProjectHeadKey::for_project(&identity)
                 != destination.head
             {
@@ -1060,8 +1058,7 @@ pub fn authorize_terminal_publication(
     let destination = current_head_destination.ok_or_else(|| {
         anyhow::anyhow!("advance-head publication requires a current-head project source")
     })?;
-    let principal_key = ryeos_state::refs::principal_storage_key(acting_principal)?;
-    if destination.head.owner_key() != principal_key {
+    if !ryeos_app::project_owner::speaks_for(state, acting_principal, destination.head.owner()) {
         anyhow::bail!("advance-head destination is not the acting principal's own head");
     }
     let admitted_head_ref = destination.head.ref_path();
@@ -3638,7 +3635,7 @@ mod tests {
         let snapshot_hash = "a".repeat(64);
         let destination = project_source::ResolvedCurrentHeadDestination {
             head: ryeos_state::project_identity::ProjectHeadKey::from_sealed(
-                &"d".repeat(64),
+                &format!("pid-v1-{}", "d".repeat(64)),
                 &"b".repeat(64),
             )
             .unwrap(),
@@ -3688,7 +3685,7 @@ mod tests {
             authority.terminal_publication(),
             Some(
                 &ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key: destination.head.owner_key().to_owned(),
+                    principal_key: destination.head.owner_component(),
                     project_hash: destination.head.name_hash().to_owned(),
                     expected_hash: snapshot_hash.clone(),
                 }
@@ -3733,7 +3730,7 @@ mod tests {
         let snapshot_hash = "d".repeat(64);
         let destination = project_source::ResolvedCurrentHeadDestination {
             head: ryeos_state::project_identity::ProjectHeadKey::from_sealed(
-                &"e".repeat(64),
+                &format!("pid-v1-{}", "e".repeat(64)),
                 &"f".repeat(64),
             )
             .unwrap(),

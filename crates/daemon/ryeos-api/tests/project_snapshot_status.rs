@@ -221,16 +221,15 @@ async fn local_operator_status_reuses_principal_head_comparison_without_creating
     assert_eq!(added, vec![".ai/project.yaml", "edited.txt"]);
     assert!(result["head_snapshot_hash"].is_null());
     assert!(result["deployed_snapshot_hash"].is_null());
+    let caller_owner =
+        ryeos_app::project_owner::owner_principal(&state, &caller_fingerprint).unwrap();
     let head = state
         .state_store
         .with_state_db(|db| {
-            db.read_project_head(
-                &ryeos_state::project_identity::ProjectHeadKey::owned_by(
-                    &caller_fingerprint,
-                    &ryeos_state::project_identity::ProjectName::new("status-probe").unwrap(),
-                )
-                .unwrap(),
-            )
+            db.read_project_head(&ryeos_state::project_identity::ProjectHeadKey::owned_by(
+                &caller_owner,
+                &ryeos_state::project_identity::ProjectName::new("status-probe").unwrap(),
+            ))
         })
         .unwrap();
     assert!(head.is_none());
@@ -319,17 +318,22 @@ async fn status_composes_capture_policy_and_reports_policy_only_changes_without_
     };
     let head = cas.store_object(&snapshot.to_value()).unwrap();
     let caller = local_operator(&state);
+    let caller_owner =
+        ryeos_app::project_owner::owner_principal(&state, &caller.fingerprint).unwrap();
     let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &caller.fingerprint,
+        &caller_owner,
         &ryeos_state::project_identity::ProjectName::new("status-snapshot").unwrap(),
-    )
-    .unwrap();
+    );
+    let advancer =
+        ryeos_app::project_owner::head_advancer(&state, &caller.fingerprint, head_key.owner())
+            .unwrap();
     let project_path = project.path().canonicalize().unwrap();
     state
         .state_store
         .write_project_head_ref(
             &head_key,
             &head,
+            &advancer,
             &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
             &guard,
         )

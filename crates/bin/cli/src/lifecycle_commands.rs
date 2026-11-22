@@ -5134,7 +5134,7 @@ fn trust_identity_checks(app_root: &Path) -> Vec<ryeos_core_tools::actions::doct
                     WARN,
                     serde_json::json!({
                         "refused": refused.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                        "fix": "these signers are unusable: their records name project paths. Re-scope each with `ryeos trust scope <fingerprint> --project fp:<owner>/<name>` (or --any-project, or leave project space) on a build from before the owner+name cut, or re-pin it",
+                        "fix": "these signers are unusable: their records name project paths. Re-scope each with `ryeos trust scope <fingerprint> --project pid:v1:<owner>/<name>` (or --any-project, or leave project space) on a build from before the owner+name cut, or re-pin it",
                     }),
                 )
             });
@@ -5181,7 +5181,7 @@ fn trust_identity_checks(app_root: &Path) -> Vec<ryeos_core_tools::actions::doct
             serde_json::json!({
                 "signers": unscoped,
                 "note": "trusted in every checkout, registered or not",
-                "fix": "narrow with `ryeos trust scope <fingerprint> --project fp:<owner>/<name>` unless every project should trust it",
+                "fix": "narrow with `ryeos trust scope <fingerprint> --project pid:v1:<owner>/<name>` unless every project should trust it",
             }),
         )
     });

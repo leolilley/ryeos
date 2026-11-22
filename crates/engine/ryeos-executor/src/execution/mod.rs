@@ -2034,6 +2034,7 @@ fn advance_head_to_frozen_runtime_result(
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire result-generation write permit: {error}"))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+    let advancer = ryeos_app::project_owner::head_advancer(state, launch_owner, head.owner())?;
     state
         .state_store
         .advance_project_head_ref_owned(
@@ -2042,6 +2043,7 @@ fn advance_head_to_frozen_runtime_result(
             &head,
             &generation.snapshot_hash,
             expected_hash,
+            &advancer,
             &signer,
             &cas_guard,
         )

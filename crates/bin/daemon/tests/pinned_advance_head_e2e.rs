@@ -195,18 +195,17 @@ async fn snapshot_create(h: &DaemonHarness, project: &Path, message: &str) -> Re
         .to_owned())
 }
 
-fn user_principal(fixture: &FastFixture) -> String {
-    format!(
-        "fp:{}",
-        lillux::signature::compute_fingerprint(&fixture.user.verifying_key())
-    )
-}
-
 fn head_key(fixture: &FastFixture) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
-    ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &user_principal(fixture),
+    let owner = ryeos_engine::trust::SuccessionGraph::default()
+        .ownership_of(&lillux::signature::compute_fingerprint(
+            &fixture.user.verifying_key(),
+        ))
+        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?
+        .principal;
+    Ok(ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &owner,
         &ryeos_state::project_identity::ProjectName::new(PROJECT_NAME)?,
-    )
+    ))
 }
 
 /// Pinned CoW from the current HEAD, advancing that HEAD from `expected`.

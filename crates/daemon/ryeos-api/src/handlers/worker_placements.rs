@@ -3956,10 +3956,10 @@ async fn prepare_after_staging(
     state
         .state_store
         .verify_project_snapshot_closure(candidate)?;
-    let target_project_identity = target_project_identity(owner, target_project_path)?;
+    let target_project_identity = target_project_identity(state, owner, target_project_path)?;
     let target_head_key =
         ryeos_state::project_identity::ProjectHeadKey::for_project(&target_project_identity);
-    let principal_key = target_head_key.owner_key().to_owned();
+    let principal_key = target_head_key.owner_component();
     let target_project_hash = target_head_key.name_hash().to_owned();
     let target_head = state
         .state_store
@@ -3970,6 +3970,7 @@ async fn prepare_after_staging(
             &source.source_snapshot.project_authority,
             target_project_path,
             &req.target_site_id,
+            &state.engine.trust_store,
             owner,
             candidate,
             &target_head,
@@ -4348,7 +4349,7 @@ async fn preflight_after_staging(
         bail!("source preflight launch ledger contradicts owner or sites");
     }
     let target_project_path = canonical_target_project_path(&req.target_project_path)?;
-    let target_project_identity = target_project_identity(owner, &target_project_path)?;
+    let target_project_identity = target_project_identity(state, owner, &target_project_path)?;
     let target_head_key =
         ryeos_state::project_identity::ProjectHeadKey::for_project(&target_project_identity);
     let target_head = state
@@ -4360,6 +4361,7 @@ async fn preflight_after_staging(
             &source.source_snapshot.project_authority,
             &target_project_path,
             &req.target_site_id,
+            &state.engine.trust_store,
             owner,
             &target_head,
             &target_head,
@@ -4492,10 +4494,11 @@ fn validate_transfer_request(
 }
 
 /// The owner's project for the target checkout on this node: the name the
-/// target tree declares now, owned by the authenticated handoff owner.
-/// Nothing from the source node names it.
+/// target tree declares now, owned by the principal the node resolves the
+/// authenticated handoff owner key to. Nothing from the source node names it.
 fn target_project_identity(
-    owner: &str,
+    state: &AppState,
+    owner_key: &str,
     target_project_path: &Path,
 ) -> Result<ryeos_state::project_identity::ProjectIdentity> {
     let name =
@@ -4506,7 +4509,10 @@ fn target_project_identity(
                     target_project_path.display()
                 )
             })?;
-    ryeos_state::project_identity::ProjectIdentity::new(owner.to_owned(), name)
+    let owner = ryeos_app::project_owner::owner_principal(state, owner_key)?;
+    Ok(ryeos_state::project_identity::ProjectIdentity::new(
+        owner, name,
+    ))
 }
 
 fn canonical_target_project_path(raw: &str) -> Result<PathBuf> {

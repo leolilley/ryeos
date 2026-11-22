@@ -977,12 +977,14 @@ mod tests {
         .content_hash;
 
         // The operator's project: an endorser endorses only projects it owns.
-        let identity: ryeos_state::project_identity::ProjectIdentity = format!(
-            "fp:{}/demo",
-            lillux::signature::compute_fingerprint(&operator.verifying_key())
-        )
-        .parse()
-        .unwrap();
+        let operator_fingerprint =
+            lillux::signature::compute_fingerprint(&operator.verifying_key());
+        let operator_owner = ryeos_engine::trust::SuccessionGraph::default()
+            .ownership_of(&operator_fingerprint)
+            .unwrap()
+            .principal;
+        let identity: ryeos_state::project_identity::ProjectIdentity =
+            format!("{operator_owner}/demo").parse().unwrap();
         let logical = ryeos_state::project_identity::LogicalProject::Stated(identity.clone());
 
         // The signer list a launch of this project carries right now.

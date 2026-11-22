@@ -4178,7 +4178,8 @@ pub fn build_remote_project_rebind(
     source: &ExecutionProjectAuthority,
     target_project_path: &std::path::Path,
     target_site_id: &str,
-    owner_principal: &str,
+    trust: &ryeos_engine::trust::TrustStore,
+    owner_key: &str,
     source_candidate_snapshot_hash: &str,
     target_expected_head_hash: &str,
     target_project: &ryeos_state::project_identity::ProjectIdentity,
@@ -4199,9 +4200,8 @@ pub fn build_remote_project_rebind(
     }
     hash("source candidate snapshot", source_candidate_snapshot_hash)?;
     hash("target expected project head", target_expected_head_hash)?;
-    if target_project.owner() != owner_principal {
-        bail!("the handoff target project is not the handoff owner's");
-    }
+    crate::project_owner::require_speaks_for_in(trust, owner_key, target_project.owner())
+        .context("the handoff target project is not the handoff owner's")?;
     let target_head = ryeos_state::project_identity::ProjectHeadKey::for_project(target_project);
     hash("project route", route_digest)?;
     let ExecutionProjectAuthority::PinnedGeneration {
@@ -4254,7 +4254,7 @@ pub fn build_remote_project_rebind(
         snapshot_hash: source_candidate_snapshot_hash.to_owned(),
         realization: PinnedProjectRealization::Cow {
             terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
-                principal_key: target_head.owner_key().to_owned(),
+                principal_key: target_head.owner_component(),
                 project_hash: target_head.name_hash().to_owned(),
                 expected_hash: target_expected_head_hash.to_owned(),
             },

@@ -26,6 +26,12 @@ const SPEAKS_FOR_CALLERS: &[&str] = &[
     "crates/engine/ryeos-engine/src/authority/trust/endorsement.rs",
     "crates/engine/ryeos-engine/src/authority/trust/endorsement/tests.rs",
     "crates/daemon/ryeos-app/src/project_owner.rs",
+    "crates/daemon/ryeos-api/src/handlers/dedicated_sessions.rs",
+    "crates/daemon/ryeos-api/src/handlers/remote_pull_worker_result.rs",
+    "crates/daemon/ryeos-api/src/handlers/remote_reconcile_project_head.rs",
+    "crates/daemon/ryeos-api/src/routes/response_modes/execute_mode.rs",
+    "crates/engine/ryeos-executor/src/execution/runner.rs",
+    "crates/daemon/ryeos-app/src/worker_handoff.rs",
 ];
 
 fn workspace_root() -> PathBuf {

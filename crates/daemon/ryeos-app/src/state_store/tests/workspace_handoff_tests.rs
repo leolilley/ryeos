@@ -677,15 +677,21 @@ fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
         .expect("state store");
     let authority = store.pinned_state_authority().expect("state authority");
     let guard = authority.acquire_shared_guard().expect("CAS guard");
+    let owner: ryeos_state::principal_id::PrincipalId =
+        format!("pid:v1:{}", "1".repeat(64)).parse().unwrap();
     let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &format!("fp:{}", "1".repeat(64)),
+        &owner,
         &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
-    )
-    .unwrap();
+    );
+    let owner_component = head_key.owner_component();
+    let advancer = ryeos_state::head_advance::HeadAdvancer {
+        key: format!("fp:{}", "1".repeat(64)),
+        via_root: None,
+    };
     let initial_head = "3".repeat(64);
     let next_head = "4".repeat(64);
     store
-        .write_project_head_ref(&head_key, &initial_head, signer.as_ref(), &guard)
+        .write_project_head_ref(&head_key, &initial_head, &advancer, signer.as_ref(), &guard)
         .expect("initial project HEAD");
 
     store
@@ -735,7 +741,7 @@ fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
             subject_digest: &"6".repeat(64),
             checkpoint_manifest_hash: &"7".repeat(64),
             upstream_session_id: "upstream-project-fence",
-            project_principal_key: head_key.owner_key(),
+            project_principal_key: &owner_component,
             project_hash: head_key.name_hash(),
             target_project_head_hash: &initial_head,
         })
@@ -746,6 +752,7 @@ fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
             &head_key,
             &next_head,
             &initial_head,
+            &advancer,
             signer.as_ref(),
             &guard,
         )
@@ -784,6 +791,7 @@ fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
             &head_key,
             &next_head,
             &initial_head,
+            &advancer,
             signer.as_ref(),
             &guard,
         )

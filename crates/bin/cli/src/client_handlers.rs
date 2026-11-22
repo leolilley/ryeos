@@ -361,8 +361,9 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
         .ok_or_else(|| local("the node did not return its endorsement ledger head"))?
         .to_owned();
     let endorser = format!("fp:{}", signer.fingerprint);
-    // The endorsement names the project as fp:<operator>/<declared name>:
-    // the owner is always the endorsing operator, never input.
+    // The endorsement names the project as pid:v1:<owner>/<declared name>:
+    // the owner is the principal the node registry resolves the endorsing
+    // operator key to, never input.
     let declared = ryeos_state::project_identity::ProjectDeclaration::declared_name(&project)
         .map_err(|error| local(format!("{error:#}")))?
         .ok_or_else(|| {
@@ -372,9 +373,12 @@ pub(crate) async fn endorse_items(app_root: &Path, parameters: &Value) -> Result
                 ryeos_state::project_identity::PROJECT_DECLARATION_PATH
             ))
         })?;
-    let project_identity =
-        ryeos_state::project_identity::ProjectIdentity::new(endorser.clone(), declared)
-            .map_err(|error| local(format!("{error:#}")))?;
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .map_err(|error| local(format!("load the node signer registry: {error}")))?;
+    let owner = ryeos_app::project_owner::owner_for_in(&trust, &signer.fingerprint)
+        .map_err(|error| local(format!("{error:#}")))?
+        .principal;
+    let project_identity = ryeos_state::project_identity::ProjectIdentity::new(owner, declared);
     eprintln!("endorsing in project {project_identity}");
     let nonce: [u8; 16] = rand::random();
     let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();

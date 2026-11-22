@@ -278,9 +278,9 @@ pub fn resolve_project_context(
             authority.ensure_guard(&cas_mutation_guard)?;
             // The acting principal's own head for the named project: the
             // owner is never request input, and the path is only a label.
-            let head = project
-                .head_key(principal_id)
+            let owner = ryeos_app::project_owner::owner_principal(state, principal_id)
                 .map_err(|error| ProjectSourceError::Other(format!("{error:#}")))?;
+            let head = project.head_key(&owner);
             let snap_hash = state
                 .state_store
                 .with_state_db(|db| db.read_project_head(&head))?
@@ -607,7 +607,8 @@ pub fn prepare_external_product_consumer(
 }
 
 /// The project identity a pinned run may state for `principal_id`: the name
-/// the snapshot itself declares, owned by the principal, and only when that
+/// the snapshot itself declares, owned by the principal the node resolves
+/// the key to, and only when that
 /// principal's own head for exactly that owner and name is `snapshot_hash`.
 /// The head is read by its exact key; nothing scans for a head equal to the
 /// snapshot, and no caller path participates. A missing declaration, a
@@ -648,9 +649,8 @@ pub fn current_head_logical_project(
                     "project_undeclared: snapshot {snapshot_hash} declares no project name"
                 ))
             })?;
-    let identity =
-        ryeos_state::project_identity::ProjectIdentity::new(principal_id.to_owned(), name)
-            .map_err(other)?;
+    let owner = ryeos_app::project_owner::owner_principal(state, principal_id).map_err(other)?;
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name);
     let head = state
         .state_store
         .with_state_db(|db| {
@@ -1453,8 +1453,7 @@ mod ai_only_base_tests {
 mod pinned_consumer_head_binding_tests {
     use super::*;
 
-    const PROJECT: &str =
-        "fp:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/registered-project";
+    const PROJECT: &str = "pid:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/registered-project";
 
     fn identity() -> ryeos_state::project_identity::ProjectIdentity {
         PROJECT.parse().unwrap()

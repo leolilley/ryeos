@@ -6122,15 +6122,17 @@ async fn evaluate_integrate_and_publish_candidate(
     );
 
     // The owner's head of the source checkout, under the name it declares.
+    let head_owner = ryeos_app::project_owner::owner_principal(state, &service_owner).unwrap();
     let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &service_owner,
+        &head_owner,
         &ryeos_state::project_identity::ProjectDeclaration::declared_name(Path::new(
             source_display_path,
         ))
         .unwrap()
         .expect("the source checkout declares its project name"),
-    )
-    .unwrap();
+    );
+    let head_advancer =
+        ryeos_app::project_owner::head_advancer(state, &service_owner, head_key.owner()).unwrap();
     let state_authority = state.state_store.pinned_state_authority().unwrap();
     let guard = state_authority.acquire_shared_guard().unwrap();
     state
@@ -6138,6 +6140,7 @@ async fn evaluate_integrate_and_publish_candidate(
         .write_project_head_ref(
             &head_key,
             base_snapshot_hash,
+            &head_advancer,
             &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
             &guard,
         )
@@ -6416,6 +6419,7 @@ async fn evaluate_integrate_and_publish_candidate(
                 &head_key,
                 &competing_snapshot_hash,
                 base_snapshot_hash,
+                &head_advancer,
                 &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
                 &guard,
             )

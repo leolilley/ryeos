@@ -210,11 +210,21 @@ impl ReconciliationOperation {
         Ok(())
     }
 
-    /// The sealed local head, which must be the configured operator's own.
+    /// The sealed local head, parsed structurally. Whether it is the
+    /// configured operator's own is decided on this node by
+    /// [`Self::operator_local_head`].
     fn local_head(&self) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
-        let head =
-            ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(&self.local_head_ref)?;
-        if head.owner_key() != self.operator_fingerprint {
+        ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(&self.local_head_ref)
+    }
+
+    /// The sealed local head, which must be the configured operator's own:
+    /// the operator key must speak for the head's owner on this node now.
+    fn operator_local_head(
+        &self,
+        state: &AppState,
+    ) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
+        let head = self.local_head()?;
+        if !ryeos_app::project_owner::speaks_for(state, &self.operator_fingerprint, head.owner()) {
             bail!("project-head reconciliation local head is not the operator's own");
         }
         Ok(head)
@@ -275,11 +285,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     let (local_project_path, remote, remote_project_path, project_name) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
-    let local_head_ref = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &format!("fp:{operator_fingerprint}"),
-        &project_name,
-    )?
-    .ref_path();
+    let operator_owner = ryeos_app::project_owner::owner_principal(&state, &operator_fingerprint)?;
+    let local_head_ref =
+        ryeos_state::project_identity::ProjectHeadKey::owned_by(&operator_owner, &project_name)
+            .ref_path();
     let delegation_digest = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &ctx)?
         .delegation_digest()
         .context("delegated client carries no delegation")?;
@@ -312,7 +321,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .with_state_db(|db| db.get_sync_job(&operation.job_id()?))?
         .is_none()
     {
-        let head = operation.local_head()?;
+        let head = operation.operator_local_head(&state)?;
         let local_head = state
             .state_store
             .with_state_db(|db| db.read_project_head(&head))?;
@@ -383,7 +392,7 @@ async fn execute_operation(
             Some(response.reconciled_head.as_str()),
             true,
         )?;
-        let head = operation.local_head()?;
+        let head = operation.operator_local_head(&state)?;
         let current = state
             .state_store
             .with_state_db(|db| db.read_project_head(&head))?;
@@ -880,7 +889,7 @@ async fn publish_local_head(
     merge_hash: &str,
 ) -> Result<()> {
     validate_merge_generation(state, operation, merge_hash)?;
-    let head = operation.local_head()?;
+    let head = operation.operator_local_head(state)?;
     let project_lock = super::project_apply_snapshot::project_apply_lock(&head.ref_path());
     let _project_guard = project_lock.lock_owned().await;
     let authority = state.state_store.pinned_state_authority()?;
@@ -904,10 +913,16 @@ async fn publish_local_head(
             current
         ))
     } else {
+        let advancer = ryeos_app::project_owner::head_advancer(
+            state,
+            &operation.operator_fingerprint,
+            head.owner(),
+        )?;
         state.state_store.advance_project_head_ref(
             &head,
             merge_hash,
             &operation.expected_local_head,
+            &advancer,
             &signer,
             &cas_guard,
         )
@@ -1332,10 +1347,9 @@ mod tests {
             remote_project_path: "/remote/project".to_owned(),
             project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
             local_head_ref: ryeos_state::project_identity::ProjectHeadKey::owned_by(
-                &format!("fp:{}", "4".repeat(64)),
+                &format!("pid:v1:{}", "4".repeat(64)).parse().unwrap(),
                 &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
             )
-            .unwrap()
             .ref_path(),
             operator_fingerprint: "4".repeat(64),
             delegation_digest: "5".repeat(64),

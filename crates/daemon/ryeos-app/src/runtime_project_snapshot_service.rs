@@ -163,7 +163,7 @@ impl RuntimeProjectSnapshotService {
             project_hash: ryeos_state::refs::deployed_project_key(canonical),
             principal_key: ryeos_state::refs::principal_storage_key(&thread_auth.acting_principal)?
                 .to_owned(),
-            head_key: declared_head_key(&thread_auth.acting_principal, &project_path)?,
+            head_key: declared_head_key(state, &thread_auth.acting_principal, &project_path)?,
             authority,
             cas,
             project_path,
@@ -214,7 +214,7 @@ pub fn local_operator_status(
         ignore_matcher: state.ignore_matcher.as_ref(),
         project_hash: ryeos_state::refs::deployed_project_key(canonical),
         principal_key: ryeos_state::refs::principal_storage_key(&caller.fingerprint)?.to_owned(),
-        head_key: declared_head_key(&caller.fingerprint, &project_path)?,
+        head_key: declared_head_key(state, &caller.fingerprint, &project_path)?,
         project_path,
         authority,
         cas,
@@ -235,15 +235,23 @@ pub fn local_operator_status(
     )
 }
 
-/// The head `principal_id` owns under the name the tree at `project_path`
-/// declares. The owner is the authenticated caller, never the tree.
+/// The head of the project the tree at `project_path` declares, in the
+/// namespace of the principal the authenticated caller acts for on this
+/// node. The owner comes from the ownership resolver, never the tree.
 fn declared_head_key(
+    state: &AppState,
     principal_id: &str,
     project_path: &Path,
 ) -> Result<Option<ryeos_state::project_identity::ProjectHeadKey>> {
-    ryeos_state::project_identity::ProjectDeclaration::declared_name(project_path)?
-        .map(|name| ryeos_state::project_identity::ProjectHeadKey::owned_by(principal_id, &name))
-        .transpose()
+    let Some(name) =
+        ryeos_state::project_identity::ProjectDeclaration::declared_name(project_path)?
+    else {
+        return Ok(None);
+    };
+    let owner = crate::project_owner::owner_principal(state, principal_id)?;
+    Ok(Some(
+        ryeos_state::project_identity::ProjectHeadKey::owned_by(&owner, &name),
+    ))
 }
 
 fn heads(ctx: &SnapshotContext<'_>) -> Result<(Option<String>, Option<String>)> {
@@ -492,17 +500,27 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
     if locked_head != initial_head {
         bail!("project head changed while creating snapshot; rerun snapshot create");
     }
+    let advancer = crate::project_owner::head_advancer(
+        state,
+        &format!("fp:{}", ctx.principal_key),
+        head_key.owner(),
+    )?;
     match initial_head.as_deref() {
         Some(current) => state.state_store.advance_project_head_ref(
             head_key,
             &snapshot_hash,
             current,
+            &advancer,
             &signer,
             &guard,
         ),
-        None => state
-            .state_store
-            .write_project_head_ref(head_key, &snapshot_hash, &signer, &guard),
+        None => state.state_store.write_project_head_ref(
+            head_key,
+            &snapshot_hash,
+            &advancer,
+            &signer,
+            &guard,
+        ),
     }?;
     Ok(json!({
         "kind": "snapshot_create",

@@ -26,11 +26,13 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
     principal.verified = true;
     principal.authorized_key_class = Some(AuthorizedKeyPrincipalClass::LocalClient);
     principal.scopes = vec!["ryeos.execute.service.threads/list".to_owned()];
+    let owner = ryeos_app::project_owner::owner_principal(&state, &principal.id).unwrap();
     let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &principal.id,
+        &owner,
         &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
-    )
-    .unwrap();
+    );
+    let advancer =
+        ryeos_app::project_owner::head_advancer(&state, &principal.id, head_key.owner()).unwrap();
     let config_path = project.path().join(PROJECT_SNAPSHOT_CONFIG_RELATIVE);
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     let config = b"schema: 1\nexclusions: []\n";
@@ -94,6 +96,7 @@ async fn current_head_validation_uses_pinned_authority_without_invoking_or_publi
         .write_project_head_ref(
             &head_key,
             &head,
+            &advancer,
             &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
             &guard,
         )

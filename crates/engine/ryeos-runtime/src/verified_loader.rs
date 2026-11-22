@@ -1598,7 +1598,7 @@ mod tests {
             ".ai/config/scoped.yaml",
             &lillux::signature::sign_content("name: scoped\n", &key, "#", None),
         );
-        let owner = format!("fp:{}", "c".repeat(64));
+        let owner = format!("pid:v1:{}", "c".repeat(64));
         let signers = vec![signer_entry(
             &key,
             SignerScope {
@@ -1632,7 +1632,7 @@ mod tests {
         let other = VerifiedLoader::new(checkout, vec![], &signers)
             .unwrap()
             .with_logical_project(ryeos_engine::contracts::LogicalProject::Stated(
-                format!("fp:{}/demo", "d".repeat(64)).parse().unwrap(),
+                format!("pid:v1:{}/demo", "d".repeat(64)).parse().unwrap(),
             ));
         assert!(
             other
@@ -2091,14 +2091,16 @@ mod tests {
         }
 
         fn named_project(&self, name: &str) -> ryeos_state::project_identity::ProjectIdentity {
+            let owner = ryeos_engine::trust::SuccessionGraph::default()
+                .ownership_of(&lillux::signature::compute_fingerprint(
+                    &self.operator.verifying_key(),
+                ))
+                .unwrap()
+                .principal;
             ryeos_state::project_identity::ProjectIdentity::new(
-                format!(
-                    "fp:{}",
-                    lillux::signature::compute_fingerprint(&self.operator.verifying_key())
-                ),
+                owner,
                 ryeos_state::project_identity::ProjectName::new(name).unwrap(),
             )
-            .unwrap()
         }
 
         fn stated_project(&self) -> ryeos_engine::contracts::LogicalProject {

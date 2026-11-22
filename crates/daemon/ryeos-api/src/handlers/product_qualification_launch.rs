@@ -896,14 +896,34 @@ mod tests {
         ryeos_state::project_identity::ProjectName::new(name).unwrap()
     }
 
-    /// Writes `principal`'s head for `name` to `snapshot`.
+    /// The principal a key owns when it is the root of its own principal.
+    fn solo_owner(key: &str) -> ryeos_state::principal_id::PrincipalId {
+        ryeos_engine::trust::SuccessionGraph::default()
+            .ownership_of(key.strip_prefix("fp:").unwrap_or(key))
+            .unwrap()
+            .principal
+    }
+
+    /// Writes the head of the principal `key` owns for `name` to `snapshot`.
     fn write_head(
         state: &AppState,
-        principal: &str,
+        key_fingerprint: &str,
         name: &ryeos_state::project_identity::ProjectName,
         snapshot: &str,
     ) {
-        let key = ryeos_state::project_identity::ProjectHeadKey::owned_by(principal, name).unwrap();
+        let key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+            &solo_owner(key_fingerprint),
+            name,
+        );
+        let advancer = ryeos_state::head_advance::HeadAdvancer {
+            key: format!(
+                "fp:{}",
+                key_fingerprint
+                    .strip_prefix("fp:")
+                    .unwrap_or(key_fingerprint)
+            ),
+            via_root: None,
+        };
         let authority = state.state_store.pinned_state_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         state
@@ -911,6 +931,7 @@ mod tests {
             .write_project_head_ref(
                 &key,
                 snapshot,
+                &advancer,
                 &ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity),
                 &guard,
             )
@@ -987,14 +1008,13 @@ mod tests {
         assert_eq!(
             stated,
             ryeos_state::project_identity::ProjectIdentity::new(
-                fixture.operator_principal.clone(),
+                solo_owner(&fixture.operator_principal),
                 fixture.name.clone(),
             )
-            .unwrap()
         );
         assert_eq!(
             stated.to_string(),
-            format!("{}/gate-project", fixture.operator_principal)
+            format!("{}/gate-project", solo_owner(&fixture.operator_principal))
         );
     }
 
@@ -1248,10 +1268,9 @@ mod tests {
         assert_eq!(
             stated,
             ryeos_state::project_identity::ProjectIdentity::new(
-                fixture.operator_principal.clone(),
+                solo_owner(&fixture.operator_principal),
                 name,
-            )
-            .unwrap(),
+            ),
             "the stated identity comes from the declared name, not the label path"
         );
         let context = resolve_project_context_off_thread(ResolveProjectContextRequest {
@@ -1330,7 +1349,7 @@ mod tests {
             &fixture.head,
         )
         .unwrap();
-        assert_eq!(stated.owner(), fixture.operator_principal);
+        assert_eq!(stated.owner(), &solo_owner(&fixture.operator_principal));
         assert_eq!(stated.name(), &fixture.name);
     }
 }

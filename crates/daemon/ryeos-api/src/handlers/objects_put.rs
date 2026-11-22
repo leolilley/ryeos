@@ -358,7 +358,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let recovery = authority.require_recovery()?;
     // The caller's own head under the requested name; the owner is never
     // request input.
-    let head_key = req.project.head_key(&ctx.fingerprint)?;
+    let owner = ryeos_app::project_owner::owner_principal(&state, &ctx.fingerprint)?;
+    let head_key = req.project.head_key(&owner);
     let publication_key = ryeos_state::DurableCasPublicationKey::project_head(&head_key)?;
     let mut stage = match req.staging_id.as_deref() {
         Some(staging_id) => {

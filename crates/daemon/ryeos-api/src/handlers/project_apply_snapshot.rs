@@ -312,10 +312,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let cas_read_guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
 
-    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &ctx.fingerprint,
-        &req.project_name,
-    )?;
+    let caller_owner = ryeos_app::project_owner::owner_principal(&state, &ctx.fingerprint)?;
+    let head_key =
+        ryeos_state::project_identity::ProjectHeadKey::owned_by(&caller_owner, &req.project_name);
     let pushed_head = state
         .state_store
         .with_state_db(|db| db.read_project_head(&head_key))?;

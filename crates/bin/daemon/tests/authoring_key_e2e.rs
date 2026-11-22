@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 /// The stated project the verifications below happen in.
 fn stated_project() -> LogicalProject {
     LogicalProject::Stated(
-        format!("fp:{}/alpha", "a".repeat(64))
+        format!("pid:v1:{}/alpha", "a".repeat(64))
             .parse()
             .expect("project identity"),
     )

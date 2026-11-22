@@ -1918,9 +1918,7 @@ fn post_execution_foldback(
             // is never rebuilt. It must still be the acting principal's own.
             let sealed = ryeos_state::project_identity::ProjectHeadKey::parse_ref_path(head_ref)
                 .context("sealed terminal publication ref")?;
-            let principal_key = ryeos_state::refs::principal_storage_key(acting_principal)
-                .context("derive fold-back principal storage identity")?;
-            if sealed.owner_key() != principal_key {
+            if !ryeos_app::project_owner::speaks_for(state, acting_principal, sealed.owner()) {
                 anyhow::bail!(
                     "sealed terminal publication ref {head_ref:?} is not the acting principal's own head"
                 );

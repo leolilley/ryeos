@@ -349,9 +349,12 @@ pub(crate) fn operator_live_project(
         let operator =
             ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)?;
         let node_key = ryeos_engine::trust::load_node_verifying_key(app_root)?;
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+            .map_err(|error| anyhow::anyhow!("load the node signer registry: {error}"))?;
         ryeos_app::project_registry::live_signer_project(
             app_root,
             &node_key,
+            &trust,
             &operator.principal_id(),
             true,
             checkout,

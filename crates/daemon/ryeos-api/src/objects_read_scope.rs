@@ -215,9 +215,9 @@ fn resolve_project_head(
     state: &AppState,
 ) -> Result<ResolvedRoot, HandlerError> {
     // The caller's own head only: the owner is the authenticated principal.
-    let key = project
-        .head_key(&ctx.fingerprint)
+    let owner = ryeos_app::project_owner::owner_principal(state, &ctx.fingerprint)
         .map_err(|_| not_in_scope("the caller has no project head namespace"))?;
+    let key = project.head_key(&owner);
     let head = state
         .state_store
         .with_state_db(|db| db.read_project_head(&key))

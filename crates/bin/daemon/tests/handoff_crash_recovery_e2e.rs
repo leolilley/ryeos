@@ -776,6 +776,23 @@ fn fixture_owner_principal() -> String {
     format!("fp:{}", fixture_hash("owner"))
 }
 
+/// The principal a fixture key owns on a node whose registry gives it no
+/// succession (the key owns its own solo principal).
+fn fixture_key_principal(key: &str) -> ryeos_state::principal_id::PrincipalId {
+    ryeos_engine::trust::SuccessionGraph::default()
+        .ownership_of(key.strip_prefix("fp:").unwrap_or(key))
+        .expect("the fixture key owns a principal")
+        .principal
+}
+
+/// The advancer a fixture head write records for `key`.
+fn fixture_advancer(key: &str) -> ryeos_state::head_advance::HeadAdvancer {
+    ryeos_state::head_advance::HeadAdvancer {
+        key: format!("fp:{}", key.strip_prefix("fp:").unwrap_or(key)),
+        via_root: None,
+    }
+}
+
 fn captured_policy(item_ref: &str) -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     let hash = fixture_hash("captured-policy");
     ryeos_state::objects::CapturedThreadHistoryPolicy {
@@ -3175,9 +3192,9 @@ fn plant_target_abort_state(
     let subject_contract_digest = fixture_hash("credential-subject-contract");
     let subject_digest = fixture_hash("credential-subject");
     let target_project_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
-        &source.operation.owner_principal,
+        &fixture_key_principal(&source.operation.owner_principal),
         &ryeos_state::project_identity::ProjectName::new("target-abort-project")?,
-    )?;
+    );
     let target_project_head_hash = fixture_hash("target-abort-project-head");
     let target_authority = store.pinned_state_authority()?;
     let target_guard = target_authority.acquire_shared_guard()?;
@@ -3186,6 +3203,7 @@ fn plant_target_abort_state(
     store.write_project_head_ref(
         &target_project_key,
         &target_project_head_hash,
+        &fixture_advancer(&source.operation.owner_principal),
         &target_signer,
         &target_guard,
     )?;
@@ -3200,7 +3218,7 @@ fn plant_target_abort_state(
         subject_digest: &subject_digest,
         checkpoint_manifest_hash: &source.operation.checkpoint_manifest_hash,
         upstream_session_id: "upstream-session:handoff-fixture",
-        project_principal_key: target_project_key.owner_key(),
+        project_principal_key: &target_project_key.owner_component(),
         project_hash: target_project_key.name_hash(),
         target_project_head_hash: &target_project_head_hash,
     })?;
@@ -3875,10 +3893,19 @@ fn install_target_project_head(
     target.verify_project_snapshot_closure(snapshot_hash)?;
     let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(target_project)?
         .context("the target checkout declares a project name")?;
-    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(owner_principal, &name)?;
+    let head_key = ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &fixture_key_principal(owner_principal),
+        &name,
+    );
     let signer = NodeIdentitySigner::from_identity(&daemon_identity(target_state_path)?);
     target.with_state_db(|db| {
-        db.write_project_head_ref(&head_key, snapshot_hash, &signer, &target_guard)
+        db.write_project_head_ref(
+            &head_key,
+            snapshot_hash,
+            &fixture_advancer(owner_principal),
+            &signer,
+            &target_guard,
+        )
     })?;
     Ok(())
 }

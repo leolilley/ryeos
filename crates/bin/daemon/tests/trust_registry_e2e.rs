@@ -27,9 +27,10 @@ use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::{Value, json};
 
 /// Project scope entries are owner+name identities, never paths.
-const PROJECT: &str = "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/alpha";
+const PROJECT: &str =
+    "pid:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/alpha";
 const OTHER_PROJECT: &str =
-    "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/beta";
+    "pid:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/beta";
 
 /// The project context a launch of `identity` states.
 fn stated(identity: &str) -> LogicalProject {

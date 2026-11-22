@@ -31,16 +31,16 @@ const PROJECT_NAME: &str = "endorsed-project";
 
 /// The identity of the test project as `operator` owns it.
 fn project_identity(operator: &SigningKey) -> ProjectIdentity {
-    ProjectIdentity::new(
-        format!("fp:{}", compute_fingerprint(&operator.verifying_key())),
-        ProjectName::new(PROJECT_NAME).expect("project name"),
-    )
-    .expect("project identity")
+    let owner = ryeos_engine::trust::SuccessionGraph::default()
+        .ownership_of(&compute_fingerprint(&operator.verifying_key()))
+        .expect("the operator key owns a principal")
+        .principal;
+    ProjectIdentity::new(owner, ProjectName::new(PROJECT_NAME).expect("project name"))
 }
 
 /// Make `project` the operator's registered live checkout: it declares
 /// [`PROJECT_NAME`] and the operator registers it while the node is stopped,
-/// so a launch from it states `fp:<operator>/endorsed-project`.
+/// so a launch from it states `pid:v1:<operator principal>/endorsed-project`.
 async fn register_project(h: &mut DaemonHarness, operator: &SigningKey, project: &Path) {
     let ai = project.join(".ai");
     std::fs::create_dir_all(&ai).expect("project .ai directory");

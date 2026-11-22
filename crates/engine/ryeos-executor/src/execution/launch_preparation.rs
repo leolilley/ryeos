@@ -3209,16 +3209,15 @@ mod ref_binding_projection_tests {
         for publication in [
             PinnedTerminalPublication::RetainResult,
             PinnedTerminalPublication::RetainCurrentHead {
-                principal_key: "b".repeat(64),
+                principal_key: format!("pid-v1-{}", "b".repeat(64)),
                 project_hash: "c".repeat(64),
                 expected_hash: hash.clone(),
             },
             PinnedTerminalPublication::AdvanceHead {
                 head_ref: ryeos_state::project_identity::ProjectHeadKey::owned_by(
-                    &format!("fp:{}", "b".repeat(64)),
+                    &format!("pid:v1:{}", "b".repeat(64)).parse().unwrap(),
                     &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
                 )
-                .unwrap()
                 .ref_path(),
                 expected_hash: hash.clone(),
             },

@@ -25,14 +25,16 @@ const PROJECT_NAME: &str = "endorsed-launch-project";
 /// The identity the test project states for `operator` once it is the
 /// operator's registered live checkout.
 fn project_identity(operator: &SigningKey) -> ryeos_state::project_identity::ProjectIdentity {
+    let owner = ryeos_engine::trust::SuccessionGraph::default()
+        .ownership_of(&lillux::signature::compute_fingerprint(
+            &operator.verifying_key(),
+        ))
+        .expect("the operator key owns a principal")
+        .principal;
     ryeos_state::project_identity::ProjectIdentity::new(
-        format!(
-            "fp:{}",
-            lillux::signature::compute_fingerprint(&operator.verifying_key())
-        ),
+        owner,
         ryeos_state::project_identity::ProjectName::new(PROJECT_NAME).expect("project name"),
     )
-    .expect("project identity")
 }
 
 /// Write the project's `.ai/project.yaml` declaring [`PROJECT_NAME`].
@@ -46,7 +48,7 @@ fn plant_project_declaration(project: &Path) -> anyhow::Result<()> {
 }
 
 /// The operator registers the declared checkout while the node is stopped, so
-/// a launch from it states `fp:<operator>/<name>`.
+/// a launch from it states `pid:v1:<operator principal>/<name>`.
 async fn register_project(h: &mut DaemonHarness, operator: &SigningKey, project: &Path) {
     h.kill_daemon().await.expect("stop the daemon");
     apply_local(

@@ -587,7 +587,7 @@ fn trust_scope(
     Ok(scope)
 }
 
-/// Parse project scope entries: `fp:<owner>/<name>` or `own:<name>`. A path
+/// Parse project scope entries: `pid:v1:<owner>/<name>` or `own:<name>`. A path
 /// is refused: it is not a project scope.
 fn trust_scope_projects(
     projects: &[String],

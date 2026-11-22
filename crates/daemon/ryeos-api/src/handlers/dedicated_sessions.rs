@@ -283,9 +283,11 @@ async fn status(
 }
 
 /// The owner's head of a checkout on this node, keyed by the name the tree
-/// declares now. The owner is the session owner, never input.
+/// declares now. The owner is the principal the node resolves the session
+/// owner's key to, never input.
 fn owner_checkout_head_key(
-    owner_principal: &str,
+    state: &AppState,
+    owner_key: &str,
     checkout: &std::path::Path,
 ) -> Result<ryeos_state::project_identity::ProjectHeadKey, HandlerError> {
     let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(checkout)
@@ -296,8 +298,10 @@ fn owner_checkout_head_key(
                 checkout.display()
             ))
         })?;
-    ryeos_state::project_identity::ProjectHeadKey::owned_by(owner_principal, &name)
-        .map_err(internal)
+    let owner = ryeos_app::project_owner::owner_principal(state, owner_key).map_err(internal)?;
+    Ok(ryeos_state::project_identity::ProjectHeadKey::owned_by(
+        &owner, &name,
+    ))
 }
 
 /// Whether a hosted session's pinned terminal publication is consistent with
@@ -324,7 +328,7 @@ fn candidate_publication_pairing_matches(
                 expected_hash,
             },
         ) => {
-            principal_key.as_str() == expected_head.owner_key()
+            *principal_key == expected_head.owner_component()
                 && project_hash.as_str() == expected_head.name_hash()
                 && expected_hash == base_snapshot_hash
         }
@@ -450,7 +454,8 @@ async fn candidate_result(
     )
     .map_err(internal)?
     .map(|name| {
-        ryeos_state::project_identity::ProjectHeadKey::owned_by(&session.owner_principal, &name)
+        ryeos_app::project_owner::owner_principal(&state, &session.owner_principal)
+            .map(|owner| ryeos_state::project_identity::ProjectHeadKey::owned_by(&owner, &name))
     })
     .transpose()
     .map_err(internal)?
@@ -7616,8 +7621,9 @@ async fn start_candidate_operation(
         &req.purpose,
         ryeos_app::thread_lifecycle::CandidateOperationPurpose::Integrate { .. }
     ) {
-        let head = owner_checkout_head_key(&session.owner_principal, &original_project_path)?;
-        let principal_key = head.owner_key().to_owned();
+        let head =
+            owner_checkout_head_key(&state, &session.owner_principal, &original_project_path)?;
+        let principal_key = head.owner_component();
         let project_hash = head.name_hash().to_owned();
         let current = state
             .state_store
@@ -8935,8 +8941,9 @@ fn verify_candidate_integration_terminal(
             ));
         }
     };
-    let expected_head = owner_checkout_head_key(&session.owner_principal, source_display_path)?;
-    let expected_principal_key = expected_head.owner_key();
+    let expected_head =
+        owner_checkout_head_key(state, &session.owner_principal, source_display_path)?;
+    let expected_principal_key = expected_head.owner_component();
     let expected_project_hash = expected_head.name_hash().to_owned();
     let exact_realization = matches!(
         integration_realization,
@@ -8947,7 +8954,7 @@ fn verify_candidate_integration_terminal(
                     project_hash,
                     expected_hash,
                 },
-        } if principal_key == expected_principal_key
+        } if *principal_key == expected_principal_key
             && project_hash == &expected_project_hash
             && expected_hash == base_snapshot_hash
     );
@@ -10661,7 +10668,6 @@ async fn publish(
         publication_authority.project_hash.as_str(),
     )
     .map_err(internal)?;
-    let principal_key = head_key.owner_key();
     let candidate_evaluation_hash = publication_authority.candidate_evaluation_hash.as_str();
     let published_result = format!("published:{candidate}");
     let already_published =
@@ -10690,9 +10696,7 @@ async fn publish(
             "session has no publishable retained candidate".into(),
         ));
     }
-    if ryeos_state::refs::principal_storage_key(&ctx.fingerprint).map_err(internal)?
-        != principal_key
-    {
+    if !ryeos_app::project_owner::speaks_for(&state, &ctx.fingerprint, head_key.owner()) {
         return Err(HandlerError::Forbidden(
             "publication caller differs from the admitted principal HEAD authority".into(),
         ));
@@ -10814,10 +10818,14 @@ async fn publish(
     let publication = if current.as_deref() == Some(candidate) {
         Ok(())
     } else {
+        let advancer =
+            ryeos_app::project_owner::head_advancer(&state, &ctx.fingerprint, head_key.owner())
+                .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
         state.state_store.advance_project_head_ref(
             &head_key,
             candidate,
             base_snapshot_hash,
+            &advancer,
             &signer,
             &cas_guard,
         )
@@ -11317,18 +11325,19 @@ mod tests {
         use ryeos_state::objects::PinnedTerminalPublication::{
             Discard, RetainCurrentHead, RetainResult,
         };
-        let owner = format!("fp:{}", "a".repeat(64));
-        let owner = owner.as_str();
+        let owner: ryeos_state::principal_id::PrincipalId =
+            format!("pid:v1:{}", "a".repeat(64)).parse().unwrap();
         let name = |value: &str| ryeos_state::project_identity::ProjectName::new(value).unwrap();
         let expected =
-            ryeos_state::project_identity::ProjectHeadKey::owned_by(owner, &name("demo")).unwrap();
+            ryeos_state::project_identity::ProjectHeadKey::owned_by(&owner, &name("demo"));
         let base = "b".repeat(64);
         let pin = |principal_key: &str, project: &str, expected: &str| RetainCurrentHead {
             principal_key: principal_key.to_owned(),
             project_hash: lillux::sha256_hex(project.as_bytes()),
             expected_hash: expected.to_owned(),
         };
-        let owner_key = ryeos_state::refs::principal_storage_key(owner).unwrap();
+        let owner_key = owner.storage_component();
+        let owner_key = owner_key.as_str();
         let path = "demo";
         let good = pin(owner_key, path, &base);
         let check = |disposition, publication: &_| {
@@ -11344,7 +11353,7 @@ mod tests {
         // A carried destination that names another owner, project or base is
         // refused under either disposition.
         for disposition in [&OwnerDecision, &RetainedForReview] {
-            let other_owner = "d".repeat(64);
+            let other_owner = format!("pid-v1-{}", "d".repeat(64));
             assert!(!check(disposition, &pin(&other_owner, path, &base)));
             assert!(!check(disposition, &pin(owner_key, "other", &base)));
             assert!(!check(disposition, &pin(owner_key, path, &"c".repeat(64))));

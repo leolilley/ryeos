@@ -1207,7 +1207,7 @@ mod tests {
         use ryeos_engine::item_resolution::ResolutionRoots;
         let checkout = std::path::PathBuf::from("/admitted/exact-source-generation");
         let logical: ryeos_state::project_identity::ProjectIdentity =
-            format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap();
+            format!("pid:v1:{}/alpha", "a".repeat(64)).parse().unwrap();
         let pinned = SubjectResolutionAuthority::PinnedGeneration {
             snapshot_hash: "a".repeat(64),
         };

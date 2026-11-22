@@ -24,7 +24,7 @@ const DOCUMENT_MAX_BYTES: u64 = 16 * 1024;
 #[command(
     name = "ryeos trust pin",
     about = "Pin a signer key on a stopped node from a PUBLISHER_TRUST.toml",
-    long_about = "Writes a node-signed signer record and a key event. The node must be stopped. A publisher defaults to bundle space for every kind; a project author defaults to project space, limited to the --project identities given (fp:<owner>/<name>, or own:<name> for the signer's own key).",
+    long_about = "Writes a node-signed signer record and a key event. The node must be stopped. A publisher defaults to bundle space for every kind; a project author defaults to project space, limited to the --project identities given (pid:v1:<owner>/<name>, or own:<name> for the signer's own key).",
     no_binary_name = true
 )]
 struct PinArgs {
@@ -36,7 +36,7 @@ struct PinArgs {
     #[arg(long)]
     role: String,
 
-    /// Project the signer may sign for (repeatable): fp:<owner>/<name>, or
+    /// Project the signer may sign for (repeatable): pid:v1:<owner>/<name>, or
     /// own:<name> for a project the signer's own key owns.
     #[arg(long = "project", action = clap::ArgAction::Append)]
     projects: Vec<String>,
@@ -60,7 +60,7 @@ struct PinArgs {
 #[command(
     name = "ryeos trust scope",
     about = "Narrow or widen the scope of a pinned signer",
-    long_about = "Replaces the spaces, kinds and projects a pinned signer may sign for. Flags left out keep the record's current values; give --project fp:<owner>/<name> (or own:<name>) to replace the project list, or --any-project to clear it so the signer may sign for every project. A scope without project space carries no projects. An authoring key's scope does not decide trust (endorsements do), so for it the verb takes no scope flags and restores the authoring scope: project space, no kinds.",
+    long_about = "Replaces the spaces, kinds and projects a pinned signer may sign for. Flags left out keep the record's current values; give --project pid:v1:<owner>/<name> (or own:<name>) to replace the project list, or --any-project to clear it so the signer may sign for every project. A scope without project space carries no projects. An authoring key's scope does not decide trust (endorsements do), so for it the verb takes no scope flags and restores the authoring scope: project space, no kinds.",
     no_binary_name = true
 )]
 struct ScopeArgs {
@@ -315,7 +315,7 @@ fn run_scope(argv: &[String], console: &crate::tty::Console) -> Result<()> {
             .contains(&ryeos_engine::trust::SignerSpace::Project);
     if adds_project_space && args.projects.is_empty() && !args.any_project {
         bail!(
-            "trust_scope_invalid: adding the project space needs --project fp:<owner>/<name> \
+            "trust_scope_invalid: adding the project space needs --project pid:v1:<owner>/<name> \
              (or own:<name>), or --any-project to sign for every project"
         );
     }

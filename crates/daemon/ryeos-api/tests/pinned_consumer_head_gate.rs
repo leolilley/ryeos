@@ -73,7 +73,10 @@ fn a_pinned_project_consumer_is_prepared_only_for_the_principals_current_head() 
     let respelled = project.join("sub/..");
 
     let name = ProjectName::new("gate-project").unwrap();
-    let key = ProjectHeadKey::owned_by(&principal, &name).unwrap();
+    let owner = ryeos_app::project_owner::owner_principal(&state, &principal).unwrap();
+    let key = ProjectHeadKey::owned_by(&owner, &name);
+    let advancer =
+        ryeos_app::project_owner::head_advancer(&state, &principal, key.owner()).unwrap();
     assert!(key.ref_path().starts_with("projects/"));
 
     let authority = state.state_store.pinned_state_authority().unwrap();
@@ -88,6 +91,7 @@ fn a_pinned_project_consumer_is_prepared_only_for_the_principals_current_head() 
         .write_project_head_ref(
             &key,
             &head,
+            &advancer,
             &NodeIdentitySigner::from_identity(&state.identity),
             &guard,
         )
