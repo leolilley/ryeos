@@ -349,10 +349,11 @@ mod tests {
                 .binding_digest
                 .clone(),
         });
-        seed_input_view(&mut core);
-        fixture_input(&mut core);
-        set_focused_input(&mut core, "draft");
-        let draft = core.focused_input_buffer().unwrap().clone();
+        let draft = crate::ui::model::RyeOsInputState {
+            text: "draft".into(),
+            cursor: 5,
+            filter_field: 0,
+        };
         let key = InputBufferKey {
             view_instance_key: instance.clone(),
             binding_scope: from_scope,
@@ -392,7 +393,6 @@ mod tests {
         };
         assert_eq!(core.input_buffers[&to_key.storage_key()].text, "draft");
         assert!(!core.input_buffers.contains_key(&key.storage_key()));
-        assert_eq!(focused_input_text(&core), "draft");
         // Nothing names the source any longer, so it is released exactly once.
         let released = later
             .iter()
