@@ -705,7 +705,7 @@ pub(crate) fn compile_target(
         .into());
     }
     let request = EffectiveItemRequest {
-        logical_project_root: None,
+        logical_project_root: prepared.exec_ctx.plan_ctx.logical_project_root.clone(),
         item_ref: item_ref.clone(),
         expected_kind: Some(item_ref.kind.clone()),
         project_root: Some(prepared.project.effective_path.clone()),

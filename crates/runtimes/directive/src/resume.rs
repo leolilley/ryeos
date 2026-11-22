@@ -3093,7 +3093,11 @@ mod tests {
         ];
         let sources = vec!["T-current".to_string(), "T-current".to_string()];
         let mut guard = recover_result_guard(&events, &sources, "T-current").unwrap();
-        let next = guard.process(&content);
+        let next = guard.process(
+            &content,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert_eq!(next.duplicate_of.as_deref(), Some(hash.as_str()));
         assert_eq!(next.content, marker);
     }
@@ -3124,7 +3128,11 @@ mod tests {
         ];
         let sources = vec!["T-current".to_string(); 2];
         let mut guard = recover_result_guard(&events, &sources, "T-current").unwrap();
-        let next = guard.process(&content);
+        let next = guard.process(
+            &content,
+            &crate::directive::ToolOutputConfig::default(),
+            crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON),
+        );
         assert_eq!(next.duplicate_of.as_deref(), Some(hash.as_str()));
         // Text that does not end with its recorded notes is refused.
         let mut broken = events.clone();
@@ -3147,7 +3155,16 @@ mod tests {
             recover_result_guard(&events, &["T-current".to_string()], "T-current").unwrap();
         // The error text was never seen by the guard, so the same bytes from
         // a successful call are not a duplicate.
-        assert!(guard.process(&content).duplicate_of.is_none());
+        assert!(
+            guard
+                .process(
+                    &content,
+                    &crate::directive::ToolOutputConfig::default(),
+                    crate::result_guard::SpillMode::Disabled(crate::result_guard::HARD_CUT_REASON)
+                )
+                .duplicate_of
+                .is_none()
+        );
 
         let mut duplicate = events.clone();
         duplicate[0].payload["guard"]["duplicate_of"] = json!("a".repeat(64));
