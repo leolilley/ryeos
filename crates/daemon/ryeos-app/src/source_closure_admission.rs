@@ -374,10 +374,17 @@ pub fn prepare_bundle_structured_worker_profile(
         "structured-session Worker must be an exact Bundle ref"
     );
     let (admitted, publication) = state.engine.with_checked_bundle_generation(|generation| {
-        let roots = state.engine.resolution_roots(None);
+        let roots = state.engine.resolution_roots(
+            None,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
+        );
         let mut resolution =
             generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                ),
                 item_ref: canonical,
                 expected_kind: Some("worker".into()),
                 project_root: None,
@@ -1138,8 +1145,8 @@ fn owner_signer_project_root<'a>(
         return None;
     }
     roots
-        .logical_project_root
-        .as_deref()
+        .logical_project
+        .stated()
         .or_else(|| (!pinned).then_some(content_root))
 }
 
@@ -1575,6 +1582,9 @@ composer: handler:ryeos/core/identity
                 name: "factory-fixture".into(),
                 canonical_root: bundle.path().canonicalize()?,
             }],
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
         );
         let admitted = admit_source_closure(
             state,
@@ -1747,15 +1757,22 @@ mod owner_signer_project_root_controls {
     fn a_pinned_checkout_is_judged_as_its_logical_project() {
         let checkout = Path::new("/tmp/generation-7/checkout");
         let logical = PathBuf::from("/work/registered-project");
-        let pinned = ResolutionRoots::from_flat(None, Vec::new())
-            .with_logical_project_root(Some(logical.clone()));
+        let pinned = ResolutionRoots::from_flat(
+            None,
+            Vec::new(),
+            ryeos_engine::contracts::LogicalProject::Stated(logical.clone()),
+        );
         assert_eq!(
             owner_signer_project_root(&pinned, ItemSpace::Project, true, checkout),
             Some(logical.as_path()),
             "a signer scoped to the logical project must be matched on it, not on the checkout"
         );
 
-        let live = ResolutionRoots::from_flat(None, Vec::new());
+        let live = ResolutionRoots::from_flat(
+            None,
+            Vec::new(),
+            ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        );
         assert_eq!(
             owner_signer_project_root(&live, ItemSpace::Project, false, checkout),
             Some(checkout),
@@ -1766,8 +1783,13 @@ mod owner_signer_project_root_controls {
     #[test]
     fn only_project_space_names_a_signer_project() {
         let checkout = Path::new("/tmp/generation-7/checkout");
-        let pinned = ResolutionRoots::from_flat(None, Vec::new())
-            .with_logical_project_root(Some(PathBuf::from("/work/registered-project")));
+        let pinned = ResolutionRoots::from_flat(
+            None,
+            Vec::new(),
+            ryeos_engine::contracts::LogicalProject::Stated(PathBuf::from(
+                "/work/registered-project",
+            )),
+        );
         assert_eq!(
             owner_signer_project_root(&pinned, ItemSpace::Bundle, true, checkout),
             None
@@ -1777,7 +1799,13 @@ mod owner_signer_project_root_controls {
     #[test]
     fn a_pinned_source_with_no_stated_project_names_none() {
         let checkout = Path::new("/tmp/generation-7/checkout");
-        let unstated = ResolutionRoots::from_flat(None, Vec::new());
+        let unstated = ResolutionRoots::from_flat(
+            None,
+            Vec::new(),
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+            ),
+        );
         assert_eq!(
             owner_signer_project_root(&unstated, ItemSpace::Project, true, checkout),
             None,
@@ -1973,18 +2001,30 @@ composer: handler:ryeos/core/identity
         let logical = PathBuf::from("/work/registered-project");
         let store = scoped_store(&fixture, &logical);
 
-        let stated =
-            ResolutionRoots::from_flat(None, Vec::new()).with_logical_project_root(Some(logical));
+        let stated = ResolutionRoots::from_flat(
+            None,
+            Vec::new(),
+            ryeos_engine::contracts::LogicalProject::Stated(logical),
+        );
         assert!(judge(&fixture, &store, &stated, true).is_ok());
 
-        let unstated = ResolutionRoots::from_flat(None, Vec::new());
+        let unstated = ResolutionRoots::from_flat(
+            None,
+            Vec::new(),
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+            ),
+        );
         let refusal = judge(&fixture, &store, &unstated, true)
             .unwrap_err()
             .to_string();
         assert!(refusal.contains("no current owner testimony"), "{refusal}");
 
-        let other = ResolutionRoots::from_flat(None, Vec::new())
-            .with_logical_project_root(Some(PathBuf::from("/work/other-project")));
+        let other = ResolutionRoots::from_flat(
+            None,
+            Vec::new(),
+            ryeos_engine::contracts::LogicalProject::Stated(PathBuf::from("/work/other-project")),
+        );
         let refusal = judge(&fixture, &store, &other, true)
             .unwrap_err()
             .to_string();
@@ -1995,7 +2035,11 @@ composer: handler:ryeos/core/identity
     fn a_live_project_is_judged_on_its_own_root() {
         let fixture = fixture();
         let own = fixture.checkout.path().canonicalize().unwrap();
-        let live = ResolutionRoots::from_flat(None, Vec::new());
+        let live = ResolutionRoots::from_flat(
+            None,
+            Vec::new(),
+            ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        );
 
         let store = scoped_store(&fixture, &own);
         assert!(judge(&fixture, &store, &live, false).is_ok());

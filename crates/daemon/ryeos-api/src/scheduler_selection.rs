@@ -57,7 +57,12 @@ pub fn resolve_scheduler_selection(
 /// scheduler unselected.
 pub fn scheduler_selected_by_composition(engine: &ryeos_engine::engine::Engine) -> Result<bool> {
     engine.with_checked_bundle_generation(|generation| -> Result<bool> {
-        let roots = engine.resolution_roots(None);
+        let roots = engine.resolution_roots(
+            None,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
+        );
         let scheduler_refs = ryeos_engine::item_resolution::enumerate_in_process_registry_refs(
             &roots,
             &engine.kinds,
@@ -70,7 +75,9 @@ pub fn scheduler_selected_by_composition(engine: &ryeos_engine::engine::Engine) 
         let requests = scheduler_refs
             .iter()
             .map(|canonical| ryeos_engine::engine::EffectiveItemRequest {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                ),
                 item_ref: canonical.clone(),
                 expected_kind: Some(canonical.kind.clone()),
                 project_root: None,

@@ -882,7 +882,9 @@ fn enforce_authored_capability_ceiling(
             };
             let effective = engine
                 .effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                        None, &subject,
+                    ),
                     item_ref: parent_ref,
                     expected_kind: Some(target.kind.clone()),
                     project_root,
