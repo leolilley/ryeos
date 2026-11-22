@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T04:34:56Z:ec7cf36c85a7233fe7950dfaf0b55289d75b2dd49a1986d99804b6efdffcb7a3:SADaCXpMHRg7s0+4T1dJBD8PPHUYX2YL+olR5yLF1lM7jwGqEO4QvguapIf0tB0dh/SjbL+Y+9SvGLsDmOQmBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T09:17:07Z:f0937b8f763ed992759c65f6accf820da32fe126d17fc7e03a17ac89b42e8623:bAXmtY6vHLxHesXBkxioa0IUsmEFNpD0dQR1sq+WRH5rIG6cXScx7cE0gMv/6OfMWDUZD8+oTRAJ6GIXADYsAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -344,7 +344,10 @@ The cut carries the stored external terminal observation's required `basis`
 field (how the lifecycle adapter settled a termination: it states the basis it
 relied on), which a store written at epoch 142 lacks. The same epoch also
 carries the turn marker's required `purpose` field (a stored-shape change: a
-marker without it is refused on resume with `resume_marker_without_purpose`). The cut ships together with
+marker without it is refused on resume with `resume_marker_without_purpose`) and the
+compaction record's required `guard_carry` field (recent loop-guard digests, wrap-up
+flags and warned ages; null when loop guards are off; a record without the field is
+refused on resume). The cut ships together with
 lifecycle adapter protocol v4, so the order on a node is: drain (settle or
 terminate every lease, qualification occurrence and termination in flight),
 stop the daemon gracefully, install the re-signed bundles, run the reset above,
