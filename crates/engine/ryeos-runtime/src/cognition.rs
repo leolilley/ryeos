@@ -260,6 +260,38 @@ pub struct ToolResultGuard {
     /// text from the notes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_images: Vec<DroppedImage>,
+    /// Set when the full result was stored beside this event and the model saw
+    /// a bounded preview. The preview is the recorded text; the stored bytes
+    /// are reachable through `attachment_refs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spill: Option<ToolResultSpill>,
+}
+
+/// The `truncated_reason` of a result whose full text was stored and replaced
+/// by a preview.
+pub const TOOL_RESULT_SPILLED: &str = "result_spilled";
+
+/// The first line of the model-visible text of a spilled result, up to the
+/// byte count. Context folding recognises a spilled result by this prefix.
+pub const TOOL_RESULT_PARTIAL_PREFIX: &str = "[tool result partial: ";
+
+/// Where the full text of a spilled tool result lives and what the preview
+/// kept of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolResultSpill {
+    /// Object hash of the stored attachment; the last entry of the result's
+    /// `attachment_refs`.
+    pub attachment: String,
+    /// Bytes of the result the attachment holds; less than `total_bytes` when
+    /// the result exceeded the node's attachment size limit.
+    pub stored_bytes: u64,
+    /// Size of the result before the guard acted.
+    pub total_bytes: u64,
+    /// Leading bytes of the result shown in the preview.
+    pub preview_head_bytes: u64,
+    /// Trailing bytes of the result shown in the preview.
+    pub preview_tail_bytes: u64,
 }
 
 /// One image of a tool result that was dropped instead of used.
@@ -340,8 +372,29 @@ impl ToolResultPayload {
         if self.guard.duplicate_of.is_some() && self.status == ToolResultStatus::Error {
             bail!("an error tool result cannot be a duplicate");
         }
-        if self.attachment_refs != Self::image_attachment_hashes(&self.parts) {
-            bail!("tool result attachment_refs do not match the attachments of its image parts");
+        let mut expected = Self::image_attachment_hashes(&self.parts);
+        if let Some(spill) = &self.guard.spill {
+            if !self.guard.truncated
+                || self.guard.truncated_reason.as_deref() != Some(TOOL_RESULT_SPILLED)
+            {
+                bail!(
+                    "a spilled tool result must be truncated with reason `{TOOL_RESULT_SPILLED}`"
+                );
+            }
+            if self.guard.duplicate_of.is_some() {
+                bail!("a spilled tool result cannot be a duplicate");
+            }
+            if spill.stored_bytes > spill.total_bytes
+                || spill.preview_head_bytes + spill.preview_tail_bytes > spill.total_bytes
+            {
+                bail!("tool result spill byte counts contradict each other");
+            }
+            expected.push(spill.attachment.clone());
+        }
+        if self.attachment_refs != expected {
+            bail!(
+                "tool result attachment_refs do not match the attachments of its image parts and its spill"
+            );
         }
         self.message().validate()
     }
@@ -545,6 +598,73 @@ mod tests {
             malformed_calls: Vec::new(),
         };
         assert!(payload.validate().is_err());
+    }
+
+    fn spilled_result() -> ToolResultPayload {
+        let attachment = "ab".repeat(32);
+        ToolResultPayload {
+            operation_id: "cd".repeat(32),
+            call_id: "call-1".to_string(),
+            tool: "t".to_string(),
+            status: ToolResultStatus::Ok,
+            parts: vec![Part::text(format!(
+                "{TOOL_RESULT_PARTIAL_PREFIX}9000 bytes, full result stored as attachment {attachment}; the full result is not available to you]\nx"
+            ))],
+            guard: ToolResultGuard {
+                result_size_bytes: 9000,
+                truncated: true,
+                truncated_reason: Some(TOOL_RESULT_SPILLED.to_string()),
+                duplicate_of: None,
+                dropped_images: Vec::new(),
+                spill: Some(ToolResultSpill {
+                    attachment: attachment.clone(),
+                    stored_bytes: 9000,
+                    total_bytes: 9000,
+                    preview_head_bytes: 100,
+                    preview_tail_bytes: 50,
+                }),
+            },
+            attachment_refs: vec![attachment],
+        }
+    }
+
+    #[test]
+    fn a_spilled_result_names_its_stored_text_and_round_trips() {
+        let payload = spilled_result();
+        payload.validate().unwrap();
+        let value = to_payload(&payload).unwrap();
+        assert_eq!(value["guard"]["spill"]["total_bytes"], 9000);
+        let parsed: ToolResultPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, payload);
+        // A result without a spill carries no `spill` key at all.
+        let mut plain = spilled_result();
+        plain.guard.spill = None;
+        plain.guard.truncated = false;
+        plain.guard.truncated_reason = None;
+        plain.attachment_refs.clear();
+        plain.validate().unwrap();
+        assert!(to_payload(&plain).unwrap()["guard"].get("spill").is_none());
+    }
+
+    #[test]
+    fn a_spilled_result_that_contradicts_itself_is_refused() {
+        let mut unlisted = spilled_result();
+        unlisted.attachment_refs.clear();
+        assert!(unlisted.validate().is_err());
+        let mut wrong_reason = spilled_result();
+        wrong_reason.guard.truncated_reason = Some("result_guard".to_string());
+        assert!(wrong_reason.validate().is_err());
+        let mut impossible = spilled_result();
+        impossible.guard.spill.as_mut().unwrap().stored_bytes = 10_000;
+        assert!(impossible.validate().is_err());
+        let mut preview_too_big = spilled_result();
+        preview_too_big
+            .guard
+            .spill
+            .as_mut()
+            .unwrap()
+            .preview_head_bytes = 9000;
+        assert!(preview_too_big.validate().is_err());
     }
 
     fn frame(system: Option<&str>, model: &str) -> FrameRecord {
