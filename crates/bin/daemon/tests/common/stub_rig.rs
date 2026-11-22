@@ -635,7 +635,10 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     plant_python_tool(
         root,
         "bulk",
-        "print(json.dumps({'ok': True, 'data': 'x' * 600}))",
+        // Each call returns different content of the same length: a scripted
+        // run that calls the tool every turn then makes progress under the
+        // production loop guards, and the sizes the tests tune to are stable.
+        "u = str(time.time_ns())\nprint(json.dumps({'ok': True, 'data': (u + 'x' * 600)[:600]}))",
         &fixture.publisher,
     )?;
     plant_python_tool(
