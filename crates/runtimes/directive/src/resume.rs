@@ -6074,12 +6074,17 @@ mod tests {
     fn corrected_replies_are_not_kept_turns_of_a_compaction_window() {
         // Turn 3 was a malformed reply and turn 4 an empty one; each was popped
         // by the live run. Only turn 5 is a kept turn.
-        let mut events = Vec::new();
-        let mut seq = 20;
-        let mut push = |events: &mut Vec<ReplayedEventRecord>, kind: &str, payload: Value| {
+        fn push(events: &mut Vec<ReplayedEventRecord>, kind: &str, payload: Value) {
+            let seq = 20 + events.len() as i64;
             events.push(event_at(kind, seq, payload));
-            seq += 1;
-        };
+        }
+        fn correct(events: &mut Vec<ReplayedEventRecord>, kind: &str) {
+            for mut input in kinded_input(kind) {
+                input.chain_seq = 20 + events.len() as i64;
+                events.push(input);
+            }
+        }
+        let mut events = Vec::new();
         push(
             &mut events,
             "cognition_in",
@@ -6090,29 +6095,21 @@ mod tests {
             "cognition_out",
             out(3, "a call written as text"),
         );
-        for mut input in kinded_input("malformed_reply_turn_3_streak_1") {
-            input.chain_seq = seq;
-            seq += 1;
-            events.push(input);
-        }
+        correct(&mut events, "malformed_reply_turn_3_streak_1");
         push(
             &mut events,
             "cognition_in",
             json!({"turn": 4, "purpose": "turn"}),
         );
         push(&mut events, "cognition_out", out(4, "  "));
-        for mut input in kinded_input("empty_reply_turn_4_streak_1") {
-            input.chain_seq = seq;
-            seq += 1;
-            events.push(input);
-        }
+        correct(&mut events, "empty_reply_turn_4_streak_1");
         push(
             &mut events,
             "cognition_in",
             json!({"turn": 5, "purpose": "turn"}),
         );
         push(&mut events, "cognition_out", out(5, "kept"));
-        let anchor = seq;
+        let anchor = 20 + events.len() as i64;
         push(
             &mut events,
             "cognition_compaction",
