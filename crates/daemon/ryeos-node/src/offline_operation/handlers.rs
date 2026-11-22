@@ -1559,6 +1559,134 @@ pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
     }))
 }
 
+// ── Project registrations ────────────────────────────────────────────────
+
+/// Register or unregister one live checkout under an owner's project name.
+/// The registration is inert until the owner+name trust cut: only
+/// `ryeos node doctor` reads it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRegistrationArguments {
+    /// Absolute checkout path; the node canonicalizes it.
+    pub path: String,
+    /// The project name. Register defaults it to the name the checkout's
+    /// `.ai/project.yaml` declares and requires the two to agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `fp:<64 lowercase hex>`; defaults to the node's operator. Never the
+    /// node key or the authoring key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+impl ProjectRegistrationArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            Path::new(&self.path).is_absolute()
+                && self.path.len() <= 4096
+                && !self.path.contains(['\0', '\n', '\r']),
+            "the project path must be an absolute path"
+        );
+        if let Some(name) = &self.name {
+            ryeos_state::project_identity::ProjectName::new(name.as_str())?;
+        }
+        if let Some(owner) = &self.owner {
+            ryeos_state::refs::principal_storage_key(owner)?;
+        }
+        Ok(())
+    }
+}
+
+/// The owner a registration names: the operator by default; never the node
+/// key or the authoring key, which sign on the node's behalf and own no
+/// project.
+fn registration_owner(ctx: &HandlerContext<'_>, requested: Option<&str>) -> Result<String> {
+    let owner = match requested {
+        Some(owner) => owner.to_owned(),
+        None => operator_public(ctx)?.principal_id(),
+    };
+    let key = ryeos_state::refs::principal_storage_key(&owner)?;
+    ensure!(
+        key != ctx.node.fingerprint(),
+        "project_owner_is_node_key: the node key signs on the node's behalf and owns no project"
+    );
+    let signers = ryeos_engine::trust::load_signer_records(
+        &ryeos_engine::trust::signers_dir(ctx.app_root),
+        ctx.node.verifying_key(),
+    )?;
+    ensure!(
+        !signers.iter().any(|record| record.fingerprint == key
+            && record.role == ryeos_engine::trust::SignerRole::Authoring),
+        "project_owner_is_authoring_key: the authoring key signs runtime drafts and owns no project"
+    );
+    Ok(owner)
+}
+
+pub(super) fn project_register(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: ProjectRegistrationArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let owner = registration_owner(ctx, arguments.owner.as_deref())?;
+    let (path, declared) =
+        crate::project_registry::inspect_checkout(ctx.app_root, Path::new(&arguments.path))?;
+    let declared = declared.with_context(|| {
+        format!(
+            "project_undeclared: {} has no {}; a registered checkout must declare its name",
+            path.display(),
+            ryeos_state::project_identity::PROJECT_DECLARATION_PATH
+        )
+    })?;
+    let name = match &arguments.name {
+        Some(name) => ryeos_state::project_identity::ProjectName::new(name.as_str())?,
+        None => declared.clone(),
+    };
+    ensure!(
+        name == declared,
+        "project_name_mismatch: {} declares `{declared}`, not `{name}`",
+        path.display()
+    );
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name)?;
+    let outcome =
+        crate::project_registry::register(&crate::project_registry::RegistrationChange {
+            app_root: ctx.app_root,
+            node: ctx.node,
+            request_digest: ctx.request_digest,
+            path: &path,
+            identity: &identity,
+        })?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
+pub(super) fn project_unregister(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: ProjectRegistrationArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let owner = registration_owner(ctx, arguments.owner.as_deref())?;
+    // A checkout that was deleted can still be unregistered: the path is then
+    // taken as given, and the name must be stated.
+    let (path, declared) =
+        match crate::project_registry::inspect_checkout(ctx.app_root, Path::new(&arguments.path)) {
+            Ok(inspected) => inspected,
+            Err(_) => (PathBuf::from(&arguments.path), None),
+        };
+    let name = match (&arguments.name, declared) {
+        (Some(name), _) => ryeos_state::project_identity::ProjectName::new(name.as_str())?,
+        (None, Some(declared)) => declared,
+        (None, None) => bail!(
+            "project_name_required: {} declares no name; state the registered name with --name",
+            path.display()
+        ),
+    };
+    let identity = ryeos_state::project_identity::ProjectIdentity::new(owner, name)?;
+    let outcome =
+        crate::project_registry::unregister(&crate::project_registry::RegistrationChange {
+            app_root: ctx.app_root,
+            node: ctx.node,
+            request_digest: ctx.request_digest,
+            path: &path,
+            identity: &identity,
+        })?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
 pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: RemotePinArguments = ctx.arguments()?;
     arguments.validate()?;

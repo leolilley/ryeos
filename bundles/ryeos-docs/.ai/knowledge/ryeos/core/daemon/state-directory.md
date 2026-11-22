@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:02:48Z:dce345b6413a3e96e868195b5590f68d27f29067174f1c3c85160b5891cdc067:l0YHhkSrRfcurZ0PhRAQbB6MCFq8fb2wsIQQAeNl/48JcWSXIY859j2DwctWdVW5G8nZ0x1SrMKBKYhqQYP5Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T13:52:39Z:c54fb9d499dfcce4ab2c41fb16d306f9a5d9f7e639e78cbb1f2d665c34ed70c2:w2HYK7T8n6IfI/EM0qPKO/hT9K+5KIY51xHGigkvRPVG6tHW9Hk8Xy6oLeH81U38PMDp2p9qPc8TmY3+C5LICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -32,6 +32,13 @@ Operator artifacts owned by `ryeos remote configure`:
   remote (schema `ryeos/remote-pin/v1`): the remote's pinned node key, URL,
   site and vault identity, ingest-ignore rules, project bindings, how the key
   was pinned and when. Only the configured local operator can write one.
+
+Operator artifacts owned by `ryeos project register`:
+
+- `<system>/.ai/node/projects/<owner-hex>/<name>.yaml` — one node-signed
+  registration per owner and project name (schema 1): the canonical live
+  checkout paths the owner registered under that name. Only the configured
+  local operator can write one. Inert until the owner+name trust cut.
 
 System-space artifacts installed or registered by `ryeos init`:
 
