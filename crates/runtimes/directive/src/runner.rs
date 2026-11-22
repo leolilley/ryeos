@@ -361,6 +361,11 @@ const OUTPUT_LIMIT_ERROR: &str = "provider_output_limit_reached: provider ended 
      response at its declared/native output limit; this is \
      distinct from a RyeOS-local output byte limit";
 
+/// Code that starts the failure text of a run whose malformed replies the
+/// provider's signed policy could not correct. The text goes on to name the
+/// marker the last reply matched.
+const MALFORMED_REPLY_ERROR_CODE: &str = "malformed_reply_retries_exhausted";
+
 /// The model-visible error for a call whose arguments did not parse.
 fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
     format!(
@@ -805,8 +810,16 @@ pub struct Runner {
     /// Derived from the record on resume; non-zero means the latest recorded
     /// turn ended at the limit.
     consecutive_length_turns: u32,
+    /// Malformed replies in a row that were corrected. Derived from the
+    /// record on resume.
+    consecutive_malformed_replies: u32,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
+    /// The provider turn a restart cut. Set on resume of an unfinished
+    /// provider turn; each attempt prepared in that turn offers the daemon the
+    /// retry the signed policy would admit, in case the restart cut that very
+    /// attempt.
+    restart_cut_turn: Option<u32>,
     provider_retry_testimony_digests: std::collections::BTreeSet<String>,
 }
 
@@ -1270,6 +1283,13 @@ pub(crate) fn retry_supersedes(decision: &ProviderRetryDecision) -> Value {
     })
 }
 
+/// The text whose digest is the `failure_digest` of every retry decision made
+/// for an attempt a restart cut. No process observed that failure, so the
+/// digest is this constant rather than a digest of an error; a reader that
+/// sees it knows the dead attempt's output count is unknown, not zero. The
+/// shipped timeline projection compares against the digest's hex.
+const RESTART_CUT_FAILURE_MARKER: &str = "ryeos.provider-retry.owner-restart-cut.v1";
+
 fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
     let value = json!({
         "schema": "ryeos.directive.provider-retry-policy.v2",
@@ -1622,7 +1642,7 @@ impl Runner {
             // honest aggregate connection-establishment boundary, which can
             // include DNS, TCP, proxy negotiation, and TLS. Response versions
             // are observed after negotiation rather than forced here.
-            http_client: reqwest::Client::builder()
+            http_client: ryeos_http_egress::client_builder()
                 .pool_max_idle_per_host(8)
                 .dns_resolver(std::sync::Arc::new(
                     crate::provider_transport_timing::InstrumentedDnsResolver,
@@ -1642,8 +1662,10 @@ impl Runner {
             resume_owed_siblings: Vec::new(),
             turn_malformed_calls: Vec::new(),
             consecutive_length_turns: 0,
+            consecutive_malformed_replies: 0,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
+            restart_cut_turn: None,
             provider_retry_testimony_digests: std::collections::BTreeSet::new(),
         }
     }
@@ -1688,6 +1710,7 @@ impl Runner {
         let wrap_up_delivered = resume.wrap_up_delivered;
         let loop_warned = resume.loop_warned.clone();
         let trailing_length_turns = resume.trailing_length_turns;
+        let trailing_malformed_replies = resume.trailing_malformed_replies;
         let last_turn_coordinate = resume.last_turn_coordinate;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
@@ -1765,10 +1788,12 @@ impl Runner {
         runner.resume_owed_siblings = owed_siblings;
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
+        runner.restart_cut_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
         runner.wrap_up_delivered = wrap_up_delivered;
         runner.loop_warned = loop_warned;
         runner.consecutive_length_turns = trailing_length_turns;
+        runner.consecutive_malformed_replies = trailing_malformed_replies;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -2008,7 +2033,10 @@ impl Runner {
         } else if self.resume_active_provider_turn.is_some() && ledger_authority.is_none() {
             State::Errored {
                 error: "provider_attempt_outcome_unknown: an unfinished provider turn has no \
-                        daemon-owned attempt ledger; native recovery refuses a second contact"
+                        daemon-owned attempt ledger, so a restart cannot be proven to have cut \
+                        the call and native recovery refuses a second contact; a route that is \
+                        priced or declared explicitly free is on the ledger and lets a \
+                        `provider_contact: repeatable` directive resume"
                     .to_string(),
             }
         } else if !self.resume_pending_tools.is_empty() {
@@ -3612,6 +3640,7 @@ impl Runner {
                     match last {
                         Some(msg) => {
                             if msg.has_tool_calls() {
+                                self.consecutive_malformed_replies = 0;
                                 let occurrences = msg
                                     .calls()
                                     .iter()
@@ -3652,6 +3681,7 @@ impl Runner {
                                     }
                                 }
                             } else if self.consecutive_length_turns > 0 {
+                                self.consecutive_malformed_replies = 0;
                                 // The turn ended at the output limit and made no
                                 // tool call: its text is incomplete, so it must
                                 // not finalize. Record the policy's message as a
@@ -3685,7 +3715,68 @@ impl Runner {
                                         error: OUTPUT_LIMIT_ERROR.to_string(),
                                     },
                                 }
+                            } else if let Some((marker, policy)) = self
+                                .provider_config
+                                .malformed_replies
+                                .as_ref()
+                                .and_then(|policy| {
+                                    policy
+                                        .first_marker_in(&msg.joined_text())
+                                        .map(|marker| (marker.to_string(), policy.clone()))
+                                })
+                            {
+                                // A reply with no structured tool call whose
+                                // text holds a marker is malformed: the model
+                                // wrote a call as text. Invariant: text that
+                                // looks like a tool call is never parsed or
+                                // executed, so a malformed reply runs no tool.
+                                // The reply is dropped from the conversation,
+                                // the policy's message takes its place, and
+                                // another turn is taken within the policy's
+                                // bound and the turn limit. Otherwise the run
+                                // fails, and the reply is never the result.
+                                let streak = self.consecutive_malformed_replies.saturating_add(1);
+                                tracing::warn!(
+                                    turn,
+                                    streak,
+                                    matched_marker = %marker,
+                                    max_consecutive = policy.max_consecutive,
+                                    "provider reply is malformed"
+                                );
+                                if streak <= policy.max_consecutive && self.can_start_another_turn()
+                                {
+                                    let input = ryeos_runtime::CognitionInput::text(
+                                        "harness",
+                                        &policy.message,
+                                    )
+                                    .with_kind(
+                                        ryeos_runtime::cognition::malformed_reply_kind(
+                                            turn, streak,
+                                        ),
+                                    );
+                                    if let Err(e) = self.callback.emit_cognition_input(&input).await
+                                    {
+                                        State::RecoveryRequired {
+                                            error: format!(
+                                                "resume-critical malformed_reply input append failed: {e}"
+                                            ),
+                                        }
+                                    } else {
+                                        self.messages.pop();
+                                        self.messages.push(ProviderMessage::user(policy.message));
+                                        self.consecutive_malformed_replies = streak;
+                                        State::CheckingLimits
+                                    }
+                                } else {
+                                    State::Errored {
+                                        error: format!(
+                                            "{MALFORMED_REPLY_ERROR_CODE}: the provider's reply held the marker {marker:?} and no correction was left (allowed in a row: {})",
+                                            policy.max_consecutive
+                                        ),
+                                    }
+                                }
                             } else if let Some(content) = msg.content_value() {
+                                self.consecutive_malformed_replies = 0;
                                 // Steer pre-finalize drain (finding C): a no-tool
                                 // content response is about to finalize. If an
                                 // operator input is pending, fold it and take
@@ -5259,6 +5350,7 @@ impl Runner {
                 prepared.requested_output_ceiling,
             )?,
             verified_bound: verified,
+            restart_retry: self.restart_retry_offer(turn, attempt_number)?,
         };
         let response = self.prepare_with_recovery(&prepare_params).await?;
         let (attempt_id, request_hash, coordinate, response_authority_digest, execution_budget_id) =
@@ -5390,6 +5482,54 @@ impl Runner {
                 ledger.attempt_id
             ),
         }
+    }
+
+    /// The retry this runtime would authorize for `attempt_number` of `turn`
+    /// if a restart cut the call, offered to the daemon when preparing an
+    /// attempt of a turn the restart interrupted. A restart is a stream cut:
+    /// the request may have reached the provider and the answer was lost, so
+    /// the reason is `mid_stream`. The signed policy gates it
+    /// like any in-process unknown-outcome retry, and the daemon applies the
+    /// sealed ceiling and transport; with no offer a cut attempt stays an
+    /// unknown outcome. The decision is a pure function of the record and the
+    /// policy, so a re-sent prepare carries the identical offer.
+    fn restart_retry_offer(
+        &self,
+        turn: u32,
+        attempt_number: u32,
+    ) -> anyhow::Result<Option<ProviderRetryDecision>> {
+        if self.restart_cut_turn != Some(turn) {
+            return Ok(None);
+        }
+        // Stream fragments are live-only and never reach the durable record,
+        // so a resumed process cannot know how many the dead attempt
+        // published; zero is the most the record can attest. A reader voids
+        // the fragments of a retried turn by position, not by this count.
+        let reason = ProviderRetryReason::MidStream {
+            live_output_events_emitted: 0,
+        };
+        let Some(delay) = retry_delay_for_reason(&reason, attempt_number, &self.execution) else {
+            return Ok(None);
+        };
+        let decision = ProviderRetryDecision {
+            turn,
+            failed_attempt_number: attempt_number,
+            next_attempt_number: attempt_number
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("provider retry attempt coordinate overflow"))?,
+            backoff_ms: u64::try_from(delay.as_millis())
+                .map_err(|_| anyhow::anyhow!("provider retry backoff exceeds u64"))?,
+            reason,
+            failure_digest: HexDigest::new(lillux::sha256_hex(
+                RESTART_CUT_FAILURE_MARKER.as_bytes(),
+            ))
+            .map_err(|error| anyhow::anyhow!("restart retry failure digest: {error}"))?,
+            retry_policy_digest: retry_policy_digest(&self.execution)?,
+        };
+        decision
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(Some(decision))
     }
 
     /// Prepare replay-or-reservation with bounded exact retry. The daemon owns
@@ -6790,6 +6930,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -6872,6 +7013,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -6930,6 +7072,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -6987,6 +7130,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -7059,6 +7203,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -7236,6 +7381,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7313,6 +7459,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7387,6 +7534,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7445,6 +7593,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -8444,6 +8593,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {
@@ -8892,6 +9042,111 @@ mod tests {
         assert_eq!(mock.recorded("reserve").len(), 1);
         assert_eq!(mock.recorded("mark_issued").len(), 1);
         assert!(mock.recorded("release_unissued").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_resumed_turn_offers_the_daemon_the_restart_retry_its_policy_admits() {
+        let authority = base_ledger_authority();
+        let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
+        let mut runner = ledger_runner(mock.clone());
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        runner.restart_cut_turn = Some(4);
+        let prepared = test_prepared();
+
+        // Within the policy: a mid-stream decision carrying the true fragment
+        // count, bound to the attempt's coordinate and the exact policy.
+        let offer = runner.restart_retry_offer(4, 2).unwrap().expect("offer");
+        assert_eq!(offer.turn, 4);
+        assert_eq!(offer.failed_attempt_number, 2);
+        assert_eq!(offer.next_attempt_number, 3);
+        assert_eq!(
+            offer.reason,
+            ProviderRetryReason::MidStream {
+                live_output_events_emitted: 0
+            }
+        );
+        assert_eq!(
+            offer.retry_policy_digest,
+            retry_policy_digest(&runner.execution).unwrap()
+        );
+        assert_eq!(
+            retry_supersedes(&offer),
+            json!({"turn": 4, "attempt": 2, "output_events": 0})
+        );
+        // Readers recognise a restart-cut decision by this exact digest.
+        assert_eq!(
+            offer.failure_digest.as_str(),
+            "07922c912825b5b1aac477c84a9b4acbe584f7d5549f6b1ce9ac56226676f384"
+        );
+        // The decision is deterministic, so a re-sent prepare offers the same.
+        assert_eq!(
+            runner.restart_retry_offer(4, 2).unwrap(),
+            Some(offer.clone())
+        );
+        // The runtime would accept the daemon's stored copy of it.
+        let advance = ProviderRetryAdvance::build(
+            "A-1".to_string(),
+            lillux::sha256_hex(b"request"),
+            lillux::sha256_hex(b"coordinate"),
+            offer.clone(),
+            1_000,
+        )
+        .unwrap();
+        runner.validate_retry_advance(&advance, 4, 2).unwrap();
+
+        // Past the policy's attempt bound, in another turn, or with a policy
+        // that does not name the class: no offer, so the cut stays unknown.
+        assert_eq!(runner.restart_retry_offer(4, 3).unwrap(), None);
+        assert_eq!(runner.restart_retry_offer(5, 1).unwrap(), None);
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::Timeout]);
+        assert_eq!(runner.restart_retry_offer(4, 1).unwrap(), None);
+        runner.execution = retry_cfg();
+        assert_eq!(runner.restart_retry_offer(4, 1).unwrap(), None);
+
+        // The offer rides on the prepare the runtime sends.
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        let verified = test_verified(&authority, &prepared);
+        runner
+            .admit_ledger_attempt(
+                4,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        let reserves = mock.recorded("reserve");
+        assert_eq!(reserves.len(), 1);
+        assert_eq!(
+            reserves[0]["restart_retry"]["reason"],
+            json!({"kind": "mid_stream", "live_output_events_emitted": 0})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uninterrupted_turn_offers_no_restart_retry() {
+        let authority = base_ledger_authority();
+        let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
+        let mut runner = ledger_runner(mock.clone());
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+        runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(mock.recorded("reserve")[0].get("restart_retry").is_none());
     }
 
     #[tokio::test]

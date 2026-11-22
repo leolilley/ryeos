@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-18T08:58:07Z:47911b71ac794d295df172d0a24db84066f9b4f5749ce86cf33707b4cee943a8:Bzhzylk2PBs6g9Dullbeu4+4hJbajsMHV6pXXIcYR4fFucsa0cULm9WW8TSssRR+hCPi07+p2pKC+KCrFZy+Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T02:48:16Z:9777958a22c0f8291a4ff4e329f495322b952e1507edff7ae122a6ffc7b0ac16:y2FisTbpXWtQLmLQQilCLh+pTjX0vsK+Kmqbiz7wOPYcuUDNGq9ZN7jXqARvbPkebwY+MhgeKOr84DM5xVRwCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -47,6 +47,26 @@ since that turn's start or the previous `provider_retry`. The fragments are
 ephemeral and the retry resends the same messages, so nothing durable records
 the abandoned text; only the turn-complete `cognition_out` counts, and resume
 folds only that one.
+
+A restart that cuts a provider call is retried the same way. On resume of an
+unfinished provider turn the runtime offers the daemon, with every prepare of
+that turn, the retry its policy would authorize for that attempt as a
+`mid_stream` failure. Stream fragments are live-only and never reach the
+record, so the decision's `supersedes.output_events` is 0, and for this decision
+the 0 means unknown, not none: the decision's `failure_digest` is the fixed
+digest of `ryeos.provider-retry.owner-restart-cut.v1` (no process observed the
+failure), which readers use to show "output lost at restart" instead of a
+count. A reader voids a retried turn's fragments by position. The daemon stores it only when that
+exact attempt was cut by the restart (issued with no recorded answer) and the
+sealed launch authority admits another contact: a `provider_contact:
+repeatable` directive, a remote transport, and an attempt number within the
+sealed `unknown_outcome_retry` ceiling. The resumed run then follows the
+ordinary advancement path (one `provider_retry` event, the stored backoff, the
+next attempt). Otherwise the resume fails with `provider_attempt_outcome_unknown`
+and the provider is not contacted again. A route with no accounting ledger has
+no attempt record to prove the cut, so it fails the same way.
+
+Resume is bounded separately: after a hard crash a turn is resumed at most once; planned restarts re-arm.
 
 ## Malformed tool calls
 

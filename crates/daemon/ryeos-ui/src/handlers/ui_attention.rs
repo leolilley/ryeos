@@ -166,7 +166,12 @@ pub fn load_config(state: &AppState) -> Result<AttentionConfig> {
 /// only names the file in refusals.
 pub fn load_signed_config(state: &AppState, config_path: &str, config_ref: &str) -> Result<Value> {
     let engine = &state.engine;
-    let roots = engine.resolution_roots(None);
+    let roots = engine.resolution_roots(
+        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
+    );
     let load_context = ConfigLoadContext {
         roots: &roots,
         parsers: &engine.parser_dispatcher,

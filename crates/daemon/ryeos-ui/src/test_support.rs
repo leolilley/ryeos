@@ -40,8 +40,23 @@ async fn live_presentation_seeded(
     ryeos_client_base::ui::UiPresentationProducer,
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
-    let root = state.config.app_root.clone();
+    let root = fixture_project_root(state);
     live_presentation_in_project(state, &root, &root, initial_surface).await
+}
+
+/// A project directory for the default presentation fixtures, beside the
+/// state's app root: a project root may never be the node's app root, an
+/// ancestor of it, or inside it. Created on first use and left empty; the
+/// fixture Config itself is a bundle item.
+pub fn fixture_project_root(state: &AppState) -> std::path::PathBuf {
+    let app_root = &state.config.app_root;
+    let name = app_root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "app".to_owned());
+    let project = app_root.with_file_name(format!("{name}-fixture-project"));
+    std::fs::create_dir_all(&project).expect("create the fixture project beside the app root");
+    project
 }
 
 /// The presentation fixture bound to `project_root`. Its signed shared
@@ -297,7 +312,7 @@ pub async fn live_presentation_with_surface(
     ryeos_client_base::ui::UiPresentationProducer,
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
-    let root = state.config.app_root.clone();
+    let root = fixture_project_root(state);
     live_presentation_with_surface_in_project(state, &root, &root, surface_ref).await
 }
 

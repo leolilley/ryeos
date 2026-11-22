@@ -50,10 +50,10 @@ pub fn observe_bundle_structured_source(
     let kind = canonical.kind.clone();
     state.engine.with_checked_bundle_generation(|generation| {
         let engine = &state.engine;
-        let roots = engine.resolution_roots(None);
+        let roots = engine.resolution_roots(None, ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless));
         let resolution = generation.effective_resolution_output(
             ryeos_engine::engine::EffectiveItemRequest {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless),
                 item_ref: canonical,
                 expected_kind: Some(kind.clone()),
                 project_root: None,

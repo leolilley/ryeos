@@ -398,7 +398,12 @@ fn authenticate_composition(
                 "rebind successor was not published for this exact source",
             ));
         }
-        authenticate_binding(generation, state, session, membership, from)?;
+        // `from` is content-stale by construction: the rebind exists because
+        // its signed content was revised. It must still be a live member of
+        // this presentation under the current generations, but the content
+        // that is revalidated is the successor being adopted.
+        authenticate_binding_membership(generation, state, session, membership, from)?;
+        authenticate_binding(generation, state, session, membership, to)?;
         let admitted = crate::state::get_ui_state(state)
             .ok_or_else(|| conflict("UI state is absent"))?
             .browser_sessions
@@ -430,13 +435,19 @@ fn authenticate_composition(
         )?;
         authenticate_binding(generation, state, session, membership, destination_binding)?;
     }
-    authenticate_binding(
-        generation,
-        state,
-        session,
-        membership,
-        composition.owner.binding(),
-    )
+    let owner_binding = composition.owner.binding();
+    match &composition.mutation {
+        // The owner is the rebound source: it is adopted only through the
+        // published, exactly matched successor authenticated above.
+        ryeos_client_base::ui::composition_operation::CompositionMutation::RebindAttachment {
+            from,
+            ..
+        } if owner_binding == from => {
+            authenticate_binding_membership(generation, state, session, membership, owner_binding)
+                .map(|_| ())
+        }
+        _ => authenticate_binding(generation, state, session, membership, owner_binding),
+    }
 }
 
 pub(super) fn authenticate_binding(
@@ -446,6 +457,29 @@ pub(super) fn authenticate_binding(
     membership: &PresentationMembership,
     coordinate: &UiBindingAttachmentCoordinate,
 ) -> Result<()> {
+    let (attachment, project) =
+        authenticate_binding_membership(generation, state, session, membership, coordinate)?;
+    super::super::ui_launch_mint::revalidate_binding_authority(
+        generation,
+        attachment.compiled_binding.as_ref(),
+        project.as_ref().map(|project| project.path()),
+        attachment.project_authority.as_deref(),
+    )
+}
+
+/// Proves the coordinate is a live attachment of this presentation under the
+/// current engine and node-policy generations with consistent project
+/// authority, without recompiling its signed content.
+fn authenticate_binding_membership(
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+    state: &AppState,
+    session: &BrowserSession,
+    membership: &PresentationMembership,
+    coordinate: &UiBindingAttachmentCoordinate,
+) -> Result<(
+    std::sync::Arc<crate::browser_session::AdmittedBindingAttachment>,
+    Option<crate::seat_auth::RetainedProjectAccess>,
+)> {
     let attachment = crate::state::get_ui_state(state)
         .ok_or_else(|| conflict("UI state is absent"))?
         .browser_sessions
@@ -488,12 +522,7 @@ pub(super) fn authenticate_binding(
             ));
         }
     }
-    super::super::ui_launch_mint::revalidate_binding_authority(
-        generation,
-        attachment.compiled_binding.as_ref(),
-        project.as_ref().map(|project| project.path()),
-        attachment.project_authority.as_deref(),
-    )
+    Ok((attachment, project))
 }
 
 pub(super) fn read_history(
