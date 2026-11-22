@@ -3956,7 +3956,10 @@ async fn prepare_after_staging(
     state
         .state_store
         .verify_project_snapshot_closure(candidate)?;
-    let target_head_key = target_project_head_key(owner, &target_project_path)?;
+    let target_project_identity = target_project_identity(owner, &target_project_path)?;
+    let target_head_key =
+        ryeos_state::project_identity::ProjectHeadKey::for_project(&target_project_identity);
+    let principal_key = target_head_key.owner_key().to_owned();
     let target_project_hash = target_head_key.name_hash().to_owned();
     let target_head = state
         .state_store
@@ -3970,7 +3973,7 @@ async fn prepare_after_staging(
             owner,
             candidate,
             &target_head,
-            &target_project_hash,
+            &target_project_identity,
             &req.project_route_digest,
         )?;
 
@@ -4212,7 +4215,7 @@ async fn prepare_after_staging(
         }
         let current_project_head = state
             .state_store
-            .with_state_db(|db| db.read_project_head(&principal_key, &target_project_hash))?;
+            .with_state_db(|db| db.read_project_head(&target_head_key))?;
         if current_project_head.as_deref() != Some(preflight.target_project_head_hash.as_str()) {
             bail!("target project HEAD changed before placement publication");
         }
@@ -4345,7 +4348,10 @@ async fn preflight_after_staging(
         bail!("source preflight launch ledger contradicts owner or sites");
     }
     let target_project_path = canonical_target_project_path(&req.target_project_path)?;
-    let target_head_key = target_project_head_key(owner, &target_project_path)?;
+    let target_project_identity = target_project_identity(owner, &target_project_path)?;
+    let target_head_key =
+        ryeos_state::project_identity::ProjectHeadKey::for_project(&target_project_identity);
+    let principal_key = target_head_key.owner_key().to_owned();
     let target_project_hash = target_head_key.name_hash().to_owned();
     let target_head = state
         .state_store
@@ -4359,7 +4365,7 @@ async fn preflight_after_staging(
             owner,
             &target_head,
             &target_head,
-            &target_project_hash,
+            &target_project_identity,
             &req.project_route_digest,
         )?;
 
@@ -4487,13 +4493,13 @@ fn validate_transfer_request(
     Ok(())
 }
 
-/// The owner's head of the target checkout on this node: keyed by the name
-/// the target tree declares now, owned by the authenticated handoff owner.
+/// The owner's project for the target checkout on this node: the name the
+/// target tree declares now, owned by the authenticated handoff owner.
 /// Nothing from the source node names it.
-fn target_project_head_key(
+fn target_project_identity(
     owner: &str,
     target_project_path: &Path,
-) -> Result<ryeos_state::project_identity::ProjectHeadKey> {
+) -> Result<ryeos_state::project_identity::ProjectIdentity> {
     let name = ryeos_state::project_identity::ProjectDeclaration::declared_name(
         target_project_path,
     )?
@@ -4503,7 +4509,7 @@ fn target_project_head_key(
             target_project_path.display()
         )
     })?;
-    ryeos_state::project_identity::ProjectHeadKey::owned_by(owner, &name)
+    ryeos_state::project_identity::ProjectIdentity::new(owner.to_owned(), name)
 }
 
 fn canonical_target_project_path(raw: &str) -> Result<PathBuf> {
