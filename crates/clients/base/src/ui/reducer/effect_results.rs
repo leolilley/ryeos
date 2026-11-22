@@ -1790,12 +1790,16 @@ mod tests {
             .clone();
         let id = preference_fetch(&core.effects_for_hint("service")).expect("refetch");
         let mut with_grounds = preference("system");
-        with_grounds["theme_catalogue"]["themes"][0]["surface_grounds"] = serde_json::json!({
-            root_ref.clone(): {"picture": {"sha256": "a".repeat(64), "media_type": "image/webp"}}
-        });
-        with_grounds["theme_catalogue"]["themes"][1]["surface_grounds"] = serde_json::json!({
-            root_ref: {"picture_state": "unavailable"}
-        });
+        let ground = |value: serde_json::Value| {
+            let mut grounds = serde_json::Map::new();
+            grounds.insert(root_ref.clone(), value);
+            serde_json::Value::Object(grounds)
+        };
+        with_grounds["theme_catalogue"]["themes"][0]["surface_grounds"] = ground(
+            serde_json::json!({"picture": {"sha256": "a".repeat(64), "media_type": "image/webp"}}),
+        );
+        with_grounds["theme_catalogue"]["themes"][1]["surface_grounds"] =
+            ground(serde_json::json!({"picture_state": "unavailable"}));
         send(&mut core, id, with_grounds);
         let grounds = crate::ui::view_model::build_view_model(&core)
             .presentation

@@ -365,7 +365,7 @@ mod tests {
         let mut granted = Vec::new();
         let mut grant = |hash: &str| {
             granted.push(hash.to_owned());
-            Ok(())
+            Ok::<(), ArtGrantRefusal>(())
         };
         let catalogue = build_catalogue(
             &installed,
@@ -401,7 +401,7 @@ mod tests {
         granted.clear();
         let mut grant = |hash: &str| {
             granted.push(hash.to_owned());
-            Ok(())
+            Ok::<(), ArtGrantRefusal>(())
         };
         let catalogue = build_catalogue(
             &installed,
@@ -434,7 +434,7 @@ mod tests {
         let installed = installed();
         // The index holds a different record, so the theme's ref is not indexed.
         let other = index_with('b', "pictures/ryeos/other.yaml", "hero");
-        let mut grant = |_: &str| Ok(());
+        let mut grant = |_: &str| Ok::<(), ArtGrantRefusal>(());
         let catalogue = build_catalogue(
             &installed,
             "theme:ryeos/night",
@@ -452,7 +452,7 @@ mod tests {
 
         // A full grant set is the same typed state, not a silent skip.
         let index = index_with('a', "pictures/ryeos/a.yaml", "hero");
-        let mut full = |_: &str| Err(ArtGrantRefusal::SetFull);
+        let mut full = |_: &str| Err::<(), ArtGrantRefusal>(ArtGrantRefusal::SetFull);
         let catalogue = build_catalogue(
             &installed,
             "theme:ryeos/night",
