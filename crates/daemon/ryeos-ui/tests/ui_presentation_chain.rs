@@ -939,3 +939,195 @@ async fn a_recorded_dispatch_is_refused_when_the_project_path_no_longer_names_th
         "{error:#}"
     );
 }
+
+/// Append one composition request, prepared then completed, to a seat. The
+/// completion is the one the client's own replay computes for the request.
+async fn append_composition(
+    chain: &Chain,
+    seat: &mut Seat,
+    owner: ryeos_client_base::ui::composition_operation::CompositionOwner,
+    mutation: ryeos_client_base::ui::composition_operation::CompositionMutation,
+    operation_id: &str,
+) {
+    let frames = history(chain, seat).await;
+    let replay = fold(chain, &seat.producer.presentation_id, &frames);
+    let maximum = body_limit(
+        &chain.state,
+        ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref,
+    );
+    let mut operation: UiPreparedPresentationOperation = serde_json::from_value(json!({
+        "schema": 2,
+        "prepared_engine_seq": seat.next_engine_seq,
+        "operation_id": operation_id,
+        "producer": seat.producer,
+        "root_binding": chain.root,
+        "request_bounds": {
+            "max_request_bytes": maximum,
+            "max_input_bytes": maximum,
+            "max_seat_append_bytes": body_limit(
+                &chain.state, ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR.service_ref),
+        },
+        "body": {"kind": "composition", "request": {
+            "schema": 1,
+            "presentation_id": seat.producer.presentation_id,
+            "operation_id": operation_id,
+            "expected_revision": replay.revision,
+            "expected_next_mount_id": replay.next_mount_id,
+            "owner": owner,
+            "mutation": mutation,
+        }},
+    }))
+    .unwrap();
+    operation.assign_identity().unwrap();
+    let completion = replay
+        .expected_composition_completion(&operation, maximum)
+        .unwrap();
+    append(
+        chain,
+        seat,
+        &[(
+            SURFACE_OPEN_PREPARED,
+            serde_json::to_value(&operation).unwrap(),
+        )],
+    )
+    .await;
+    append(
+        chain,
+        seat,
+        &[(
+            SURFACE_OPENED_COMPLETION,
+            serde_json::to_value(&completion).unwrap(),
+        )],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_rebound_surface_is_accepted_by_history_dispatch_and_detach() {
+    use ryeos_client_base::ui::UiBindingAttachmentCoordinate as Ui;
+    use ryeos_client_base::ui::composition_operation::{CompositionMutation, CompositionOwner};
+    use ryeos_ui::browser_session::{AttachmentStoreError, BindingAttachmentCandidate};
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let state = Arc::new(state);
+    let project = tempfile::TempDir::new().expect("project");
+    std::fs::create_dir(project.path().join(".ai")).expect("project .ai");
+    let (chain, mut seat) = project_bound_chain(&state, project.path()).await;
+    let opened = admit(&chain, &mut seat, open_authored_surface()).await;
+    let transition = &opened["result"]["ui_transition"];
+    let surface_id = transition["surface"]["surface_instance_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let from = BindingAttachmentCoordinate {
+        binding_attachment_id: transition["attachment"]["binding_attachment_id"]
+            .as_str()
+            .unwrap()
+            .into(),
+        binding_generation: transition["attachment"]["binding_generation"]
+            .as_u64()
+            .unwrap(),
+        binding_digest: transition["attachment"]["binding_digest"]
+            .as_str()
+            .unwrap()
+            .into(),
+    };
+    let pid = seat.producer.presentation_id.clone();
+    let ui = get_ui_state(&state).unwrap();
+    let policy = state.node_policy.generation_digest().to_owned();
+    let old = ui
+        .browser_sessions
+        .get_session(&chain.session_id)
+        .unwrap()
+        .attachments[&from.binding_attachment_id]
+        .clone();
+    // The service publishes the successor beside its source. Both stay live
+    // and the source cannot be detached while the Surface still owns it.
+    let successor = ui
+        .browser_sessions
+        .publish_rebind_attachment(
+            &chain.session_id,
+            &pid,
+            &from,
+            BindingAttachmentCandidate {
+                registered_project_id: old.registered_project_id.clone(),
+                compiled_binding: old.compiled_binding.clone(),
+                presentation: old.presentation.clone(),
+                project_authority: old.project_authority.clone(),
+            },
+            16,
+            &policy,
+        )
+        .unwrap();
+    let to = successor.coordinate();
+    assert_eq!(
+        ui.browser_sessions
+            .attachment_for_detach(&chain.session_id, &from)
+            .unwrap_err(),
+        AttachmentStoreError::AttachmentInUse
+    );
+    let frames = history(&chain, &seat).await;
+    let replay = fold(&chain, &pid, &frames);
+    let bounds = replay.binding_descriptors()[&from.binding_attachment_id].binding_request_bounds;
+    let public = |coordinate: &BindingAttachmentCoordinate| Ui {
+        binding_attachment_id: coordinate.binding_attachment_id.clone(),
+        binding_generation: coordinate.binding_generation,
+        binding_digest: coordinate.binding_digest.clone(),
+    };
+    let surface = ryeos_client_base::ids::SurfaceInstanceId::try_new(surface_id.clone()).unwrap();
+    append_composition(
+        &chain,
+        &mut seat,
+        CompositionOwner::Surface {
+            surface_instance_id: surface.clone(),
+            binding: public(&from),
+        },
+        CompositionMutation::RebindAttachment {
+            from: public(&from),
+            to: public(&to),
+            descriptor: Box::new(successor.public_descriptor(bounds)),
+        },
+        "11111111-2222-4333-8444-555555555555",
+    )
+    .await;
+
+    // History verification accepted the rebound seat; membership follows it.
+    let frames = history(&chain, &seat).await;
+    let replay = fold(&chain, &pid, &frames);
+    assert_eq!(replay.completed_rebinds().len(), 1);
+    assert_eq!(
+        replay.composition.surfaces()[&surface].binding(),
+        &public(&to)
+    );
+    // The next request, owned by the successor, is accepted too.
+    append_composition(
+        &chain,
+        &mut seat,
+        CompositionOwner::Surface {
+            surface_instance_id: surface.clone(),
+            binding: public(&to),
+        },
+        CompositionMutation::RenameSurface {
+            title: "After rebind".into(),
+        },
+        "66666666-7777-4888-8999-000000000000",
+    )
+    .await;
+    let session = ui.browser_sessions.get_session(&chain.session_id).unwrap();
+    assert_eq!(
+        session.presentations[&pid].surfaces[&surface_id].coordinate,
+        to
+    );
+    assert!(
+        ui.browser_sessions
+            .admit_presentation_dispatch(&chain.session_id, &pid, &to, &policy)
+            .is_ok(),
+        "dispatch from a rebound tile is admitted"
+    );
+    assert!(
+        ui.browser_sessions
+            .attachment_for_detach(&chain.session_id, &from)
+            .unwrap()
+            .is_none(),
+        "the settled source is gone: detach is the idempotent no-op"
+    );
+}
