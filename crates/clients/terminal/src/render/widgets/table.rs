@@ -11,6 +11,7 @@
 //! ignored.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::TextSurface;
 use ryeos_client_base::ui::content::ColumnRole;
 use ryeos_client_base::ui::view_model::{RyeOsTableCoverageVm, RyeOsTableRowVm, RyeOsTone};
@@ -24,14 +25,14 @@ use super::super::theme::{
 use super::rows::draw_detail;
 
 /// Cells sit two columns in, past the tone-glyph gutter.
-const GUTTER: usize = 2;
+const GUTTER: usize = LAYOUT.cells.table_gutter;
 
 /// The least height at which the coverage foot (rule and sentence) is drawn
 /// and still leaves the header and a row.
-const FOOT_MIN_HEIGHT: usize = 4;
+const FOOT_MIN_HEIGHT: usize = LAYOUT.cells.table_foot_min_height;
 
 /// Indent per level of a hierarchical table, in columns.
-const INDENT: &str = "  ";
+const INDENT: &str = LAYOUT.cells.table_indent;
 
 #[cfg(test)]
 pub fn draw_table(
@@ -313,7 +314,13 @@ fn draw_row(
 /// eight characters, an id or ref is cut in the middle, a path from the left.
 fn role_text(role: ColumnRole, cell: &str, width: usize) -> String {
     match role {
-        ColumnRole::Hash => truncate(&cell.chars().take(8).collect::<String>(), width),
+        ColumnRole::Hash => truncate(
+            &cell
+                .chars()
+                .take(LAYOUT.px.table.columns.hash_chars)
+                .collect::<String>(),
+            width,
+        ),
         ColumnRole::Id | ColumnRole::Ref => cut_middle(cell, width),
         ColumnRole::Path => cut_left(cell, width),
         _ => truncate(cell, width),

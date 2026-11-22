@@ -865,6 +865,11 @@ mod tests {
                 "worker_result":{"result":{"usage":{"input_tokens":1,"output_tokens":1}}}}),
             json!({"worker_result_cost":declared_cost(),"worker_result":{"result":{"usage":{
                 "input_tokens":-1,"output_tokens":1,"cost_micro_usd":1}}}}),
+            // An unknown cost (null with an `unknown` status) is no cost, not
+            // a zero one, even though the token counts are present.
+            json!({"worker_result_cost":declared_cost(),"worker_result":{"result":{"usage":{
+                "input_tokens":1,"output_tokens":1,"cost_micro_usd":null,
+                "cost_status":"unknown"}}}}),
             json!({"worker_result_cost":{"input_tokens":"/result/usage/input_tokens",
                 "output_tokens":null,"cost_micro_usd":"/result/usage/cost_micro_usd"},
                 "worker_result":{"result":usage.clone()}}),

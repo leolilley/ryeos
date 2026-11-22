@@ -4,6 +4,7 @@
 //! traversal, groups, layers, replay state, evidence, and generic traits as a
 //! bounded outline. It never branches on project roles or entity kinds.
 
+use ryeos_client_base::layout_table::LAYOUT;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ryeos_client_base::layout::Rect;
@@ -162,13 +163,13 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
             .iter()
             .position(|entry| entry.selected)
             .unwrap_or_else(|| field.replay.rail.len().saturating_sub(1));
-        let start = selected_rail.saturating_sub(2);
+        let start = selected_rail.saturating_sub(LAYOUT.cells.field_rail_lead);
         let rail = field
             .replay
             .rail
             .iter()
             .skip(start)
-            .take(5)
+            .take(LAYOUT.cells.field_rail_window)
             .map(|entry| {
                 format!(
                     "{}{} {}",
@@ -293,22 +294,22 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
             .iter()
             .find_map(|id| field.previews.iter().find(|preview| &preview.id == id))
     });
-    let grid_width = if width >= 58
+    let grid_width = if width >= LAYOUT.cells.field_grid_min_width
         && selected_preview
             .and_then(|preview| preview.grid.as_ref())
             .is_some()
     {
-        (width / 3).max(18)
+        (width / LAYOUT.cells.field_grid_divisor).max(LAYOUT.cells.field_grid_least)
     } else {
         0
     };
     let list_width = width.saturating_sub(grid_width + usize::from(grid_width > 0));
     let footer_lines = 1
-        + field.warnings.len().min(3)
-        + field.metrics.len().min(3)
-        + usize::from(field.metrics.len() > 3)
-        + field.subjects.len().min(2)
-        + usize::from(field.subjects.len() > 2)
+        + field.warnings.len().min(LAYOUT.cells.field_warnings)
+        + field.metrics.len().min(LAYOUT.cells.field_metrics)
+        + usize::from(field.metrics.len() > LAYOUT.cells.field_metrics)
+        + field.subjects.len().min(LAYOUT.cells.field_subjects)
+        + usize::from(field.subjects.len() > LAYOUT.cells.field_subjects)
         + usize::from(selected_entity.is_some())
         + usize::from(selected_entity.is_some_and(|entity| entity.artifact_ref.is_some()))
         + usize::from(source_evidence.is_some())
@@ -351,7 +352,7 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
                     style_fg()
                 };
                 fill_line(surface, rect.x as usize, y, list_width, style);
-                let indent = "  ".repeat((*depth).min(8) + 1);
+                let indent = "  ".repeat((*depth).min(LAYOUT.cells.field_depth) + 1);
                 let glyph = entity_glyph(entity);
                 let status = entity.status.as_deref().unwrap_or_default();
                 let suffix = if status.is_empty() {
@@ -359,7 +360,7 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
                 } else {
                     status
                 };
-                let right_width = display_width(suffix).min(list_width / 3);
+                let right_width = display_width(suffix).min(list_width / LAYOUT.cells.meta_divisor);
                 let left_width =
                     list_width.saturating_sub(right_width + usize::from(right_width > 0));
                 let left = format!("{indent}{glyph} {}", entity.label);
@@ -483,7 +484,7 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
         y += 1;
     }
 
-    for subject in field.subjects.iter().take(2) {
+    for subject in field.subjects.iter().take(LAYOUT.cells.field_subjects) {
         if y >= bottom {
             break;
         }
@@ -509,13 +510,16 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
         surface.draw_text(rect.x as usize, y, &coordinate, style_muted());
         y += 1;
     }
-    if y < bottom && field.subjects.len() > 2 {
-        let text = format!("+{} more projected subjects", field.subjects.len() - 2);
+    if y < bottom && field.subjects.len() > LAYOUT.cells.field_subjects {
+        let text = format!(
+            "+{} more projected subjects",
+            field.subjects.len() - LAYOUT.cells.field_subjects
+        );
         surface.draw_text(rect.x as usize, y, &truncate(&text, width), style_muted());
         y += 1;
     }
 
-    for message in field.warnings.iter().take(3) {
+    for message in field.warnings.iter().take(LAYOUT.cells.field_warnings) {
         if y >= bottom {
             break;
         }
@@ -529,7 +533,7 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
         y += 1;
     }
 
-    for metric in field.metrics.iter().take(3) {
+    for metric in field.metrics.iter().take(LAYOUT.cells.field_metrics) {
         if y >= bottom {
             break;
         }
@@ -541,8 +545,11 @@ pub fn draw_field(surface: &mut TextSurface, rect: Rect, field: &RyeOsFieldVm) {
         surface.draw_text(rect.x as usize, y, &truncate(&text, width), style_muted());
         y += 1;
     }
-    if y < bottom && field.metrics.len() > 3 {
-        let text = format!("+{} more projected metrics", field.metrics.len() - 3);
+    if y < bottom && field.metrics.len() > LAYOUT.cells.field_metrics {
+        let text = format!(
+            "+{} more projected metrics",
+            field.metrics.len() - LAYOUT.cells.field_metrics
+        );
         surface.draw_text(rect.x as usize, y, &truncate(&text, width), style_muted());
         y += 1;
     }
@@ -611,7 +618,7 @@ fn entity_depth(entity: &RyeOsFieldEntityVm, by_id: &BTreeMap<&str, &RyeOsFieldE
     let mut parent = entity.parent_id.as_deref();
     let mut seen = BTreeSet::new();
     while let Some(parent_id) = parent {
-        if depth >= 8 || !seen.insert(parent_id) {
+        if depth >= LAYOUT.cells.field_depth || !seen.insert(parent_id) {
             break;
         }
         depth += 1;
@@ -648,7 +655,7 @@ fn draw_two_sided(
     right: &str,
     style: Style,
 ) {
-    let right = truncate(right, width / 3);
+    let right = truncate(right, width / LAYOUT.cells.meta_divisor);
     let right_width = display_width(&right);
     let left_width = width.saturating_sub(right_width + usize::from(right_width > 0));
     surface.draw_text(x, y, &truncate(left, left_width), style);

@@ -3,6 +3,7 @@
 //! the shell decides what to show and these only draw it.
 
 use rune::{Color, El, col, el, row, text};
+use ryeos_client_base::layout_table::LAYOUT;
 
 use crate::theme::{self, Tokens};
 
@@ -17,7 +18,7 @@ pub(crate) fn grid_mark(ink: Color) -> El {
 
 /// Side of the key figure, in cells. The figure is mirrored left to right, so
 /// only the first `KEY_FIGURE_CELLS.div_ceil(2)` columns carry bits.
-const KEY_FIGURE_CELLS: usize = 5;
+const KEY_FIGURE_CELLS: usize = LAYOUT.px.field.key_figure_cells;
 
 /// The cells of a key figure, row by row, from a key fingerprint. The same
 /// fingerprint always gives the same figure; it is a picture of the key, not
