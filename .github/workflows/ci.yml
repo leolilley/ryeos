@@ -1866,10 +1866,8 @@ jobs:
         # The suite's development-hosted nodes start as the only child of tini,
         # pid 1 of their own user, pid, mount and cgroup namespace (the
         # enclosure placement, the shipped image's shape).
-        # continue-on-error stays until the suite has passed here once.
-        continue-on-error: true
         run: |
-          "$RUNNER_TEMP/run-suite" claude_code_worker_follow_e2e 6 0 || { echo "::error title=claude_code_worker_follow_e2e::the suite failed in the enclosure placement; see the test output above"; exit 1; }
+          "$RUNNER_TEMP/run-suite" claude_code_worker_follow_e2e 6 0
 
       - name: No suite skips on its own
         run: |
