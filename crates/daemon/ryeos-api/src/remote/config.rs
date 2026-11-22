@@ -1264,7 +1264,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let key = node_fixture(tmp.path());
         let project = tmp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(project.join(".ai")).unwrap();
+        std::fs::write(project.join(".ai/project.yaml"), "schema: 1\nname: demo\n").unwrap();
         write_remote_pin(
             tmp.path(),
             &key,
@@ -1282,6 +1283,7 @@ mod tests {
             bindings.insert(
                 identity.clone(),
                 RemoteProjectBinding {
+                    project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
                     remote_project_path: "/srv/project".into(),
                     sync_scope: ProjectSyncScope::default(),
                 },
@@ -1591,7 +1593,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let key = node_fixture(tmp.path());
         let project = tmp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(project.join(".ai")).unwrap();
+        std::fs::write(project.join(".ai/project.yaml"), "schema: 1\nname: demo\n").unwrap();
         let descriptor = signed_descriptor(9, None, true);
         pin_remote(tmp.path(), &key, "origin", &descriptor, None).unwrap();
         let canonical = canonical_local_project_path(&project).unwrap();
@@ -1600,6 +1603,7 @@ mod tests {
             bindings.insert(
                 identity.clone(),
                 RemoteProjectBinding {
+                    project_name: ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
                     remote_project_path: "/srv/p".into(),
                     sync_scope: ProjectSyncScope::default(),
                 },

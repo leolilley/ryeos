@@ -402,6 +402,9 @@ pub(crate) fn synthetic_test_live_project_authority(
         },
         capability_ceiling: Vec::new(),
         child_policy: ChildProjectAuthorityPolicy::Inherit,
+        signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+            ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
+        ),
     };
     authority
         .validate()

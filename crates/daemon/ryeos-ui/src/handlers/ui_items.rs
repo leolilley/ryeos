@@ -203,6 +203,7 @@ pub async fn handle_items_list(
     };
 
     // One signed config per request; a missing or untrusted file refuses.
+    let titles = ItemTitleConfig::load(&state)?;
     let signer_project = super::signed_item_topology::seat_live_project(
         &state,
         caller.principal_id(),

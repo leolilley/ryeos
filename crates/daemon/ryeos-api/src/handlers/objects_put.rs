@@ -514,7 +514,7 @@ mod raw_ingress_controls {
             out
         }
         let exact = format!(
-            "{{\"project\":{\"kind\":\"no_project\"},\"blobs\":[{}],\"blob_chunks\":[{}],\"objects\":[{}]}}",
+            "{{\"project\":{{\"kind\":\"no_project\"}},\"blobs\":[{}],\"blob_chunks\":[{}],\"objects\":[{}]}}",
             entries(33_334, r#"{"data":""}"#),
             entries(
                 33_333,
@@ -525,7 +525,7 @@ mod raw_ingress_controls {
         assert!(validate_raw_object_put_request(exact.as_bytes()).is_ok());
 
         let one_over = format!(
-            "{{\"project\":{\"kind\":\"no_project\"},\"blobs\":[{}],\"blob_chunks\":[{}],\"objects\":[{}]}}",
+            "{{\"project\":{{\"kind\":\"no_project\"}},\"blobs\":[{}],\"blob_chunks\":[{}],\"objects\":[{}]}}",
             entries(33_335, r#"{"data":""}"#),
             entries(
                 33_333,
@@ -542,7 +542,7 @@ mod raw_ingress_controls {
             "{{\"payload\":\"{}\"}}",
             "x".repeat(MAX_RAW_OBJECT_BYTES + 1)
         );
-        let raw = format!("{{\"project\":{\"kind\":\"named\",\"name\":\"project\"},\"objects\":[{{\"value\":{value}}}]}}");
+        let raw = format!("{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"objects\":[{{\"value\":{value}}}]}}");
         assert!(validate_raw_object_put_request(raw.as_bytes()).is_err());
     }
 
@@ -550,7 +550,7 @@ mod raw_ingress_controls {
     fn generic_object_raw_and_canonical_ceiling_accept_exact_and_reject_one_over() {
         let value_at = |raw_len: usize| format!("\"{}\"", "x".repeat(raw_len - 2));
         let make_body = |value: String| {
-            format!("{{\"project\":{\"kind\":\"no_project\"},\"objects\":[{{\"value\":{value}}}]}}")
+            format!("{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}")
         };
         assert!(
             validate_raw_object_put_request(make_body(value_at(MAX_RAW_OBJECT_BYTES)).as_bytes())
@@ -575,7 +575,7 @@ mod raw_ingress_controls {
                 "🧭".repeat(astral_count),
                 "a".repeat(ascii_count)
             );
-            format!("{{\"project\":{\"kind\":\"no_project\"},\"objects\":[{{\"value\":{value}}}]}}")
+            format!("{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}")
         };
         let exact = make_body(MAX_RAW_OBJECT_BYTES);
         assert!(validate_raw_object_put_request(exact.as_bytes()).is_ok());
@@ -589,7 +589,7 @@ mod raw_ingress_controls {
             "{{\"kind\":\"admitted_launch_capsule\",\"payload\":\"{}\"}}",
             "x".repeat(MAX_CAPSULE_OBJECT_BYTES + 1)
         );
-        let raw = format!("{{\"project\":{\"kind\":\"named\",\"name\":\"project\"},\"objects\":[{{\"value\":{value}}}]}}");
+        let raw = format!("{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"objects\":[{{\"value\":{value}}}]}}");
         assert!(validate_raw_object_put_request(raw.as_bytes()).is_err());
     }
 
@@ -604,7 +604,7 @@ mod raw_ingress_controls {
                 "x".repeat(raw_len - prefix.len() - suffix.len()),
                 suffix
             );
-            format!("{{\"project\":{\"kind\":\"no_project\"},\"objects\":[{{\"value\":{value}}}]}}")
+            format!("{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}")
         };
         for kind_json in [
             "\"admitted_launch_capsule\"",
@@ -641,7 +641,7 @@ mod raw_ingress_controls {
                 "a".repeat(ascii_count),
                 suffix
             );
-            format!("{{\"project\":{\"kind\":\"no_project\"},\"objects\":[{{\"value\":{value}}}]}}")
+            format!("{{\"project\":{{\"kind\":\"no_project\"}},\"objects\":[{{\"value\":{value}}}]}}")
         };
         let exact = make_body(MAX_CAPSULE_OBJECT_BYTES);
         assert!(validate_raw_object_put_request(exact.as_bytes()).is_ok());
@@ -659,7 +659,7 @@ mod raw_ingress_controls {
     fn raw_preflight_rejects_oversized_encoded_inline_blob_before_decode() {
         let encoded_max = MAX_INLINE_BLOB_BYTES.saturating_add(2) / 3 * 4;
         let raw = format!(
-            "{{\"project\":{\"kind\":\"named\",\"name\":\"project\"},\"blobs\":[{{\"data\":\"{}\"}}]}}",
+            "{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"blobs\":[{{\"data\":\"{}\"}}]}}",
             "A".repeat(encoded_max + 1)
         );
         assert!(validate_raw_object_put_request(raw.as_bytes()).is_err());
@@ -669,7 +669,7 @@ mod raw_ingress_controls {
     fn raw_preflight_rejects_oversized_chunk_and_declared_blob_before_decode() {
         let encoded_max = MAX_BLOB_CHUNK_BYTES * 2;
         let raw = format!(
-            "{{\"project\":{\"kind\":\"named\",\"name\":\"project\"},\"blob_chunks\":[{{\"hash\":\"h\",\"total_size\":{},\"offset\":0,\"data\":\"{}\"}}]}}",
+            "{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"blob_chunks\":[{{\"hash\":\"h\",\"total_size\":{},\"offset\":0,\"data\":\"{}\"}}]}}",
             MAX_BLOB_BYTES + 1,
             "A".repeat(encoded_max + 1)
         );
@@ -696,7 +696,7 @@ mod raw_ingress_controls {
         let make_body = |size: usize| {
             let encoded = base64::engine::general_purpose::STANDARD.encode(vec![0u8; size]);
             format!(
-                "{{\"project\":{\"kind\":\"named\",\"name\":\"project\"},\"blob_chunks\":[{{\"hash\":\"h\",\"total_size\":{},\"offset\":0,\"data\":\"{}\"}}]}}",
+                "{{\"project\":{{\"kind\":\"named\",\"name\":\"project\"}},\"blob_chunks\":[{{\"hash\":\"h\",\"total_size\":{},\"offset\":0,\"data\":\"{}\"}}]}}",
                 size + 1,
                 encoded
             )
