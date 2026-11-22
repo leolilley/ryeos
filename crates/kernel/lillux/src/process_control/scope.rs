@@ -467,8 +467,8 @@ pub fn require_administrator() -> anyhow::Result<()> {
 /// container, that container's enclosure cgroup. The enclosure is recorded
 /// only when the node runs alone in a private cgroup namespace rooted at its
 /// own cgroup and a private pid namespace, and its exit is proven to end
-/// that namespace: the node is pid 1, or its parent is a pid 1 that node
-/// policy trusts to exit with its only child. Otherwise only the boot is
+/// that namespace: its parent is a pid 1 that node policy trusts to exit
+/// with its only child. Otherwise only the boot is
 /// recorded and the enclosure generation stays undecided. Callers decide
 /// lifetimes only while holding the node's state lock, which proves the
 /// recording node has exited; with both, a different enclosure on the same

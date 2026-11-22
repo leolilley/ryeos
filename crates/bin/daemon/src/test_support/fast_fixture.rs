@@ -1440,8 +1440,8 @@ pub fn authorize_fixture_bundle(
 ///
 /// The authored `hosted` floor requires `recovery:enclosure_trusted_init` and
 /// `termination:enclosure_trusted_init`, graded `measured` or `trusted`. The
-/// node proves those only when it is pid 1 of a private pid namespace, or its
-/// parent is a pid 1 named in `enclosure_inits`
+/// node proves those only when its parent is pid 1 of a private pid namespace
+/// and is named in `enclosure_inits`
 /// (`lillux::process_control::decide_enclosure_exit`), and the recovery name
 /// also needs a private cgroup namespace. A fixture daemon is a child of the
 /// test process in the host's pid namespace, so neither can ever hold on a

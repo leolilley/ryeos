@@ -696,7 +696,10 @@ mod tests {
             .node
             .push(CapabilityRequirement::Spec(CapabilityRequirementSpec {
                 name: None,
-                any_of: vec!["recovery:enclosure".into(), "recovery:scope".into()],
+                any_of: vec![
+                    "recovery:enclosure_trusted_init".into(),
+                    "recovery:scope".into(),
+                ],
                 accept: vec!["provider_attested".into()],
                 providers: Vec::new(),
             }));
@@ -717,7 +720,7 @@ mod tests {
         assert_eq!(
             met_by(
                 "requires.node",
-                "any_of(recovery:enclosure, recovery:scope)"
+                "any_of(recovery:enclosure_trusted_init, recovery:scope)"
             ),
             ("recovery:scope", "provider_attested", "fixture-provider")
         );
@@ -886,7 +889,10 @@ mod tests {
     fn a_set_is_met_by_any_name_and_refused_with_every_reason() {
         let entry = CapabilityRequirement::Spec(CapabilityRequirementSpec {
             name: None,
-            any_of: vec!["recovery:enclosure".into(), "recovery:scope".into()],
+            any_of: vec![
+                "recovery:enclosure_trusted_init".into(),
+                "recovery:scope".into(),
+            ],
             accept: Vec::new(),
             providers: Vec::new(),
         });
@@ -897,14 +903,14 @@ mod tests {
             &view(
                 &[],
                 &[
-                    ("recovery:enclosure", "no enclosure"),
+                    ("recovery:enclosure_trusted_init", "no enclosure"),
                     ("recovery:scope", "no scope"),
                 ],
             ),
         );
         assert_eq!(
-            unmet["any_of(recovery:enclosure, recovery:scope)"],
-            "none of its names is met; recovery:enclosure: no enclosure; recovery:scope: no scope"
+            unmet["any_of(recovery:enclosure_trusted_init, recovery:scope)"],
+            "none of its names is met; recovery:enclosure_trusted_init: no enclosure; recovery:scope: no scope"
         );
     }
 

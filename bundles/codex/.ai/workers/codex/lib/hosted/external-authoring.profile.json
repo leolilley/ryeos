@@ -246,20 +246,14 @@
         ]
       },
       {
-        "any_of": [
-          "recovery:enclosure",
-          "recovery:enclosure_trusted_init"
-        ],
+        "name": "recovery:enclosure_trusted_init",
         "accept": [
           "measured",
           "trusted"
         ]
       },
       {
-        "any_of": [
-          "termination:enclosure",
-          "termination:enclosure_trusted_init"
-        ],
+        "name": "termination:enclosure_trusted_init",
         "accept": [
           "measured",
           "trusted"

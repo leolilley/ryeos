@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T04:38:07Z:0aa395fccf79b28365e5db5a6f817baffc13e454dad618f74fd954ba98ca5bca:9JPMwbuTWWAkMMJOXoOZcUYA0fjEP12PTAkGGL1MdNRxsIMce/rBiQMj7eKYagHwZFIeGdFGEldY63h+HbfgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T21:38:02Z:3da08a0ba27d7c27f55d412b9f91cbd2353866b56c63f428874b75fe1e7ae9f0:lUUvnYtAwl7ihm9WkszAiftZ8KOEwj0GvgESCCboPKR25LVBoPEN2D1XOUkShqsQd9anu3APHiIpyNGt8Lf0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -285,15 +285,14 @@ policies:
           # Docker). It has no qualified per-job process scopes and commonly no
           # swap and no CAP_IPC_LOCK, so the floor accepts a resident region
           # proven only by the absence of swap at startup (residency:swap_absent),
-          # which a later swapon ends. Jobs die with the node because the node is
-          # pid 1 of its container, or its parent is a pid 1 named in
-          # enclosure_inits; the trusted_init names carry that weaker grade and
-          # the report names which proof met each entry. Jobs run without a
-          # sandbox. Codex app servers run in the trusted direct process-group
-          # lane on this class as on `local`: a host with no qualified per-job
-          # scope cannot hold them in one, so the floor requires a trusted
-          # process-group termination proof instead, and the lane makes no
-          # hard-containment claim.
+          # which a later swapon ends. Jobs die with the node because its parent
+          # is a pid 1 named in enclosure_inits; the node itself cannot be pid 1,
+          # since process identity refuses pid 1. Jobs run without a sandbox.
+          # Codex app servers run in the trusted direct process-group lane on this
+          # class as on `local`: a host with no qualified per-job scope cannot
+          # hold them in one, so the floor requires a trusted process-group
+          # termination proof instead, and the lane makes no hard-containment
+          # claim.
           requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
           process_scopes:
             mode: unconfigured
@@ -303,26 +302,25 @@ policies:
           proc_filesystem: empty
           host_direct: unavailable
         local:
-          # A host the operator runs the controller on directly.
-          # Vault secrets, the node identity, the credential home and the
-          # restart-inhibit record live under the app root, so every class
-          # requires storage:durable_root. Codex app servers run in the trusted
-          # direct process-group lane, which needs a trusted process-group
-          # termination proof. Remote Codex authoring also requires that the
-          # controller's jobs die with it and that a restart proves the old
-          # generation's jobs dead, so the floor requires the enclosure
-          # termination and recovery proofs: the node is pid 1 of a container
-          # enclosure, or its parent is a pid 1 named in enclosure_inits. An
-          # operator's host where the node runs under a service manager outside
-          # such an enclosure cannot prove them and refuses at boot; run the
-          # controller there in a container (Docker or Podman with one of the
-          # trusted inits, or the node as pid 1). The floor also requires
-          # strict `accounting`, a resident region proven by memory locking,
-          # so that container needs CAP_IPC_LOCK and a memlock limit large
-          # enough for the region. A container deployment that cannot lock
-          # memory declares `hosted` instead, whose floor accepts the absence
-          # of swap in place of the lock.
-          requires_capabilities: [accounting, {any_of: [recovery:enclosure, recovery:enclosure_trusted_init], accept: [measured, trusted]}, storage:durable_root, {any_of: [termination:enclosure, termination:enclosure_trusted_init], accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
+          # A host the operator runs the controller on directly. Vault secrets,
+          # the node identity, the credential home and the restart-inhibit
+          # record live under the app root, so every class requires
+          # storage:durable_root. Codex app servers run in the trusted direct
+          # process-group lane, which needs a trusted process-group termination
+          # proof. Remote Codex authoring also requires that the controller's
+          # jobs die with it and that a restart proves the old generation's jobs
+          # dead, so the floor requires the enclosure termination and recovery
+          # proofs: the node's parent is pid 1 of a container enclosure and is
+          # named in enclosure_inits. An operator's host where the node runs
+          # under a service manager outside such an enclosure cannot prove them
+          # and refuses at boot; run the controller there in a container (Docker
+          # or Podman with one of the trusted inits as pid 1). The floor also
+          # requires strict `accounting`, a resident region proven by memory
+          # locking, so that container needs CAP_IPC_LOCK and a memlock limit
+          # large enough for the region. A container deployment that cannot lock
+          # memory declares `hosted` instead, whose floor accepts the absence of
+          # swap in place of the lock.
+          requires_capabilities: [accounting, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, {name: termination:process_group, accept: [trusted]}, time]
           process_scopes:
             mode: unconfigured
           # The same trusted direct process-group lane as `hosted`: it admits
