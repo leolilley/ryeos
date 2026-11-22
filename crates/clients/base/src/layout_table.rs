@@ -606,7 +606,7 @@ pub struct CellTable {
     pub dialog_height_margin: usize,
     pub dialog_least: usize,
     /// The dialog's input is at most this many rows.
-    pub dialog_input_max_rows: usize,
+    pub dialog_input_max_rows: u16,
     /// The dialog sits this fraction down (as a divisor) of the room left.
     pub dialog_top_divisor: usize,
     /// A tile's composer is at most this many rows.
