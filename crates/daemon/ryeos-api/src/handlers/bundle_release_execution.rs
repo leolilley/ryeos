@@ -696,6 +696,7 @@ pub(crate) async fn execute_protected_qualification(
         "capture": signed_capture_recipe.as_deref(),
         "recipe_ref": recipe_ref,
     }))?;
+    let release_project_identity = source_generation.project_identity().to_path_buf();
     let workspace = tokio::task::spawn_blocking(move || {
         source_generation.materialize_with_recipe_overlay(
             &signed_build_recipe,
@@ -727,10 +728,10 @@ pub(crate) async fn execute_protected_qualification(
         .context("release qualification lost its overlay snapshot")?;
     let site_id = state.threads.site_id().to_owned();
     let plan_ctx = ryeos_engine::contracts::PlanContext {
-        // None is correct: this is a freshly materialized release overlay in a
-        // private workspace, not a registered project, so no project-scoped
-        // signer can name it. Its signed recipes are node-signed.
-        logical_project_root: None,
+        // The overlay copies the release source generation into a private
+        // workspace; project-scoped signers are matched on the registered
+        // project the generation stands for, never on that workspace.
+        logical_project_root: Some(release_project_identity),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),
