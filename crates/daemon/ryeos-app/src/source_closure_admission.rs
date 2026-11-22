@@ -1129,10 +1129,10 @@ fn require_current_source_policy(
 /// one the resolution roots state, for project-space sources only. A checkout
 /// path, live or pinned, never names a project, so a source whose roots state
 /// no identity is matched against none.
-fn owner_signer_project<'a>(
-    roots: &'a ryeos_engine::item_resolution::ResolutionRoots,
+fn owner_signer_project(
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
     source_space: ItemSpace,
-) -> &'a ryeos_engine::contracts::LogicalProject {
+) -> &ryeos_engine::contracts::LogicalProject {
     if !matches!(source_space, ItemSpace::Project) {
         return &ryeos_engine::trust::NO_PROJECT;
     }
