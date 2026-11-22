@@ -51,6 +51,40 @@ fn is_false(value: &bool) -> bool {
 /// time. Readers that do not know it treat it as any other harness input.
 pub const KIND_DEADLINE_WRAP_UP: &str = "deadline_wrap_up";
 
+/// Kind of the harness input that tells the model the next turn is the last
+/// the run's turn limit allows.
+pub const KIND_LIMIT_WRAP_UP: &str = "limit_wrap_up";
+
+/// Kind of the single harness input that gives both reasons at once, when the
+/// run deadline's wrap-up and the turn limit's fall on the same turn.
+pub const KIND_DEADLINE_LIMIT_WRAP_UP: &str = "deadline_limit_wrap_up";
+
+/// The kind of the wrap-up input that gives these reasons, if any is due.
+pub fn wrap_up_kind(deadline: bool, turn_limit: bool) -> Option<&'static str> {
+    match (deadline, turn_limit) {
+        (true, true) => Some(KIND_DEADLINE_LIMIT_WRAP_UP),
+        (true, false) => Some(KIND_DEADLINE_WRAP_UP),
+        (false, true) => Some(KIND_LIMIT_WRAP_UP),
+        (false, false) => None,
+    }
+}
+
+/// The reasons a wrap-up input of this kind gave, as (deadline, turn limit);
+/// `None` for any other kind. A recovered run reads its delivered flags from
+/// these.
+pub fn wrap_up_reasons(kind: &str) -> Option<(bool, bool)> {
+    match kind {
+        KIND_DEADLINE_WRAP_UP => Some((true, false)),
+        KIND_LIMIT_WRAP_UP => Some((false, true)),
+        KIND_DEADLINE_LIMIT_WRAP_UP => Some((true, true)),
+        _ => None,
+    }
+}
+
+/// Prefix of the kind of a harness input that warns the model its run is
+/// looping; the finding's code follows it.
+pub const KIND_LOOP_WARNING_PREFIX: &str = "loop_warning_";
+
 /// One input to cognition: what the model is given as a user message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
