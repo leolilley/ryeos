@@ -56,9 +56,12 @@ pub struct ResumeState {
     /// The latest frame recorded on the path: what the model was given besides
     /// the conversation. `None` when the path recorded none.
     pub frame: Option<CognitionFramePayload>,
-    /// Whether the run-deadline wrap-up input is already on the path, so a
+    /// Which wrap-up reasons the path's wrap-up inputs already gave, so a
     /// recovered or continued segment does not tell the model twice.
-    pub deadline_wrap_up_delivered: bool,
+    pub wrap_up_delivered: WrapUpDelivered,
+    /// The loop findings the model was already warned about, each with the
+    /// number of turns the conversation held when the warning was given.
+    pub loop_warned: std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
     /// What the path has stored of tool images, against the run's limits.
     pub images: ImageRunState,
 }
@@ -274,20 +277,35 @@ pub async fn load_resume_state(
     let frame = latest_frame(&events)?;
     let predecessor = fold_messages(&events[..own_start])?;
     let own = fold_messages(&events[own_start..])?;
-    let predecessor_notices: Vec<ProviderMessage> = predecessor
+    let predecessor_notices: Vec<(ProviderMessage, WrapUpDelivered)> = predecessor
         .iter()
-        .filter(|folded| is_wrap_up_notice(folded))
-        .map(|folded| folded.message.clone())
+        .filter_map(|folded| wrap_up_notice_reasons(folded).map(|r| (folded.message.clone(), r)))
         .collect();
-    let own_has_notice = own.iter().any(is_wrap_up_notice);
+    let mut wrap_up_delivered = own
+        .iter()
+        .filter_map(wrap_up_notice_reasons)
+        .fold(WrapUpDelivered::default(), WrapUpDelivered::union);
     let mut messages = carry_into_successor(predecessor, &carry, images)?;
-    // The notice counts as delivered only if the conversation the model is
+    // A notice counts as delivered only if the conversation the model is
     // given still holds it: a successor whose carried start trimmed it away is
     // told again, with the time left now.
-    let wrap_up_delivered = own_has_notice
-        || predecessor_notices
-            .iter()
-            .any(|notice| messages.contains(notice));
+    for (notice, reasons) in &predecessor_notices {
+        if messages.contains(notice) {
+            wrap_up_delivered = wrap_up_delivered.union(*reasons);
+        }
+    }
+    // A loop warning is positioned among the turns of the whole rebuilt
+    // conversation: the carried part first, then this thread's own messages.
+    let mut loop_warned = std::collections::BTreeMap::new();
+    let mut turns_so_far = crate::loop_guards::digests_from_messages(&messages).len() as u32;
+    for folded in &own {
+        if folded.message.role == ryeos_provider_contract::Role::Assistant {
+            turns_so_far += 1;
+        }
+        if let Some(kind) = loop_warning_kind(folded) {
+            loop_warned.insert(kind, turns_so_far);
+        }
+    }
     messages.extend(own.into_iter().map(|folded| folded.message));
     // The whole rebuilt conversation, predecessors' carry and own part, must
     // be one a provider accepts. A failed check is a typed refusal, not a
@@ -320,7 +338,8 @@ pub async fn load_resume_state(
         provider_retry_testimony_digests,
         trailing_length_turns,
         frame,
-        deadline_wrap_up_delivered: wrap_up_delivered,
+        wrap_up_delivered,
+        loop_warned,
         images: recover_image_run(&events)?,
     })
 }
@@ -344,9 +363,38 @@ fn recover_image_run(events: &[ReplayedEventRecord]) -> Result<ImageRunState> {
     Ok(run)
 }
 
-/// Whether a folded message is the run-deadline wrap-up notice.
-fn is_wrap_up_notice(folded: &FoldedMessage) -> bool {
-    folded.kind.as_deref() == Some(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP)
+/// Which wrap-up reasons a conversation's wrap-up inputs have given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WrapUpDelivered {
+    pub deadline: bool,
+    pub turn_limit: bool,
+}
+
+impl WrapUpDelivered {
+    fn union(self, other: Self) -> Self {
+        Self {
+            deadline: self.deadline || other.deadline,
+            turn_limit: self.turn_limit || other.turn_limit,
+        }
+    }
+}
+
+/// The reasons a folded message gave, when it is a wrap-up notice.
+fn wrap_up_notice_reasons(folded: &FoldedMessage) -> Option<WrapUpDelivered> {
+    let (deadline, turn_limit) =
+        ryeos_runtime::cognition::wrap_up_reasons(folded.kind.as_deref()?)?;
+    Some(WrapUpDelivered {
+        deadline,
+        turn_limit,
+    })
+}
+
+/// The finding a folded message warned about, when it is a loop warning.
+fn loop_warning_kind(folded: &FoldedMessage) -> Option<crate::loop_guards::FindingKind> {
+    let kind = folded.kind.as_deref()?;
+    crate::loop_guards::FindingKind::from_code(
+        kind.strip_prefix(ryeos_runtime::cognition::KIND_LOOP_WARNING_PREFIX)?,
+    )
 }
 
 /// Count the final turns, newest first, that ended at the output limit,
@@ -3199,10 +3247,72 @@ mod tests {
         events
     }
 
+    fn kinded_input(kind: &str) -> Vec<ReplayedEventRecord> {
+        ryeos_runtime::encode_cognition_in_payloads(
+            &ryeos_runtime::CognitionInput::text("harness", "notice").with_kind(kind),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|payload| ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn each_wrap_up_kind_recovers_exactly_the_reasons_it_gave() {
+        use ryeos_runtime::cognition::{
+            KIND_DEADLINE_LIMIT_WRAP_UP, KIND_DEADLINE_WRAP_UP, KIND_LIMIT_WRAP_UP,
+        };
+        let reasons = |kind: &str| {
+            let folded = fold_messages(&kinded_input(kind)).unwrap();
+            wrap_up_notice_reasons(&folded[0])
+        };
+        assert_eq!(
+            reasons(KIND_DEADLINE_WRAP_UP),
+            Some(WrapUpDelivered {
+                deadline: true,
+                turn_limit: false
+            })
+        );
+        assert_eq!(
+            reasons(KIND_LIMIT_WRAP_UP),
+            Some(WrapUpDelivered {
+                deadline: false,
+                turn_limit: true
+            })
+        );
+        assert_eq!(
+            reasons(KIND_DEADLINE_LIMIT_WRAP_UP),
+            Some(WrapUpDelivered {
+                deadline: true,
+                turn_limit: true
+            })
+        );
+        assert_eq!(reasons("operator_note"), None);
+    }
+
+    #[test]
+    fn a_loop_warning_is_recognised_by_its_kind() {
+        let folded = fold_messages(&kinded_input("loop_warning_ping_pong")).unwrap();
+        assert_eq!(
+            loop_warning_kind(&folded[0]),
+            Some(crate::loop_guards::FindingKind::PingPong)
+        );
+        let other = fold_messages(&kinded_input("loop_warning_unknown")).unwrap();
+        assert_eq!(loop_warning_kind(&other[0]), None);
+        let wrap = fold_messages(&kinded_input("limit_wrap_up")).unwrap();
+        assert_eq!(loop_warning_kind(&wrap[0]), None);
+    }
+
     #[test]
     fn the_fold_marks_only_the_wrap_up_notice_with_its_kind() {
         let folded = fold_messages(&wrap_up_events()).unwrap();
-        let notices: Vec<bool> = folded.iter().map(is_wrap_up_notice).collect();
+        let notices: Vec<bool> = folded
+            .iter()
+            .map(|f| wrap_up_notice_reasons(f).is_some())
+            .collect();
         assert_eq!(notices, [false, true]);
         // The notice is deliberately not pinned.
         assert!(folded.iter().all(|f| !f.pinned));
@@ -3237,7 +3347,8 @@ mod tests {
                 load_resume_state(callback, "T1", CarryPolicy::turns(carry), mode, None)
                     .await
                     .unwrap()
-                    .deadline_wrap_up_delivered
+                    .wrap_up_delivered
+                    .deadline
             }
         };
         assert!(!delivered(0, ResumeMode::Continuation).await);

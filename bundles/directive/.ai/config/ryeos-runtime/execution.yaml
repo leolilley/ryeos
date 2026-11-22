@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-22T00:28:11Z:dbfdc5e6c972ceb3cf3ecff4f41673db33a269cfab5039aa6b7ffe9bf43e4d07:y3RwxPgplw2dCzE8yEF9dfJHXJ1ssKOYN8JbEc9bJSwAFObV/dLirGOK3D9bebYSS0bu1ZWwrVogNqVe4qq/Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T01:37:20Z:505c6cba7c22c9d749d33f275895be915a524b74d06c0f0c3e1f6baf02ddef4e:PFVwPr+CL0n61ABA6QBFVOu9rRDqGyFWL9BSD4vFDdAgbGIG3v/c4Qvun6HDxDLYjMlULc4mFi96o32PYzdfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 retries: 2
 retry_status_codes: [429, 500, 502, 503, 504, 529]
@@ -25,4 +25,13 @@ tool_output:
   preview_tail_bytes: 8192
   max_stored_bytes: 4194304
   hard_cut_bytes: 102400
+loop_guards:
+  enabled: true
+  window_turns: 16
+  repeat_threshold: 5
+  pingpong_cycles: 4
+  pingpong_max_period: 4
+  no_progress_turns: 8
+  idle_turns: 3
+  grace_turns: 2
 tool_preload: false

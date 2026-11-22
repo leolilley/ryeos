@@ -6473,7 +6473,15 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
             }
             None => false,
         };
+        // A held dedicated-session root is owned by its session: the
+        // session policy table (not a process, claim or follow row) is the
+        // durable owner while the session is parked/frozen/publishing, so
+        // the root legitimately stays `running` with no resume.
+        let held_by_dedicated_session = !status.is_terminal()
+            && reconcile::dedicated_session_root_resume(state, thread_id)?
+                == ryeos_app::dedicated_session_service::SessionRootResume::Hold;
         if status.is_terminal()
+            || held_by_dedicated_session
             || live_owned_process
             // Reuse the owner checked by reconcile_in_process_handler. A
             // reservation alone is not liveness, and this volatile registry
