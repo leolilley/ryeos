@@ -4889,17 +4889,15 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     {
         bail!("qualification binding subject authority differs from its sealed verifier capsule");
     }
-    let logical_project_root = plan_context.effective_logical_project_root(project_root.as_deref());
-    if project_root.is_some() && logical_project_root.is_none() {
-        // A pinned verifier generation's checkout is temporary: with no stated
-        // logical project the identity is refused rather than judged on it.
-        bail!(
-            "qualification verifier generation names no logical project; its checkout is not judged"
-        );
-    }
+    // The verifier generation states its logical project when the pinned
+    // admission carries one. A bundle verifier's own trust does not depend on
+    // it, and a pinned verifier may legitimately state none, so there is no
+    // refusal here.
     let roots = request_engine
         .resolution_roots(project_root.clone())
-        .with_logical_project_root(logical_project_root);
+        .with_logical_project_root(
+            plan_context.effective_logical_project_root(project_root.as_deref()),
+        );
     // Admit the exact current subject before choosing its execution route.
     // A signed delegated runtime need not declare a root executor chain.
     let preflight = crate::thread_lifecycle::preflight_root_execution(
