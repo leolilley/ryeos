@@ -144,12 +144,12 @@ done
 cmp "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     "$tmp/two/ryeos-bundles-1.2.3-x86_64.tar.gz"
 tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
-    | grep -qx 'ryeos-bundles-1.2.3-x86_64/core/.ai/manifest.yaml'
+    | grep -x 'ryeos-bundles-1.2.3-x86_64/core/.ai/manifest.yaml' >/dev/null
 tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
-    | grep -qx 'ryeos-bundles-1.2.3-x86_64/.ai/node/init/profiles/hosted-workflow.yaml'
+    | grep -x 'ryeos-bundles-1.2.3-x86_64/.ai/node/init/profiles/hosted-workflow.yaml' >/dev/null
 # The controller distribution's bundle outside `standard` is archived too.
 tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
-    | grep -qx 'ryeos-bundles-1.2.3-x86_64/render-sandbox/.ai/manifest.yaml'
+    | grep -x 'ryeos-bundles-1.2.3-x86_64/render-sandbox/.ai/manifest.yaml' >/dev/null
 
 mkdir "$tmp/malformed"
 malformed_checksum="$tmp/malformed/ryeos-bundles-1.2.3-x86_64.tar.gz.sha256"

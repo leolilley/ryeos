@@ -22,6 +22,7 @@ use ryeos_accounting::{
 mod cache_marks;
 mod effective;
 mod image_input;
+mod malformed_replies;
 mod request_rejections;
 
 pub use cache_marks::{CACHE_MARKS_MAX, CacheMarkPosition, CacheMarksConfig};
@@ -35,6 +36,7 @@ pub use image_input::{
     ImageAcceptConfig, ImageCostConfig, ImageInputConfig, ToolResultImagePlacement,
     UnsupportedImagePolicy, render_note,
 };
+pub use malformed_replies::MalformedRepliesPolicy;
 pub use request_rejections::{
     REQUEST_REJECTION_CODE_PREFIX, RequestRejectionRow, classify_request_rejection,
     validate_request_rejections,
@@ -155,6 +157,11 @@ pub struct ProviderConfig {
     /// failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_rejections: Option<Vec<RequestRejectionRow>>,
+    /// Which replies are malformed (a tool call written as text) and how the
+    /// run corrects them. A top-level field, not part of `schemas`, for the
+    /// same reason as `image_input`. Absent: no reply is judged malformed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub malformed_replies: Option<MalformedRepliesPolicy>,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
 }
@@ -191,6 +198,9 @@ pub struct ProviderProfile {
     /// Replaces the config's `request_rejections` whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_rejections: Option<Vec<RequestRejectionRow>>,
+    /// Replaces the config's `malformed_replies` whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub malformed_replies: Option<MalformedRepliesPolicy>,
 }
 
 /// Provider-domain transport selection. The remote and admitted-worker paths
@@ -1470,6 +1480,9 @@ impl ProviderConfig {
         if let Some(rows) = &self.request_rejections {
             validate_request_rejections(rows, context)?;
         }
+        if let Some(policy) = &self.malformed_replies {
+            policy.validate(context)?;
+        }
         for profile in &self.profiles {
             // A profile can change the route (schemas, spend authority) under
             // an entry-level declaration, or add its own; the cross-field
@@ -1487,6 +1500,9 @@ impl ProviderConfig {
             }
             if let Some(rows) = &profile.request_rejections {
                 validate_request_rejections(rows, &format!("{context} profile {}", profile.name))?;
+            }
+            if let Some(policy) = &profile.malformed_replies {
+                policy.validate(&format!("{context} profile {}", profile.name))?;
             }
         }
         if self.body_template.is_none() {
@@ -2031,6 +2047,9 @@ impl ProviderConfig {
         }
         if let Some(rows) = &profile.request_rejections {
             resolved.request_rejections = Some(rows.clone());
+        }
+        if let Some(policy) = &profile.malformed_replies {
+            resolved.malformed_replies = Some(policy.clone());
         }
         resolved.profiles.clear();
         resolved
@@ -3115,6 +3134,7 @@ mod reasoning_tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: Vec::new(),
         };
         ResolvedProviderSnapshot {
@@ -4229,5 +4249,68 @@ profiles:
             .unwrap(),
         );
         assert!(parsed.is_err());
+    }
+}
+
+#[cfg(test)]
+mod malformed_replies_config_tests {
+    use super::*;
+
+    fn load(top: &str, profile: &str) -> ProviderConfig {
+        let yaml = format!(
+            r#"
+family: chat_completions
+transport: {{kind: remote_http, base_url: "https://example.invalid"}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+body_template: {{model: "{{model}}", messages: "{{messages}}", stream: "{{stream}}"}}
+{top}
+profiles:
+  - name: special
+    match: ["special-*"]
+{profile}
+"#
+        );
+        serde_json::from_value(serde_yaml::from_str::<Value>(&yaml).expect("yaml"))
+            .expect("provider config")
+    }
+
+    const TOP: &str = "malformed_replies: {markers: [\"<|a|>\"], message: top, max_consecutive: 2}";
+    const PROFILE: &str =
+        "    malformed_replies: {markers: [\"<|b|>\"], message: profile, max_consecutive: 1}";
+
+    #[test]
+    fn a_profile_replaces_the_policy_whole() {
+        let provider = load(TOP, PROFILE);
+        provider.validate("").unwrap();
+        let plain = provider
+            .resolve_for_model("other")
+            .malformed_replies
+            .expect("config policy");
+        assert_eq!(plain.markers, vec!["<|a|>".to_string()]);
+        let special = provider
+            .resolve_for_model("special-1")
+            .malformed_replies
+            .expect("profile policy");
+        assert_eq!(special.markers, vec!["<|b|>".to_string()]);
+        assert_eq!(special.max_consecutive, 1);
+    }
+
+    #[test]
+    fn no_policy_is_the_default_and_serialises_nothing() {
+        let provider = load("", "    extra: {}");
+        assert!(provider.malformed_replies.is_none());
+        let value = serde_json::to_value(&provider).unwrap();
+        assert!(value.get("malformed_replies").is_none());
+    }
+
+    #[test]
+    fn an_invalid_policy_fails_validation_in_the_entry_and_in_a_profile() {
+        let bad_top = TOP.replace("max_consecutive: 2", "max_consecutive: 0");
+        assert!(load(&bad_top, "    extra: {}").validate("").is_err());
+        let bad_profile = PROFILE.replace("max_consecutive: 1", "max_consecutive: 9");
+        assert!(load(TOP, &bad_profile).validate("").is_err());
     }
 }

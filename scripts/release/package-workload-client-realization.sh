@@ -92,8 +92,8 @@ grep -Eq '^[[:space:]]*Class:[[:space:]]+ELF64$' <<<"$elf_header" \
     echo "workload-client realization does not match x86_64-unknown-linux-gnu" >&2
     exit 2
 }
-if readelf -l "$binary" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
-    || readelf -d "$binary" | grep -Eq 'NEEDED'; then
+if readelf -l "$binary" | grep -E '(^|[[:space:]])INTERP([[:space:]]|$)' >/dev/null \
+    || readelf -d "$binary" | grep -E 'NEEDED' >/dev/null; then
     echo "workload-client realization must be fully static: $binary" >&2
     exit 2
 fi
