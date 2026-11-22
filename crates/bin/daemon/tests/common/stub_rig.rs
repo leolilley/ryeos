@@ -223,6 +223,27 @@ pub fn plant_python_tool(
     code: &str,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
+    plant_python_tool_on(root, name, "script", code, signer)
+}
+
+/// A python tool run by the function runtime: `code` defines
+/// `execute(params, project_path)`, and what it returns is the tool's result.
+pub fn plant_python_function_tool(
+    root: &Path,
+    name: &str,
+    code: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    plant_python_tool_on(root, name, "function", code, signer)
+}
+
+fn plant_python_tool_on(
+    root: &Path,
+    name: &str,
+    runtime: &str,
+    code: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
     let dir = root.join(format!(".ai/tools/{name}"));
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -230,7 +251,7 @@ pub fn plant_python_tool(
 # ryeos-tool:
 #   category: "{name}"
 #   version: "1.0.0"
-#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   executor_id: "tool:ryeos/core/runtimes/python/{runtime}"
 #   execution_protocol: "protocol:ryeos/core/opaque"
 #   description: "stub probe tool {name}"
 
