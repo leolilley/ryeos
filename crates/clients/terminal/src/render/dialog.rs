@@ -2,6 +2,7 @@
 //! and exact addresses as tile mounts; there is no terminal catalogue.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 use ryeos_client_base::ui::view_model::{RyeOsDialogVm, RyeOsRowVm, RyeOsViewVm};
 
@@ -10,13 +11,16 @@ use super::text::truncate;
 use super::theme::{ACCENT, FG, PANEL};
 
 pub fn draw_dialog(surface: &mut TextSurface, dialog: &RyeOsDialogVm, now_ms: u64) {
-    let w = surface.width.min(84);
-    let h = surface.height.saturating_sub(4).min(32);
-    if w < 4 || h < 4 {
+    let w = surface.width.min(LAYOUT.cells.dialog_max_width);
+    let h = surface
+        .height
+        .saturating_sub(LAYOUT.cells.dialog_height_margin)
+        .min(LAYOUT.cells.dialog_max_height);
+    if w < LAYOUT.cells.dialog_least || h < LAYOUT.cells.dialog_least {
         return;
     }
     let x = surface.width.saturating_sub(w) / 2;
-    let y = surface.height.saturating_sub(h) / 3;
+    let y = surface.height.saturating_sub(h) / LAYOUT.cells.dialog_top_divisor;
     let rect = Rect::new(x as u16, y as u16, w as u16, h as u16);
     fill_rect(surface, rect, Style::new().fg(FG).bg(PANEL));
     surface.draw_box(
@@ -50,7 +54,7 @@ pub fn draw_dialog(surface: &mut TextSurface, dialog: &RyeOsDialogVm, now_ms: u6
         content.h = content.h.saturating_sub(1);
     }
     if let Some(input) = dialog.input.as_ref().filter(|input| !input.live_filter) {
-        let input_h = content.h.min(4);
+        let input_h = content.h.min(LAYOUT.cells.dialog_input_max_rows);
         super::input::draw_input_tile(
             surface,
             Rect::new(

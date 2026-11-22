@@ -1463,6 +1463,120 @@ async fn startup_recovery_does_not_resume_the_root_of_a_terminal_dedicated_sessi
     assert_eq!(session.state, "terminal");
 }
 
+/// Seed the running root `thread_id` of a freshly admitted dedicated session
+/// (session state `admitted`, credential lock held by its worker).
+fn seed_dedicated_session_root(state: &AppState, thread_id: &str, project: &std::path::Path) {
+    seed_live_recovery(state, thread_id, project);
+    let db = &state.state_store;
+    let profile = format!("profile-{thread_id}");
+    let home = format!("home-{thread_id}");
+    let workspace = format!("W-{thread_id}");
+    let worker = format!("worker-{thread_id}");
+    db.create_credential_profile(NewCredentialProfile {
+        activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
+        profile_id: &profile,
+        owner_principal: "fp:test",
+        home_id: &home,
+    })
+    .unwrap();
+    let generation = db
+        .acquire_credential_profile(&profile, "fp:test", &worker)
+        .unwrap();
+    db.admit_dedicated_session(NewDedicatedSession {
+        placement_thread_id: thread_id,
+        chain_root_id: thread_id,
+        owner_principal: "fp:test",
+        admitted_capsule_hash: &"a".repeat(64),
+        workspace_id: &workspace,
+        candidate_required: false,
+        candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
+        credential_profile_id: &profile,
+        credential_generation: generation,
+        credential_lock_owner: &worker,
+    })
+    .unwrap();
+}
+
+/// Everything a restart must leave untouched on a held root: the chain's
+/// events (count and last hash), the root thread's status and the resume
+/// budget.
+fn held_root_footprint(state: &AppState, thread_id: &str) -> (usize, Option<String>, String, u32) {
+    let events = state
+        .state_store
+        .replay_events(thread_id, None, None, 10_000, usize::MAX)
+        .unwrap()
+        .events;
+    let last_hash = events.last().and_then(|event| event.event_hash.clone());
+    let status = state
+        .state_store
+        .get_thread(thread_id)
+        .unwrap()
+        .unwrap()
+        .status;
+    let attempts = state.state_store.get_resume_attempts(thread_id).unwrap();
+    (events.len(), last_hash, status, attempts)
+}
+
+/// A restart holds the root of a dedicated session that is not running and not
+/// terminal: no resume intent, no resume budget spent, the chain head unmoved,
+/// the root still running, and the typed hold reason reported. Every
+/// non-running, non-terminal state goes through the same real path.
+#[tokio::test]
+async fn startup_recovery_holds_the_root_of_a_dedicated_session_that_is_not_running() {
+    for session_state in [
+        "freezing",
+        "frozen",
+        "verifying",
+        "qualifying",
+        "publish_ready",
+        "publishing",
+        "discarding",
+    ] {
+        let (_tmpdir, _state_owner, state) = build_test_state();
+        let projects = tempfile::tempdir().unwrap();
+        let project = projects.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(ryeos_engine::AI_DIR)).unwrap();
+        let thread_id = "T-held-session-root";
+        seed_dedicated_session_root(&state, thread_id, &project);
+        let qualification = (session_state == "qualifying").then_some("{}");
+        state
+            .state_store
+            .with_runtime_sql_for_test(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session SET state=?1, candidate_qualification_json=?2
+                     WHERE placement_thread_id=?3",
+                    rusqlite::params![session_state, qualification, thread_id],
+                )?)
+            })
+            .unwrap();
+        let before = held_root_footprint(&state, thread_id);
+        assert_eq!(before.2, "running", "{session_state}");
+
+        let report = super::reconcile::reconcile_active_threads(&state)
+            .await
+            .unwrap();
+
+        assert!(report.resume_intents.is_empty(), "{session_state}");
+        assert_eq!(
+            report.held_roots.get(thread_id).copied(),
+            Some(ryeos_app::dedicated_session_service::DEDICATED_SESSION_HOLDS_CANDIDATE),
+            "{session_state}"
+        );
+        assert_eq!(
+            held_root_footprint(&state, thread_id),
+            before,
+            "{session_state}"
+        );
+        let session = state
+            .state_store
+            .dedicated_session(thread_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.state, session_state);
+    }
+}
+
 #[tokio::test]
 async fn periodic_recovery_permanently_refuses_only_the_structurally_invalid_root() {
     let (_tmpdir, _state_owner, state) = build_test_state();

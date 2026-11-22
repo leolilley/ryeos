@@ -809,4 +809,44 @@ mod history_tests {
                 .is_some_and(|error| error.contains("basis"))
         );
     }
+
+    #[test]
+    fn a_worker_with_unknown_cost_is_left_out_of_the_rollup_not_added_as_zero() {
+        use ryeos_runtime::envelope::{UsdNanos, worker_result_cost};
+        let session = |usage: serde_json::Value| {
+            serde_json::json!({
+                "worker_result_cost": {
+                    "input_tokens": "/result/usage/input_tokens",
+                    "output_tokens": "/result/usage/output_tokens",
+                    "cost_micro_usd": "/result/usage/cost_micro_usd"
+                },
+                "worker_result": {"result": {"usage": usage}}
+            })
+        };
+        let known = |input, micro| {
+            worker_result_cost(&session(serde_json::json!({
+                "input_tokens": input, "output_tokens": 1,
+                "cost_micro_usd": micro, "cost_status": "known"
+            })))
+        };
+        let unknown = worker_result_cost(&session(serde_json::json!({
+            "input_tokens": 500, "output_tokens": 50,
+            "cost_micro_usd": null, "cost_status": "unknown"
+        })));
+        assert!(unknown.is_none());
+
+        // Only unknown members: the rollup stays absent, never a zero total.
+        let mut total = None;
+        add_runtime_cost(&mut total, unknown.clone()).unwrap();
+        assert!(total.is_none());
+
+        // A mix: the total is exactly the known members' sum, and the unknown
+        // member contributes neither spend nor tokens.
+        add_runtime_cost(&mut total, known(10, 2_500)).unwrap();
+        add_runtime_cost(&mut total, unknown).unwrap();
+        add_runtime_cost(&mut total, known(20, 1_000)).unwrap();
+        let total = total.expect("known members roll up");
+        assert_eq!(total.total_usd, UsdNanos::from_nanos(3_500_000).unwrap());
+        assert_eq!(total.input_tokens, 30);
+    }
 }

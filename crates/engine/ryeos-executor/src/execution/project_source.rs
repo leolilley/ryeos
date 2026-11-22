@@ -406,6 +406,7 @@ pub struct PreparedExternalProductConsumer {
     _semantic_config: Option<ryeos_engine::launch_config::LaunchConfigSnapshotSet>,
     _source_closure: Option<ryeos_app::source_closure_admission::AdmittedSourceClosure>,
     _project_context: Option<ResolvedProjectContext>,
+    logical_project_root: Option<PathBuf>,
 }
 
 impl PreparedExternalProductConsumer {
@@ -429,11 +430,13 @@ impl PreparedExternalProductConsumer {
             .as_ref()
             .map(|context| &context.request_engine)
             .unwrap_or(&state.engine);
-        let roots = engine.resolution_roots(
-            self._project_context
-                .as_ref()
-                .map(|context| context.effective_path.clone()),
-        );
+        let roots = engine
+            .resolution_roots(
+                self._project_context
+                    .as_ref()
+                    .map(|context| context.effective_path.clone()),
+            )
+            .with_logical_project_root(self.logical_project_root.clone());
         ryeos_app::operator_external_content::product_composition::select_products_with_project_context_resolver(
             state,
             context,
@@ -475,11 +478,13 @@ impl PreparedExternalProductConsumer {
             .as_ref()
             .map(|context| &context.request_engine)
             .unwrap_or(&state.engine);
-        let roots = engine.resolution_roots(
-            self._project_context
-                .as_ref()
-                .map(|context| context.effective_path.clone()),
-        );
+        let roots = engine
+            .resolution_roots(
+                self._project_context
+                    .as_ref()
+                    .map(|context| context.effective_path.clone()),
+            )
+            .with_logical_project_root(self.logical_project_root.clone());
         ryeos_app::operator_external_content::product_composition::select_and_import_products(
             Arc::clone(&state),
             context,
@@ -732,11 +737,11 @@ fn prepare_external_consumer_context(
         .get(item_kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.source_closure.as_ref());
+    let effective_logical_root =
+        plan_context.effective_logical_project_root(project_root.as_deref());
     let roots = engine
         .resolution_roots(project_root.clone())
-        .with_logical_project_root(
-            plan_context.effective_logical_project_root(project_root.as_deref()),
-        );
+        .with_logical_project_root(effective_logical_root.clone());
     let project_authority = project_context
         .as_ref()
         .map(|context| {
@@ -804,6 +809,7 @@ fn prepare_external_consumer_context(
         _semantic_config: semantic_config,
         _source_closure: source_closure,
         _project_context: project_context,
+        logical_project_root: effective_logical_root,
     })
 }
 
