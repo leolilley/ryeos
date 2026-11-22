@@ -213,7 +213,7 @@ pub(crate) fn resolve_subject_digests(
         executor_id,
         &effective.kind,
         Some(project.clone()),
-        Some(project.clone()),
+        ryeos_engine::contracts::LogicalProject::Stated(project.clone()),
         &authority,
     )?;
     let runtime = terminal
