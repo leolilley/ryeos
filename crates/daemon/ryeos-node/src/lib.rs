@@ -20,6 +20,7 @@ pub mod native_capacity;
 pub mod node_journal;
 pub mod offline_operation;
 pub mod operator_layout;
+pub mod project_registry;
 pub mod provider_env;
 mod signed_chain;
 pub mod start;

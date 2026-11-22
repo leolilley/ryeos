@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T22:16:20Z:2ee61d3de00b56ffaa913b34d5e4c1a8da2fe856e5f9b816971a733c920ef55d:knAjR0Mxg23kDrqkw3oYQrsblyTM+fpxHdCDR0dY/QvoMkQCd6TDD5xhSDtk16LMr7tJHHbEebFa+qCrL2bOBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T17:01:54Z:7721ccdf2eb50d36a0e79f5390325a41247d582239ccc8ca2e715b74d304dd47:tvQeUzOp/bk1IhowM8QzexZ2nT0/aiKfmYMroI+pPiIQ+kGgwTNBbj6k+U5/Jr29zUyzo2gIJU3N1akcraBBDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -285,6 +285,15 @@ granted it, or the node operator), or on a remote with `ryeos remote revoke
 `ryeos node authorization revoke --fingerprint <fp> --reason <text>
 [--keep-delegates]` does the same offline and is the only way to revoke the
 configured operator's own grant. See [Identity model](../identity-model.md#revocation).
+
+The `project_registrations` row verifies every node-signed project
+registration under `.ai/node/projects/` and warns when one name lists more
+than one checkout (names are free text, so unrelated checkouts registered
+under one name would share its trust at the cut). It fails, naming the cure,
+for an unsigned, edited or stray entry. The `project_registration_declarations`
+row warns for each registered checkout that is gone or whose `.ai/project.yaml`
+no longer declares the registered name; the fix restores the declaration or
+unregisters the checkout.
 
 The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
@@ -953,6 +962,26 @@ only). On a running node they refuse with `node_running_trust_change`; cure
 by stopping the node, or by `ryeos node offline-operation submit --stop`.
 Each change appends a node-signed, hash-chained key event under
 `<app_root>/.ai/node/trust/events/`.
+
+### Project registrations
+
+| Verb | Effect |
+|---|---|
+| `ryeos project register <path> [--name <name>] [--owner fp:<hex>]` | Register a live checkout under `fp:<owner>/<name>`. The checkout's `.ai/project.yaml` (`schema: 1`, `name: <name>`) must declare the name, and `--name` defaults to it. The owner defaults to the node's operator and is never the node key or the authoring key |
+| `ryeos project unregister <path> [--name <name>] [--owner fp:<hex>]` | Remove the checkout from the registration; the record is deleted when no checkout remains. A checkout that no longer exists is unregistered by naming `--name` |
+
+Both are signed offline operations (`node.project.register`,
+`node.project.unregister`; local signer only) and refuse on a running node with
+`node_running_trust_change`. A path that is `/`, the node app root, an ancestor
+of it or inside it is refused. Each registration is a node-signed record at
+`<app_root>/.ai/node/projects/<owner-hex>/<name>.yaml` listing the canonical
+checkout paths. Refusal codes: `project_undeclared`, `project_name_mismatch`,
+`project_name_required`, `project_owner_is_node_key`,
+`project_owner_is_authoring_key`.
+
+Registrations are inert for now: only `ryeos node doctor` reads them. At the
+owner+name trust cut they become what lets a live checkout state its project
+identity, so registrations made before the cut become trust at the cut.
 
 ### Key rotation
 
