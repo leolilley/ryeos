@@ -14,7 +14,8 @@ use serde::Serialize;
 pub use ryeos_app::project_registry::{
     LoadedRegistration, MAX_REGISTERED_PATHS, PROJECT_REGISTRATION_SCHEMA, PROJECTS_DIR,
     ProjectRegistration, inspect_checkout, live_signer_project, load_registrations,
-    owner_directory_name, projects_dir, read_registration, validate_checkout_path,
+    load_registrations_reporting, owner_directory_name, projects_dir, read_registration,
+    validate_checkout_path,
 };
 
 /// What a register or unregister request asks for, after the handler has
