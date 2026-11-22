@@ -1799,6 +1799,59 @@ mod tests {
     }
 
     #[test]
+    fn launch_entries_resolve_scoped_signers_per_launch_identity_only() {
+        let (sk, vk, fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let alpha = format!("{PROJECT_OWNER}/alpha");
+        let record = record_for(
+            &vk,
+            SignerRole::ProjectAuthor,
+            vec![SignerSpace::Project, SignerSpace::Bundle],
+            &["*"],
+            &[alpha.as_str()],
+            SignerStatus::Active,
+        );
+        let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
+        let entry_for = |project: &LogicalProject| {
+            store
+                .launch_signer_entries(&store, project)
+                .into_iter()
+                .find(|entry| entry.fingerprint == fp)
+        };
+        // A launch of the scoped project carries the signer unscoped for it.
+        let own = entry_for(stated_project("alpha")).unwrap();
+        assert!(own.scope.projects.is_empty());
+        assert!(own.scope.spaces.contains(&SignerSpace::Project));
+        // A child or second launch into another project gets no widened entry:
+        // the signer loses project space there, keeping only its other spaces.
+        for other in [stated_project("beta"), absent_project()] {
+            let entry = entry_for(other).unwrap();
+            assert!(
+                !entry.scope.spaces.contains(&SignerSpace::Project),
+                "{other}"
+            );
+            assert_eq!(entry.scope.spaces, vec![SignerSpace::Bundle]);
+            // A runtime rebuilt from that entry never trusts the signer's
+            // project items, whatever project context it judges.
+            let rebuilt = TrustStore::from_signer_entries(&[entry]).unwrap();
+            let (content, envelope, header) = signed_with_header(&sk, &fp);
+            let ctx = SignerContext::project("tool", stated_project("alpha"));
+            let (class, _) =
+                verify_item_signature(&content, &header, &envelope, &rebuilt, &ctx).unwrap();
+            assert_eq!(class, TrustClass::Untrusted, "{other}");
+        }
+        // The resolution is computed afresh for every launch from the store,
+        // not cached: the same store still widens for alpha afterwards.
+        assert!(
+            entry_for(stated_project("alpha"))
+                .unwrap()
+                .scope
+                .projects
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn revoked_signer_does_not_verify() {
         let (sk, vk, fp) = gen_key();
         let (_, node_vk, _) = gen_key2();
