@@ -497,6 +497,22 @@ impl NodeJournal {
         &self,
         facts: &ProjectAttachmentFacts<'_>,
     ) -> Result<SignedJournalRecord, JournalError> {
+        // One grant is one record: a retried admission of the same creation
+        // request retains the same attachment and finds its record here.
+        if self.dir.exists() {
+            let read = self.read().map_err(JournalError::Integrity)?;
+            if let Some(existing) = read.records.into_iter().find(|record| {
+                record.body.record_type == JournalType::ProjectAttachmentOpened
+                    && record
+                        .body
+                        .detail
+                        .get("attachment_id")
+                        .and_then(Value::as_str)
+                        == Some(facts.attachment_id)
+            }) {
+                return Ok(existing);
+            }
+        }
         self.append(project_attachment_draft(facts))
     }
 

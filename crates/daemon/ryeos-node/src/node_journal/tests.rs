@@ -581,6 +581,21 @@ fn project_attachment_opening_is_journaled_with_who_root_attachment_and_time() {
         "attachment-root"
     );
     assert!(!record.body.recorded_at.is_empty());
+    // A retry of the same grant adds no second record.
+    let again = fx
+        .journal()
+        .record_project_attachment_opened(&ProjectAttachmentFacts {
+            principal: &principal,
+            local_id: "proj-1",
+            root: "/srv/projects/alpha",
+            session_id: "session-1",
+            presentation_id: "presentation-1",
+            requesting_attachment_id: "attachment-root",
+            attachment_id: "attachment-new",
+            creation_request_id: "creation-1",
+        })
+        .unwrap();
+    assert_eq!(again, record);
     assert_eq!(
         serde_json::to_value(JournalType::ProjectAttachmentOpened).unwrap(),
         "project.attachment_opened"
