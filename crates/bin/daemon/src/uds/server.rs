@@ -1235,6 +1235,11 @@ struct RuntimeFinalizeCost {
     total_usd: ryeos_runtime::envelope::UsdNanos,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     basis: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "ryeos_runtime::envelope::UsageStatus::is_complete"
+    )]
+    usage_status: ryeos_runtime::envelope::UsageStatus,
 }
 
 fn final_cost_from_runtime(
@@ -1248,17 +1253,15 @@ fn final_cost_from_runtime(
         output_tokens: cost.output_tokens,
         total_usd: cost.total_usd,
         basis: cost.basis.clone(),
+        usage_status: cost.usage_status,
     };
     runtime_cost.validate()?;
-    Ok(ryeos_engine::contracts::FinalCost {
-        turns: 0,
-        input_tokens: runtime_cost.input_tokens,
-        output_tokens: runtime_cost.output_tokens,
-        spend: runtime_cost.total_usd,
-        provider: None,
-        basis: runtime_cost.basis,
-        metadata: None,
-    })
+    Ok(ryeos_engine::contracts::FinalCost::from_runtime(
+        &runtime_cost,
+        0,
+        None,
+        None,
+    ))
 }
 
 async fn handle_finalize(
@@ -3576,18 +3579,21 @@ mod tests {
                 output_tokens: 2,
                 total_usd: usd("0.01"),
                 basis: Some("estimate".to_string()),
+                usage_status: Default::default(),
             },
             RuntimeFinalizeCost {
                 input_tokens: i64::MAX as u64 + 1,
                 output_tokens: 2,
                 total_usd: usd("0.01"),
                 basis: None,
+                usage_status: Default::default(),
             },
             RuntimeFinalizeCost {
                 input_tokens: 1,
                 output_tokens: i64::MAX as u64 + 1,
                 total_usd: usd("0.01"),
                 basis: None,
+                usage_status: Default::default(),
             },
         ] {
             assert!(final_cost_from_runtime(&cost).is_err());
@@ -5094,6 +5100,7 @@ mod tests {
                         spend: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.001").unwrap(),
                         provider: None,
                         basis: None,
+                        usage_status: Default::default(),
                         metadata: None,
                     }),
                     summary_json: None,

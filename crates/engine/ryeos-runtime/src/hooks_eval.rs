@@ -181,6 +181,7 @@ pub async fn run_hooks(
                 output_tokens: 0,
                 total_usd: crate::envelope::UsdNanos::ZERO,
                 basis: Some(COST_BASIS_ROLLUP.to_string()),
+                usage_status: Default::default(),
             });
             if let Err(error) = aggregate.checked_accumulate(&cost) {
                 return Err(HookRunError::new(
@@ -555,6 +556,7 @@ mod tests {
                         output_tokens: 3,
                         total_usd: crate::envelope::UsdNanos::parse_canonical("0.25").unwrap(),
                         basis: None,
+                        usage_status: Default::default(),
                     }),
                     failure: None,
                 })
@@ -870,6 +872,7 @@ mod tests {
                         output_tokens: 0,
                         total_usd: crate::envelope::UsdNanos::ZERO,
                         basis: None,
+                        usage_status: Default::default(),
                     }),
                     failure: None,
                 })

@@ -10,7 +10,7 @@ pub use ryeos_engine::launch_envelope_types::{
     AggregateExecutionLimits, COST_BASIS_ROLLUP, DeadlineLimits, EnvelopeAccountingScope,
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, ItemDescriptor,
     LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeCost, RuntimeCostError, RuntimeResult,
-    RuntimeResultStatus, UsdNanos,
+    RuntimeResultStatus, UsageStatus, UsdNanos,
 };
 
 /// Canonical managed-runtime result for the provider-neutral dedicated-session
@@ -87,6 +87,7 @@ pub fn worker_result_cost(session: &serde_json::Value) -> Option<RuntimeCost> {
         output_tokens,
         total_usd: UsdNanos::from_nanos(nanos).ok()?,
         basis: None,
+        usage_status: Default::default(),
     };
     cost.validate().ok()?;
     Some(cost)
@@ -753,6 +754,7 @@ mod tests {
             output_tokens: 4,
             total_usd: UsdNanos::from_nanos(5_000).unwrap(),
             basis: None,
+            usage_status: Default::default(),
         };
         let value = worker_follow_value(
             "T-child",
