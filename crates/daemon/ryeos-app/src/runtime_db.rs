@@ -15447,11 +15447,12 @@ impl RuntimeDb {
             };
             let session_changed = if cleanup_state == "reaped" {
                 tx.execute(
-                    "UPDATE dedicated_session
+                    &format!("UPDATE dedicated_session
                     SET worker_instance_id=NULL, worker_boot_epoch=NULL, worker_scope=NULL, state=?4,
                         send_boundary=?5, current_turn_id=NULL, updated_at_ms=?6
                   WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
-                    AND state NOT IN ('terminal','frozen','publish_ready')",
+                    AND state IN ({})",
+                        crate::dedicated_session_service::worker_fence_moved_states_sql()),
                     params![
                         placement_thread_id,
                         worker_instance_id,
@@ -15466,10 +15467,11 @@ impl RuntimeDb {
                 // the exact worker identity and profile fence so revocation and
                 // recovery can never mistake it for a safely unattached session.
                 tx.execute(
-                    "UPDATE dedicated_session
+                    &format!("UPDATE dedicated_session
                     SET state='outcome_unknown', send_boundary='outcome_unknown', updated_at_ms=?4
                   WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
-                    AND state NOT IN ('terminal','frozen','publish_ready')",
+                    AND state IN ({})",
+                        crate::dedicated_session_service::worker_fence_moved_states_sql()),
                     params![placement_thread_id, worker_instance_id, epoch, now],
                 )?
             };

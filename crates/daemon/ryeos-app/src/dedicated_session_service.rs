@@ -6823,6 +6823,12 @@ pub struct SessionStatePolicy {
     /// candidate-holding states are excluded: their settlement is the
     /// candidate path's.
     pub settles_without_worker: bool,
+    /// The abandoned-worker fence moves a session of this state to
+    /// `recovering` (or `outcome_unknown`). `false` states are left to their
+    /// own path and the fence refuses them. In practice no candidate state
+    /// can meet a live worker: its worker is already dead and reaped before
+    /// the session leaves `recovering`/`idle` for the candidate path.
+    pub worker_fence_moves_session: bool,
 }
 
 const fn session_policy(
@@ -6830,35 +6836,66 @@ const fn session_policy(
     retires_before_capture: bool,
     root_resume: SessionRootResume,
     settles_without_worker: bool,
+    worker_fence_moves_session: bool,
 ) -> SessionStatePolicy {
     SessionStatePolicy {
         state,
         retires_before_capture,
         root_resume,
         settles_without_worker,
+        worker_fence_moves_session,
     }
 }
 
 /// One row per dedicated-session state, pinned to the runtime schema's state
 /// set by a test. Every state-keyed decision reads this table.
 pub const SESSION_STATE_POLICY: [SessionStatePolicy; 16] = [
-    session_policy("admitted", true, SessionRootResume::Resume, true),
-    session_policy("binding", true, SessionRootResume::Resume, true),
-    session_policy("idle", true, SessionRootResume::Resume, false),
-    session_policy("turn_running", true, SessionRootResume::Resume, false),
-    session_policy("awaiting_approval", true, SessionRootResume::Resume, false),
-    session_policy("recovering", true, SessionRootResume::Resume, true),
-    session_policy("outcome_unknown", true, SessionRootResume::Resume, true),
-    session_policy("draining", true, SessionRootResume::Resume, false),
-    session_policy("freezing", false, SessionRootResume::Hold, false),
-    session_policy("frozen", false, SessionRootResume::Hold, false),
-    session_policy("verifying", false, SessionRootResume::Hold, false),
-    session_policy("qualifying", false, SessionRootResume::Hold, false),
-    session_policy("publish_ready", false, SessionRootResume::Hold, false),
-    session_policy("publishing", false, SessionRootResume::Hold, false),
-    session_policy("discarding", false, SessionRootResume::Hold, false),
-    session_policy("terminal", false, SessionRootResume::Finalise, false),
+    session_policy("admitted", true, SessionRootResume::Resume, true, true),
+    session_policy("binding", true, SessionRootResume::Resume, true, true),
+    session_policy("idle", true, SessionRootResume::Resume, false, true),
+    session_policy("turn_running", true, SessionRootResume::Resume, false, true),
+    session_policy(
+        "awaiting_approval",
+        true,
+        SessionRootResume::Resume,
+        false,
+        true,
+    ),
+    session_policy("recovering", true, SessionRootResume::Resume, true, true),
+    session_policy(
+        "outcome_unknown",
+        true,
+        SessionRootResume::Resume,
+        true,
+        true,
+    ),
+    session_policy("draining", true, SessionRootResume::Resume, false, true),
+    session_policy("freezing", false, SessionRootResume::Hold, false, true),
+    session_policy("frozen", false, SessionRootResume::Hold, false, false),
+    session_policy("verifying", false, SessionRootResume::Hold, false, true),
+    session_policy("qualifying", false, SessionRootResume::Hold, false, true),
+    session_policy(
+        "publish_ready",
+        false,
+        SessionRootResume::Hold,
+        false,
+        false,
+    ),
+    session_policy("publishing", false, SessionRootResume::Hold, false, true),
+    session_policy("discarding", false, SessionRootResume::Hold, false, true),
+    session_policy("terminal", false, SessionRootResume::Finalise, false, false),
 ];
+
+/// The SQL list of states the abandoned-worker fence moves, read from the
+/// table. Every element is a static state name from [`SESSION_STATE_POLICY`].
+pub fn worker_fence_moved_states_sql() -> String {
+    SESSION_STATE_POLICY
+        .iter()
+        .filter(|policy| policy.worker_fence_moves_session)
+        .map(|policy| format!("'{}'", policy.state))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 fn session_state_policy(session_state: &str) -> Option<&'static SessionStatePolicy> {
     SESSION_STATE_POLICY
@@ -7109,6 +7146,23 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_worker_fence_list_is_the_table_and_pins_current_behaviour() {
+        for policy in SESSION_STATE_POLICY {
+            assert_eq!(
+                policy.worker_fence_moves_session,
+                !matches!(policy.state, "terminal" | "frozen" | "publish_ready"),
+                "{}",
+                policy.state
+            );
+        }
+        let list = worker_fence_moved_states_sql();
+        assert_eq!(list.split(',').count(), 13);
+        for excluded in ["terminal", "frozen", "publish_ready"] {
+            assert!(!list.contains(excluded), "{excluded}");
+        }
+    }
 
     #[test]
     fn only_running_or_recoverable_states_settle_without_a_worker() {
