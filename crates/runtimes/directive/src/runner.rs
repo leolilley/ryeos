@@ -804,10 +804,6 @@ pub struct Runner {
     /// digests the latest compaction carried, or the predecessor turns a
     /// successor's start left out. At most the settings' `carry_len`.
     guard_prefix: Vec<crate::loop_guards::TurnDigest>,
-    /// How many turns of history the record this run resumed from carried,
-    /// when that is fewer than the settings want. Logged once; kept so the
-    /// state is inspectable.
-    guard_history_shortfall: Option<u32>,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -1706,7 +1702,6 @@ impl Runner {
             wrap_up_delivered: crate::resume::WrapUpDelivered::default(),
             loop_warned: std::collections::BTreeMap::new(),
             guard_prefix: Vec::new(),
-            guard_history_shortfall: None,
             continuation_config: continuation,
             sampling,
             reasoning,
@@ -1898,7 +1893,6 @@ impl Runner {
         runner.guard_prefix = guard_prefix;
         runner.trim_guard_prefix();
         if let Some(carried) = guard_history.shortfall(&runner.execution.loop_guards) {
-            runner.guard_history_shortfall = Some(carried);
             // The loop detectors run on the history that exists. A compaction
             // record written under shorter loop-guard settings (or with the
             // guards off) carried less than these settings read, so a run
