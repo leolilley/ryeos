@@ -284,11 +284,14 @@ pub fn finalize_pinned_qualification_launch(
     // and consumer slot instead of assuming dispatch preflight projected a
     // resolved selection into the root ResolutionOutput.
     let subject_authority = &plan_context.subject_resolution_authority;
+    // A pinned generation's checkout is temporary: with no stated logical
+    // project the launch is refused rather than judged on that path.
+    let logical_project_root = project_authority
+        .logical_project_root(&plan_context.current_site_id)
+        .context("pinned qualification names no logical project; its checkout is not judged")?;
     let roots = request_engine
         .resolution_roots(Some(project_root.to_path_buf()))
-        .with_logical_project_root(
-            project_authority.logical_project_root(&plan_context.current_site_id),
-        );
+        .with_logical_project_root(Some(logical_project_root));
     let selectors = prepared
         .product_selections
         .iter()
@@ -4886,11 +4889,17 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     {
         bail!("qualification binding subject authority differs from its sealed verifier capsule");
     }
+    let logical_project_root = plan_context.effective_logical_project_root(project_root.as_deref());
+    if project_root.is_some() && logical_project_root.is_none() {
+        // A pinned verifier generation's checkout is temporary: with no stated
+        // logical project the identity is refused rather than judged on it.
+        bail!(
+            "qualification verifier generation names no logical project; its checkout is not judged"
+        );
+    }
     let roots = request_engine
         .resolution_roots(project_root.clone())
-        .with_logical_project_root(
-            plan_context.effective_logical_project_root(project_root.as_deref()),
-        );
+        .with_logical_project_root(logical_project_root);
     // Admit the exact current subject before choosing its execution route.
     // A signed delegated runtime need not declare a root executor chain.
     let preflight = crate::thread_lifecycle::preflight_root_execution(
