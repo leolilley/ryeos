@@ -51,6 +51,7 @@ async fn a_run_that_repeats_one_call_is_warned_then_stopped_with_a_typed_failure
         &repeat_calls(10),
         RigOptions {
             spill_tools: true,
+            loop_guards: true,
             ..RigOptions::default()
         },
     )
@@ -87,6 +88,7 @@ async fn the_last_permitted_turn_carries_the_wrap_up_input() {
         RigOptions {
             spill_tools: true,
             limits: Some((2, 0)),
+            loop_guards: true,
             ..RigOptions::default()
         },
     )

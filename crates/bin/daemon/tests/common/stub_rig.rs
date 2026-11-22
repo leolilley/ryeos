@@ -434,6 +434,10 @@ fn configure_phase_child(
 
 pub struct RigOptions {
     pub exec_yaml: Option<String>,
+    /// Whether the runtime's loop guards stay on. Off by default: a scripted
+    /// stub model repeats the same turn, which the guards would end as a
+    /// repeating run; only a test of the guards turns them on.
+    pub loop_guards: bool,
     /// The continuation runtime config, including the compaction policy.
     pub continuation_yaml: Option<String>,
     /// A runtime recovery stage the directive runtime reports and then blocks
@@ -480,6 +484,7 @@ impl Default for RigOptions {
     fn default() -> Self {
         Self {
             exec_yaml: None,
+            loop_guards: false,
             continuation_yaml: None,
             phase_cut: None,
             context_window: 200_000,
@@ -620,8 +625,19 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let aux = tempfile::tempdir()?;
     let root = project.path();
     plant_routing(root, opts.context_window, &fixture.publisher)?;
-    if let Some(yaml) = &opts.exec_yaml {
-        plant_execution(root, yaml, &fixture.publisher)?;
+    match (&opts.exec_yaml, opts.loop_guards) {
+        (Some(yaml), true) => plant_execution(root, yaml, &fixture.publisher)?,
+        (Some(yaml), false) => plant_execution(
+            root,
+            &format!("{yaml}\nloop_guards:\n  enabled: false\n"),
+            &fixture.publisher,
+        )?,
+        (None, true) => {}
+        (None, false) => plant_execution(
+            root,
+            "category: \"ryeos-runtime\"\nloop_guards:\n  enabled: false\n",
+            &fixture.publisher,
+        )?,
     }
     if let Some(yaml) = &opts.continuation_yaml {
         plant_continuation(root, yaml, &fixture.publisher)?;
