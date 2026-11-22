@@ -359,7 +359,10 @@ fn check_imports(
         }
     };
     let isolation_bundle_roots = engine
-        .resolution_roots(Some(project_path.clone()))
+        .resolution_roots(
+            Some(project_path.clone()),
+            ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        )
         .ordered
         .iter()
         .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
@@ -367,7 +370,7 @@ fn check_imports(
         .collect::<Vec<_>>();
 
     let plan_ctx = PlanContext {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:doctor".into(),
             scopes: vec!["execute".into()],

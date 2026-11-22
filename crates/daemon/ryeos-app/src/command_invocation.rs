@@ -37,7 +37,9 @@ pub fn normalize_selected_parameters(
     }
     let effective = engine
         .effective_item(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                None, &authority,
+            ),
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
                 .map_err(|e| e.to_string())?,
             expected_kind: None,

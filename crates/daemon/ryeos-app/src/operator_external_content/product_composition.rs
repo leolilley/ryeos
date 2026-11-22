@@ -475,7 +475,7 @@ fn relationship_resolution_request(
         }
     };
     Ok(ryeos_engine::engine::EffectiveItemRequest {
-        logical_project_root: roots.logical_project_root.clone(),
+        logical_project: roots.logical_project.clone(),
         item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(relationship_ref)?,
         expected_kind: Some("config".to_owned()),
         project_root,
@@ -1165,7 +1165,13 @@ mod tests {
     fn relationship_lookup_preserves_admitted_cow_operational_generation_and_root() {
         use ryeos_engine::item_resolution::ResolutionRoots;
         let root = std::path::PathBuf::from("/admitted/exact-source-generation");
-        let roots = ResolutionRoots::from_registered(Some(root.clone()), &[]);
+        let roots = ResolutionRoots::from_registered(
+            Some(root.clone()),
+            &[],
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+            ),
+        );
         let base = "a".repeat(64);
         for generation in ["b".repeat(64), "c".repeat(64)] {
             let subject = SubjectResolutionAuthority::CowWorkspace {
@@ -1204,26 +1210,49 @@ mod tests {
         let pinned = SubjectResolutionAuthority::PinnedGeneration {
             snapshot_hash: "a".repeat(64),
         };
-        let stated = ResolutionRoots::from_registered(Some(checkout.clone()), &[])
-            .with_logical_project_root(Some(logical.clone()));
+        let stated = ResolutionRoots::from_registered(
+            Some(checkout.clone()),
+            &[],
+            ryeos_engine::contracts::LogicalProject::Stated(logical.clone()),
+        );
         let request =
             relationship_resolution_request(&stated, &pinned, "config:example/relationships")
                 .unwrap();
-        assert_eq!(request.logical_project_root, Some(logical));
+        assert_eq!(
+            request.logical_project,
+            ryeos_engine::contracts::LogicalProject::Stated(logical)
+        );
         assert_eq!(request.project_root, Some(checkout.clone()));
 
-        let unstated = ResolutionRoots::from_registered(Some(checkout.clone()), &[]);
+        let unstated = ResolutionRoots::from_registered(
+            Some(checkout.clone()),
+            &[],
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+            ),
+        );
         let request =
             relationship_resolution_request(&unstated, &pinned, "config:example/relationships")
                 .unwrap();
-        assert_eq!(request.logical_project_root, None);
+        assert_eq!(
+            request.logical_project,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotStated
+            )
+        );
         assert_eq!(request.project_root, Some(checkout));
     }
 
     #[test]
     fn relationship_lookup_never_promotes_live_or_loose_roots() {
         use ryeos_engine::item_resolution::ResolutionRoots;
-        let roots = ResolutionRoots::from_registered(None, &[]);
+        let roots = ResolutionRoots::from_registered(
+            None,
+            &[],
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
+        );
         let projectless = relationship_resolution_request(
             &roots,
             &SubjectResolutionAuthority::Projectless,
@@ -1242,11 +1271,21 @@ mod tests {
         assert!(
             relationship_resolution_request(&roots, &cow, "config:example/relationships").is_err()
         );
-        let loose = ResolutionRoots::from_flat(Some("/loose/project/.ai".into()), vec![]);
+        let loose = ResolutionRoots::from_flat(
+            Some("/loose/project/.ai".into()),
+            vec![],
+            ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        );
         assert!(
             relationship_resolution_request(&loose, &cow, "config:example/relationships").is_err()
         );
-        let registered = ResolutionRoots::from_registered(Some("/admitted/source".into()), &[]);
+        let registered = ResolutionRoots::from_registered(
+            Some("/admitted/source".into()),
+            &[],
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+            ),
+        );
         assert!(
             relationship_resolution_request(
                 &registered,
@@ -1457,7 +1496,12 @@ mod tests {
             snapshot_hash: "d".repeat(64),
         };
         let recorded = |engine: &ryeos_engine::engine::Engine| {
-            let roots = engine.resolution_roots(Some(project.clone()));
+            let roots = engine.resolution_roots(
+                Some(project.clone()),
+                ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+                ),
+            );
             let resolution = engine
                 .effective_resolution_output(
                     relationship_resolution_request(&roots, &subject, REF).unwrap(),
