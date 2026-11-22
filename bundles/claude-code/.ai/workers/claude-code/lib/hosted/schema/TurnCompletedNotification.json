@@ -48,8 +48,18 @@
               "minimum": 0
             },
             "cost_micro_usd": {
-              "type": "integer",
+              "type": [
+                "integer",
+                "null"
+              ],
               "minimum": 0
+            },
+            "cost_status": {
+              "type": "string",
+              "enum": [
+                "known",
+                "unknown"
+              ]
             }
           },
           "required": [

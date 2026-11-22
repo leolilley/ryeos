@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use ryeos_accounting::UsdNanos;
 use serde_json::{Map, Value, json};
 
 /// The longest result text a turn reports.
@@ -356,7 +357,9 @@ impl StreamParser {
 
     /// Usage from the `result` event when there is one; otherwise the
     /// per-message snapshots, whose output counts are a lower bound and whose
-    /// cost is unknown.
+    /// cost is unknown. An unknown cost reports `cost_micro_usd: null` with
+    /// `cost_status: "unknown"`, never zero: a truncated turn must not look
+    /// free to anything that totals spend.
     fn usage(&self) -> (Value, &'static str, Value) {
         let mut by_model = Map::new();
         let (counts, cost, source) = match self.result.as_ref() {
@@ -390,7 +393,7 @@ impl StreamParser {
                     entry["output_tokens"] =
                         json!(entry["output_tokens"].as_u64().unwrap_or(0) + counts.output);
                 }
-                (total, other.map_or(0, cost_micro_usd), "messages")
+                (total, other.and_then(cost_micro_usd), "messages")
             }
         };
         (
@@ -398,6 +401,7 @@ impl StreamParser {
                 "input_tokens": counts.input,
                 "output_tokens": counts.output,
                 "cost_micro_usd": cost,
+                "cost_status": if cost.is_some() { "known" } else { "unknown" },
             }),
             source,
             Value::Object(by_model),
@@ -405,12 +409,18 @@ impl StreamParser {
     }
 }
 
-fn cost_micro_usd(result: &Value) -> u64 {
-    result
-        .get("total_cost_usd")
-        .and_then(Value::as_f64)
-        .filter(|cost| cost.is_finite() && *cost > 0.0)
-        .map_or(0, |cost| (cost * 1_000_000.0).round() as u64)
+/// The result event's reported cost in whole micro-dollars, rounded up so a
+/// fractional micro-dollar is never dropped. `None` when the event reports no
+/// usable figure (absent, not a number, negative, non-finite or beyond the
+/// money range); a reported `0` is a known zero. The float enters the exact
+/// domain through the accounting crate's single round-up quantizer, the same
+/// one the HTTP provider path uses.
+fn cost_micro_usd(result: &Value) -> Option<u64> {
+    let reported = result.get("total_cost_usd").and_then(Value::as_f64)?;
+    let (nanos, _) = UsdNanos::quantize_reported_f64_round_up(reported).ok()?;
+    u64::try_from(nanos.as_nanos())
+        .ok()
+        .map(|nanos| nanos.div_ceil(1_000))
 }
 
 #[cfg(test)]
@@ -464,6 +474,7 @@ mod tests {
         assert_eq!(result["usage"]["input_tokens"], 32 + 250 + 30);
         assert_eq!(result["usage"]["output_tokens"], 410);
         assert_eq!(result["usage"]["cost_micro_usd"], 42_100);
+        assert_eq!(result["usage"]["cost_status"], "known");
         assert_eq!(result["usage_source"], "result");
         assert_eq!(result["models"]["declared"], "claude-opus-5-5");
         assert_eq!(result["models"]["called"], json!(["claude-opus-5-5"]));
@@ -482,7 +493,8 @@ mod tests {
         // msg_01 is counted once, at its last snapshot; the subagent counts too.
         assert_eq!(result["usage"]["input_tokens"], (12 + 100) + 3 + (20 + 150));
         assert_eq!(result["usage"]["output_tokens"], 40 + 5 + 9);
-        assert_eq!(result["usage"]["cost_micro_usd"], 0);
+        assert_eq!(result["usage"]["cost_micro_usd"], Value::Null);
+        assert_eq!(result["usage"]["cost_status"], "unknown");
         assert_eq!(result["usage_source"], "messages");
         // The subagent's text is not the final message.
         assert_eq!(result["text"], "Done: wrote /work/out.txt");
@@ -635,5 +647,74 @@ mod tests {
         parser.on_line(line("last").as_bytes(), start + Duration::from_secs(2));
         let (_, result) = parser.complete(&End::Interrupted, "");
         assert_eq!(result["text"], "last");
+    }
+
+    fn result_with_cost(cost: &str) -> Value {
+        serde_json::from_str(&format!(
+            r#"{{"type":"result","subtype":"success","total_cost_usd":{cost}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn cost_rounds_up_to_the_next_micro_dollar_and_exact_values_are_unchanged() {
+        for (reported, micro) in [
+            ("0.0421", Some(42_100)),
+            ("0.5", Some(500_000)),
+            ("0.000001", Some(1)),
+            ("0.0000010000001", Some(2)),
+            ("0.0000019999999", Some(2)),
+            ("0.0000000001", Some(1)),
+            ("1.0000001", Some(1_000_001)),
+            ("0", Some(0)),
+            ("0.0", Some(0)),
+            ("-0.5", None),
+            ("1e300", None),
+        ] {
+            assert_eq!(
+                cost_micro_usd(&result_with_cost(reported)),
+                micro,
+                "{reported}"
+            );
+        }
+        assert_eq!(cost_micro_usd(&json!({"type": "result"})), None);
+        assert_eq!(
+            cost_micro_usd(&json!({"total_cost_usd": "0.5"})),
+            None,
+            "a non-number is unknown"
+        );
+    }
+
+    #[test]
+    fn a_truncated_stream_reports_unknown_cost_not_zero() {
+        let mut parser = parser();
+        feed(&mut parser, &[INIT, FIRST_FINAL]);
+        let (_, result) = parser.complete(&End::Exited(None), "");
+        assert!(result["usage"]["cost_micro_usd"].is_null());
+        assert_eq!(result["usage"]["cost_status"], "unknown");
+        // The token counts are still a lower bound, reported as numbers.
+        assert_eq!(result["usage"]["input_tokens"], 112);
+    }
+
+    #[test]
+    fn a_result_event_without_a_cost_is_unknown_and_with_a_zero_cost_is_known() {
+        for (event, status, micro) in [
+            (
+                r#"{"type":"result","subtype":"success","result":"x"}"#,
+                "unknown",
+                Value::Null,
+            ),
+            (
+                r#"{"type":"result","subtype":"success","result":"x","total_cost_usd":0}"#,
+                "known",
+                json!(0),
+            ),
+        ] {
+            let mut parser = parser();
+            feed(&mut parser, &[INIT, FIRST_FINAL, event]);
+            let (_, result) = parser.complete(&End::Exited(Some(0)), "");
+            assert_eq!(result["usage"]["cost_status"], status);
+            assert_eq!(result["usage"]["cost_micro_usd"], micro);
+        }
     }
 }
