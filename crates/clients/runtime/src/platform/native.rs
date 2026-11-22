@@ -343,6 +343,22 @@ impl Transport for NativeTransport {
         Link::text(path, response).await
     }
 
+    async fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, RuntimeError> {
+        let request = self.link.get_request(path, Some("image/*"))?;
+        let response = self.link.send(path, request).await?;
+        if !response.status().is_success() {
+            return Err(Link::refusal(path, response).await);
+        }
+        let unreadable = || RuntimeError::UnreadableResponse {
+            path: path.to_owned(),
+        };
+        let body = response.bytes().await.map_err(|_| unreadable())?;
+        if body.len() > max_bytes {
+            return Err(unreadable());
+        }
+        Ok(body.to_vec())
+    }
+
     async fn post_encoded(&self, path: &str, body: String) -> Result<String, RuntimeError> {
         let request = self.link.post_request(path, body, "application/json")?;
         let response = self.link.send(path, request).await?;

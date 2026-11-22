@@ -1,0 +1,73 @@
+# ryeos:signed:2026-11-22T00:22:30Z:dd33e42ef31fdd1ebd4f8d2bb23216071e0dbdd06b1a87875ee3892b8c28264f:Hl1P191MwoQv+EA0i/iYqWGP9i2GndJg6h2UixvLnSu04pvhw7M4bqK+5+Eiv67+gBbbip5SS/knC9ZaIsykAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/theme"
+version: "1.0.0"
+# A project file may not take the ref of a theme an installed bundle
+# supplies, so a project can never replace the node's look or its pictures.
+project_shadowing: refuse
+location:
+  directory: themes
+effective_trust:
+  include_references: false
+resolution: []
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+# A theme is a signed, non-executable record of how an installation looks:
+# its colours (`palette`) and its pictures (`grounds`, `surface_grounds`).
+# A principal's stored preference names a theme by ref, or `system`, which a
+# signed config maps to one dark and one light theme.
+#
+#   id            the file name, e.g. `night` for `theme:ryeos/night`
+#   title         what a person reads in a theme list
+#   palette       the six colours every opacity step is derived from, each
+#                 a `#rrggbb` hex string
+#   grounds       picture choice by slot: `<slot>: [{picture, role?}]`. A slot
+#                 is an opaque word that a view's `art_slot` meets by string
+#                 equality; the picture for a subject is the list entry at
+#                 sha256(subject key) mod list length
+#   surface_grounds
+#                 the picture drawn behind a named Surface:
+#                 `<surface ref>: {picture, role?}`
+#   content, voice
+#                 reserved for what a theme will say and how it will say it.
+#                 Nothing reads them yet; they are accepted so a theme can
+#                 gain them as data without a change to this contract
+#
+# A picture is named by its `picture:` item ref and an optional rendition
+# role, never by hash: the daemon resolves the ref to the signed picture
+# record and supplies the hash.
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required:
+    id: { type: single, prim: string }
+    title: { type: single, prim: string }
+    palette:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          bg: { type: single, prim: string }
+          ink: { type: single, prim: string }
+          accent: { type: single, prim: string }
+          good: { type: single, prim: string }
+          warn: { type: single, prim: string }
+          danger: { type: single, prim: string }
+        optional: {}
+  optional:
+    grounds: { type: single, prim: mapping }
+    surface_grounds: { type: single, prim: mapping }
+    content: { type: single, prim: mapping }
+    voice: { type: single, prim: mapping }
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+      match: filename
+    category:
+      from: relative_dir
+      required: true

@@ -140,6 +140,10 @@ pub fn shell(
         .h_full()
         .fill(p.bg)
         .on_layout(|app: &mut App, rect: [f32; 4]| app.set_viewport(rect[2], rect[3]));
+    // The ground is pinned behind everything and takes no part in layout.
+    if let Some(ground) = ground(vm, local) {
+        page = page.child(ground);
+    }
     // The side switcher is pinned, so its place in the child list does not
     // move it on screen; first here, keyboard focus starts at the open
     // Surfaces.
@@ -181,6 +185,49 @@ pub fn shell(
         page = page.child(views::actions_menu(key, intents));
     }
     page
+}
+
+/// The picture drawn behind the panels: the active Surface's ground in the
+/// theme in force, once the daemon's granted bytes are fetched and decoded.
+/// Dimmed and softened, with a vertical wash of the theme's ground colour so
+/// the words above it keep their contrast. Nothing is drawn when the theme
+/// names no ground for this Surface, when its binding failed
+/// (`picture_state: unavailable`), or while the picture is still arriving:
+/// the Surface is flat, and no other picture stands in.
+fn ground(vm: &RyeOsViewModel, local: &Local) -> Option<El> {
+    let theme_ref = theme::current_theme_ref()?;
+    let art = vm
+        .presentation
+        .theme
+        .grounds
+        .get(&theme_ref)?
+        .picture
+        .as_ref()?;
+    let image = local.pictures.image(&art.sha256)?;
+    let t = Tokens::get();
+    // Keyed by picture, so a Surface with another ground fades one out and
+    // the next in.
+    let picture = el()
+        .key(format!("ground-{}", art.sha256))
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .opacity(theme::GROUND_OPACITY)
+        .pixels_fit(image.pixels(), rune::SurfaceFit::Fill)
+        .blur(theme::GROUND_BLUR);
+    let wash = el()
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .linear_gradient(
+            std::f32::consts::PI,
+            [
+                (0.0, t.bg_at(theme::GROUND_WASH_TOP)),
+                (1.0, t.bg_at(theme::GROUND_WASH_BOTTOM)),
+            ],
+        );
+    Some(
+        el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+            .fill(t.bg)
+            .child(picture)
+            .child(wash),
+    )
 }
 
 /// Where the switcher and the status bar sit, as this frame draws them.

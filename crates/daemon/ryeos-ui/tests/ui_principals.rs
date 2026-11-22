@@ -1,7 +1,7 @@
 // Tests for principal-aware RyeOS UI user-space storage.
 
 use ryeos_ui::test_support as test_state;
-use test_state::{build_test_state, launch_context};
+use test_state::{build_test_state, build_test_state_with_live_bundles, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::{HandlerError, extract_handler_error};
@@ -64,7 +64,7 @@ fn session_context(
 
 #[tokio::test]
 async fn ryeos_config_is_isolated_by_durable_user_principal() {
-    let (tmp, _state_owner, state) = build_test_state();
+    let (tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let principal_a = format!("fp:{}", "aa".repeat(32));
     let principal_b = format!("fp:{}", "bb".repeat(32));
 
@@ -72,14 +72,14 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
     let updated = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment_a.clone(),
         ryeos_ui::handlers::ui_projects::handle_config_update(
-            json!({ "theme": "gruvbox" }),
+            json!({ "theme": "theme:ryeos/gruvbox" }),
             ctx_a.clone(),
             Arc::new(state.clone()),
         ),
     )
     .await
     .expect("principal A should update config");
-    assert_eq!(updated["theme"], "gruvbox");
+    assert_eq!(updated["theme"], "theme:ryeos/gruvbox");
 
     let loaded_a = ryeos_ui::seat_auth::with_compiled_ui_attachment(
         attachment_a,
@@ -91,7 +91,7 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
     )
     .await
     .expect("principal A should read updated config");
-    assert_eq!(loaded_a["theme"], "gruvbox");
+    assert_eq!(loaded_a["theme"], "theme:ryeos/gruvbox");
 
     let (ctx_b, attachment_b) = session_context(&state, &principal_b);
     let loaded_b = ryeos_ui::seat_auth::with_compiled_ui_attachment(
@@ -118,7 +118,7 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
 
 #[tokio::test]
 async fn a_stored_light_or_dark_theme_reads_as_system_and_can_be_replaced() {
-    let (tmp, _state_owner, state) = build_test_state();
+    let (tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let principal = format!("fp:{}", "dd".repeat(32));
     let (ctx, attachment) = session_context(&state, &principal);
     let call = |params: serde_json::Value, update: bool| {
@@ -139,7 +139,7 @@ async fn a_stored_light_or_dark_theme_reads_as_system_and_can_be_replaced() {
             }
         }
     };
-    call(json!({ "theme": "gruvbox" }), true)
+    call(json!({ "theme": "theme:ryeos/gruvbox" }), true)
         .await
         .expect("writes the config file");
     let file = tmp
@@ -148,25 +148,151 @@ async fn a_stored_light_or_dark_theme_reads_as_system_and_can_be_replaced() {
         .join("dd".repeat(32))
         .join("space/.ai/config/ryeos-ui.yaml");
     let text = std::fs::read_to_string(&file).expect("config file");
-    std::fs::write(&file, text.replace("theme: gruvbox", "theme: dark")).expect("rewrite");
+    std::fs::write(
+        &file,
+        text.replace("theme: theme:ryeos/gruvbox", "theme: dark"),
+    )
+    .expect("rewrite");
 
     // The whole config still reads; only the theme is treated as unset.
     let loaded = call(json!(null), false).await.expect("config still reads");
     assert_eq!(loaded["theme"], "system");
     assert_eq!(loaded["landing_view"], "projects");
     // And a config update still works and writes a valid theme back.
-    let updated = call(json!({ "theme": "paper" }), true)
+    let updated = call(json!({ "theme": "theme:ryeos/paper" }), true)
         .await
         .expect("update works over the stale theme");
-    assert_eq!(updated["theme"], "paper");
+    assert_eq!(updated["theme"], "theme:ryeos/paper");
     assert!(
         std::fs::read_to_string(&file)
             .unwrap()
-            .contains("theme: paper")
+            .contains("theme: theme:ryeos/paper")
     );
 }
 
 #[tokio::test]
+#[tokio::test]
+async fn a_theme_that_is_not_installed_is_refused_and_a_stored_one_reads_as_system() {
+    let (tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let principal = format!("fp:{}", "ee".repeat(32));
+    let (ctx, attachment) = session_context(&state, &principal);
+    let update = |theme: &str| {
+        ryeos_ui::seat_auth::with_compiled_ui_attachment(
+            attachment.clone(),
+            ryeos_ui::handlers::ui_projects::handle_config_update(
+                json!({ "theme": theme }),
+                ctx.clone(),
+                Arc::new(state.clone()),
+            ),
+        )
+    };
+    // The earlier palette ids and refs to themes nobody installed are refused.
+    for refused in ["gruvbox", "night", "theme:ryeos/neon", "neon"] {
+        let error = update(refused).await.expect_err(refused);
+        assert!(
+            format!("{error:#}").contains("invalid theme value"),
+            "{refused}: {error:#}"
+        );
+    }
+    update("theme:ryeos/night").await.expect("installed theme");
+
+    // A well-formed ref to a theme that is later uninstalled reads as system.
+    let file = tmp
+        .path()
+        .join(".ai/principals")
+        .join("ee".repeat(32))
+        .join("space/.ai/config/ryeos-ui.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        text.replace("theme: theme:ryeos/night", "theme: theme:ryeos/gone"),
+    )
+    .unwrap();
+    let loaded = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        ryeos_ui::handlers::ui_projects::handle_config_get(json!(null), ctx, Arc::new(state)),
+    )
+    .await
+    .expect("config reads");
+    assert_eq!(loaded["theme"], "system");
+}
+
+#[tokio::test]
+async fn config_get_grants_the_session_the_ground_pictures_of_its_active_themes() {
+    let (_tmp, _state_owner, state) = build_test_state_with_live_bundles();
+    let principal = format!("fp:{}", "ff".repeat(32));
+    let (ctx, attachment) = session_context(&state, &principal);
+    let session_id = ctx.fingerprint.strip_prefix("session:").unwrap().to_owned();
+    let loaded = test_state::with_dispatched_session(
+        &state,
+        &session_id,
+        attachment,
+        ryeos_ui::handlers::ui_projects::handle_config_get(
+            json!(null),
+            ctx,
+            Arc::new(state.clone()),
+        ),
+    )
+    .await
+    .expect("config reads");
+
+    // Stored `system`: the dark and the light theme may be drawn.
+    assert_eq!(loaded["theme"], "system");
+    let catalogue = &loaded["theme_catalogue"];
+    let themes = catalogue["themes"].as_array().expect("themes");
+    let refs: Vec<&str> = themes.iter().map(|t| t["ref"].as_str().unwrap()).collect();
+    assert_eq!(
+        refs,
+        [
+            "theme:ryeos/gruvbox",
+            "theme:ryeos/night",
+            "theme:ryeos/paper"
+        ]
+    );
+    assert_eq!(catalogue["system"]["dark"], "theme:ryeos/night");
+    let session = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&session_id)
+        .unwrap();
+    // The source tree's bundle has no populated picture manifest, so its
+    // grounds read as `unavailable` here; a populated bundle grants the hash.
+    // Either way an active theme carries an entry for the Surface and the
+    // session holds exactly the hashes it was handed.
+    let mut handed = 0;
+    for theme in themes {
+        let ground = &theme["surface_grounds"]["surface:ryeos/ui/lens"];
+        if theme["ref"] == "theme:ryeos/gruvbox" {
+            assert!(ground.is_null(), "an inactive theme carries no ground");
+            continue;
+        }
+        if let Some(hash) = ground["picture"]["sha256"].as_str() {
+            assert_eq!(ground["picture"]["media_type"], "image/webp");
+            assert!(session.art_grants.contains(hash));
+            handed += 1;
+        } else {
+            assert_eq!(ground["picture_state"], "unavailable");
+            assert!(ground["picture"].is_null());
+        }
+    }
+    assert_eq!(session.art_grants.is_empty(), handed == 0);
+
+    // Another session was granted nothing.
+    let (other_ctx, other_attachment) = session_context(&state, &principal);
+    let other_id = other_ctx
+        .fingerprint
+        .strip_prefix("session:")
+        .unwrap()
+        .to_owned();
+    let other = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .get_session(&other_id)
+        .unwrap();
+    assert!(other.art_grants.is_empty());
+    drop(other_attachment);
+}
+
 async fn ryeos_dimension_exposes_session_user_principal() {
     let (_tmp, _state_owner, state) = build_test_state();
     let principal = format!("fp:{}", "cc".repeat(32));

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-20T23:17:59Z:0c6e5db774a876924b4231e9621612385f13ef720a815a016b54f4ebd1b9df65:zNFLO5Hn2ABKgFg1miAT9if75WW8sJEMXE0/fb1v4v63m5iSEQwc9rLlAevkUCmH9F/vIvlJx1Bg0pgTaufiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:22:30Z:7cebd62bc98e3c46e1221e7b92ac7756134dff6fbcb7f4a3740cd6b33f9363a9:OOIw2QS1dvNenAt68ErYkY6mnUzUr7piDE2TODRzeJthbc2E8c6YMO3/VVN/AAMl0YEut6V7G1UZ6KAcDiwgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v2"
@@ -11,7 +11,7 @@ version: "2.4.0"
 # RyeOS UI Frame Contract v2
 
 Frame contract version `2.4.0`, implemented with UI binding contract
-`ryeos.ui.binding.v16` and timeline contract `ryeos.timeline.v1` (the
+`ryeos.ui.binding.v18` and timeline contract `ryeos.timeline.v1` (the
 `timeline-v1` document). A renderer and the daemon cut over together: the
 frame, the binding contract and the timeline contract each have exactly one
 version in force, and there is no reader for an earlier one.
@@ -375,6 +375,33 @@ URL and no path.
   `default-src 'none'; sandbox` policy and immutable private caching. PNG,
   JPEG and WebP only; animated images, SVG and GIF are refused, as are bytes
   whose magic, hash, size or dimensions differ from the signed record.
+
+## Themes and the drawn ground
+
+A theme is a signed `theme` item (`theme:ryeos/night`): a six-colour palette,
+pictures by slot (`grounds`), and the picture behind a named Surface
+(`surface_grounds`, keyed by Surface ref). It replaces the constant palette
+list: the stored preference is `system` or an installed theme's ref, and
+`system` follows the platform through the pair named by the signed config
+`config:ryeos/ui/themes`. See the theme kind page in the docs bundle.
+
+- The theme source (`ui/ryeos-ui/config/get`, role `theme_preference`) returns
+  `theme_catalogue` beside `theme`: each installed theme's ref, id, title and
+  palette. For a browser session it also carries the Surface grounds of the
+  themes that session may draw now, each `{picture: {sha256, media_type}}` the
+  daemon resolved through the picture index and granted to the session, or
+  `{picture_state: unavailable}` when the binding failed.
+- `presentation.theme` carries `id` (the stored preference), `catalogue` (when
+  delivered) and `grounds`: the active Surface's ground in each theme that
+  names one, by theme ref, each with `origin: theme`. A renderer resolves `id`
+  against the catalogue (`system` follows the platform), draws the matching
+  ground and ignores a ground that is absent or `unavailable`.
+- Ground precedence: principal choice, node operator overlay, the Surface's
+  own binding, the theme's `surface_grounds`, then flat. Only the theme tier
+  exists today; the others are consulted ahead of it when they are built.
+- Rune draws the picture full-bleed behind the panels at opacity 0.70 and blur
+  10 under a vertical wash of the theme's ground colour (0.45 at the top to 0.90
+  at the bottom). The terminal draws no pictures.
 
 ## Attention (`ryeos.ui.attention.v3`)
 

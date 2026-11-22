@@ -1,67 +1,89 @@
 //! The RyeOS look: the colour, opacity, surface, radius, gap and type tokens,
-//! the three themes that supply the colours, and the shell palette derived
-//! from them.
+//! the colours of the theme in force (served by the daemon as signed theme
+//! items; the embedded boot theme draws until they arrive), and the shell
+//! palette derived from them.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{OnceLock, RwLock};
 
 use rune::Color;
 use rune::tok::{Family, TextStyle};
 
+use ryeos_client_base::theme_preference::{ThemeCatalogue, ThemeEntry, ThemePalette};
 use ryeos_client_base::ui::view_model::RyeOsTone;
 
 fn hex(value: &str) -> Color {
     rune::color::hex(value).expect("palette entries are valid hex")
 }
 
-/// The three themes. A theme changes colour only; it never moves or resizes
-/// anything.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeId {
-    Night,
-    Paper,
-    Gruvbox,
+/// The theme in force: its ref (`None` before a catalogue theme is selected,
+/// when the embedded boot theme draws) and its tokens. A theme changes colour
+/// only; it never moves or resizes anything.
+struct Current {
+    theme_ref: Option<String>,
+    tokens: Tokens,
 }
 
-impl ThemeId {
-    pub const ALL: [ThemeId; 3] = [ThemeId::Night, ThemeId::Paper, ThemeId::Gruvbox];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            ThemeId::Night => "night",
-            ThemeId::Paper => "paper",
-            ThemeId::Gruvbox => "gruvbox",
-        }
-    }
-
-    pub fn from_name(name: &str) -> Option<ThemeId> {
-        ThemeId::ALL
-            .into_iter()
-            .find(|id| id.name().eq_ignore_ascii_case(name))
-    }
+fn current() -> &'static RwLock<Current> {
+    static CURRENT: OnceLock<RwLock<Current>> = OnceLock::new();
+    CURRENT.get_or_init(|| {
+        let boot = embedded(ryeos_client_base::theme_preference::BOOT_THEME)
+            .expect("the boot theme is embedded");
+        RwLock::new(Current {
+            theme_ref: None,
+            tokens: boot,
+        })
+    })
 }
 
-/// The palette a stored preference selects, given the platform's light/dark
-/// preference: `system` maps to the shared pair, a palette id to itself, and
-/// anything else to nothing.
-pub fn for_preference(stored: &str, system_dark: bool) -> Option<ThemeId> {
-    ryeos_client_base::theme_preference::resolve(stored, system_dark).and_then(ThemeId::from_name)
+/// The tokens of an embedded shipped theme (`night`), for the boot palette
+/// and for fixtures. A daemon-served theme is applied with [`use_theme`].
+pub fn embedded(id: &str) -> Option<Tokens> {
+    ryeos_client_base::theme_preference::embedded_theme(id)
+        .map(|body| Tokens::from_palette(&body.palette))
 }
 
-/// The theme in force. Night until something selects another.
-static THEME: AtomicU8 = AtomicU8::new(0);
+/// The theme a stored preference selects from the catalogue the daemon sent,
+/// given the platform's light/dark preference: `system` follows the
+/// catalogue's pair, a theme ref selects itself, anything else nothing.
+pub fn for_preference<'a>(
+    catalogue: &'a ThemeCatalogue,
+    stored: &str,
+    system_dark: bool,
+) -> Option<&'a ThemeEntry> {
+    catalogue.resolve(stored, system_dark)
+}
 
 /// Select the theme every later draw uses.
-pub fn use_theme(id: ThemeId) {
-    THEME.store(id as u8, Ordering::Relaxed);
+pub fn use_theme(theme: &ThemeEntry) {
+    let tokens = Tokens::from_palette(&theme.palette);
+    let mut current = current()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    current.theme_ref = Some(theme.theme_ref.clone());
+    current.tokens = tokens;
 }
 
-/// The theme in force.
-pub fn current_theme() -> ThemeId {
-    match THEME.load(Ordering::Relaxed) {
-        1 => ThemeId::Paper,
-        2 => ThemeId::Gruvbox,
-        _ => ThemeId::Night,
-    }
+/// Select the embedded theme `id` for every later draw; false, with nothing
+/// changed, for an id that is not embedded.
+pub fn use_embedded(id: &str) -> bool {
+    let Some(tokens) = embedded(id) else {
+        return false;
+    };
+    let mut current = current()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    current.theme_ref = Some(format!("theme:ryeos/{id}"));
+    current.tokens = tokens;
+    true
+}
+
+/// The ref of the theme in force; `None` while the boot theme draws.
+pub fn current_theme_ref() -> Option<String> {
+    current()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .theme_ref
+        .clone()
 }
 
 // ---- Tokens ----
@@ -97,6 +119,14 @@ pub const INK_FAINT: f32 = 0.38;
 /// Chevrons, separators.
 pub const INK_MUTE: f32 = 0.30;
 
+/// `picture`: the ground behind the tiles is drawn this strong (opacity) and
+/// this soft (blur sigma, points), under a vertical wash of `bg` that runs
+/// from [`GROUND_WASH_TOP`] at the top to [`GROUND_WASH_BOTTOM`] at the bottom.
+pub const GROUND_OPACITY: f32 = 0.70;
+pub const GROUND_BLUR: f32 = 10.0;
+pub const GROUND_WASH_TOP: f32 = 0.45;
+pub const GROUND_WASH_BOTTOM: f32 = 0.90;
+
 /// `sheet.fill`: `bg` at this opacity over the picture.
 pub const SHEET_FILL: f32 = 0.58;
 /// `sheet.border`: `ink` at this opacity, 1 px.
@@ -129,38 +159,24 @@ pub const GAP_TILE: f32 = 12.0;
 pub const PAD_TILE: f32 = 18.0;
 
 impl Tokens {
-    pub fn of(theme: ThemeId) -> Tokens {
-        match theme {
-            ThemeId::Night => Tokens {
-                bg: hex("#060708"),
-                ink: hex("#f3f1ec"),
-                accent: hex("#fe8019"),
-                good: hex("#9ccf8a"),
-                warn: hex("#f2c24f"),
-                danger: hex("#f0604d"),
-            },
-            ThemeId::Paper => Tokens {
-                bg: hex("#ece8df"),
-                ink: hex("#1a1917"),
-                accent: hex("#c2410c"),
-                good: hex("#3f7a3a"),
-                warn: hex("#a16207"),
-                danger: hex("#b42318"),
-            },
-            ThemeId::Gruvbox => Tokens {
-                bg: hex("#1d2021"),
-                ink: hex("#ebdbb2"),
-                accent: hex("#fe8019"),
-                good: hex("#b8bb26"),
-                warn: hex("#fabd2f"),
-                danger: hex("#fb4934"),
-            },
+    /// The tokens a theme's palette names.
+    pub fn from_palette(palette: &ThemePalette) -> Tokens {
+        Tokens {
+            bg: hex(&palette.bg),
+            ink: hex(&palette.ink),
+            accent: hex(&palette.accent),
+            good: hex(&palette.good),
+            warn: hex(&palette.warn),
+            danger: hex(&palette.danger),
         }
     }
 
     /// The tokens of the theme in force.
     pub fn get() -> Tokens {
-        Tokens::of(current_theme())
+        current()
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tokens
     }
 
     /// `ink` at an opacity.
@@ -418,59 +434,69 @@ impl Tokens {
 #[cfg(test)]
 mod tests {
     use super::{
-        Face, INK_BODY, INK_DIM, INK_FAINT, INK_MUTE, INK_SOFT, INK_STRONG, Palette, ThemeId,
-        Tokens, drawable, hex,
+        Face, INK_BODY, INK_DIM, INK_FAINT, INK_MUTE, INK_SOFT, INK_STRONG, Palette, Tokens,
+        drawable, embedded, hex,
+    };
+    use ryeos_client_base::theme_preference::{
+        SystemThemes, THEME_CATALOGUE_CONTRACT, ThemeCatalogue, ThemeEntry, embedded_theme,
+        embedded_theme_ids,
     };
     use ryeos_client_base::ui::view_model::RyeOsTone;
 
     /// The spec's six colours, by theme: bg, ink, accent, good, warn, danger.
-    const COLOURS: [(ThemeId, [&str; 6]); 3] = [
+    /// The theme items are the single source; this table pins that the items
+    /// still carry the spec's values.
+    const COLOURS: [(&str, [&str; 6]); 3] = [
         (
-            ThemeId::Night,
+            "night",
             [
                 "#060708", "#f3f1ec", "#fe8019", "#9ccf8a", "#f2c24f", "#f0604d",
             ],
         ),
         (
-            ThemeId::Paper,
+            "paper",
             [
                 "#ece8df", "#1a1917", "#c2410c", "#3f7a3a", "#a16207", "#b42318",
             ],
         ),
         (
-            ThemeId::Gruvbox,
+            "gruvbox",
             [
                 "#1d2021", "#ebdbb2", "#fe8019", "#b8bb26", "#fabd2f", "#fb4934",
             ],
         ),
     ];
 
+    fn tokens(id: &str) -> Tokens {
+        embedded(id).expect("embedded theme")
+    }
+
     #[test]
     fn every_theme_carries_every_colour_token() {
         for (id, [bg, ink, accent, good, warn, danger]) in COLOURS {
-            let t = Tokens::of(id);
-            assert_eq!(t.bg, hex(bg), "{id:?} bg");
-            assert_eq!(t.ink, hex(ink), "{id:?} ink");
-            assert_eq!(t.accent, hex(accent), "{id:?} accent");
-            assert_eq!(t.good, hex(good), "{id:?} good");
-            assert_eq!(t.warn, hex(warn), "{id:?} warn");
-            assert_eq!(t.danger, hex(danger), "{id:?} danger");
+            let t = tokens(id);
+            assert_eq!(t.bg, hex(bg), "{id} bg");
+            assert_eq!(t.ink, hex(ink), "{id} ink");
+            assert_eq!(t.accent, hex(accent), "{id} accent");
+            assert_eq!(t.good, hex(good), "{id} good");
+            assert_eq!(t.warn, hex(warn), "{id} warn");
+            assert_eq!(t.danger, hex(danger), "{id} danger");
         }
     }
 
     #[test]
     fn the_themes_differ_and_each_reaches_the_shell_palette() {
-        let ground = |id| Palette::of(Tokens::of(id)).bg;
-        assert_ne!(ground(ThemeId::Night), ground(ThemeId::Paper));
-        assert_ne!(ground(ThemeId::Night), ground(ThemeId::Gruvbox));
-        assert_ne!(ground(ThemeId::Paper), ground(ThemeId::Gruvbox));
-        let paper = Palette::of(Tokens::of(ThemeId::Paper));
-        assert_eq!(paper.green, Tokens::of(ThemeId::Paper).good);
+        let ground = |id| Palette::of(tokens(id)).bg;
+        assert_ne!(ground("night"), ground("paper"));
+        assert_ne!(ground("night"), ground("gruvbox"));
+        assert_ne!(ground("paper"), ground("gruvbox"));
+        let paper = Palette::of(tokens("paper"));
+        assert_eq!(paper.green, tokens("paper").good);
     }
 
     #[test]
     fn ink_steps_and_surfaces_are_the_specs_opacities() {
-        let t = Tokens::of(ThemeId::Night);
+        let t = tokens("night");
         assert_eq!(t.ink_strong(), t.ink.alpha(0.96));
         assert_eq!(t.ink_body(), t.ink.alpha(0.90));
         assert_eq!(t.ink_soft(), t.ink.alpha(0.72));
@@ -492,8 +518,8 @@ mod tests {
 
     #[test]
     fn a_tone_takes_the_specs_colour_and_no_tone_takes_none() {
-        for id in ThemeId::ALL {
-            let t = Tokens::of(id);
+        for id in embedded_theme_ids() {
+            let t = tokens(id);
             assert_eq!(t.tone(RyeOsTone::Accent), Some(t.accent));
             assert_eq!(t.tone(RyeOsTone::Good), Some(t.good));
             assert_eq!(t.tone(RyeOsTone::Warn), Some(t.warn));
@@ -510,30 +536,51 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_palettes_are_exactly_the_ids_the_daemon_accepts() {
-        let ours: Vec<&str> = ThemeId::ALL.iter().map(|id| id.name()).collect();
-        assert_eq!(ours, ryeos_client_base::theme_preference::PALETTE_IDS);
-    }
-
-    #[test]
-    fn a_stored_preference_selects_its_palette() {
-        use super::for_preference;
-        assert_eq!(for_preference("gruvbox", true), Some(ThemeId::Gruvbox));
-        assert_eq!(for_preference("paper", true), Some(ThemeId::Paper));
-        assert_eq!(for_preference("system", true), Some(ThemeId::Night));
-        assert_eq!(for_preference("system", false), Some(ThemeId::Paper));
-        assert_eq!(for_preference("dark", true), None);
-    }
-
-    #[test]
-    fn themes_are_named_and_night_is_the_default() {
-        for id in ThemeId::ALL {
-            assert_eq!(ThemeId::from_name(id.name()), Some(id));
+    fn catalogue() -> ThemeCatalogue {
+        let themes = embedded_theme_ids()
+            .map(|id| {
+                let body = embedded_theme(id).unwrap();
+                ThemeEntry {
+                    theme_ref: format!("theme:ryeos/{id}"),
+                    id: body.id,
+                    title: body.title,
+                    palette: body.palette,
+                    surface_grounds: Default::default(),
+                }
+            })
+            .collect();
+        ThemeCatalogue {
+            schema_version: THEME_CATALOGUE_CONTRACT.into(),
+            themes,
+            system: SystemThemes {
+                dark: "theme:ryeos/night".into(),
+                light: "theme:ryeos/paper".into(),
+            },
+            default: "theme:ryeos/night".into(),
         }
-        assert_eq!(ThemeId::from_name("PAPER"), Some(ThemeId::Paper));
-        assert_eq!(ThemeId::from_name("solarized"), None);
-        assert_eq!(super::current_theme(), ThemeId::Night);
+    }
+
+    #[test]
+    fn a_stored_preference_selects_its_palette_from_the_catalogue() {
+        use super::for_preference;
+        let catalogue = catalogue();
+        let id =
+            |stored, dark| for_preference(&catalogue, stored, dark).map(|theme| theme.id.as_str());
+        assert_eq!(id("theme:ryeos/gruvbox", true), Some("gruvbox"));
+        assert_eq!(id("theme:ryeos/paper", true), Some("paper"));
+        assert_eq!(id("system", true), Some("night"));
+        assert_eq!(id("system", false), Some("paper"));
+        assert_eq!(id("gruvbox", true), None);
+        assert_eq!(id("dark", true), None);
+    }
+
+    #[test]
+    fn the_boot_theme_draws_until_a_theme_is_selected() {
+        // No test selects a theme (the selection is process-wide), so the
+        // theme in force is still the embedded boot theme.
+        assert_eq!(Tokens::get().bg, tokens("night").bg);
+        assert_eq!(super::current_theme_ref(), None);
+        assert!(embedded("solarized").is_none());
     }
 
     #[test]

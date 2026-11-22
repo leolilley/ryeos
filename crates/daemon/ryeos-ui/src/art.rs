@@ -98,6 +98,19 @@ impl ArtIndex {
         Self { entries, records }
     }
 
+    /// Add one verified rendition, for tests that build an index without
+    /// installed bundles.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&mut self, entry: PictureEntry) {
+        let records = self.records.entry(entry.record.clone()).or_default();
+        records.push(entry.clone());
+        records.sort_by_key(|entry| entry.rendition_index);
+        self.entries
+            .entry(entry.sha256.clone())
+            .or_default()
+            .push(entry);
+    }
+
     /// Every installed copy of `sha256`, empty when none.
     pub fn candidates(&self, sha256: &str) -> &[PictureEntry] {
         self.entries.get(sha256).map(Vec::as_slice).unwrap_or(&[])
@@ -376,7 +389,7 @@ impl ResponseMode for ArtMode {
         }
         Ok(Arc::new(CompiledArtMode {
             ui: self.ui.clone(),
-            cache: Arc::new(ArtIndexCache::default()),
+            cache: self.ui.art_index.clone(),
         }))
     }
 }
