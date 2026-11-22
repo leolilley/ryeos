@@ -1615,6 +1615,10 @@ jobs:
 
       - name: Claude Code worker follow (real isolation)
         if: ${{ !cancelled() }}
+        # Shortcut register entry D15-claude-follow (.tmp/shortcuts-register-20261120.md):
+        # claude_code_worker_follow_e2e cannot qualify on a cgroup-delegated node.
+        # Cure: a pid-namespace-enclosure harness node variant; remove
+        # continue-on-error when it lands.
         # Known red: the suite's development-hosted profile needs a node that
         # is the init of its own enclosure, which a cgroup-delegated node does
         # not provide. It stays here as a visible failing step (the error says

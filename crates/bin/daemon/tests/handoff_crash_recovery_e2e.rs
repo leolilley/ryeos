@@ -5284,18 +5284,22 @@ async fn real_portable_worker_completes_cross_site_handoff_on_qualified_host() -
         &handoff,
         &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
     )?;
-    // Each node run resumes a non-terminal session root once and the next run
-    // settles it terminal (a real worker is not re-attached by these
-    // restarts). Restart until that has happened, so the projection compared
-    // around the replay differs only by what the replay itself writes.
+    // With the operator grant revoked, a restarted target keeps its recovering
+    // successor session only until the node's own recovery of that session's
+    // root runs and is refused: that cancels the session. It is the startup
+    // recovery, not the replay, so let the target run idle long enough for it
+    // to finish before the "before" projection is read. If the session is
+    // still recovering after that, anything that then changes it is the
+    // replay and the comparison below reports it.
     let mut private_projection_before_replay = serde_json::Value::Null;
-    for _ in 0..4 {
+    for _ in 0..3 {
         handoff
             .target
             .respawn_with(|command| {
                 command.env("HOSTNAME", "handoff-target");
             })
             .await?;
+        tokio::time::sleep(Duration::from_secs(15)).await;
         handoff.target.kill_daemon().await?;
         wait_for_state_lock_release(&handoff.target.state_path).await?;
         private_projection_before_replay =
