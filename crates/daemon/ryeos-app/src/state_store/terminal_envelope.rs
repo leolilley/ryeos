@@ -98,7 +98,8 @@ pub(super) fn validate_managed_terminal_envelope(
             if final_cost.input_tokens == runtime_cost.input_tokens
                 && final_cost.output_tokens == runtime_cost.output_tokens
                 && final_cost.spend == runtime_cost.total_usd
-                && final_cost.basis == runtime_cost.basis => {}
+                && final_cost.basis == runtime_cost.basis
+                && final_cost.usage_status == runtime_cost.usage_status => {}
         (Some(_), Some(_)) => {
             bail!("managed runtime envelope cost contradicts settlement final cost")
         }
@@ -153,6 +154,12 @@ pub(super) fn terminal_facets(
         if let Some(basis) = cost.basis.as_ref() {
             facets.insert("cost.basis".to_string(), basis.clone());
         }
+        if !cost.usage_status.is_complete() {
+            facets.insert(
+                "cost.usage_status".to_string(),
+                cost.usage_status.as_str().to_string(),
+            );
+        }
         if let Some(metadata) = cost.metadata.as_ref() {
             facets.insert(
                 "cost.metadata_json".to_string(),
@@ -200,14 +207,7 @@ pub(super) fn managed_terminal_envelope_from_supplement(
 ) -> Result<Value> {
     let runtime_status = runtime_status_for_thread_status(status)?;
     let raw_cost = final_cost
-        .map(|cost| {
-            serde_json::to_value(ryeos_runtime::envelope::RuntimeCost {
-                input_tokens: cost.input_tokens,
-                output_tokens: cost.output_tokens,
-                total_usd: cost.spend,
-                basis: cost.basis.clone(),
-            })
-        })
+        .map(|cost| serde_json::to_value(cost.to_runtime()))
         .transpose()
         .context("encode authoritative managed runtime terminal cost")?;
     let envelope = json!({
@@ -248,6 +248,7 @@ pub(super) fn follow_envelope_limit_reservation() -> Value {
         output_tokens: i64::MAX as u64,
         total_usd: ryeos_engine::launch_envelope_types::UsdNanos::MAX,
         basis: Some(ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP.to_string()),
+        usage_status: Default::default(),
     };
     let maximum_thread_id = format!("T-{}", "x".repeat(126));
     follow_envelope_limit_failure(&maximum_thread_id, Some(&maximum_cost))
@@ -674,5 +675,56 @@ mod tests {
         );
         let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(&envelope).unwrap();
         assert_eq!(decoded.result, json!({"answer": 42}));
+    }
+
+    #[test]
+    fn a_usage_status_mismatch_between_envelope_and_settlement_is_refused() {
+        use ryeos_engine::launch_envelope_types::UsageStatus;
+
+        let cost = |usage_status| ryeos_runtime::envelope::RuntimeCost {
+            input_tokens: 3,
+            output_tokens: 5,
+            total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.02").unwrap(),
+            basis: None,
+            usage_status,
+        };
+        let envelope = |usage_status| {
+            json!({
+                "success": true,
+                "child_thread_id": "T-child",
+                "status": "completed",
+                "result": null,
+                "outputs": {},
+                "warnings": [],
+                "cost": serde_json::to_value(cost(usage_status)).unwrap(),
+            })
+        };
+        let validate = |raw: &Value, settled: UsageStatus| {
+            let final_cost =
+                ryeos_engine::contracts::FinalCost::from_runtime(&cost(settled), 0, None, None);
+            validate_managed_terminal_envelope(
+                raw,
+                "T-child",
+                ThreadStatus::Completed,
+                None,
+                None,
+                Some(&final_cost),
+            )
+        };
+
+        assert!(validate(&envelope(UsageStatus::Partial), UsageStatus::Partial).is_ok());
+        assert!(validate(&envelope(UsageStatus::Complete), UsageStatus::Complete).is_ok());
+        assert!(validate(&envelope(UsageStatus::Partial), UsageStatus::Complete).is_err());
+        assert!(validate(&envelope(UsageStatus::Complete), UsageStatus::Partial).is_err());
+        // Only a non-complete status is written to the wire.
+        assert!(
+            envelope(UsageStatus::Complete)["cost"]
+                .get("usage_status")
+                .is_none()
+        );
+        assert_eq!(
+            envelope(UsageStatus::Partial)["cost"]["usage_status"],
+            "partial"
+        );
     }
 }

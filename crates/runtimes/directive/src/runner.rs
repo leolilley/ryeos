@@ -1245,6 +1245,53 @@ fn provider_outcome_is_uncertain(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Usage status a failed provider attempt leaves on the run's cost. A timeout,
+/// a stream cut or an unknown outcome after the request was issued may have
+/// consumed usage the run never saw or only saw in part, so the figure is
+/// partial; an error carrying a usage frame is the same (that frame may not be
+/// final). A failure before contact consumed nothing and claims nothing.
+fn failed_attempt_usage_status(
+    error: &anyhow::Error,
+) -> Option<ryeos_runtime::envelope::UsageStatus> {
+    (provider_outcome_is_uncertain(error) || carried_usage_from_error(error).is_some())
+        .then_some(ryeos_runtime::envelope::UsageStatus::Partial)
+}
+
+/// Usage status one settled provider turn contributes to the run's cost.
+/// A turn the provider reported no usable usage for is unavailable (tokens
+/// were not settled as zero and the spend is unknown), or partial when only a
+/// provider-reported spend survived; a turn with tokens but no computable
+/// price is unavailable, never a measured zero. A replayed turn consumed
+/// nothing and claims complete.
+fn settled_turn_usage_status(
+    usage_valid: bool,
+    spend_only_settled: bool,
+    replayed: bool,
+    pricing: &PricingSource,
+    tokens: u64,
+) -> ryeos_runtime::envelope::UsageStatus {
+    use ryeos_runtime::envelope::UsageStatus;
+    if replayed {
+        return UsageStatus::Complete;
+    }
+    if !usage_valid {
+        return if spend_only_settled {
+            UsageStatus::Partial
+        } else {
+            UsageStatus::Unavailable
+        };
+    }
+    if matches!(
+        pricing,
+        PricingSource::Unpriced | PricingSource::ByokUntracked
+    ) && tokens != 0
+    {
+        UsageStatus::Unavailable
+    } else {
+        UsageStatus::Complete
+    }
+}
+
 fn retry_delay_for_reason(
     reason: &ProviderRetryReason,
     failed_attempt_number: u32,
@@ -1738,6 +1785,7 @@ impl Runner {
             output_tokens,
             total_usd: spend_usd,
             basis: None,
+            usage_status: Default::default(),
         }
         .validate()
         .map_err(|error| anyhow::anyhow!("invalid resume usage: {error}"))?;
@@ -2704,6 +2752,9 @@ impl Runner {
                         };
                         match call {
                             Err(e) => {
+                                if let Some(status) = failed_attempt_usage_status(&e) {
+                                    self.budget.note_usage_status(status);
+                                }
                                 let Some(decision) = prepared_retry else {
                                     if provider_outcome_is_uncertain(&e) {
                                         break Err(anyhow::anyhow!(
@@ -2956,6 +3007,13 @@ impl Runner {
                                 }
                             };
                             let usd = cost.usd;
+                            self.budget.note_usage_status(settled_turn_usage_status(
+                                valid_usage.is_some(),
+                                settled_spend_only,
+                                turn_replayed_from.is_some(),
+                                &cost.source,
+                                input_tok.saturating_add(output_tok),
+                            ));
                             // §2: an operator auditing spend must be able to tell
                             // "free" from "untracked", and know when a model's
                             // cost came from provider-default rates rather than a
@@ -3205,6 +3263,10 @@ impl Runner {
                             State::Streaming { events }
                         }
                         Ok(crate::provider_adapter::StreamOutcome::Cancelled { attempt: cut }) => {
+                            // A cut stream: whatever usage it reported is not
+                            // known to be final.
+                            self.budget
+                                .note_usage_status(ryeos_runtime::envelope::UsageStatus::Partial);
                             if let Err(error) = self
                                 .settle_available_attempt_accounting(
                                     turn,
@@ -3230,6 +3292,10 @@ impl Runner {
                             events,
                             attempt: cut,
                         }) => {
+                            // A cut stream: whatever usage it reported is not
+                            // known to be final.
+                            self.budget
+                                .note_usage_status(ryeos_runtime::envelope::UsageStatus::Partial);
                             // Live interrupt (SIGUSR1) cut the in-flight cognition.
                             // Surface any provider warnings from the partial stream
                             // (the diagnostic State::Streaming pass is skipped on the
@@ -3427,6 +3493,9 @@ impl Runner {
                                                          {turn}: model `{}` has no usable price",
                                                         self.model_name
                                                     ));
+                                                    self.budget.note_usage_status(
+                                                        ryeos_runtime::envelope::UsageStatus::Unavailable,
+                                                    );
                                                 }
                                                 self
                                                     .settle_provider_usage(
@@ -5330,6 +5399,7 @@ impl Runner {
             output_tokens,
             total_usd: usd,
             basis: None,
+            usage_status: Default::default(),
         };
         let mut proposed_cost = self.budget.cost();
         proposed_cost
@@ -6296,6 +6366,7 @@ fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) 
         output_tokens: 0,
         total_usd: usd,
         basis: None,
+        usage_status: Default::default(),
     }
 }
 
@@ -9978,5 +10049,89 @@ mod frame_refusal_tests {
             assert!(recorder.events.lock().unwrap().is_empty());
             assert!(recorder.finalized.lock().unwrap().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_status_producer_tests {
+    use super::*;
+    use ryeos_runtime::envelope::UsageStatus;
+
+    #[test]
+    fn a_turn_with_no_usable_usage_is_unavailable() {
+        let status = settled_turn_usage_status(false, false, false, &PricingSource::PerModel, 0);
+        assert_eq!(status, UsageStatus::Unavailable);
+    }
+
+    #[test]
+    fn a_turn_with_only_a_reported_spend_is_partial() {
+        let status =
+            settled_turn_usage_status(false, true, false, &PricingSource::ProviderReported, 0);
+        assert_eq!(status, UsageStatus::Partial);
+    }
+
+    #[test]
+    fn tokens_without_a_computable_price_are_unavailable_not_zero() {
+        for pricing in [PricingSource::Unpriced, PricingSource::ByokUntracked] {
+            assert_eq!(
+                settled_turn_usage_status(true, false, false, &pricing, 12),
+                UsageStatus::Unavailable
+            );
+        }
+        // No tokens consumed: nothing is missing.
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::Unpriced, 0),
+            UsageStatus::Complete
+        );
+    }
+
+    #[test]
+    fn a_measured_priced_or_replayed_turn_is_complete() {
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::PerModel, 9),
+            UsageStatus::Complete
+        );
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::ExplicitlyFree, 9),
+            UsageStatus::Complete
+        );
+        assert_eq!(
+            settled_turn_usage_status(false, false, true, &PricingSource::PerModel, 0),
+            UsageStatus::Complete
+        );
+    }
+
+    #[test]
+    fn a_cut_timeout_or_unknown_outcome_leaves_usage_partial() {
+        let timeout = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
+            detail: "read timed out".to_string(),
+        });
+        assert_eq!(
+            failed_attempt_usage_status(&timeout),
+            Some(UsageStatus::Partial)
+        );
+        let cut = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
+            Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
+                live_output_events_emitted: 0,
+                accepted_bytes: 0,
+                accepted_output_events: 0,
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens: None,
+                detail: "reset".to_string(),
+            }),
+        ));
+        assert_eq!(
+            failed_attempt_usage_status(&cut),
+            Some(UsageStatus::Partial)
+        );
+        // A refusal before contact consumed nothing.
+        let status = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
+            code: 429,
+            detail: "rate limited".to_string(),
+            body: String::new(),
+        });
+        assert_eq!(failed_attempt_usage_status(&status), None);
     }
 }
