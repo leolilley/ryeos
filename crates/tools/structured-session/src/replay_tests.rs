@@ -149,6 +149,26 @@ fn recorded_codex_turn_replays_through_the_production_profile() {
     // Today the profile ignores usage frames. When a declared usage
     // observation replaces this, this assertion changes with it.
     assert_eq!(usage[0].1, Outcome::Dropped);
+    // The one frame of the recorded turn the profile does not know. Real Codex
+    // announces its built-in `codex_apps` server (and any configured MCP
+    // server) with this notification; the profile neither maps nor ignores it,
+    // so the bridge refuses it as `unknown_notification`. This pins today's
+    // behaviour: when the profile declares the method, this assertion changes.
+    let refused: Vec<&str> = outcomes
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, Outcome::Refused(_)))
+        .map(|(method, _)| method.as_str())
+        .collect();
+    assert_eq!(
+        refused,
+        vec!["mcpServer/startupStatus/updated"; 4],
+        "only the MCP startup-status frames are refused"
+    );
+    for (_, outcome) in &outcomes {
+        if let Outcome::Refused(message) = outcome {
+            assert!(message.contains("unknown_notification"), "{message}");
+        }
+    }
     let completed: Vec<_> = outcomes
         .iter()
         .filter(|(method, _)| method == "turn/completed")
