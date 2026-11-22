@@ -4692,6 +4692,138 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rebind_keeps_old_or_new_live_until_settled_then_hands_ownership_over() {
+        let store = BrowserSessionStore::new();
+        let (id, token) = mint(&store, test_shared_context());
+        store.activate_launch_token(&token).unwrap();
+        let session = store.get_session(&id).unwrap();
+        let root = session.attachments[&session.root_attachment_id].coordinate();
+        let policy = "22".repeat(32);
+        let presentation = store
+            .prepare_presentation(
+                &id,
+                &uuid::Uuid::new_v4().to_string(),
+                &root,
+                &limits(4, 16, 16, 128),
+                &policy,
+                test_bounds(),
+            )
+            .unwrap();
+        let candidate = || {
+            let context = test_context();
+            BindingAttachmentCandidate {
+                registered_project_id: None,
+                compiled_binding: context.compiled_binding,
+                presentation: context.presentation,
+                project_authority: None,
+            }
+        };
+        let (surface, attachment) = store
+            .publish_surface(
+                &id,
+                &presentation.presentation_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &root,
+                candidate(),
+                &limits(16, 8, 8, 128),
+                &policy,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        let from = attachment.coordinate();
+        assert_eq!(
+            store
+                .publish_rebind_attachment(
+                    &id,
+                    &presentation.presentation_id,
+                    &root,
+                    candidate(),
+                    16,
+                    &policy
+                )
+                .unwrap_err(),
+            AttachmentStoreError::RootAttachmentImmutable
+        );
+        let successor = store
+            .publish_rebind_attachment(
+                &id,
+                &presentation.presentation_id,
+                &from,
+                candidate(),
+                16,
+                &policy,
+            )
+            .unwrap();
+        let to = successor.coordinate();
+        // Published but unsettled: both are live and owned, neither is lost.
+        for coordinate in [&from, &to] {
+            store
+                .require_presentation_attachment(
+                    &id,
+                    &presentation.presentation_id,
+                    coordinate,
+                    &policy,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.attachment_for_detach(&id, &from).unwrap_err(),
+            AttachmentStoreError::AttachmentInUse
+        );
+        // A repeat replaces the earlier unsettled successor.
+        let again = store
+            .publish_rebind_attachment(
+                &id,
+                &presentation.presentation_id,
+                &from,
+                candidate(),
+                16,
+                &policy,
+            )
+            .unwrap()
+            .coordinate();
+        assert!(store.resolve_attachment(&id, &to).is_err());
+        store
+            .apply_settled_rebinds(
+                &id,
+                &presentation.presentation_id,
+                &[(from.clone(), again.clone())],
+            )
+            .unwrap();
+        let settled = store.get_session(&id).unwrap();
+        let member = &settled.presentations[&presentation.presentation_id];
+        assert_eq!(
+            member.surfaces[&surface.surface_instance_id].coordinate,
+            again
+        );
+        assert!(
+            member.surfaces[&surface.surface_instance_id]
+                .pending_rebinds
+                .is_empty()
+        );
+        store
+            .require_presentation_attachment(&id, &presentation.presentation_id, &again, &policy)
+            .unwrap();
+        // The source left the session; a detach is the idempotent no-op.
+        assert!(store.attachment_for_detach(&id, &from).unwrap().is_none());
+        assert!(
+            store
+                .require_presentation_attachment(&id, &presentation.presentation_id, &from, &policy)
+                .is_err()
+        );
+        // Applying the same settled history again changes nothing.
+        store
+            .apply_settled_rebinds(&id, &presentation.presentation_id, &[(from, again.clone())])
+            .unwrap();
+        assert_eq!(
+            store.get_session(&id).unwrap().presentations[&presentation.presentation_id].surfaces
+                [&surface.surface_instance_id]
+                .coordinate,
+            again
+        );
+    }
+
+    #[test]
     fn presentation_membership_fences_retry_capacity_seat_and_revocation() {
         let store = BrowserSessionStore::new();
         let (id, token) = mint(&store, test_shared_context());

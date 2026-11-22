@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T22:16:20Z:a7d8748dc3cee6a21666b6fc15c60c5ee190a1c80ac2993a7c7558c2982dcdb0:/ZQwXEAMeydotaXkZ6h/jRLOf3L0Pl/EMvep3DMBMC9cLkZwrQSyVmFwDTIJWGxJY/k1nhm2qbZsShYM+BojAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T00:24:31Z:82be60673049b9b96321e930288e7109ad4596e3521076142c94415eb69d2fcb:Z97AMNo/uuHnjXufZwXeU8zgLvs1RaBcp9y9P3Rz8QCgDjB3sGthFZNPutIHjt0MnJ0/FypReilkTtuTj7RRCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -209,6 +209,11 @@ What announces a change:
   announced for each item. At startup it compares every chain head with that
   record and announces whatever is newer, so a change made while the node was
   stopped is announced once.
+
+A session that holds an attachment naming a revised item is sent the
+announcement as an `item.hint` on its session bus and swaps the recompiled
+attachment into its open Surfaces in place; the root attachment is not swapped
+(see the UI frame contract).
 
 A change to the policy generation is not an item revision and is not announced
 this way. Editing an item file by hand announces nothing: an unsigned edit is

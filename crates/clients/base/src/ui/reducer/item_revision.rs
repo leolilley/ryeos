@@ -226,3 +226,182 @@ impl RyeOsCore {
         effects
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::model::InputBufferKey;
+    use crate::ui::reducer::test_support::*;
+
+    const HELD: &str = "fixture-attachment";
+
+    fn hint(core: &mut RyeOsCore, change_set: Option<&str>) -> Vec<RyeOsEffect> {
+        core.dispatch(RyeOsEvent::HintReceived {
+            kind: ITEM_HINT_KIND.into(),
+            payload: serde_json::json!({
+                "item_ref": "view:test/home", "digest": "d", "revision": 1,
+                "change_set": change_set,
+            }),
+        })
+    }
+
+    fn revisions(effects: &[RyeOsEffect]) -> Vec<String> {
+        effects
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                RyeOsEffectKind::ReviseBindingAttachment {
+                    binding_attachment_id,
+                    ..
+                } => Some(binding_attachment_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn revised_answer(core: &RyeOsCore) -> (serde_json::Value, UiBindingAttachmentCoordinate) {
+        let source = core.binding_attachments[HELD].descriptor.clone();
+        let from = UiBindingAttachmentCoordinate {
+            binding_attachment_id: source.binding_attachment_id.clone(),
+            binding_generation: source.binding_generation,
+            binding_digest: source.binding_digest.clone(),
+        };
+        let mut successor = source;
+        successor.binding_attachment_id = "successor".into();
+        successor.binding_generation += 1;
+        let to = UiBindingAttachmentCoordinate {
+            binding_attachment_id: "successor".into(),
+            binding_generation: successor.binding_generation,
+            binding_digest: successor.binding_digest.clone(),
+        };
+        (
+            serde_json::json!({"revised": true, "from": from, "attachment": successor}),
+            to,
+        )
+    }
+
+    #[test]
+    fn twenty_hints_of_one_change_set_request_one_revise_per_attachment() {
+        let mut core = core(writable_session());
+        let mut all = Vec::new();
+        for _ in 0..20 {
+            all.extend(hint(&mut core, Some("set-1")));
+        }
+        assert_eq!(revisions(&all), vec![HELD.to_string()]);
+        // Without a change set each hint is its own, but one request stays in
+        // flight per attachment.
+        let more = hint(&mut core, None);
+        assert!(revisions(&more).is_empty());
+    }
+
+    #[test]
+    fn the_root_attachment_is_never_revised() {
+        let mut core = core(writable_session());
+        let root = core.root_attachment_id.clone();
+        assert!(!core.revisable_attachment_ids().contains(&root));
+        core.note_stale_attachment(&root);
+        assert!(core.pump_item_revisions().is_empty());
+    }
+
+    #[test]
+    fn a_stale_dispatch_revises_once_and_a_second_stale_is_not_retried() {
+        let mut core = core(writable_session());
+        core.note_stale_attachment(HELD);
+        assert_eq!(revisions(&core.pump_item_revisions()), vec![HELD]);
+        core.finish_attachment_revision(HELD, None);
+        core.note_stale_attachment(HELD);
+        assert!(core.pump_item_revisions().is_empty());
+    }
+
+    #[test]
+    fn an_unchanged_answer_swaps_nothing() {
+        let mut core = core(writable_session());
+        core.note_stale_attachment(HELD);
+        core.pump_item_revisions();
+        core.finish_attachment_revision(
+            HELD,
+            Some(serde_json::json!({"revised": false, "attachment": {}})),
+        );
+        assert!(core.pump_item_revisions().is_empty());
+        assert!(pending_prefix(&core).is_empty());
+    }
+
+    #[test]
+    fn a_swap_keeps_tile_state_and_drafts_and_releases_the_source() {
+        let mut core = core(writable_session());
+        let producer = claim_fixture_producer(&mut core);
+        settle_pending_prefix(&mut core, &producer);
+        let surface = core.active_surface().unwrap().id().clone();
+        let (set_id, tile_id, instance, view_ref) = {
+            let set = core.active_view_set().unwrap();
+            let tile = &set.tiles[&set.focused_tile];
+            (
+                set.id,
+                set.focused_tile,
+                tile.instance_key.clone(),
+                tile.view.view_ref.clone(),
+            )
+        };
+        let from_scope = InputBufferKey::binding_scope(&UiBindingAttachmentCoordinate {
+            binding_attachment_id: HELD.into(),
+            binding_generation: core.binding_attachments[HELD].descriptor.binding_generation,
+            binding_digest: core.binding_attachments[HELD]
+                .descriptor
+                .binding_digest
+                .clone(),
+        });
+        seed_input_view(&mut core);
+        fixture_input(&mut core);
+        set_focused_input(&mut core, "draft");
+        let draft = core.focused_input_buffer().unwrap().clone();
+        let key = InputBufferKey {
+            view_instance_key: instance.clone(),
+            binding_scope: from_scope,
+            view_ref: view_ref.clone(),
+            input_id: "line".into(),
+            target_scope: None,
+        };
+        core.input_buffers.insert(key.storage_key(), draft.clone());
+        let local_before = format!(
+            "{:?}",
+            core.active_view_set().unwrap().tiles[&tile_id].local
+        );
+
+        let effects = hint(&mut core, Some("set-1"));
+        assert_eq!(revisions(&effects), vec![HELD.to_string()]);
+        let (answer, to) = revised_answer(&core);
+        core.finish_attachment_revision(HELD, Some(answer));
+        assert!(core.pump_item_revisions().is_empty());
+        let prepared = pending_prefix(&core);
+        assert!(prepared.iter().any(|event| matches!(&event.kind,
+            crate::ui::seat::SeatEventKind::PresentationOperationPrepared(operation)
+                if operation.composition().is_some_and(|request| matches!(
+                    request.mutation,
+                    crate::ui::composition_operation::CompositionMutation::RebindAttachment { .. })))));
+        let mut later = settle_pending_prefix(&mut core, &producer);
+        later.extend(core.pump_item_revisions());
+
+        assert_eq!(core.active_surface().unwrap().binding(), &to);
+        let set = core.active_view_set().unwrap();
+        assert_eq!(set.id, set_id);
+        assert_eq!(set.tiles[&tile_id].instance_key, instance);
+        assert_eq!(format!("{:?}", set.tiles[&tile_id].local), local_before);
+        assert!(core.active_surface().unwrap().id() == &surface);
+        let to_key = InputBufferKey {
+            binding_scope: InputBufferKey::binding_scope(&to),
+            ..key.clone()
+        };
+        assert_eq!(core.input_buffers[&to_key.storage_key()].text, "draft");
+        assert!(!core.input_buffers.contains_key(&key.storage_key()));
+        assert_eq!(focused_input_text(&core), "draft");
+        // Nothing names the source any longer, so it is released exactly once.
+        let released = later
+            .iter()
+            .filter(|effect| {
+                matches!(&effect.kind,
+                    RyeOsEffectKind::ReleaseBindingAttachment { binding_attachment_id, .. }
+                        if binding_attachment_id == HELD)
+            })
+            .count();
+        assert_eq!(released, 1);
+    }
+}
