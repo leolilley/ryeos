@@ -5101,7 +5101,6 @@ pub(crate) mod tests {
             read_canonical_evidence(&conn, "obs", "observation_json", "T-one");
         assert!(refused.is_err(), "a pre-cut observation must not decode");
         // An unknown basis is refused too.
-        let mut value = value;
         value["basis"] = "guessed".into();
         let unknown = lillux::canonical_json(&value).unwrap();
         conn.execute("INSERT INTO obs VALUES('T-two',?1)", [&unknown])
