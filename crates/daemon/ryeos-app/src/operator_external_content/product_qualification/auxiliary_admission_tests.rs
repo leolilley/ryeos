@@ -1451,6 +1451,7 @@ fn pinned_fixture(fixture: &Fixture) -> Result<PinnedFixture> {
         relationship_name: "subject_to_downstream".into(),
         project_context: Some(launch::ProductQualificationProjectContext {
             snapshot_hash: snapshot.snapshot.clone(),
+            project_path: None,
         }),
         auxiliary_product_selections: vec![ProductSelectionInput {
             target: ProductSelectionTarget::Root {},
