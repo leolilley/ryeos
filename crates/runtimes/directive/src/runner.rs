@@ -1138,6 +1138,13 @@ pub(crate) fn retry_supersedes(decision: &ProviderRetryDecision) -> Value {
     })
 }
 
+/// The text whose digest is the `failure_digest` of every retry decision made
+/// for an attempt a restart cut. No process observed that failure, so the
+/// digest is this constant rather than a digest of an error; a reader that
+/// sees it knows the dead attempt's output count is unknown, not zero. The
+/// shipped timeline projection compares against the digest's hex.
+const RESTART_CUT_FAILURE_MARKER: &str = "ryeos.provider-retry.owner-restart-cut.v1";
+
 fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
     let value = json!({
         "schema": "ryeos.directive.provider-retry-policy.v2",
@@ -5185,11 +5192,7 @@ impl Runner {
                 .map_err(|_| anyhow::anyhow!("provider retry backoff exceeds u64"))?,
             reason,
             failure_digest: HexDigest::new(lillux::sha256_hex(
-                format!(
-                    "owner restart cut provider attempt {}/{turn}/{attempt_number}",
-                    self.thread_id
-                )
-                .as_bytes(),
+                RESTART_CUT_FAILURE_MARKER.as_bytes(),
             ))
             .map_err(|error| anyhow::anyhow!("restart retry failure digest: {error}"))?,
             retry_policy_digest: retry_policy_digest(&self.execution)?,
@@ -8445,6 +8448,11 @@ mod tests {
         assert_eq!(
             retry_supersedes(&offer),
             json!({"turn": 4, "attempt": 2, "output_events": 0})
+        );
+        // Readers recognise a restart-cut decision by this exact digest.
+        assert_eq!(
+            offer.failure_digest.as_str(),
+            "07922c912825b5b1aac477c84a9b4acbe584f7d5549f6b1ce9ac56226676f384"
         );
         // The decision is deterministic, so a re-sent prepare offers the same.
         assert_eq!(

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T02:46:00Z:24fe6d42fafa4baa7bdd1a4fd940482c92af0c95c82fd4d7b868e715f3f93439:C3/b9+ydQ6OgubptRbDTLCPU+rkaYZUJ9nYKqsBd6njaRG7evK+YBVai2MBC+Pw2KpzbFjpZWF0vqNIPE7mqBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T02:48:16Z:9777958a22c0f8291a4ff4e329f495322b952e1507edff7ae122a6ffc7b0ac16:y2FisTbpXWtQLmLQQilCLh+pTjX0vsK+Kmqbiz7wOPYcuUDNGq9ZN7jXqARvbPkebwY+MhgeKOr84DM5xVRwCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, directive, llm, callbacks]
@@ -52,8 +52,11 @@ A restart that cuts a provider call is retried the same way. On resume of an
 unfinished provider turn the runtime offers the daemon, with every prepare of
 that turn, the retry its policy would authorize for that attempt as a
 `mid_stream` failure. Stream fragments are live-only and never reach the
-record, so the decision's `supersedes.output_events` is 0; a reader voids a
-retried turn's fragments by position. The daemon stores it only when that
+record, so the decision's `supersedes.output_events` is 0, and for this decision
+the 0 means unknown, not none: the decision's `failure_digest` is the fixed
+digest of `ryeos.provider-retry.owner-restart-cut.v1` (no process observed the
+failure), which readers use to show "output lost at restart" instead of a
+count. A reader voids a retried turn's fragments by position. The daemon stores it only when that
 exact attempt was cut by the restart (issued with no recorded answer) and the
 sealed launch authority admits another contact: a `provider_contact:
 repeatable` directive, a remote transport, and an attempt number within the
