@@ -17,7 +17,7 @@ on:
         default: true
         type: boolean
       merge_gates:
-        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. A branch whose changed paths are all UI paths runs the UI-only gate instead (see the classify job). Full tests run on next after merge."
+        description: "Branch pre-merge mode: run only the five merge gates (lint/policy, static policy, test archive build, crash qualification build, scheduler compositions); skip bundle refresh, test shards and crash phases. A branch whose changed paths are all UI paths runs the UI-only gate instead (see the classify job). Every gate also runs the tests of each crate the branch changed (touched-tests job). Full tests run on next after merge."
         required: true
         default: false
         type: boolean
@@ -96,6 +96,9 @@ jobs:
     outputs:
       mode: ${{ steps.classify.outputs.mode || 'full' }}
       bundles_changed: ${{ steps.classify.outputs.bundles_changed || 'true' }}
+      # JSON list of the packages whose tests the touched-tests job runs. An unset or
+      # unreadable value is ERROR, which fails that job; it is never read as "none".
+      test_packages: ${{ steps.classify.outputs.test_packages || 'ERROR' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -118,11 +121,11 @@ jobs:
             exit 0
           fi
           # A classifier fault must leave the output unset (the job defaults it to full).
-          if ! python3 -I .ai/tools/ryeos/development/repository-validation/lib/classify-merge-gate.py --base-ref origin/next > "$RUNNER_TEMP/classification"; then
+          if ! python3 -I .ai/tools/ryeos/development/repository-validation/lib/classify-merge-gate.py --base-ref origin/next --rule wide > "$RUNNER_TEMP/classification"; then
             echo "### Gate: full (classifier failed)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          grep -E '^(mode|bundles_changed)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
+          grep -E '^(mode|bundles_changed|test_packages)=' "$RUNNER_TEMP/classification" >> "$GITHUB_OUTPUT"
           {
             echo "### Gate: $(sed -n 's/^mode=//p' "$RUNNER_TEMP/classification")"
             echo '```'
@@ -1052,6 +1055,186 @@ jobs:
         env:
           RUST_MIN_STACK: 8388608
         run: cargo test --locked -p ryeos-client-base -p ryeos-client-terminal -p ryeos-ui
+
+  # Every merge_gates dispatch runs the tests of each crate the branch changed: a branch that
+  # only adds tests, or changes a crate the skipped shards would have covered, otherwise merged
+  # with those tests never run. The classify job picks the packages (see
+  # classify-merge-gate.py: --rule wide = every crate with a changed file, minus the daemon's
+  # end-to-end test binaries, which the next-branch shards run; --rule narrow = crates with
+  # changed test code only). Tests run through gate.sh so they get the same composition
+  # features as the shards, on next's restored bundle state, because many crates' tests need
+  # populated bundle binaries.
+  touched-tests:
+    name: Changed crates' tests
+    needs: [classify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.merge_gates && needs.classify.outputs.test_packages != '[]' }}
+    steps:
+      - name: Require a readable package list
+        env:
+          PACKAGES: ${{ needs.classify.outputs.test_packages }}
+        run: |
+          if [[ "$PACKAGES" == ERROR ]]; then
+            echo "::error::The classifier could not decide which crates' tests to run; refusing to treat that as none."
+            exit 1
+          fi
+          printf '%s\n' "$PACKAGES" | jq -r '.[] | "\(.package) \(.manifest // "-") \(.args | join(" "))"'
+
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      # Read the crate cache the other jobs save; never save from here.
+      - name: Restore cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      # A branch that changes bundle sources tests against its own refresh. Otherwise next's
+      # bundle state is restored (it refuses when it would hide a branch change); if no usable
+      # state exists the branch refresh runs instead.
+      - name: Restore next's bundle state
+        id: restore
+        if: ${{ needs.classify.outputs.bundles_changed != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Restores the bundle state of the newest next CI run whose bundles job succeeded and
+        # whose artifact is live. Refused (exit 1) when the branch differs from that next commit
+        # on any path the state would write or delete, or anywhere under bundles/, because the
+        # run would then test next's version of those files; the step after this one then
+        # refreshes the bundles from the branch instead.
+        run: |
+          set -euo pipefail
+
+          repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+          : "${GH_TOKEN:?GH_TOKEN is required}"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          run_id=""
+          sha=""
+          runs="$(gh api "repos/$repo/actions/workflows/ci.yml/runs?branch=next&event=push&per_page=30" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')"
+          while read -r id head; do
+              [[ -n "$id" ]] || continue
+              ok="$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" \
+                  --jq '[.jobs[] | select(.name == "Bundle refresh for tests" and .conclusion == "success")] | length')"
+              [[ "$ok" -gt 0 ]] || continue
+              live="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
+                  --jq "[.artifacts[] | select(.name == \"bundle-state-$head\" and (.expired | not))] | length")"
+              if [[ "$live" -gt 0 ]]; then
+                  run_id="$id"
+                  sha="$head"
+                  break
+              fi
+          done <<<"$runs"
+
+          if [[ -z "$run_id" ]]; then
+              echo "::error::No unexpired bundle state found: none of the last 30 ci.yml runs on next has a successful bundles job with a live artifact (retention is 1 day). Wait for a next CI run to finish its bundles job, or run with bundles=none."
+              exit 1
+          fi
+          echo "Bundle state comes from next $sha (ci.yml run $run_id)"
+          echo "https://github.com/$repo/actions/runs/$run_id"
+
+          gh run download "$run_id" --repo "$repo" -n "bundle-state-$sha" -D "$work/dl"
+          state="$work/dl/bundle-state.tar.zst"
+
+          # Paths the state would write or delete.
+          tar --zstd -tf "$state" | grep -v -e '^\.ci-deleted-files$' -e '/$' | sort -u > "$work/state-paths" || true
+          tar --zstd -xOf "$state" .ci-deleted-files | sort -u > "$work/deleted-paths"
+          sort -u "$work/state-paths" "$work/deleted-paths" > "$work/touched"
+
+          git fetch --no-tags --depth=1 origin "$sha"
+          git diff --name-only "$sha" HEAD | sort -u > "$work/differs"
+
+          { comm -12 "$work/touched" "$work/differs"; grep '^bundles/' "$work/differs" || true; } | sort -u > "$work/conflicts"
+          conflicts="$(cat "$work/conflicts")"
+          if [[ -n "$conflicts" ]]; then
+              echo "::error::Refusing to restore next's bundle state: this branch differs from next $sha on paths the state would overwrite or delete, or on bundle sources the state was built from, so the run would test next's version, not the branch's. Merge origin/next into the branch, or keep branch edits out of these paths."
+              while IFS= read -r path; do echo "  conflict: $path"; done <<<"$conflicts"
+              exit 1
+          fi
+
+          if grep -E -q '^(crates/|Cargo\.lock$|Cargo\.toml$)' "$work/differs"; then
+              echo "::warning::This branch differs from next $sha in crate sources; the prebuilt bundle bins were built from next and may not reflect those changes."
+          fi
+
+          ./scripts/ci/unpack-bundle-state.sh "$state"
+          {
+              echo "### Bundle state"
+              echo "next \`$sha\`, ci.yml run [$run_id](https://github.com/$repo/actions/runs/$run_id); $(wc -l < "$work/touched") paths; no branch overlap."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Refresh the bundles from this branch
+        if: ${{ needs.classify.outputs.bundles_changed == 'true' || steps.restore.outcome == 'failure' }}
+        env:
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+        run: ./scripts/gate.sh --refresh-bundles --no-tests
+
+      # The synthetic lifecycle adapter's remote-lease test runs real guests in an enclosure with
+      # no host libraries, so it needs the statically linked guest executables the workspace
+      # test archive job builds. Build them only when that crate is among the selected packages.
+      - name: Build the static guest executables
+        if: ${{ contains(needs.classify.outputs.test_packages, '"ryeos-synthetic-external-lifecycle-adapter"') }}
+        run: |
+          RUSTFLAGS='-C target-feature=+crt-static' cargo build \
+            --target x86_64-unknown-linux-gnu \
+            -p ryeos-synthetic-external-lifecycle-adapter \
+            --bin ryeos-synthetic-mounted-candidate-supervisor \
+            --bin ryeos-synthetic-external-candidate-launcher \
+            --bin ryeos-synthetic-external-candidate-connector
+
+      - name: Run the changed crates' tests
+        env:
+          PACKAGES: ${{ needs.classify.outputs.test_packages }}
+          RUST_MIN_STACK: 8388608
+        run: |
+          set -uo pipefail
+          # The publish idempotency tests want the staged core binaries, not a cold build each.
+          staged="$PWD/bundles/core/.ai/bin/x86_64-unknown-linux-gnu"
+          if [[ -d "$staged" ]]; then
+            export RYEOS_TEST_HANDLER_BIN_DIR="$staged"
+          fi
+          failed=0
+          # Root-workspace packages with no special arguments share one run.
+          mapfile -t plain < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest == null and (.args | length) == 0) | "-p", .package')
+          if [[ ${#plain[@]} -gt 0 ]]; then
+            ./scripts/gate.sh "${plain[@]}" || failed=1
+          fi
+          # Packages with their own arguments (the daemon: lib and bin tests, or named test binaries).
+          while IFS= read -r entry; do
+            [[ -n "$entry" ]] || continue
+            mapfile -t words < <(printf '%s\n' "$entry" | jq -r '"-p", .package, .args[]')
+            ./scripts/gate.sh "${words[@]}" || failed=1
+          done < <(printf '%s\n' "$PACKAGES" | jq -c '.[] | select(.manifest == null and (.args | length) > 0)')
+          # Packages of a separate workspace (Rune) need their own manifest.
+          while IFS= read -r manifest; do
+            [[ -n "$manifest" ]] || continue
+            cargo test --locked --manifest-path "$manifest" || failed=1
+          done < <(printf '%s\n' "$PACKAGES" | jq -r '.[] | select(.manifest != null) | .manifest' | sort -u)
+          exit "$failed"
 
   test:
     name: Workspace tests

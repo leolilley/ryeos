@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use rune::Color;
 use rune::tok::{Family, TextStyle};
 
+use ryeos_client_base::layout_table::{LAYOUT, TypeStep};
 use ryeos_client_base::ui::view_model::RyeOsTone;
 
 fn hex(value: &str) -> Color {
@@ -112,11 +113,11 @@ pub const CONTROL_BORDER: f32 = 0.12;
 /// `control.border` at its strong end, for secondary buttons.
 pub const CONTROL_BORDER_STRONG: f32 = 0.18;
 
-pub const RADIUS_TILE: f32 = 16.0;
-pub const RADIUS_CARD: f32 = 12.0;
-pub const RADIUS_BUBBLE: f32 = 14.0;
-pub const RADIUS_ROW: f32 = 8.0;
-pub const RADIUS_BUTTON: f32 = 9.0;
+pub const RADIUS_TILE: f32 = LAYOUT.px.spacing.radius_tile;
+pub const RADIUS_CARD: f32 = LAYOUT.px.spacing.radius_card;
+pub const RADIUS_BUBBLE: f32 = LAYOUT.px.spacing.radius_bubble;
+pub const RADIUS_ROW: f32 = LAYOUT.px.spacing.radius_row;
+pub const RADIUS_BUTTON: f32 = LAYOUT.px.spacing.radius_button;
 
 /// `radius.pill`: half the height.
 pub const fn radius_pill(height: f32) -> f32 {
@@ -124,9 +125,9 @@ pub const fn radius_pill(height: f32) -> f32 {
 }
 
 /// `gap.tile`: between tiles.
-pub const GAP_TILE: f32 = 12.0;
+pub const GAP_TILE: f32 = LAYOUT.px.spacing.gap_tile;
 /// `pad.tile`: inside a tile, horizontal.
-pub const PAD_TILE: f32 = 18.0;
+pub const PAD_TILE: f32 = LAYOUT.px.spacing.pad_tile;
 
 impl Tokens {
     pub fn of(theme: ThemeId) -> Tokens {
@@ -229,30 +230,40 @@ impl Tokens {
 // ---- Type ----
 
 /// The launcher's find line.
-pub const TYPE_FIND: TextStyle = TextStyle::new(19.0, 400.0);
+pub const TYPE_FIND: TextStyle = style(LAYOUT.px.type_scale.find);
 /// Prose, message, composer placeholder.
-pub const TYPE_PROSE: TextStyle = TextStyle::new(15.0, 400.0);
+pub const TYPE_PROSE: TextStyle = style(LAYOUT.px.type_scale.prose);
 /// Tile title, dock title.
-pub const TYPE_TITLE: TextStyle = TextStyle::new(13.5, 500.0);
+pub const TYPE_TITLE: TextStyle = style(LAYOUT.px.type_scale.title);
 /// One-line entry headline and detail.
-pub const TYPE_LINE: TextStyle = TextStyle::new(13.0, 400.0);
+pub const TYPE_LINE: TextStyle = style(LAYOUT.px.type_scale.line);
 /// Section values.
-pub const TYPE_CELL: TextStyle = TextStyle::new(12.5, 400.0);
+pub const TYPE_CELL: TextStyle = style(LAYOUT.px.type_scale.cell);
 /// Table cells, state words, field names.
-pub const TYPE_SMALL: TextStyle = TextStyle::new(12.0, 400.0);
+pub const TYPE_SMALL: TextStyle = style(LAYOUT.px.type_scale.small);
 /// Chips, key hints, usage.
-pub const TYPE_MICRO: TextStyle = TextStyle::new(11.5, 400.0);
+pub const TYPE_MICRO: TextStyle = style(LAYOUT.px.type_scale.micro);
 /// Coverage sentences.
-pub const TYPE_NOTE: TextStyle = TextStyle::new(11.0, 400.0);
+pub const TYPE_NOTE: TextStyle = style(LAYOUT.px.type_scale.note);
 /// A key chip's text (status bar hints).
-pub const TYPE_KEY: TextStyle = TextStyle::new(10.5, 500.0);
+pub const TYPE_KEY: TextStyle = style(LAYOUT.px.type_scale.key);
 /// Column headers and section titles; the caller sets the text in upper case.
-pub const TYPE_LABEL: TextStyle = TextStyle::new(10.5, 500.0).tracking(1.5);
+pub const TYPE_LABEL: TextStyle = style(LAYOUT.px.type_scale.label);
 
-/// The same style at weight 500.
+/// A table type step as a text style.
+pub const fn style(step: TypeStep) -> TextStyle {
+    let base = TextStyle::new(step.size, step.weight);
+    if step.tracking == 0.0 {
+        base
+    } else {
+        base.tracking(step.tracking)
+    }
+}
+
+/// The same style at the table's medium weight.
 pub const fn medium(style: TextStyle) -> TextStyle {
     TextStyle {
-        weight: 500.0,
+        weight: LAYOUT.px.type_scale.medium_weight,
         ..style
     }
 }
@@ -335,11 +346,11 @@ pub const UI: Family = Family::Sans;
 pub const DATA: Family = Family::Mono;
 
 pub const fn ui(size: f32) -> TextStyle {
-    TextStyle::new(size, 400.0).family(UI)
+    TextStyle::new(size, LAYOUT.px.type_scale.regular_weight).family(UI)
 }
 
 pub const fn data(size: f32) -> TextStyle {
-    TextStyle::new(size, 400.0).family(DATA)
+    TextStyle::new(size, LAYOUT.px.type_scale.regular_weight).family(DATA)
 }
 
 /// Which embedded face a string is set in.
@@ -380,25 +391,25 @@ pub fn drawable(text: &str, face: Face) -> std::borrow::Cow<'_, str> {
 
 /// The tabs band's height, and how far the words drop from its top: they sit
 /// level with the switcher's chips.
-pub const TABS_HEIGHT: f32 = 50.0;
-pub const TABS_TOP: f32 = 6.0;
+pub const TABS_HEIGHT: f32 = LAYOUT.px.bands.tabs_height;
+pub const TABS_TOP: f32 = LAYOUT.px.bands.tabs_top;
 /// The Surfaces switcher along the top: its band, 10 above its 30 high island.
-pub const SWITCHER_BAND_HEIGHT: f32 = 40.0;
+pub const SWITCHER_BAND_HEIGHT: f32 = LAYOUT.px.bands.switcher_band_height;
 /// The floating status bar's row: its 30 high islands and the 10 beneath.
-pub const STATUS_BAR_HEIGHT: f32 = 40.0;
+pub const STATUS_BAR_HEIGHT: f32 = LAYOUT.px.bands.status_bar_height;
 /// An island of the status bar.
-pub const ISLAND_HEIGHT: f32 = 30.0;
+pub const ISLAND_HEIGHT: f32 = LAYOUT.px.bands.island_height;
 /// The Surfaces switcher: its width, its chips and its inset from the edges.
-pub const SWITCHER_WIDTH: f32 = 40.0;
+pub const SWITCHER_WIDTH: f32 = LAYOUT.px.bands.switcher_width;
 /// The switcher while a Surface is being renamed.
-pub const SWITCHER_RENAME_WIDTH: f32 = 260.0;
-pub const SWITCHER_CHIP: f32 = 28.0;
-pub const SWITCHER_INSET: f32 = 10.0;
+pub const SWITCHER_RENAME_WIDTH: f32 = LAYOUT.px.bands.switcher_rename_width;
+pub const SWITCHER_CHIP: f32 = LAYOUT.px.bands.switcher_chip;
+pub const SWITCHER_INSET: f32 = LAYOUT.px.bands.switcher_inset;
 /// Room the frame leaves at the left of the body (the body adds its own 18).
-pub const SWITCHER_ROOM: f32 = 44.0;
-pub const RADIUS_SWITCHER: f32 = 14.0;
+pub const SWITCHER_ROOM: f32 = LAYOUT.px.bands.switcher_room;
+pub const RADIUS_SWITCHER: f32 = LAYOUT.px.bands.radius_switcher;
 /// `radius.sheet`: the overlay sheet.
-pub const RADIUS_SHEET: f32 = 22.0;
+pub const RADIUS_SHEET: f32 = LAYOUT.px.bands.radius_sheet;
 /// The switcher and the status islands: `bg` at this opacity.
 pub const BAR_FILL: f32 = 0.50;
 /// Their border: `ink` at this opacity.

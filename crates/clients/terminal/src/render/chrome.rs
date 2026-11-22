@@ -3,6 +3,7 @@
 //! truth (provenance, focus) — it is load-bearing, not decoration.
 
 use ryeos_client_base::layout::Rect;
+use ryeos_client_base::layout_table::LAYOUT;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 use ryeos_client_base::ui::event::RyeOsTransportFreshness;
 use ryeos_client_base::ui::view_model::{
@@ -129,7 +130,7 @@ fn draw_strip(
     entries: &[StripEntry],
     plus: bool,
 ) {
-    const GAP: usize = 1;
+    const GAP: usize = LAYOUT.cells.strip_gap;
     const PLUS: &str = " + ";
     let limit = limit.min(surface.width);
     let plus_width = if plus { display_width(PLUS) } else { 0 };
@@ -377,7 +378,7 @@ pub fn draw_tile(
     }
     // A composer does not replace the view it belongs to.
     if let Some(input) = input {
-        let input_height = inner.h.min(3);
+        let input_height = inner.h.min(LAYOUT.cells.tile_input_max_rows);
         let view_rect = Rect::new(inner.x, inner.y, inner.w, inner.h - input_height);
         super::draw_view(surface, view_rect, view, now_ms);
         draw_input_tile(
