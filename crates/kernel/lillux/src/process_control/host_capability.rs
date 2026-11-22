@@ -1681,9 +1681,9 @@ pub struct HostFacts {
     /// the link is unreadable to this process.
     pub pid1_executable: Option<String>,
     /// Why the node's exit ends its pid namespace and every job in it:
-    /// measured when the node is pid 1, trusted when its parent is pid 1
-    /// and node policy names that init as one that exits with its only
-    /// child. Exactly one of this and `enclosure_exit_refusal` is set.
+    /// trusted when its parent is pid 1 and node policy names that init as
+    /// one that exits with its only child. Exactly one of this and
+    /// `enclosure_exit_refusal` is set.
     pub enclosure_exit: Option<CapabilityEvidence>,
     pub enclosure_exit_refusal: Option<String>,
     pub uid_map: Option<String>,
