@@ -96,6 +96,7 @@ tokio-stream = { workspace = true }
 once_cell = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+ryeos-http-egress = { workspace = true }
 url = { workspace = true }
 tempfile = { workspace = true, optional = true }
 

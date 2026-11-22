@@ -647,7 +647,7 @@ impl AuthenticatedPublisherClient {
         );
         hash(&expected_publisher_fingerprint)?;
         token(&bearer, 4096)?;
-        let client = reqwest::Client::builder()
+        let client = ryeos_http_egress::client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
