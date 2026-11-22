@@ -2,11 +2,12 @@
 //! scripted chat stub.
 //!
 //! The attempt's outcome is unknown: the request may have reached the
-//! provider and its answer was never recorded. Resuming after a restart is not
-//! supported, so the resumed run fails with the typed code
-//! `provider_attempt_outcome_unknown` and the stub sees exactly one request. They need populated bundles
-//! (`-f bundles=branch`, or `-f bundles=next` on a branch with the same
-//! bundles).
+//! provider and its answer was never recorded. A directive that does not
+//! declare `provider_contact: repeatable` is not resumed, so the resumed run
+//! fails with the typed code `provider_attempt_outcome_unknown` and the stub
+//! sees exactly one request. (`restart_resume_retry_e2e.rs` covers the
+//! repeatable directive.) They need populated bundles (`-f bundles=branch`,
+//! or `-f bundles=next` on a branch with the same bundles).
 
 use ryeosd::test_support as common;
 
@@ -88,15 +89,13 @@ async fn a_kill_while_a_provider_attempt_is_issued_fails_typed_without_a_second_
     for expected in [
         "the provider outcome is unknown because the node restarted during the call",
         "charged its reserved maximum",
-        "this turn cannot be resumed",
-        "Resuming after a restart is not supported for any directive yet",
+        "this turn was not resumed",
+        "`provider_contact: repeatable`",
+        "`unknown_outcome_retry`",
+        "fenced while issued, with no recorded answer or retry advancement",
     ] {
         assert!(detail.contains(expected), "missing `{expected}`: {detail}");
     }
-    assert!(
-        !detail.contains("repeatable"),
-        "the failure offers no repeatable cure: {detail}"
-    );
     assert_eq!(
         rig.stub.requests().await.len(),
         1,

@@ -102,6 +102,16 @@ pub struct ProviderAttemptPrepareParams {
     pub transport: ryeos_provider_contract::PreparedTransportIntent,
     pub request: ryeos_provider_contract::PreparedRequestProjection,
     pub verified_bound: VerifiedPreparedSpendBound,
+    /// Present only when the runtime resumed an unfinished provider turn after
+    /// a restart and its signed policy would admit retrying this attempt had
+    /// the failure been observed in process. It is the runtime's decision for
+    /// this exact attempt, and nothing more than an offer: the daemon stores
+    /// it only when the same coordinate is already closed as cut by the
+    /// restart (fenced while issued, with no recorded answer or advancement)
+    /// and the sealed launch authority admits another contact. In every other
+    /// case it has no effect, so it is not part of the request identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_retry: Option<ProviderRetryDecision>,
 }
 
 impl ProviderAttemptPrepareParams {
@@ -118,6 +128,19 @@ impl ProviderAttemptPrepareParams {
         self.transport
             .validate()
             .map_err(|error| format!("{error:#}"))?;
+        if let Some(retry) = &self.restart_retry {
+            retry.validate()?;
+            if retry.turn != self.turn || retry.failed_attempt_number != self.attempt_number {
+                return Err(
+                    "a restart retry decision must name the prepared turn and attempt".to_string(),
+                );
+            }
+            if !retry.reason.leaves_outcome_unknown() {
+                return Err(
+                    "a restart retry decision must carry an unknown-outcome reason".to_string(),
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -742,6 +765,7 @@ mod tests {
                 },
                 verifier_contract_digest: digest_of("verifier"),
             },
+            restart_retry: None,
         };
         params.validate().unwrap();
         let mut value = serde_json::to_value(&params).unwrap();
@@ -780,6 +804,7 @@ mod tests {
                 },
                 verifier_contract_digest: digest_of("verifier"),
             },
+            restart_retry: None,
         };
         assert!(params.validate().is_err());
         params.turn = 1;

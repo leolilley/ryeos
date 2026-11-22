@@ -1574,6 +1574,16 @@ async fn startup_recovery_holds_the_root_of_a_dedicated_session_that_is_not_runn
             .unwrap()
             .unwrap();
         assert_eq!(session.state, session_state);
+
+        // Readiness boundary: the held root is owned by its session, so the
+        // ownership check that gates Ready accepts it and nothing moves.
+        super::ensure_recovery_targets_classified(&state, &report.active_thread_ids)
+            .unwrap_or_else(|error| panic!("{session_state}: readiness refused: {error:#}"));
+        assert_eq!(
+            held_root_footprint(&state, thread_id),
+            before,
+            "{session_state} after readiness"
+        );
     }
 }
 

@@ -112,7 +112,7 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
         .with_checked_bundle_generation(|generation| {
             let (mut effective, resolution) =
                 generation.effective_item_with_resolution(EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
                     item_ref,
                     expected_kind: req.expected_kind,
                     project_root: project_root.clone(),

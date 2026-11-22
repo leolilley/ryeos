@@ -390,11 +390,16 @@ pub struct RigOptions {
     pub provider_cache_tariff: bool,
     /// Plant the image-returning tools `shot`, `shot_bad` and `shot_big`.
     pub image_tools: bool,
-    /// Plant the tool `big_text`, which returns 200 KB of text.
+    /// Plant the tools `big_text` (200 KB of text) and `small_text` (a fixed
+    /// short answer).
     pub spill_tools: bool,
     /// Lines under the directive's `model.reasoning:`, when it sets a
     /// reasoning policy.
     pub directive_reasoning: Option<String>,
+    /// Rewrite the node's signed native-capacity policy to a 300 s service
+    /// window with a 60 s drain margin, so a planned rollover begins 180 s
+    /// after the daemon starts.
+    pub long_service_window: bool,
 }
 
 impl Default for RigOptions {
@@ -415,6 +420,7 @@ impl Default for RigOptions {
             image_tools: false,
             spill_tools: false,
             directive_reasoning: None,
+            long_service_window: false,
         }
     }
 }
@@ -453,6 +459,33 @@ impl Rig {
     }
 }
 
+/// Rewrite the fixture's signed native-capacity policy to a 300 s window with
+/// the minimum 60 s cleanup occupancy and drain margin, so the planned
+/// rollover begins 180 s after the daemon starts. The window must exceed the
+/// margin plus the cleanup occupancy the reservation requires.
+pub fn lengthen_short_service_window(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/native_capacity.yaml");
+    let raw = std::fs::read_to_string(&path)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    let incarnation = policy["incarnation"]
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("native capacity policy has no incarnation envelope"))?;
+    incarnation.insert("maximum_occupancy_ms".into(), 300_000u64.into());
+    incarnation.insert("cleanup_occupancy_ms".into(), 60_000u64.into());
+    incarnation.insert("rollover_drain_margin_ms".into(), 60_000u64.into());
+    let body = serde_yaml::to_string(&policy)?;
+    let signed = lillux::signature::sign_content_at(
+        &body,
+        node,
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
 pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Rig> {
     let stub = StubServer::start(Script::from_yaml_str(script_yaml)?).await;
     let url = stub.base_url.clone();
@@ -462,12 +495,16 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let top_extra = opts.provider_top_extra.clone();
     let usage_extra = opts.provider_usage_extra.clone();
     let cache_tariff = opts.provider_cache_tariff;
+    let long_service_window = opts.long_service_window;
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
     let started_at = Instant::now();
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_workflow_bundles(state_path, fixture)?;
+            if long_service_window {
+                lengthen_short_service_window(state_path, &fixture.node)?;
+            }
             if graph_vault {
                 plant_vault_with_zen_key(state_path)?;
             }
@@ -553,6 +590,12 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         }
     }
     if opts.spill_tools {
+        plant_python_tool(
+            root,
+            "small_text",
+            "print(json.dumps({'ok': True}))",
+            &fixture.publisher,
+        )?;
         plant_python_tool(
             root,
             "big_text",

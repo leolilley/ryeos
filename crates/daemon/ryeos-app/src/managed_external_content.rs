@@ -783,7 +783,7 @@ fn resolve_activation_with_policy(
         state.engine.with_checked_bundle_generation(|generation| {
             let effective =
                 generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless),
                     item_ref: canonical,
                     expected_kind: Some("config".to_owned()),
                     project_root: None,
@@ -798,7 +798,7 @@ fn resolve_activation_with_policy(
                     .map_err(|error| anyhow::anyhow!("invalid activation consumer ref: {error}"))?;
             let consumer =
                 generation.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless),
                     item_ref: consumer_ref,
                     expected_kind: None,
                     project_root: None,

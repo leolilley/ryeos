@@ -23,7 +23,7 @@ That is the whole idea. Everything in this repository is that one property
 at a different layer:
 
 - **Signed items and bundles** — behavior you can install and trust because
-  resolution verifies its signature and content identity. Enforced isolationing
+  resolution verifies its signature and content identity. Enforced isolation
   additionally pins verified entry bytes through execution.
 - **Threads** — every execution has an identity and a durable event log.
   The log _is_ the run: tail it live, replay it, resume it, cancel it.
@@ -97,6 +97,14 @@ Tools are executable programs. Directives are LLM-evaluated programs with
 permissions, limits, context, and inheritance. Both are resolved from signed
 bundle or project data before execution.
 
+Directive runs (on main, not yet in a tagged release) are bounded by signed execution config
+([execution config](bundles/ryeos-docs/.ai/knowledge/ryeos/standard/execution-config.md)):
+a tool result over `spill_threshold_bytes` is stored whole as a thread
+attachment and the model sees a marked partial preview; four loop and stall
+detectors (repetition, ping-pong, no-progress, idle) warn once and then stop
+the run with `loop_detected`; and the last turn a turn limit allows is a
+wrap-up turn that tells the model to finish.
+
 ### Trace, steer, and replay executions
 
 ```bash
@@ -105,6 +113,8 @@ ryeos thread get <thread-id>
 ryeos thread tail <thread-id>        # live event stream
 ryeos thread children <thread-id>    # lineage-linked child threads
 ryeos thread chain <thread-id>       # continuation chain
+ryeos thread receipts <thread-id>    # per-node graph receipts
+ryeos threads timeline <chain-root-id>  # a chain as a readable timeline
 ryeos thread cancel <thread-id>
 ryeos events replay <thread-id>
 ```
@@ -141,7 +151,10 @@ ryeos remote admit \
   --remote prod \
   --token "<one-time-token>" \
   --label dev-machine \
-  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
+  --scopes ryeos.execute.service.objects/has \
+  --scopes ryeos.execute.service.objects/put \
+  --scopes ryeos.execute.service.objects/get \
+  --scopes ryeos.execute.service.system/push-head
 ryeos remote doctor --remote prod
 ryeos remote execute \
   --remote prod \
@@ -162,6 +175,13 @@ container images are currently `linux/amd64`, and packaged bundle executables ta
 `x86_64-unknown-linux-gnu`. Other targets are tracked in the
 [platform support matrix](bundles/ryeos-docs/.ai/knowledge/ryeos/core/platform-support.md) and must not silently bypass
 the isolation or durability contracts.
+
+This README describes the 0.6 line on `main`. The latest stable release is
+v0.5.102; v0.6.0 prereleases (`v0.6.0-ple.N`) are tagged, and 0.6.0 itself is
+not released. The init selectors below (`--node-profile standard --host-class`)
+are not in v0.5.102, whose init takes `--node-profile full`. Use the release's
+own README for the release you install. Features marked "on main, not yet in a
+tagged release" are merged but in no tag.
 
 ### Arch Linux / AUR
 
@@ -186,6 +206,10 @@ requires an exact publisher-signed init profile and an explicit host class the
 profile declares (`standard` declares `local`, `local_unconfined` and `hosted`); absence is never replaced
 with runtime defaults, and the class is never inferred from what the host
 proves.
+`local` enforces the sandbox lane: init refuses when the host's sandbox probe
+cannot prove it, and the refusal names `--host-class local_unconfined`, the
+explicit opt-out that runs jobs as the daemon user. Init never selects the
+opt-out for you, and `ryeos node doctor` warns while a node runs it.
 Isolation backends are ordinary, separately installed bundles. `ryeos start`
 launches `ryeosd`. See the
 [execution isolation contract](bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md) before
@@ -233,16 +257,25 @@ Composition images, one per bundle set:
 | `ryeos-local-inference` | local-inference | `local-inference` |
 | `ryeos-hosted-workflow` | hosted-workflow | `hosted-workflow` |
 | `ryeos-central-host` | central-host | `central-host` |
-| `ryeos-substrate` | bundle-source | `bundle-source` |
+| `ryeos-substrate` (published; `ryeos-bundle-source` is only the composition-candidate bake tag) | bundle-source | `bundle-source` |
 
 `ryeos-standard`, `ryeos-central-host`, `ryeos-local-inference` and
 `ryeos-hosted-workflow` are the four published release images.
-The rest are branch candidates deployed by digest, not tagged releases. See
-[deploy/composition-images.md](deploy/composition-images.md).
+The rest are branch candidates deployed by digest, not tagged releases;
+`ryeos-hosted-controller` can also be built from a published release's signed
+bundle archive (`build-controller-from-release` workflow) and is deployed by
+digest. `standard-central-auth` (installable, no image decided) and
+`development` (for local builds) have no image. Two more init profiles reuse a set: `hosted-node` (the `core`
+set under hosted admission policy) and `contained-workflow` (the
+`hosted-workflow` set). `standard` is the default local node set: core,
+scheduling, knowledge, directive, graph, ryeos-docs, ryeos-ui, codex, opencode,
+web and browser. See [deploy/composition-images.md](deploy/composition-images.md).
 
-The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
-entrypoint runs `ryeos init --non-interactive --node-profile standard
---host-class "$RYEOS_INIT_HOST_CLASS"` for first policy publication. The image
+The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. On a
+first boot the entrypoint runs `ryeos init --non-interactive` with the profile
+named by `RYEOS_INIT_NODE_PROFILE` (the standard image sets it to `standard`),
+`--host-class "$RYEOS_INIT_HOST_CLASS"`, and the substrate coordinates below,
+for first policy publication. The image
 never sets `RYEOS_INIT_HOST_CLASS`: the deployment sets it to `hosted` in a
 hosting provider's container (a hosted service, plain Docker) or to
 `local` on a host the operator runs, and the node keeps that class for life.
@@ -257,14 +290,24 @@ maximum number of live compiled-binding attachments retained by one UI browser
 session. The daemon has no fallback when that current policy member is absent;
 existing installed generations require an explicit stopped-node schema cut or
 complete policy replacement before a binary with the new registry can start.
+A first boot also requires `RYEOS_SUBSTRATE_IMAGE`, the exact running image
+reference pinned by digest, and `RYEOS_SUBSTRATE_PROTOCOL`, a nonzero integer
+(`1`; not the remote protocol version).
+An image cannot embed its own registry digest, so the deployment sets them.
 Keep `/data` on a named volume:
 
 ```bash
 docker volume create ryeos-data
+DIGEST="$(docker buildx imagetools inspect ghcr.io/leolilley/ryeos-standard:X.Y.Z \
+  --format '{{json .Manifest.Digest}}' | tr -d '"')"
+IMAGE="ghcr.io/leolilley/ryeos-standard@${DIGEST}"
 docker run -d --name ryeos \
   -p 8000:8000 \
   -v ryeos-data:/data \
-  ghcr.io/leolilley/ryeos-standard:latest
+  -e RYEOS_INIT_HOST_CLASS=hosted \
+  -e RYEOS_SUBSTRATE_IMAGE="$IMAGE" \
+  -e RYEOS_SUBSTRATE_PROTOCOL=1 \
+  "$IMAGE"
 docker exec ryeos ryeos node status
 ```
 
@@ -280,51 +323,37 @@ not use it for release images. See the
 [official publisher trust contract](bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/operator-init.md#official-publisher-trust)
 for the complete operator contract.
 
-When an upgrade intentionally changes the signed node-policy schema or the
-image's exact bundle-set profile, replace the complete signed policy generation
-with a signed offline operation, `node.reset.policy-generation`. It is applied
-from the new image's seed at the top of the next startup: the request names the
-seed's measured digest, the node profile, the host class and the substrate image
-digest, so a request signed for one image cannot apply on another. Sign it
-against the node's facts and submit it to the running node, which stops and
-starts again to apply it:
-
-```bash
-ryeos node offline-operation facts --json > facts.json   # or GET /offline-operations/facts
-ryeos node offline-operation sign --operation node.reset.policy-generation \
-  --facts facts.json --arguments policy-replace.json --expect policy_generation=<sha256> \
-  --out request.json
-ryeos node offline-operation submit --file request.json --url https://node.example --stop
-```
-
-A node that cannot start receives the same request from the platform instead:
-`ryeos node offline-operation sign ... --stage-dir ./stage` writes
-`request.json` and `inputs/`, and `RYEOS_OFFLINE_OPERATION_REQUEST` (a path) and
-`RYEOS_OFFLINE_OPERATION_INPUTS` (a directory) hand them to the entrypoint,
-which copies them into the node's inbox without verifying anything. The node
-verifies and applies them, and leaves a node-signed receipt in a hash-chained
-ledger (`ryeos node offline-operation list`). Hosted nodes trust their platform
-to restart them after an exit; a platform operator who can write the volume can
-still sign as the local operator, which the ledger makes visible and does not
-prevent.
+Upgrades that change the signed node-policy schema or the image's bundle set,
+and every other change that needs a stopped node, are signed offline operations
+(`ryeos node offline-operation facts|sign|submit|list`), also deliverable to a
+node that cannot start through `RYEOS_OFFLINE_OPERATION_REQUEST` and
+`RYEOS_OFFLINE_OPERATION_INPUTS`. See the
+[operator init guide](bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/operator-init.md),
+[deploy/composition-images.md](deploy/composition-images.md) and
+[signed offline operations](.ai/knowledge/ryeos/development/signed-offline-operations.md).
 
 The release gate exercises default-disabled startup and signed execution
 without extra capabilities or an isolation backend. Back up the `ryeos-data`
 volume before upgrades; it contains node identity, trust, vault, and durable
 execution state.
 
-This release is an explicit no-backcompat runtime-schema cutover. Before
-restarting the new daemon on every existing node, stop the daemon and discard
-the incompatible thread history and project heads:
+Some upgrades change the execution-history schema. There is no automatic
+migration and startup fails closed: it reports the exact predecessor and
+current runtime epochs. The cut is then a signed offline operation,
+`node.reset.execution-history`, that runs only when the retained database is
+exactly the `from` epoch and the installed binary owns exactly the `to` epoch.
+On a node on this machine the same cut is:
 
 ```bash
-ryeos node reset execution-history --include-project-heads \
-  --confirm --confirm-project-heads
+ryeos node reset execution-history --schema-cut-from <epoch> --schema-cut-to <epoch> \
+  --confirm
 ```
 
-The reset is destructive, so retain the pre-upgrade backup. Startup fails
-closed when predecessor launch metadata is still present rather than silently
-projecting it into the current runtime contract.
+Add `--include-project-heads --confirm-project-heads` only to retire project
+HEADs as well. The reset is destructive, so retain the pre-upgrade backup.
+The variables `RYEOS_RESET_NODE_POLICY_GENERATION` and
+`RYEOS_EXECUTION_HISTORY_SCHEMA_CUT` no longer exist and refuse the start when
+set. Which epochs a given release cuts is stated in that release's notes.
 
 ### From source
 
@@ -453,8 +482,17 @@ The repository currently includes bundles such as:
 | `scheduling`   | Scheduler service and schedule declarations.                                             |
 | `web`          | Web-oriented tools and runtimes.                                                         |
 | `browser`      | Browser automation tools.                                                                |
-| `ryeos-ui`       | UI/operator-facing bundle assets.                                                        |
+| `ryeos-ui`     | UI/operator-facing bundle assets (`ryeos tui`, `ryeos web`).                             |
+| `codex`        | Hosts the pinned Codex App Server through the core structured-session bridge.            |
+| `opencode`     | Hosts a pinned OpenCode server through the same bridge.                                  |
+| `claude-code`  | Claude Code adapter data for the same bridge; a stub slice (see its README).             |
+| `local-inference` | Local-model worker programs, provider routes and model-domain knowledge.              |
 | `central-auth` | Reusable app-level auth primitives for RyeOS-backed projects.                            |
+| `bundle-source` | Bundle catalog services (upload, publish, resolve, recovery) for a bundle-source node.  |
+
+Also present under `bundles/`: `render-sandbox`, `modal-sandbox`,
+`sandbox-linux-bubblewrap` and `environment-qualification`. The `standard` set
+is listed under [Composition images](#docker-image).
 
 ## State model
 
@@ -476,16 +514,19 @@ projection of its thread's durable state.
 
 | Path                           | Purpose                                                                             |
 | ------------------------------ | ----------------------------------------------------------------------------------- |
-| `crates/kernel/lillux`         | Low-level signing, hashing, atomic IO, process, and primitive execution support; see the [durability matrix](.ai/knowledge/ryeos/development/filesystem-durability.md). |
+| `crates/kernel/lillux`, `lillux-sqlite` | Low-level signing, hashing, atomic IO, process, and primitive execution support; see the [durability matrix](.ai/knowledge/ryeos/development/filesystem-durability.md). |
 | `crates/engine/ryeos-engine`   | Item resolution, composition, policy facts, and execution planning.                 |
 | `crates/engine/ryeos-executor` | Execution dispatch and runtime integration.                                         |
-| `crates/daemon/*`              | Daemon crates: app core, HTTP API, bundle install, node lifecycle, and UI assets.   |
-| `crates/bin/cli`               | `ryeos`, the operator CLI and MCP target.                                           |
+| `crates/daemon/*`              | Daemon crates: app core, HTTP API, bundle install, node lifecycle, scheduler service, and UI. |
+| `crates/bin/cli`               | Package `ryeos-cli`, binary `ryeos`: the operator CLI and MCP target.               |
 | `crates/bin/daemon`            | `ryeosd`, the local node daemon.                                                    |
-| `crates/clients/*`             | Client surfaces: shared ryeos-ui base, terminal, and web.                             |
+| `crates/clients/*`             | Client surfaces: shared base, presentation contract, terminal, web, and transport. `rune` is a separate, workspace-excluded client. |
 | `crates/runtimes/*`            | Directive, graph, and knowledge runtimes.                                           |
 | `crates/state/*`               | Durable state, scheduler, and vault crates.                                         |
-| `crates/tools/*`               | Bundle-owned tool binaries and handler protocols.                                   |
+| `crates/tools/*`               | Bundle-owned tool binaries, handlers, and worker adapters (Codex, Claude Code, web, browser). |
+| `crates/kinds/*`               | Directive and graph definition crates.                                              |
+| `crates/host-adapters/*`       | Executables installed by a host administrator; not RyeOS tools (see its README).    |
+| `crates/support/*`             | Tracing, request signing, and a chat stub.                                          |
 | `bundles/*`                    | Signed bundle source trees.                                                         |
 | `integrations/mcp/ryeosd`      | Python MCP stdio adapter exposing the `cli` tool.                                   |
 | `scripts/`                     | Bundle population, validation, local install, and development workflows.            |

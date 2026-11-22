@@ -4506,15 +4506,14 @@ async fn prepare_managed_launch_authority_in_mode(
     })?;
     let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
     let resolution_project_root = root_admission.resolution_workspace();
-    let engine_roots = engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(
-            root_admission
-                .verified_subject()
-                .resolved
-                .logical_project_root
-                .clone(),
-        );
+    let engine_roots = engine.resolution_roots(
+        resolution_project_root.map(Path::to_path_buf),
+        root_admission
+            .verified_subject()
+            .resolved
+            .logical_project
+            .clone(),
+    );
     let bundle_roots: Vec<PathBuf> = engine_roots
         .authoritative_bundle_roots()
         .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?
@@ -7358,15 +7357,14 @@ async fn run_claimed_thread_row_inner(
         .ok_or_else(|| anyhow::anyhow!("managed launch has no exact root admission"))?;
     let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
     let resolution_project_root = root_admission.resolution_workspace();
-    let engine_roots = engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(
-            root_admission
-                .verified_subject()
-                .resolved
-                .logical_project_root
-                .clone(),
-        );
+    let engine_roots = engine.resolution_roots(
+        resolution_project_root.map(Path::to_path_buf),
+        root_admission
+            .verified_subject()
+            .resolved
+            .logical_project
+            .clone(),
+    );
     let effective_request_snapshot = match resolved
         .root_admission
         .as_ref()

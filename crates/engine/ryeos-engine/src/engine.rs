@@ -10,8 +10,9 @@ use crate::AI_DIR;
 use crate::canonical_ref::CanonicalRef;
 use crate::composers::ComposerRegistry;
 use crate::contracts::{
-    EngineContext, ExecutionCompletion, ExecutionHints, ExecutionPlan, PlanContext, ProjectContext,
-    ResolvedItem, SubjectResolutionAuthority, VerifiedItem,
+    EngineContext, ExecutionCompletion, ExecutionHints, ExecutionPlan, LogicalProject,
+    LogicalProjectAbsence, PlanContext, ProjectContext, ResolvedItem, SubjectResolutionAuthority,
+    VerifiedItem,
 };
 use crate::effective_validators::EffectiveValidatorRegistry;
 use crate::error::EngineError;
@@ -30,9 +31,8 @@ pub struct EffectiveItemRequest {
     pub expected_kind: Option<String>,
     pub project_root: Option<PathBuf>,
     /// The logical project of `project_root` (see
-    /// `PlanContext::logical_project_root`); `None` means the root is its
-    /// own logical project when the authority is live.
-    pub logical_project_root: Option<PathBuf>,
+    /// `PlanContext::logical_project`).
+    pub logical_project: LogicalProject,
     pub subject_resolution_authority: SubjectResolutionAuthority,
 }
 
@@ -40,14 +40,19 @@ impl EffectiveItemRequest {
     /// The logical project for signer scopes: the stated one, or the project
     /// root itself when the authority is the live project.
     pub fn effective_logical_project_root(&self) -> Option<PathBuf> {
-        match (
-            &self.logical_project_root,
+        self.logical_project.resolve(
             &self.subject_resolution_authority,
-        ) {
-            (Some(logical), _) => Some(logical.clone()),
-            (None, SubjectResolutionAuthority::LiveFs) => self.project_root.clone(),
-            (None, _) => None,
-        }
+            self.project_root.as_deref(),
+        )
+    }
+
+    /// [`EffectiveItemRequest::effective_logical_project_root`] as a
+    /// `LogicalProject`, keeping the reason when no project results.
+    pub fn effective_logical_project(&self) -> LogicalProject {
+        self.logical_project.resolved(
+            &self.subject_resolution_authority,
+            self.project_root.as_deref(),
+        )
     }
 }
 
@@ -1178,7 +1183,10 @@ impl CheckedEngineGeneration<'_> {
         const MAX_SOURCE_FILE_BYTES: usize = 256 * 1024;
         const MAX_SOURCE_TOTAL_BYTES: usize = 1024 * 1024;
 
-        let roots = self.engine.resolution_roots(None);
+        let roots = self.engine.resolution_roots(
+            None,
+            LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+        );
         let mut captured = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         let mut total = 0usize;
@@ -1610,7 +1618,10 @@ impl Engine {
     ) -> Result<Option<Value>, EngineError> {
         use crate::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
 
-        let roots = self.resolution_roots(None);
+        let roots = self.resolution_roots(
+            None,
+            LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+        );
         let load_context = ConfigLoadContext {
             roots: &roots,
             parsers: &self.parser_dispatcher,
@@ -1641,7 +1652,10 @@ impl Engine {
         let Some(schema) = self.kinds.get("config") else {
             return Ok(Vec::new());
         };
-        let roots = self.resolution_roots(None);
+        let roots = self.resolution_roots(
+            None,
+            LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+        );
         let mut ids: Vec<String> =
             crate::item_resolution::try_enumerate_kind_refs(&roots, schema, "config")?
                 .into_iter()
@@ -2447,7 +2461,10 @@ impl Engine {
                 })?;
 
         // Build resolution roots (system-first order)
-        let roots = self.resolution_roots(project_root.clone());
+        let roots = self.resolution_roots(
+            project_root.clone(),
+            ctx.effective_logical_project(project_root.as_deref()),
+        );
 
         tracing::debug!(item_ref = %item_ref, "resolving item");
 
@@ -2554,7 +2571,7 @@ impl Engine {
         );
 
         let resolved = ResolvedItem {
-            logical_project_root: ctx.effective_logical_project_root(project_root.as_deref()),
+            logical_project: ctx.effective_logical_project(project_root.as_deref()),
             canonical_ref: item_ref.clone(),
             kind: item_ref.kind.clone(),
             source_path: result.winner_path,
@@ -2721,7 +2738,10 @@ impl Engine {
                 &request_authority,
                 false,
             )?;
-            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let roots = self.resolution_roots(
+                Some(project_root.to_path_buf()),
+                ctx.effective_logical_project(Some(project_root)),
+            );
             let (output, probed_absent) =
                 crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
                     &verified_root.resolved.canonical_ref,
@@ -3177,11 +3197,10 @@ impl Engine {
             materialized_project_root.as_deref(),
             subject_resolution_authority,
         )?;
-        let roots = self
-            .resolution_roots(materialized_project_root.clone())
-            .with_logical_project_root(
-                ctx.effective_logical_project_root(materialized_project_root.as_deref()),
-            );
+        let roots = self.resolution_roots(
+            materialized_project_root.clone(),
+            ctx.effective_logical_project(materialized_project_root.as_deref()),
+        );
         let (output, probed_absent) = crate::resolution::run_resolution_pipeline_with_probes(
             &verified_root.resolved.canonical_ref,
             &self.kinds,
@@ -3241,11 +3260,10 @@ impl Engine {
             &materialized_project_root,
             admitted,
         )?;
-        let roots = self
-            .resolution_roots(Some(materialized_project_root.clone()))
-            .with_logical_project_root(
-                ctx.effective_logical_project_root(Some(materialized_project_root.as_path())),
-            );
+        let roots = self.resolution_roots(
+            Some(materialized_project_root.clone()),
+            ctx.effective_logical_project(Some(materialized_project_root.as_path())),
+        );
         let project_content = admitted.project_content_for_root(&materialized_project_root)?;
         let (output, probed_absent) =
             crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
@@ -3916,9 +3934,10 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-        let roots = self
-            .resolution_roots(request.project_root.clone())
-            .with_logical_project_root(request.effective_logical_project_root());
+        let roots = self.resolution_roots(
+            request.project_root.clone(),
+            request.effective_logical_project(),
+        );
         let request_snapshot = self.effective_request_snapshot_current(
             request.project_root.as_deref(),
             &request.subject_resolution_authority,
@@ -3951,9 +3970,10 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-        let roots = self
-            .resolution_roots(request.project_root.clone())
-            .with_logical_project_root(request.effective_logical_project_root());
+        let roots = self.resolution_roots(
+            request.project_root.clone(),
+            request.effective_logical_project(),
+        );
         let snapshot = self.effective_request_snapshot_from_project_content(
             project_root,
             project_content,
@@ -4056,7 +4076,10 @@ impl Engine {
                 .get(&request.item_ref.kind)
                 .is_some_and(|schema| {
                     crate::item_resolution::resolve_item_full(
-                        &self.resolution_roots(None),
+                        &self.resolution_roots(
+                            None,
+                            LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+                        ),
                         schema,
                         &request.item_ref,
                     )
@@ -4138,9 +4161,10 @@ impl Engine {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
             _ => None,
         };
-        let roots = self
-            .resolution_roots(project_root.clone())
-            .with_logical_project_root(ctx.effective_logical_project_root(project_root.as_deref()));
+        let roots = self.resolution_roots(
+            project_root.clone(),
+            ctx.effective_logical_project(project_root.as_deref()),
+        );
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             &ctx.subject_resolution_authority,
@@ -4189,11 +4213,10 @@ impl Engine {
                 crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
                 _ => None,
             };
-            let roots = self
-                .resolution_roots(project_root.clone())
-                .with_logical_project_root(
-                    ctx.effective_logical_project_root(project_root.as_deref()),
-                );
+            let roots = self.resolution_roots(
+                project_root.clone(),
+                ctx.effective_logical_project(project_root.as_deref()),
+            );
             let request_snapshot = self.effective_request_snapshot_current(
                 project_root.as_deref(),
                 &ctx.subject_resolution_authority,
@@ -4240,7 +4263,10 @@ impl Engine {
             let (compile_ctx, compile_item) =
                 logical_bundle_compile_subject(generation, ctx, item, root_source)?;
 
-            let roots = self.resolution_roots(None);
+            let roots = self.resolution_roots(
+                None,
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            );
             let request_snapshot = self.effective_request_snapshot_current(
                 None,
                 &crate::contracts::SubjectResolutionAuthority::Projectless,
@@ -4320,9 +4346,10 @@ impl Engine {
             }
             let request_snapshot =
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
-            let roots = self
-                .resolution_roots(Some(project_root.to_path_buf()))
-                .with_logical_project_root(ctx.effective_logical_project_root(Some(project_root)));
+            let roots = self.resolution_roots(
+                Some(project_root.to_path_buf()),
+                ctx.effective_logical_project(Some(project_root)),
+            );
             let project_content = admitted.project_content_for_root(project_root)?;
             let plan = crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
                 item,
@@ -4359,7 +4386,7 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
-        logical_project_root: Option<PathBuf>,
+        logical_project: LogicalProject,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
@@ -4368,7 +4395,7 @@ impl Engine {
                 root_executor_id,
                 root_kind,
                 project_root,
-                logical_project_root,
+                logical_project,
                 subject_resolution_authority,
             )
         })
@@ -4381,16 +4408,14 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: &Path,
-        logical_project_root: Option<PathBuf>,
+        logical_project: LogicalProject,
         admitted: &AdmittedRequestAuthoritySnapshot,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
             admitted.validate_root_binding(project_root)?;
             let request_snapshot =
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
-            let roots = self
-                .resolution_roots(Some(project_root.to_path_buf()))
-                .with_logical_project_root(logical_project_root);
+            let roots = self.resolution_roots(Some(project_root.to_path_buf()), logical_project);
             let project_content = admitted.project_content_for_root(project_root)?;
             crate::plan_builder::resolve_terminal_executor_under_project_authority(
                 root_executor_id,
@@ -4412,12 +4437,10 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
-        logical_project_root: Option<PathBuf>,
+        logical_project: LogicalProject,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
-        let roots = self
-            .resolution_roots(project_root.clone())
-            .with_logical_project_root(logical_project_root);
+        let roots = self.resolution_roots(project_root.clone(), logical_project);
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             subject_resolution_authority,
@@ -4547,22 +4570,35 @@ impl Engine {
     }
 
     /// Build resolution roots for a given project root (project-first order).
-    pub fn resolution_roots(&self, project_root: Option<PathBuf>) -> ResolutionRoots {
+    /// `logical_project` is stated by every caller: a pinned or COW checkout
+    /// passes the project it stands for (or `Absent`), never a default.
+    pub fn resolution_roots(
+        &self,
+        project_root: Option<PathBuf>,
+        logical_project: LogicalProject,
+    ) -> ResolutionRoots {
         if !self.registered_bundle_roots.is_empty() {
-            return ResolutionRoots::from_registered(project_root, &self.registered_bundle_roots);
+            return ResolutionRoots::from_registered(
+                project_root,
+                &self.registered_bundle_roots,
+                logical_project,
+            );
         }
         let system_ai: Vec<PathBuf> = self.bundle_roots.iter().map(|p| p.join(AI_DIR)).collect();
         let project_ai = project_root.map(|p| p.join(AI_DIR));
-        ResolutionRoots::from_flat(project_ai, system_ai)
+        ResolutionRoots::from_flat(project_ai, system_ai, logical_project)
     }
 
     /// Add node-local configuration to launch-config lookup only. Keeping this
     /// separate prevents mutable node state from becoming a general item root.
+    /// Launch-config lookup keeps the logical project of `roots`: a pinned
+    /// launch's project config layers are judged on the project the
+    /// generation stands for, never on its checkout.
     pub fn launch_config_roots(&self, roots: &ResolutionRoots) -> ResolutionRoots {
         let mut ordered = roots.ordered.clone();
         let Some(node_config_root) = &self.node_config_root else {
             return ResolutionRoots {
-                logical_project_root: None,
+                logical_project: roots.logical_project.clone(),
                 owned_namespaces: roots.owned_namespaces.clone(),
                 ordered,
             };
@@ -4573,7 +4609,7 @@ impl Engine {
             .any(|root| root.ai_root == node_config_ai_root)
         {
             return ResolutionRoots {
-                logical_project_root: None,
+                logical_project: roots.logical_project.clone(),
                 owned_namespaces: roots.owned_namespaces.clone(),
                 ordered,
             };
@@ -4593,7 +4629,7 @@ impl Engine {
             },
         );
         ResolutionRoots {
-            logical_project_root: None,
+            logical_project: roots.logical_project.clone(),
             owned_namespaces: roots.owned_namespaces.clone(),
             ordered,
         }
@@ -4958,7 +4994,7 @@ formats:
 
     fn test_plan_context() -> PlanContext {
         PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5158,7 +5194,7 @@ formats:
             assert_eq!(verified.trust_class, TrustClass::Trusted);
             let resolution = selected
                 .effective_resolution_output(EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
                     item_ref: hook.clone(),
                     expected_kind: Some("tool".to_owned()),
                     project_root: None,
@@ -5255,7 +5291,7 @@ formats:
         engine
             .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
                 let resolution = generation.effective_resolution_output(EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
                     item_ref: CanonicalRef::parse("tool:hello")?,
                     expected_kind: Some("tool".to_owned()),
                     project_root: None,
@@ -5460,7 +5496,10 @@ formats:
     #[test]
     fn node_config_root_is_added_only_to_launch_config_precedence() {
         let engine = test_engine().with_node_config_root(PathBuf::from("/node-config"));
-        let ordinary = engine.resolution_roots(Some(PathBuf::from("/project")));
+        let ordinary = engine.resolution_roots(
+            Some(PathBuf::from("/project")),
+            LogicalProject::MaterializedLive,
+        );
         assert_eq!(ordinary.ordered.len(), engine.bundle_roots.len() + 1);
         assert!(
             !ordinary
@@ -5502,7 +5541,9 @@ formats:
                 assert!(
                     generation
                         .effective_resolution_output(EffectiveItemRequest {
-                            logical_project_root: None,
+                            logical_project: LogicalProject::Absent(
+                                LogicalProjectAbsence::Projectless
+                            ),
                             item_ref: CanonicalRef::parse("worker:missing").unwrap(),
                             expected_kind: Some("worker".to_string()),
                             project_root: None,
@@ -5902,7 +5943,10 @@ formats:
     #[test]
     fn resolution_roots_with_project() {
         let engine = test_engine();
-        let roots = engine.resolution_roots(Some(PathBuf::from("/workspace/project")));
+        let roots = engine.resolution_roots(
+            Some(PathBuf::from("/workspace/project")),
+            LogicalProject::MaterializedLive,
+        );
         assert!(roots.ordered.iter().any(|r| r.space == ItemSpace::Project));
         let project_root = roots
             .ordered
@@ -5924,7 +5968,10 @@ formats:
                 canonical_root: PathBuf::from("/bundles/core"),
             },
         ]);
-        let roots = engine.resolution_roots(Some(PathBuf::from("/workspace/project")));
+        let roots = engine.resolution_roots(
+            Some(PathBuf::from("/workspace/project")),
+            LogicalProject::MaterializedLive,
+        );
 
         assert_eq!(roots.ordered.len(), 2);
         assert_eq!(roots.ordered[0].space, ItemSpace::Project);
@@ -5941,7 +5988,10 @@ formats:
     #[test]
     fn resolution_roots_without_project() {
         let engine = test_engine();
-        let roots = engine.resolution_roots(None);
+        let roots = engine.resolution_roots(
+            None,
+            LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+        );
         assert!(!roots.ordered.iter().any(|r| r.space == ItemSpace::Project));
     }
 
@@ -5969,7 +6019,7 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6066,7 +6116,7 @@ formats:
         .with_trust_store(trust_store);
 
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6112,7 +6162,7 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6155,7 +6205,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6203,7 +6253,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6268,7 +6318,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6317,7 +6367,7 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6386,7 +6436,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6446,7 +6496,7 @@ formats:
         );
 
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6678,7 +6728,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

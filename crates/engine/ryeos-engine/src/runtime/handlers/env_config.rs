@@ -341,6 +341,7 @@ mod interpreter_resolution_tests {
     //! candidate. This is the contract documented in
     //! `bundles/ryeos-docs/.ai/knowledge/ryeos/core/runtimes/python-runtime-contract.md`.
     use super::*;
+    use crate::contracts::{LogicalProject, LogicalProjectAbsence};
     use std::fs;
 
     fn shared_python_descriptors() -> [Value; 2] {
@@ -424,7 +425,11 @@ mod interpreter_resolution_tests {
             &kinds,
             &trust,
             &trust,
-            &crate::item_resolution::ResolutionRoots::from_flat(None, vec![]),
+            &crate::item_resolution::ResolutionRoots::from_flat(
+                None,
+                vec![],
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             crate::resolution::TrustClass::TrustedProject,
             None,
             None,

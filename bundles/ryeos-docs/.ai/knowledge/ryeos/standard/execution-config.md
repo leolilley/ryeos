@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T00:28:22Z:10e7e397ea199a2f0533f551f5ab5df9edf2c79897d7677ae18697ab5950c146:7HiUqQLbOfXexu7UW9TGzslV4Z5eVR4IVbWxege1zkXMTEUCcTr7gEVmomPnfONqmNPwZp/L/DWmJFlJRgmzBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T06:32:13Z:e8cdf536bf4f9d32a345edc4c5250df1401c57115798d5d5e6d6cea127102e77:ceY5Lckvrmot3xK/I3GEQOImJXmoHtW8TVklF3t2dLWYkNmJh9r9gZ1uJxFGC4j5H49OHj8sLZ3KhNDawcJFDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -34,6 +34,7 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `accounting.budget_mode` | settled | Settle after each attempt; may overshoot a finite budget by one attempt |
 | `tool_images` | see below | Ceilings on the images a run's tools return |
 | `tool_output` | see below | How an oversize tool result is shown to the model and stored |
+| `loop_guards` | see below | Detection of a run that repeats itself or stops making progress |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
 
 ## Retry Behavior
@@ -74,10 +75,29 @@ removed `retry_on_timeout` and `retry_mid_stream` keys are refused.
 
 These retries cover a failure the running process observed. If the node stops
 while a model call is in flight (a kill, a crash, a planned rollover that cuts
-the run), the call's outcome is never recorded. The attempt is charged its
-reserved maximum, the turn cannot be resumed, and the thread fails with
-`provider_attempt_outcome_unknown`. Resuming after a restart is not supported
-for any directive yet; no header declaration changes this.
+the run), nothing observed the failure and the call's outcome is never
+recorded. The attempt is charged its reserved maximum. On the next start the
+resumed run treats the cut as a mid-stream failure of that attempt and retries
+it, using one of the `unknown_outcome_retry` slots, when all of these hold:
+
+1. The directive declares `provider_contact: repeatable`.
+2. The provider route is remote, not an admitted local worker, and is on the
+   accounting ledger (priced, or declared explicitly free).
+3. `unknown_outcome_retry.on` names `mid_stream`.
+4. The cut attempt's number is at most `max_retries`, counting every retry of
+   the turn before it, in process or after an earlier restart, and at most
+   `retries`.
+
+The retry resends the same request, so a restart can cost the provider's
+charge for the cut call as well as the reserved maximum node-side; the
+resumed attempt is charged like any other. `max_retries` bounds the total
+number of contacts for a turn across restarts. In every other case (the
+directive is not repeatable, the route is a local worker or has no ledger, the
+policy does not name `mid_stream`, or the ceiling is spent) the turn is not
+resumed and the thread fails with the typed code
+`provider_attempt_outcome_unknown`; no second contact is made.
+
+Resume itself is bounded separately: after a hard crash a turn is resumed at most once; planned restarts re-arm. A turn cut by a second hard crash is therefore failed by the resume budget, not retried, whatever `max_retries` allows.
 
 ### Output limit
 
@@ -221,6 +241,51 @@ The first refusal of a run is logged. A node installed before `text/plain` was
 added to the shipped `thread_attachments` policy keeps its installed policy
 until it resets its policy generation (`reset policy-generation`); until then
 oversize results are cut with `spill_media_type_not_admitted`.
+
+## Loop and stall guards
+
+Four detectors run at the start of each turn over what the conversation holds.
+They compare hashes of each turn's calls, results and text, never content, and
+rebuild from the conversation, so a recovered run reaches the same verdict.
+
+| Finding | Meaning |
+| --- | --- |
+| `repetition` | the same call with the same result `repeat_threshold` times in the last `window_turns` turns, including the latest turn |
+| `ping_pong` | an alternation of different calling turns (period up to `pingpong_max_period`) repeated `pingpong_cycles` whole cycles, the later cycles giving no result the first did not |
+| `no_progress` | `no_progress_turns` consecutive turns whose every result and text had been seen before |
+| `idle` | `idle_turns` consecutive turns with no call and no text |
+
+A finding the model has not been told about is delivered once as a durable
+harness input (kind `loop_warning_<finding>`). If the same finding is still
+present `grace_turns` turns after the warning, the run fails with the typed code
+`loop_detected`. A finding that goes away (the run changed course) is forgotten.
+
+```yaml
+loop_guards:
+  enabled: true
+  window_turns: 16
+  repeat_threshold: 5
+  pingpong_cycles: 4
+  pingpong_max_period: 4
+  no_progress_turns: 8
+  idle_turns: 3
+  grace_turns: 2
+```
+
+`enabled: false` turns every detector off; there is no zero-means-off value, and
+a config that sets a threshold to zero, or one a window could never reach
+(`repeat_threshold` over `window_turns`, `pingpong_cycles` x `pingpong_max_period`
+over `window_turns`), is refused at load.
+
+## Turn-limit wrap-up
+
+When the run has a turn limit, the last turn it allows is a wrap-up turn: before
+that turn the model is told, once, as a durable harness input (kind
+`limit_wrap_up`), that it is the last and to finish. The limit stays a hard cap:
+a run that does not finish on that turn still ends with `turn limit exceeded`.
+With a limit of one turn the first turn carries the notice. When the run
+deadline's wrap-up phase falls on the same turn, one input (kind
+`deadline_limit_wrap_up`) names both reasons.
 
 ## Config Resolution Chain
 

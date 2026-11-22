@@ -156,6 +156,7 @@ pub fn run_sign_batch(
             .isolation
             .registered_generation_roots()
             .context("retained isolation generation omitted typed bundle roots")?,
+        ryeos_engine::contracts::LogicalProject::MaterializedLive,
     );
     let configured_ignore =
         ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
@@ -210,7 +211,10 @@ pub fn run_sign_online_batch(
 ) -> Result<BatchReport> {
     let trust_store = engine.node_trust_store.clone();
     ensure_operator_key_is_trusted(&trust_store, signing_key)?;
-    let resolution_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
+    let resolution_roots = engine.resolution_roots(
+        Some(project_path.to_path_buf()),
+        ryeos_engine::contracts::LogicalProject::MaterializedLive,
+    );
     run_sign_prepared_batch(
         item_refs,
         Some(project_path),

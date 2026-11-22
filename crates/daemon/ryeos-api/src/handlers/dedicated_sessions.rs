@@ -7770,7 +7770,10 @@ async fn start_candidate_operation(
             scopes: effective_caps.clone(),
         });
     let base_plan_context = ryeos_engine::contracts::PlanContext {
-        logical_project_root: base_provenance.logical_project_root(&current_site_id),
+        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+            base_provenance.logical_project_root(&current_site_id),
+            &base_provenance.subject_resolution_authority(),
+        ),
         requested_by: requested_by.clone(),
         project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
             path: base.effective_path.clone(),
