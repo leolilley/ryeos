@@ -213,7 +213,14 @@ async fn a_restart_during_an_issued_attempt_is_retried_and_voids_the_dead_output
         Some(recorded as u64),
         "the retry voids exactly the fragments the dead attempt left: {retry}"
     );
-    assert!(recorded > 0);
+    eprintln!(
+        "EVIDENCE provider_retry supersedes: {}",
+        retry["supersedes"]
+    );
+    assert!(
+        recorded > 0,
+        "the node keeps stream fragments, so the count is not trivially zero"
+    );
 
     rig.h.kill_daemon().await.expect("stop the node");
     let rows = attempts(&rig.h);
@@ -369,6 +376,7 @@ async fn a_planned_rollover_during_a_provider_call_is_retried_after_the_restart(
     );
     let rows = attempts(&rig.h);
     assert_eq!(rows.len(), 1, "{rows:?}");
+    eprintln!("EVIDENCE ledger after the planned rollover exit: {rows:?}");
     assert_eq!(
         rows[0].state, "issued",
         "the rollover left the cut attempt issued for the next start to fence: {rows:?}"
