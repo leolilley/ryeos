@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T04:38:35Z:eef2cca9ca82265c42ba21359cb5c3f36881864177266f1c7a021311b9805228:rnvPNAa6Lad1oCcSC9ks0Iga+N+Vb1Q3Sh4KICIdIkVvX4+Axdre6x/3IuEZW7xfnV07zWsMKVXcesJRts/XDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T05:02:59Z:056329ce29923e89b41402963017cbec5eda3aa9ab01954bdbe8b8e2e1ba6601:UbgLMZS9ieOX4kGlh3bbgWgQ5IAzAh0lgBhivmFESP3I/Q2924zM7xh+athabF9GnS39+R2ye10Gf8CoCdoSCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -238,3 +238,9 @@ left out too. A node initialized from an earlier profile keeps its old scopes
 until the same stopped-node cutover takes the profile's section; if an
 operator applied `ui_browser_sessions`, name it with `--reset-section
 ui_browser_sessions` to take the profile's body.
+Browser sessions are held in daemon memory only, and the cutover runs on a
+stopped node, so every session minted under the old scopes ends with that
+stop; a session minted after the restart gets the trimmed scopes, and nothing
+needs revoking. The cutover's restart counts against the node's capacity
+incarnations like any start, so on a hosted node fold it into the next image
+change rather than restarting for it alone.
