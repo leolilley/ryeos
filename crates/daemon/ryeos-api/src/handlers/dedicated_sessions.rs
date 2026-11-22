@@ -7775,6 +7775,9 @@ async fn start_candidate_operation(
     .and_then(|authority| {
         authority.with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
     })
+    // A candidate operation of the session's project carries the identity the
+    // session sealed at admission; it is never re-derived.
+    .and_then(|authority| authority.with_signer_project(source.project_authority.signer_project()))
     .map_err(internal)?;
     let base_lifeline = base
         .temp_dir
@@ -7862,6 +7865,9 @@ async fn start_candidate_operation(
     .and_then(|authority| {
         authority.with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
     })
+    // A candidate operation of the session's project carries the identity the
+    // session sealed at admission; it is never re-derived.
+    .and_then(|authority| authority.with_signer_project(source.project_authority.signer_project()))
     .map_err(internal)?;
     if matches!(
         &req.purpose,
