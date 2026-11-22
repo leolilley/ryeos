@@ -4899,6 +4899,7 @@ mod tests {
                 "kind": ryeos_runtime::cognition::empty_reply_kind(turn, position),
                 "parts": text_parts("answer or call"),
             }),
+            chain_seq: 0,
         }
     }
 
@@ -4911,6 +4912,7 @@ mod tests {
                 "parts": [{"type": "reasoning", "text": "thinking"}],
                 "finish": finish,
             }),
+            chain_seq: 0,
         }
     }
 
@@ -4927,6 +4929,7 @@ mod tests {
         let event = |event_type: &str, payload: Value| ReplayedEventRecord {
             event_type: event_type.to_string(),
             payload,
+            chain_seq: 0,
         };
         let events = vec![
             event("cognition_in", input("Do task")),
@@ -4981,6 +4984,7 @@ mod tests {
         let event = |event_type: &str, payload: Value| ReplayedEventRecord {
             event_type: event_type.to_string(),
             payload,
+            chain_seq: 0,
         };
         let empty = |turn: u32| reasoning_only(turn, "stop");
         assert_eq!(trailing_empty_replies(&[]).unwrap(), 0);
