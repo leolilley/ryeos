@@ -382,6 +382,21 @@ mod tests {
     }
 
     impl Peer {
+        /// Wait until the peer's handler has recorded `count` requests. A
+        /// client whose deadline fired has already dropped its future, but the
+        /// request bytes it wrote reach the peer's runtime later, so the
+        /// peer's record, not the client's return, is what proves a contact.
+        async fn wait_for_requests(&self, count: usize) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while self.state.requests.lock().unwrap().len() < count {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "peer never recorded request {count}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+
         async fn start(mode: PeerMode) -> Self {
             async fn receive(
                 axum::extract::State(state): axum::extract::State<PeerState>,
@@ -720,6 +735,7 @@ mod tests {
         );
         assert_eq!(fixture.context.original_execution_budget(), Some(&original));
         assert!(original.remaining().is_zero());
+        stalled.wait_for_requests(1).await;
         assert_eq!(stalled.state.requests.lock().unwrap().len(), 1);
         assert!(
             submit_remote_request(&client, &request, None, Some(cancel_deadline))

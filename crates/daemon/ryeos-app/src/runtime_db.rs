@@ -24319,9 +24319,9 @@ mod tests {
             .map(|s| s.trim().trim_matches('\''))
             .collect();
         let classified: std::collections::BTreeSet<&str> =
-            crate::dedicated_session_service::DEDICATED_SESSION_STATE_RETIRES_BEFORE_CAPTURE
+            crate::dedicated_session_service::SESSION_STATE_POLICY
                 .iter()
-                .map(|(state, _)| *state)
+                .map(|policy| policy.state)
                 .collect();
         assert_eq!(
             schema_states, classified,
