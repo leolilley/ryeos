@@ -415,14 +415,16 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         bound.project_authored_source,
         async {
             if runs_unrecorded(&bound.target) {
-                execute_unrecorded_service(
+                // Surface admission runs inline here, not on a daemon-owned
+                // task, so its large future lives on the heap.
+                Box::pin(execute_unrecorded_service(
                     &item_ref,
                     bound.params,
                     &state,
                     prepared,
                     verified,
                     trusted_handler_context,
-                )
+                ))
                 .await
             } else {
                 execute_prepared_item_ref(

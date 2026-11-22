@@ -360,9 +360,24 @@ impl Seat {
             .send()
             .await?;
         anyhow::ensure!(response.status() == StatusCode::OK, "history route");
-        let text = tokio::time::timeout(std::time::Duration::from_secs(30), response.text())
-            .await
-            .map_err(|_| anyhow::anyhow!("seat history did not end"))??;
+        // The route keeps following the seat after its completion fence, so
+        // the stream is read until that frame arrives, never to its end.
+        let mut response = response;
+        let mut text = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while let Some(chunk) = response.chunk().await? {
+                text.push_str(&String::from_utf8_lossy(&chunk));
+                if parse_sse(&text)
+                    .last()
+                    .is_some_and(|(event, _)| event == "ui_seat.replay.complete.v1")
+                {
+                    break;
+                }
+            }
+            anyhow::Ok(())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("seat history did not reach its fence: {text}"))??;
         let frames = parse_sse(&text);
         anyhow::ensure!(
             frames
