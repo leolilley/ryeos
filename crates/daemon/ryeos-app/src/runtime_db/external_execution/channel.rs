@@ -3926,6 +3926,7 @@ pub(super) mod tests {
                 termination_request_digest: intent.termination_request_digest.clone(),
                 terminal_state: "terminated".into(),
                 provider_observation_digest: "2".repeat(64),
+                basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
             },
         )
         .unwrap();
@@ -4442,6 +4443,7 @@ pub(super) mod tests {
                 termination_request_digest: intent.termination_request_digest.clone(),
                 terminal_state: "terminated".into(),
                 provider_observation_digest: "2".repeat(64),
+                basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
             },
         )
         .unwrap();
@@ -6104,6 +6106,7 @@ pub(super) mod tests {
                 termination_request_digest: intent.termination_request_digest,
                 terminal_state: "terminated".into(),
                 provider_observation_digest: "2".repeat(64),
+                basis: ryeos_external_execution_contract::TerminalBasis::ObservedTerminated,
             },
         )
         .unwrap();

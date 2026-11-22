@@ -5,13 +5,13 @@ use serde_json::{Value, json};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason, ProviderMessage, ProviderMessageExt,
-    StreamEvent, TIME_LEFT_TOOL, ToolSchema,
+    CompactionConfig, CompactionOnPressure, DIRECTIVE_RETURN_TOOL, ExecutionConfig, FinishReason,
+    ProviderMessage, ProviderMessageExt, StreamEvent, SummaryMode, TIME_LEFT_TOOL, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
-use crate::resume::{ResumeDisposition, ResumeState};
+use crate::resume::{CompactionMemo, ResumeDisposition, ResumeState};
 use crate::run_clock::{RunClock, RunPhase};
 use ryeos_accounting::{
     AttemptBudgetState, BillableDimension, ChargeReconciliationAuthority, HexDigest,
@@ -361,6 +361,11 @@ const OUTPUT_LIMIT_ERROR: &str = "provider_output_limit_reached: provider ended 
      response at its declared/native output limit; this is \
      distinct from a RyeOS-local output byte limit";
 
+/// Code that starts the failure text of a run whose malformed replies the
+/// provider's signed policy could not correct. The text goes on to name the
+/// marker the last reply matched.
+const MALFORMED_REPLY_ERROR_CODE: &str = "malformed_reply_retries_exhausted";
+
 /// The model-visible error for a call whose arguments did not parse.
 fn malformed_call_error(malformed: &ryeos_runtime::MalformedCall) -> String {
     format!(
@@ -692,7 +697,26 @@ pub enum State {
         context: Value,
         resume_to: Box<State>,
     },
+    /// Decides, after every settled turn, whether the conversation has
+    /// reached the compaction trigger.
     CheckingContinuation,
+    /// The context-window continuation boundary, after any compaction.
+    ContinuationBoundary,
+    /// Replaces the older part of the conversation by a summary. `trigger` is
+    /// `pressure` (live context reached the trigger) or `overflow` (the
+    /// provider refused the request as too long).
+    Compacting {
+        trigger: String,
+    },
+    /// The compaction's summary call settled: write the record and rebuild the
+    /// conversation from it.
+    FinishingCompaction,
+    /// A refused request the compaction policy answers: record the refusal as a
+    /// final turn at the refused coordinate, then continue into the successor.
+    ForkingAfterRefusal {
+        code: String,
+        detail: String,
+    },
 
     Finalizing {
         result: Value,
@@ -780,7 +804,11 @@ pub struct Runner {
     wrap_up_delivered: crate::resume::WrapUpDelivered,
     /// The loop findings the model was warned about, each with the turn
     /// count when it was warned.
-    loop_warned: std::collections::BTreeMap<crate::loop_guards::FindingKind, u32>,
+    loop_warned: crate::loop_guards::WarnedAt,
+    /// The turns before the conversation that the detectors still read: the
+    /// digests the latest compaction carried, or the predecessor turns a
+    /// successor's start left out. At most the settings' `carry_len`.
+    guard_prefix: Vec<crate::loop_guards::TurnDigest>,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -805,10 +833,84 @@ pub struct Runner {
     /// Derived from the record on resume; non-zero means the latest recorded
     /// turn ended at the limit.
     consecutive_length_turns: u32,
+    /// Malformed replies in a row that were corrected. Derived from the
+    /// record on resume.
+    consecutive_malformed_replies: u32,
     resume_disposition: ResumeDisposition,
     resume_active_provider_turn: Option<u32>,
+    /// The provider turn a restart cut. Set on resume of an unfinished
+    /// provider turn; each attempt prepared in that turn offers the daemon the
+    /// retry the signed policy would admit, in case the restart cut that very
+    /// attempt.
+    restart_cut_turn: Option<u32>,
     provider_retry_testimony_digests: std::collections::BTreeSet<String>,
+    /// The compaction policy, from the signed runtime config.
+    compaction: CompactionConfig,
+    /// The latest compaction on the path, as far as the run needs it.
+    compaction_memo: Option<CompactionMemo>,
+    /// The code of the refusal the path's latest provider turn recorded, with
+    /// nothing completed or compacted since: the run starts by compacting when
+    /// the policy answers that code.
+    refused_code: Option<String>,
+    /// The trigger of the compaction summary call this thread had in flight.
+    resume_summary_trigger: Option<String>,
+    /// What a `context_pressure` hook's action chooses between.
+    pressure_hook: Option<PressureHook>,
+    /// The compaction's summary call in flight.
+    summary_job: Option<SummaryJob>,
+    /// No compaction is attempted before this many turns have been used: a
+    /// conversation with nothing yet to replace is looked at again once it has
+    /// grown by the kept turns.
+    compaction_retry_at_turn: u32,
+    /// Continuation predecessors of this thread, and the most a chain may have.
+    chain_depth: u32,
+    chain_depth_limit: u32,
+    /// The compacted start of this thread is still over the continuation
+    /// threshold: it compacts again before its first request.
+    start_over_ceiling: bool,
 }
+
+/// The two states a `context_pressure` hook chooses between.
+struct PressureHook {
+    compact: State,
+    skip: State,
+}
+
+/// A compaction's summary call: its request and, once it settles, its text.
+struct SummaryJob {
+    trigger: String,
+    messages: Vec<ProviderMessage>,
+    omitted_from_input: u32,
+    result: Option<Vec<Part>>,
+    /// The summary ended at the output limit: it is cut off and not carried.
+    truncated: bool,
+}
+
+/// How the compaction policy answers a refusal.
+enum OverflowRecovery {
+    /// Continue into a successor that compacts first.
+    Allowed,
+    /// Not a refusal the policy answers (or already answered once).
+    NotApplicable,
+    /// The chain has spent its recoveries.
+    Exhausted,
+}
+
+enum CompactionOutcome {
+    Compacted,
+    NothingToReplace,
+}
+
+enum CompactionFailure {
+    /// The compaction could not be done; the run's state is unchanged.
+    Failed(String),
+    /// A record append or rebuild whose outcome is not known: a same-thread
+    /// recovery decides.
+    Unknown(String),
+}
+
+/// The name of the hook event that lets a directive act on context pressure.
+const CONTEXT_PRESSURE_EVENT: &str = "context_pressure";
 
 struct RunGuard {
     finalized: bool,
@@ -1120,6 +1222,20 @@ fn retry_backoff(
     retry_classification(err, attempt, execution).map(|(delay, _)| delay)
 }
 
+/// The admitted part of [`classify_retry`], for tests that only care whether a
+/// failure is retried and why.
+#[cfg(test)]
+fn retry_classification(
+    err: &anyhow::Error,
+    attempt: u32,
+    execution: &ExecutionConfig,
+) -> Option<(std::time::Duration, ProviderRetryReason)> {
+    match classify_retry(err, attempt, execution) {
+        RetryClassification::Admitted { delay, reason, .. } => Some((delay, reason)),
+        RetryClassification::Denied(_) => None,
+    }
+}
+
 /// A request the provider refused that the entry's `request_rejections` rows
 /// name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1147,15 +1263,59 @@ fn request_rejection(provider: &ProviderConfig, error: &anyhow::Error) -> Option
     })
 }
 
-fn retry_classification(
+/// Why a provider failure is not retried, when the policy had something typed
+/// to say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryDenial {
+    /// Not retryable under the policy (class, status, budget).
+    NotAdmitted,
+    /// The provider's `Retry-After` asks for longer than the signed cap
+    /// `execution.retry_after_max_ms`. The run fails rather than sleeping past
+    /// the cap.
+    RetryAfterExceedsCap { asked_ms: u64, cap_ms: u64 },
+}
+
+impl RetryDenial {
+    /// The typed failure prefix for a denial that carries one.
+    fn typed_failure(&self) -> Option<String> {
+        match self {
+            Self::NotAdmitted => None,
+            Self::RetryAfterExceedsCap { asked_ms, cap_ms } => Some(format!(
+                "provider_retry_after_exceeds_cap: the provider asked to wait {asked_ms}ms \
+                 (Retry-After) and execution.retry_after_max_ms is {cap_ms}ms, so the request \
+                 is not retried"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetryClassification {
+    Admitted {
+        delay: std::time::Duration,
+        reason: ProviderRetryReason,
+        /// The `Retry-After` the delay honoured; `None` when the response
+        /// carried none or the policy ignores it.
+        retry_after_ms: Option<u64>,
+    },
+    Denied(RetryDenial),
+}
+
+fn classify_retry(
     err: &anyhow::Error,
     attempt: u32,
     execution: &ExecutionConfig,
-) -> Option<(std::time::Duration, ProviderRetryReason)> {
+) -> RetryClassification {
     use crate::provider_adapter::ProviderStreamError;
 
+    let mut header_ms = None;
     let reason = match err.downcast_ref::<ProviderStreamError>() {
-        Some(ProviderStreamError::Status { code, .. }) => {
+        Some(ProviderStreamError::Status {
+            code,
+            retry_after_ms,
+            ..
+        }) => {
+            header_ms = *retry_after_ms;
             ProviderRetryReason::Status { code: *code }
         }
         Some(ProviderStreamError::Timeout { .. }) => ProviderRetryReason::Timeout,
@@ -1171,9 +1331,44 @@ fn retry_classification(
             live_output_events_emitted: u64::try_from(mid_stream.live_output_events_emitted)
                 .unwrap_or(u64::MAX),
         },
-        None => return None,
+        None => return RetryClassification::Denied(RetryDenial::NotAdmitted),
     };
-    retry_delay_for_reason(&reason, attempt.checked_add(1)?, execution).map(|delay| (delay, reason))
+    // A policy that ignores the header (cap 0) never sees it, so the recorded
+    // decision and the delay derive from the same inputs.
+    let header_ms = header_ms.filter(|_| execution.retry_after_max_ms != 0);
+    let Some(failed_attempt_number) = attempt.checked_add(1) else {
+        return RetryClassification::Denied(RetryDenial::NotAdmitted);
+    };
+    match retry_delay_for_reason(&reason, failed_attempt_number, header_ms, execution) {
+        Ok(delay) => RetryClassification::Admitted {
+            delay,
+            reason,
+            retry_after_ms: header_ms,
+        },
+        Err(denial) => RetryClassification::Denied(denial),
+    }
+}
+
+/// The launch-time statement for a route whose retries cannot take effect:
+/// `execution.retries` allows them but the route has no daemon ledger
+/// authority to make a retry durable.
+fn provider_retries_unavailable_statement(retries: u32, ledger_route: bool) -> Option<String> {
+    (retries > 0 && !ledger_route).then(|| {
+        format!(
+            "provider retries unavailable: no ledger authority (execution.retries is {retries}, but this route cannot record a retry durably, so a retryable provider failure ends the run)"
+        )
+    })
+}
+
+/// When a retry that waits `delay` from `now_ms` would not finish before the
+/// run's hard stop, the time the run has left; `None` when it fits.
+fn retry_wait_outruns_run_deadline(
+    clock: &crate::run_clock::RunClock,
+    now_ms: i64,
+    delay: std::time::Duration,
+) -> Option<u64> {
+    let wait_ms = i64::try_from(delay.as_millis()).unwrap_or(i64::MAX);
+    (now_ms.saturating_add(wait_ms) >= clock.hard_stop_at_ms()).then(|| clock.remaining_ms(now_ms))
 }
 
 fn provider_outcome_is_uncertain(error: &anyhow::Error) -> bool {
@@ -1185,14 +1380,71 @@ fn provider_outcome_is_uncertain(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Usage status a failed provider attempt leaves on the run's cost. A timeout,
+/// a stream cut or an unknown outcome after the request was issued may have
+/// consumed usage the run never saw or only saw in part, so the figure is
+/// partial; an error carrying a usage frame is the same (that frame may not be
+/// final). A failure before contact consumed nothing and claims nothing.
+fn failed_attempt_usage_status(
+    error: &anyhow::Error,
+) -> Option<ryeos_runtime::envelope::UsageStatus> {
+    (provider_outcome_is_uncertain(error) || carried_usage_from_error(error).is_some())
+        .then_some(ryeos_runtime::envelope::UsageStatus::Partial)
+}
+
+/// Usage status one settled provider turn contributes to the run's cost.
+/// A turn the provider reported no usable usage for is unavailable (tokens
+/// were not settled as zero and the spend is unknown), or partial when only a
+/// provider-reported spend survived; a turn with tokens but no computable
+/// price is unavailable, never a measured zero. A replayed turn consumed
+/// nothing and claims complete.
+fn settled_turn_usage_status(
+    usage_valid: bool,
+    spend_only_settled: bool,
+    replayed: bool,
+    pricing: &PricingSource,
+    tokens: u64,
+) -> ryeos_runtime::envelope::UsageStatus {
+    use ryeos_runtime::envelope::UsageStatus;
+    if replayed {
+        return UsageStatus::Complete;
+    }
+    if !usage_valid {
+        return if spend_only_settled {
+            UsageStatus::Partial
+        } else {
+            UsageStatus::Unavailable
+        };
+    }
+    if matches!(
+        pricing,
+        PricingSource::Unpriced | PricingSource::ByokUntracked
+    ) && tokens != 0
+    {
+        UsageStatus::Unavailable
+    } else {
+        UsageStatus::Complete
+    }
+}
+
+/// The wait before the retry of a failed attempt, or why there is none.
+///
+/// The wait is the exponential backoff, raised to the provider's `Retry-After`
+/// (`retry_after_ms`, only meaningful for a status reason) so the retry is never
+/// earlier than the provider asked. An ask above `execution.retry_after_max_ms`
+/// is refused with [`RetryDenial::RetryAfterExceedsCap`]; a cap of `0` ignores
+/// the header.
 fn retry_delay_for_reason(
     reason: &ProviderRetryReason,
     failed_attempt_number: u32,
+    retry_after_ms: Option<u64>,
     execution: &ExecutionConfig,
-) -> Option<std::time::Duration> {
-    let attempt = failed_attempt_number.checked_sub(1)?;
+) -> Result<std::time::Duration, RetryDenial> {
+    let attempt = failed_attempt_number
+        .checked_sub(1)
+        .ok_or(RetryDenial::NotAdmitted)?;
     if attempt >= execution.retries {
-        return None;
+        return Err(RetryDenial::NotAdmitted);
     }
     let admitted = match reason {
         ProviderRetryReason::Status { code } => {
@@ -1217,14 +1469,27 @@ fn retry_delay_for_reason(
         ),
     };
     if !admitted {
-        return None;
+        return Err(RetryDenial::NotAdmitted);
     }
     let factor = 1u64 << attempt.min(16);
-    let delay_ms = execution
+    let backoff_ms = execution
         .backoff_base_ms
         .saturating_mul(factor)
         .min(execution.backoff_max_ms);
-    Some(lillux::time::Duration::from_millis(delay_ms))
+    let asked_ms = retry_after_ms
+        .filter(|_| matches!(reason, ProviderRetryReason::Status { .. }))
+        .filter(|_| execution.retry_after_max_ms != 0);
+    let delay_ms = match asked_ms {
+        Some(asked_ms) if asked_ms > execution.retry_after_max_ms => {
+            return Err(RetryDenial::RetryAfterExceedsCap {
+                asked_ms,
+                cap_ms: execution.retry_after_max_ms,
+            });
+        }
+        Some(asked_ms) => backoff_ms.max(asked_ms),
+        None => backoff_ms,
+    };
+    Ok(lillux::time::Duration::from_millis(delay_ms))
 }
 
 /// Whether closing the failed attempt before a retry must see valid usage.
@@ -1270,9 +1535,28 @@ pub(crate) fn retry_supersedes(decision: &ProviderRetryDecision) -> Value {
     })
 }
 
-fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
+/// The text whose digest is the `failure_digest` of every retry decision made
+/// for an attempt a restart cut. No process observed that failure, so the
+/// digest is this constant rather than a digest of an error; a reader that
+/// sees it knows the dead attempt's output count is unknown, not zero. The
+/// shipped timeline projection compares against the digest's hex.
+const RESTART_CUT_FAILURE_MARKER: &str = "ryeos.provider-retry.owner-restart-cut.v1";
+
+/// Schema string sealed into every retry-policy digest. A recorded digest of
+/// an older schema cannot be re-derived under the current policy, so recovery
+/// refuses it with a typed reason.
+const RETRY_POLICY_DIGEST_SCHEMA: &str = "ryeos.directive.provider-retry-policy.v3";
+
+/// The digest schema before `retry_after_max_ms` joined the policy. The
+/// provider retry policy digest moved to v3 inside the epoch-143 cut, which
+/// clears in-flight threads; a v2-recorded digest met anyway is a typed refusal.
+const RETRY_POLICY_DIGEST_SCHEMA_V2: &str = "ryeos.directive.provider-retry-policy.v2";
+
+/// What the retired v2 schema would have digested for this policy. Used only to
+/// recognise a v2-recorded digest so recovery can refuse it by name.
+fn retry_policy_digest_v2(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
     let value = json!({
-        "schema": "ryeos.directive.provider-retry-policy.v2",
+        "schema": RETRY_POLICY_DIGEST_SCHEMA_V2,
         "retries": execution.retries,
         "retry_status_codes": execution.retry_status_codes,
         "never_retry": execution.never_retry,
@@ -1286,11 +1570,47 @@ fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest>
         .map_err(|error| anyhow::anyhow!("provider retry policy digest: {error}"))
 }
 
+/// A recorded decision is valid only under the exact policy it was admitted
+/// under. A digest of the retired v2 schema is refused by name: the policy it
+/// sealed cannot be re-derived, and it is never silently re-read as v3.
+fn check_recorded_retry_policy_digest(
+    recorded: &HexDigest,
+    execution: &ExecutionConfig,
+) -> anyhow::Result<()> {
+    if *recorded == retry_policy_digest(execution)? {
+        return Ok(());
+    }
+    if *recorded == retry_policy_digest_v2(execution)? {
+        anyhow::bail!(
+            "provider_retry_policy_digest_retired: the retry advancement was recorded under the retired retry-policy digest schema (v2) and cannot be re-derived under the current policy"
+        );
+    }
+    anyhow::bail!("provider retry advancement was admitted under a different execution policy")
+}
+
+fn retry_policy_digest(execution: &ExecutionConfig) -> anyhow::Result<HexDigest> {
+    let value = json!({
+        "schema": RETRY_POLICY_DIGEST_SCHEMA,
+        "retries": execution.retries,
+        "retry_status_codes": execution.retry_status_codes,
+        "never_retry": execution.never_retry,
+        "backoff_base_ms": execution.backoff_base_ms,
+        "backoff_max_ms": execution.backoff_max_ms,
+        "retry_after_max_ms": execution.retry_after_max_ms,
+        "unknown_outcome_retry": execution.unknown_outcome_retry,
+        "accounting": execution.accounting,
+    });
+    let canonical = lillux::canonical_json(&value)?;
+    HexDigest::new(lillux::sha256_hex(canonical.as_bytes()))
+        .map_err(|error| anyhow::anyhow!("provider retry policy digest: {error}"))
+}
+
 fn provider_retry_decision(
     turn: u32,
     failed_attempt_number: u32,
     delay: std::time::Duration,
     reason: ProviderRetryReason,
+    retry_after_ms: Option<u64>,
     error: &anyhow::Error,
     execution: &ExecutionConfig,
 ) -> anyhow::Result<ProviderRetryDecision> {
@@ -1306,6 +1626,7 @@ fn provider_retry_decision(
         failure_digest: HexDigest::new(lillux::sha256_hex(format!("{error:#}").as_bytes()))
             .map_err(|digest_error| anyhow::anyhow!("provider failure digest: {digest_error}"))?,
         retry_policy_digest: retry_policy_digest(execution)?,
+        retry_after_ms,
     };
     decision
         .validate()
@@ -1612,6 +1933,7 @@ impl Runner {
             return_nudge_sent: false,
             wrap_up_delivered: crate::resume::WrapUpDelivered::default(),
             loop_warned: std::collections::BTreeMap::new(),
+            guard_prefix: Vec::new(),
             continuation_config: continuation,
             sampling,
             reasoning,
@@ -1622,7 +1944,7 @@ impl Runner {
             // honest aggregate connection-establishment boundary, which can
             // include DNS, TCP, proxy negotiation, and TLS. Response versions
             // are observed after negotiation rather than forced here.
-            http_client: reqwest::Client::builder()
+            http_client: ryeos_http_egress::client_builder()
                 .pool_max_idle_per_host(8)
                 .dns_resolver(std::sync::Arc::new(
                     crate::provider_transport_timing::InstrumentedDnsResolver,
@@ -1642,10 +1964,32 @@ impl Runner {
             resume_owed_siblings: Vec::new(),
             turn_malformed_calls: Vec::new(),
             consecutive_length_turns: 0,
+            consecutive_malformed_replies: 0,
             resume_disposition: ResumeDisposition::ContinueProvider,
             resume_active_provider_turn: None,
+            restart_cut_turn: None,
             provider_retry_testimony_digests: std::collections::BTreeSet::new(),
+            compaction: CompactionConfig::default(),
+            compaction_memo: None,
+            refused_code: None,
+            resume_summary_trigger: None,
+            pressure_hook: None,
+            summary_job: None,
+            compaction_retry_at_turn: 0,
+            chain_depth: 0,
+            chain_depth_limit: u32::MAX,
+            start_over_ceiling: false,
         }
+    }
+
+    /// Set how many continuation predecessors a chain may have.
+    pub fn set_chain_depth_limit(&mut self, limit: u32) {
+        self.chain_depth_limit = limit;
+    }
+
+    /// Set the compaction policy the signed runtime config carries.
+    pub fn set_compaction(&mut self, policy: CompactionConfig) {
+        self.compaction = policy;
     }
 
     pub fn from_resume(resume: ResumeState, mut config: RunnerConfig) -> anyhow::Result<Self> {
@@ -1669,6 +2013,7 @@ impl Runner {
             output_tokens,
             total_usd: spend_usd,
             basis: None,
+            usage_status: Default::default(),
         }
         .validate()
         .map_err(|error| anyhow::anyhow!("invalid resume usage: {error}"))?;
@@ -1687,8 +2032,16 @@ impl Runner {
         let provider_retry_testimony_digests = resume.provider_retry_testimony_digests;
         let wrap_up_delivered = resume.wrap_up_delivered;
         let loop_warned = resume.loop_warned.clone();
+        let guard_prefix = resume.guard_prefix.clone();
+        let guard_history = resume.guard_history;
         let trailing_length_turns = resume.trailing_length_turns;
+        let trailing_malformed_replies = resume.trailing_malformed_replies;
         let last_turn_coordinate = resume.last_turn_coordinate;
+        let compaction_memo = resume.compaction.clone();
+        let refused_code = resume.refused_code.clone();
+        let resume_summary_trigger = resume.active_summary_trigger.clone();
+        let chain_depth = resume.chain_depth;
+        let start_over_ceiling = resume.start_over_ceiling;
         if let Some(active_turn) = resume_active_provider_turn {
             let expected = last_turn_coordinate
                 .checked_add(1)
@@ -1712,16 +2065,21 @@ impl Runner {
         {
             anyhow::bail!("resume: settled directive_return no longer validates: {error}");
         }
+        // A compaction's replay window opens after the run's earlier tool
+        // starts and spawns; they are counted in the record.
+        let starts_before_window = resume.tool_starts_before_window;
         let started_count = u32::try_from(started_tool_occurrences.len())
-            .map_err(|_| anyhow::anyhow!("resume tool-start count exceeds u32"))?;
+            .map_err(|_| anyhow::anyhow!("resume tool-start count exceeds u32"))?
+            .checked_add(starts_before_window)
+            .ok_or_else(|| anyhow::anyhow!("resume tool-start count exceeds u32"))?;
         let admitted_count = runner
             .harness
             .recover_admitted_tool_call_count(started_count);
-        let admitted_len = usize::try_from(admitted_count)
+        let admitted_len = usize::try_from(admitted_count.saturating_sub(starts_before_window))
             .expect("u32 admitted tool count always fits usize on supported targets");
         let mut admitted_operations = std::collections::BTreeSet::new();
         let mut spawn_counted_operations = std::collections::BTreeSet::new();
-        let mut derived_spawns = 0u32;
+        let mut derived_spawns = resume.spawns_before_window;
         for started in &started_tool_occurrences[..admitted_len] {
             admitted_operations.insert(started.operation_id.clone());
             let Ok(resolved) = runner.dispatcher.resolve(
@@ -1765,10 +2123,30 @@ impl Runner {
         runner.resume_owed_siblings = owed_siblings;
         runner.resume_disposition = resume_disposition;
         runner.resume_active_provider_turn = resume_active_provider_turn;
+        runner.restart_cut_turn = resume_active_provider_turn;
         runner.provider_retry_testimony_digests = provider_retry_testimony_digests;
         runner.wrap_up_delivered = wrap_up_delivered;
         runner.loop_warned = loop_warned;
+        runner.guard_prefix = guard_prefix;
+        runner.trim_guard_prefix();
+        if let Some(carried) = guard_history.shortfall(&runner.execution.loop_guards) {
+            // The loop detectors run on the history that exists. A compaction
+            // record written under shorter loop-guard settings (or with the
+            // guards off) carried less than these settings read, so a run
+            // that looks clean here may not be.
+            tracing::warn!(
+                carried_turns = carried,
+                configured_turns = crate::loop_guards::carry_len(&runner.execution.loop_guards),
+                "loop-guard history is shorter than configured: the compaction this run resumed from carried less than the current loop_guards settings read"
+            );
+        }
         runner.consecutive_length_turns = trailing_length_turns;
+        runner.compaction_memo = compaction_memo;
+        runner.chain_depth = chain_depth;
+        runner.start_over_ceiling = start_over_ceiling;
+        runner.refused_code = refused_code;
+        runner.resume_summary_trigger = resume_summary_trigger;
+        runner.consecutive_malformed_replies = trailing_malformed_replies;
         runner.return_nudge_sent = recovered_return_nudge_seen(
             &runner.messages,
             &runner.return_nudge,
@@ -1792,6 +2170,305 @@ impl Runner {
     ///
     /// Drained ONLY at safe turn boundaries (never between an assistant tool-call
     /// message and its tool results), so the folded wire history is well-formed.
+    /// Estimated tokens of live context at which a compaction starts.
+    fn compaction_trigger_tokens(&self) -> u64 {
+        (self.context_window as f64 * self.compaction.trigger_ratio) as u64
+    }
+
+    /// Whether the compaction policy asks for a compaction at `live_context`:
+    /// the trigger is reached, enough turns have settled since the last one,
+    /// and a last one that failed to shrink the conversation has been outgrown
+    /// by the same share. All of it is read from the record's compaction.
+    fn compaction_due(&self, live_context: u64) -> bool {
+        if !self.compaction.enabled
+            || live_context < self.compaction_trigger_tokens()
+            || self.harness.turns_used() < self.compaction_retry_at_turn
+        {
+            return false;
+        }
+        let Some(memo) = &self.compaction_memo else {
+            return true;
+        };
+        let settled_since = self.harness.turns_used().saturating_sub(memo.settled_turns);
+        if settled_since < self.compaction.min_turns_between {
+            return false;
+        }
+        if memo.ineffective {
+            let outgrown = memo.size_after as f64 * (1.0 + self.compaction.min_reduction_ratio);
+            return live_context as f64 >= outgrown;
+        }
+        true
+    }
+
+    /// Whether the policy answers a refusal carrying `code` with a compaction
+    /// in a successor, from the record alone: the policy is on, the directive
+    /// allows continuation, the code is one the policy names, the chain has
+    /// recoveries left, and the request has not already been retried after one.
+    fn overflow_recovery(&self, code: &str) -> OverflowRecovery {
+        if !self.compaction.enabled
+            || !self.continuation_config.enabled()
+            || !self
+                .compaction
+                .overflow_codes
+                .iter()
+                .any(|named| named == code)
+            || ryeos_runtime::cognition::provider_refused_finish(code).len()
+                > ryeos_runtime::cognition::MAX_TOKEN_BYTES
+        {
+            return OverflowRecovery::NotApplicable;
+        }
+        if let Some(memo) = &self.compaction_memo {
+            // A compaction for an overflow, with no turn completed since:
+            // this refusal is the retried request's. It stands.
+            if memo.trigger == "overflow"
+                && self.harness.turns_used().saturating_sub(1) <= memo.settled_turns
+            {
+                return OverflowRecovery::NotApplicable;
+            }
+            if memo.overflow_recoveries >= self.compaction.max_overflow_recoveries_per_chain {
+                return OverflowRecovery::Exhausted;
+            }
+        } else if self.compaction.max_overflow_recoveries_per_chain == 0 {
+            return OverflowRecovery::Exhausted;
+        }
+        OverflowRecovery::Allowed
+    }
+
+    fn pressure_occurrence(&self, turn: u32) -> ryeos_runtime::callback::HookDispatchOccurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::new(
+            "directive",
+            CONTEXT_PRESSURE_EVENT,
+            self.definition_ref.clone(),
+            self.root_raw_content_digest.clone(),
+            self.effective_definition_digest.clone(),
+        )
+        .with_counter_coordinate("turn", turn)
+    }
+
+    /// The `context_pressure` hook context: numbers only, no conversation.
+    fn pressure_context(
+        &self,
+        trigger: &str,
+        turn: u32,
+        live_context: u64,
+        rejection: Option<&RequestRejection>,
+    ) -> Value {
+        let mut event = json!({
+            "name": CONTEXT_PRESSURE_EVENT,
+            "trigger": trigger,
+            "turn": turn,
+            "live_context_tokens": live_context,
+            "trigger_tokens": self.compaction_trigger_tokens(),
+            "threshold_tokens": self.continuation.threshold(),
+            "window_tokens": self.context_window,
+            "compactions_so_far": self.compaction_memo.as_ref().map_or(0, |memo| memo.compactions),
+            "last_compaction_turn": self.compaction_memo.as_ref().map(|memo| memo.settled_turns),
+        });
+        if let Some(rejection) = rejection {
+            event["code"] = json!(rejection.code);
+            event["status"] = json!(rejection.status);
+        }
+        json!({ "event": event })
+    }
+
+    /// The execution settings of a compaction's summary call: the run's, with
+    /// the output cap at the policy's.
+    fn summary_call_execution(&self) -> ExecutionConfig {
+        let mut execution = self.execution.clone();
+        let cap = self.compaction.summary.max_output_tokens;
+        execution.max_provider_output_tokens_per_turn =
+            match execution.max_provider_output_tokens_per_turn {
+                0 => cap,
+                existing => existing.min(cap),
+            };
+        execution
+    }
+
+    /// Load the conversation as the record holds it and choose the cut. The
+    /// summary call's request is the replaced range, rendered and bounded.
+    /// `false` when there is nothing to replace.
+    async fn begin_summary_call(&mut self, trigger: &str) -> Result<bool, CompactionFailure> {
+        let basis = crate::resume::load_compaction_basis(&self.callback, &self.thread_id)
+            .await
+            .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
+        let Some(plan) = crate::compaction::plan(&basis.folded, self.compaction.keep_turns) else {
+            return Ok(false);
+        };
+        // The record carries the pinned inputs: refuse before a paid call that
+        // could not be recorded.
+        let summary = &self.compaction.summary;
+        crate::compaction::pinned_inputs_fit_a_record(
+            &plan.pinned_inputs,
+            summary.max_output_tokens,
+        )
+        .map_err(CompactionFailure::Failed)?;
+        let input_budget = ((self.context_window as f64 * summary.input_ratio) as u64)
+            .saturating_sub(summary.max_output_tokens);
+        let rendered =
+            crate::compaction::render_for_summary(&basis.folded[..plan.cut], input_budget);
+        self.summary_job = Some(SummaryJob {
+            trigger: trigger.to_string(),
+            messages: vec![
+                ProviderMessage::system(summary.instruction.clone()),
+                ProviderMessage::user(rendered.text),
+            ],
+            omitted_from_input: rendered.omitted,
+            result: None,
+            truncated: false,
+        });
+        Ok(true)
+    }
+
+    /// Write the compaction record and make the conversation the fold over it.
+    /// `summary` is the settled summary call's text, or `None` for the policy's
+    /// fixed note. The conversation is replaced by rebuilding it from the
+    /// record, never patched in place, so memory and record cannot diverge.
+    async fn finish_compaction(
+        &mut self,
+        trigger: &str,
+        summary: Option<crate::compaction::Summary>,
+    ) -> Result<CompactionOutcome, CompactionFailure> {
+        let images = self
+            .provider_config
+            .image_input
+            .as_ref()
+            .and_then(|image_input| image_input.accepts.clone());
+        let basis = crate::resume::load_compaction_basis(&self.callback, &self.thread_id)
+            .await
+            .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
+        let Some(plan) = crate::compaction::plan(&basis.folded, self.compaction.keep_turns) else {
+            return Ok(CompactionOutcome::NothingToReplace);
+        };
+        let summary = summary.unwrap_or_else(|| crate::compaction::fixed_note(&plan));
+        let loop_guards = self.execution.loop_guards.clone();
+        let guard = loop_guards
+            .enabled
+            .then(|| crate::compaction::GuardSnapshot {
+                config: &loop_guards,
+                prefix: &self.guard_prefix,
+                warned: &self.loop_warned,
+                wrap_up: ryeos_runtime::GuardWrapUp {
+                    deadline: self.wrap_up_delivered.deadline,
+                    turn_limit: self.wrap_up_delivered.turn_limit,
+                },
+            });
+        let record = crate::compaction::build_record(
+            &basis,
+            &plan,
+            summary,
+            trigger,
+            &self.compaction,
+            images.as_ref(),
+            guard.as_ref(),
+        )
+        .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
+        let payload = ryeos_runtime::cognition::to_payload(&record)
+            .map_err(|error| CompactionFailure::Failed(format!("{error:#}")))?;
+        self.callback
+            .append_runtime_event(RuntimeEventType::CognitionCompaction, payload)
+            .await
+            .map_err(|error| {
+                CompactionFailure::Unknown(format!(
+                    "resume-critical compaction record append failed: {error:#}"
+                ))
+            })?;
+        let rebuilt = crate::resume::load_resume_state(
+            &self.callback,
+            &self.thread_id,
+            crate::resume::CarryPolicy {
+                carry_turns: u32::MAX,
+                start_tokens: u64::MAX,
+                ceiling_tokens: u64::MAX,
+            },
+            crate::resume::ResumeMode::NativeSameThread,
+            images.as_ref(),
+        )
+        .await
+        .map_err(|error| {
+            CompactionFailure::Unknown(format!(
+                "resume-critical compaction rebuild failed: {error:#}"
+            ))
+        })?;
+        let system = self
+            .messages
+            .first()
+            .filter(|message| message.role() == "system")
+            .cloned();
+        self.messages = system.into_iter().chain(rebuilt.messages).collect();
+        self.result_guard = rebuilt.result_guard;
+        // The record carries the guard state the compaction replaced, written
+        // from this run's own state, so the rebuilt state is the one the run
+        // had. A delivered flag the process set stays set regardless.
+        self.wrap_up_delivered = self.wrap_up_delivered.union(rebuilt.wrap_up_delivered);
+        self.loop_warned = rebuilt.loop_warned;
+        self.guard_prefix = rebuilt.guard_prefix;
+        self.trim_guard_prefix();
+        self.compaction_memo = Some(CompactionMemo::of(&record));
+        block_at_directive_recovery_test_cut(&self.callback, "compaction_recorded").await;
+        self.refused_code = None;
+        self.start_over_ceiling = false;
+        tracing::info!(
+            trigger,
+            size_before = record.size_before,
+            size_after = record.size_after,
+            ineffective = record.ineffective,
+            "compacted the conversation"
+        );
+        Ok(CompactionOutcome::Compacted)
+    }
+
+    /// Where a run goes after a compaction attempt.
+    fn after_compaction(
+        &mut self,
+        trigger: &str,
+        outcome: Result<CompactionOutcome, CompactionFailure>,
+    ) -> State {
+        let overflow = trigger == "overflow";
+        let onward = if overflow {
+            State::CheckingLimits
+        } else {
+            State::ContinuationBoundary
+        };
+        let overflow_code = || {
+            self.compaction
+                .overflow_codes
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "provider_context_length_exceeded".to_string())
+        };
+        match outcome {
+            Ok(CompactionOutcome::Compacted) => onward,
+            Ok(CompactionOutcome::NothingToReplace) if overflow => State::Errored {
+                error: format!(
+                    "{}: the request was refused as too long and the conversation holds no turn older than the {} kept turns to replace",
+                    overflow_code(),
+                    self.compaction.keep_turns
+                ),
+            },
+            Ok(CompactionOutcome::NothingToReplace) => {
+                self.compaction_retry_at_turn = self
+                    .harness
+                    .turns_used()
+                    .saturating_add(self.compaction.keep_turns.max(1));
+                onward
+            }
+            Err(CompactionFailure::Unknown(error)) => State::RecoveryRequired { error },
+            Err(CompactionFailure::Failed(error)) if overflow => State::Errored {
+                error: format!("{}: compaction failed: {error}", overflow_code()),
+            },
+            Err(CompactionFailure::Failed(error)) => {
+                tracing::warn!(%error, "compaction failed; the run carries on uncompacted");
+                // Not tried again every turn: a paid summary call must not
+                // repeat after each settled turn.
+                self.compaction_retry_at_turn = self
+                    .harness
+                    .turns_used()
+                    .saturating_add(self.compaction.keep_turns.max(1));
+                onward
+            }
+        }
+    }
+
     /// The `time_left` tool's answer, read from the run clock now.
     fn time_left_report(&self) -> Value {
         crate::run_clock::time_left_report(
@@ -1860,6 +2537,15 @@ impl Runner {
         Ok(RunDeadlineBoundary::Proceed)
     }
 
+    /// Keep the carried history to what the settings read.
+    fn trim_guard_prefix(&mut self) {
+        let keep = crate::loop_guards::carry_len(&self.execution.loop_guards) as usize;
+        if self.guard_prefix.len() > keep {
+            let drop = self.guard_prefix.len() - keep;
+            self.guard_prefix.drain(..drop);
+        }
+    }
+
     /// The loop and stall detectors at the start of a turn. A finding the
     /// model has not been warned about gets a durable harness warning; the same
     /// finding still present `grace_turns` turns after its warning stops the run
@@ -1869,7 +2555,12 @@ impl Runner {
         if !config.enabled || self.resume_active_provider_turn.is_some() {
             return Ok(None);
         }
-        let digests = crate::loop_guards::digests_from_messages(&self.messages);
+        // The history the detectors read: the carried digests, then this
+        // conversation's own. Warning positions count over all of it.
+        let digests = crate::loop_guards::history(
+            &self.guard_prefix,
+            &crate::loop_guards::digests_from_messages(&self.messages),
+        );
         let turns = digests.len() as u32;
         let findings = crate::loop_guards::detect(&digests, &config);
         // A warned kind that is no longer found starts over.
@@ -2008,8 +2699,40 @@ impl Runner {
         } else if self.resume_active_provider_turn.is_some() && ledger_authority.is_none() {
             State::Errored {
                 error: "provider_attempt_outcome_unknown: an unfinished provider turn has no \
-                        daemon-owned attempt ledger; native recovery refuses a second contact"
+                        daemon-owned attempt ledger, so a restart cannot be proven to have cut \
+                        the call and native recovery refuses a second contact; a route that is \
+                        priced or declared explicitly free is on the ledger and lets a \
+                        `provider_contact: repeatable` directive resume"
                     .to_string(),
+            }
+        } else if let Some(trigger) = self.resume_summary_trigger.take() {
+            // The thread's turn marker names a compaction summary call that
+            // never completed: it is re-issued at its own coordinate, by the
+            // ledger's rules for an unknown outcome.
+            State::Compacting { trigger }
+        } else if self.compaction.enabled
+            && self.refused_code.as_deref().is_some_and(|code| {
+                self.compaction
+                    .overflow_codes
+                    .iter()
+                    .any(|named| named == code)
+            })
+            && self.resume_pending_tools.is_empty()
+        {
+            // The predecessor's request was refused as too long: this thread's
+            // first act is the compaction, and its first request is the
+            // retried one.
+            State::Compacting {
+                trigger: "overflow".to_string(),
+            }
+        } else if self.compaction.enabled
+            && self.start_over_ceiling
+            && self.resume_pending_tools.is_empty()
+        {
+            // The compacted start is still over the continuation threshold:
+            // compact it again before the first request.
+            State::Compacting {
+                trigger: "pressure".to_string(),
             }
         } else if !self.resume_pending_tools.is_empty() {
             let pending = std::mem::take(&mut self.resume_pending_tools);
@@ -2041,6 +2764,17 @@ impl Runner {
                 ResumeDisposition::FinalizeDirectiveReturn { outputs } => {
                     State::FinalizingDirectiveReturn { outputs }
                 }
+                ResumeDisposition::ForkAfterRefusal => State::Continued,
+                ResumeDisposition::FinishCompaction { trigger, summary } => {
+                    self.summary_job = Some(SummaryJob {
+                        trigger,
+                        messages: Vec::new(),
+                        omitted_from_input: 0,
+                        result: Some(summary),
+                        truncated: false,
+                    });
+                    State::FinishingCompaction
+                }
             }
         };
         let mut turn = self.initial_turn;
@@ -2061,6 +2795,29 @@ impl Runner {
         // `tracing::warn!` still fires every turn for log visibility.
         let mut provider_default_pricing_logged = false;
         let mut cost_untracked_warned = false;
+        // Retries are refused on a route without daemon ledger authority, but
+        // only when a failure happens. Say so at launch so a configured retry
+        // allowance is not mistaken for an effective one.
+        if let Some(statement) = provider_retries_unavailable_statement(
+            self.execution.retries,
+            ledger_authority.is_some(),
+        ) {
+            warnings.push(statement.clone());
+            record_callback_warning(
+                &mut warnings,
+                "provider_retries_unavailable",
+                self.callback
+                    .append_runtime_event(
+                        RuntimeEventType::Observation,
+                        json!({
+                            "kind": "directive.provider_retries_unavailable",
+                            "statement": statement,
+                            "retries": self.execution.retries,
+                        }),
+                    )
+                    .await,
+            );
+        }
 
         loop {
             state = match state {
@@ -2113,17 +2870,27 @@ impl Runner {
 
                 State::CallingProvider => {
                     let turn_start = Instant::now();
-                    self.harness.record_turn();
+                    // A compaction's summary call takes a turn coordinate but is
+                    // not a model turn of the directive: it does not count
+                    // against the turn limit.
+                    if self.summary_job.is_none() {
+                        self.harness.record_turn();
+                    }
                     // Filter tools by effective_caps so the LLM only sees
                     // tools it can actually call (saves context, avoids the
                     // "model names a tool the dispatcher would reject" path).
-                    let visible_tools_owned = visible_provider_tools(
-                        &self.tools,
-                        self.harness.effective_caps(),
-                        self.directive_outputs.as_deref(),
-                        self.harness.tool_calls_available(),
-                        self.harness.run_clock().is_some(),
-                    );
+                    // The summary call offers none.
+                    let visible_tools_owned = if self.summary_job.is_some() {
+                        Vec::new()
+                    } else {
+                        visible_provider_tools(
+                            &self.tools,
+                            self.harness.effective_caps(),
+                            self.directive_outputs.as_deref(),
+                            self.harness.tool_calls_available(),
+                            self.harness.run_clock().is_some(),
+                        )
+                    };
                     if let Some(active_turn) = self.resume_active_provider_turn.take() {
                         turn = active_turn;
                     } else {
@@ -2136,7 +2903,27 @@ impl Runner {
                             .collect();
                         let tools_offered =
                             (offered != self.inventory_tool_names).then_some(offered);
-                        if let Err(e) = self.callback.emit_turn_start(turn, tools_offered).await {
+                        let purpose = match self.summary_job.as_ref() {
+                            Some(job) => {
+                                match ryeos_runtime::cognition::TurnPurpose::for_summary(
+                                    &job.trigger,
+                                ) {
+                                    Ok(purpose) => purpose,
+                                    Err(error) => {
+                                        state = State::Errored {
+                                            error: format!("compaction_failed: {error:#}"),
+                                        };
+                                        continue;
+                                    }
+                                }
+                            }
+                            None => ryeos_runtime::cognition::TurnPurpose::Turn,
+                        };
+                        if let Err(e) = self
+                            .callback
+                            .emit_turn_start(turn, purpose, tools_offered)
+                            .await
+                        {
                             state = State::RecoveryRequired {
                                 error: format!(
                                     "resume-critical callback emit_turn_start failed: {e}"
@@ -2197,6 +2984,16 @@ impl Runner {
                         if let Err(error) = self.load_request_images().await {
                             break Err(error);
                         }
+                        let summary_execution: Option<ExecutionConfig> = self
+                            .summary_job
+                            .as_ref()
+                            .map(|_| self.summary_call_execution());
+                        let request_execution =
+                            summary_execution.as_ref().unwrap_or(&self.execution);
+                        let request_messages: &[ProviderMessage] = match &self.summary_job {
+                            Some(job) => &job.messages,
+                            None => &self.messages,
+                        };
                         let call_input = crate::provider_adapter::StreamingCallInput {
                             client: &self.http_client,
                             provider: &self.provider_config,
@@ -2204,9 +3001,9 @@ impl Runner {
                             matched_profile: self.matched_profile.as_deref(),
                             config_hash: &self.config_hash,
                             images: &self.image_store,
-                            execution: &self.execution,
+                            execution: request_execution,
                             model: &self.model_name,
-                            messages: &self.messages,
+                            messages: request_messages,
                             tools: &visible_tools_owned,
                             callback: &self.callback,
                             turn,
@@ -2237,7 +3034,7 @@ impl Runner {
                                 authority,
                                 &self.provider_config,
                                 self.context_window,
-                                self.execution.max_provider_output_tokens_per_turn,
+                                request_execution.max_provider_output_tokens_per_turn,
                             ) {
                                 Ok(verified) => verified,
                                 Err(error) => {
@@ -2390,6 +3187,10 @@ impl Runner {
                         turn_replayed_from = replayed
                             .as_ref()
                             .map(|(record_hash, _)| record_hash.clone());
+                        // A retry the policy or the run clock refused, as the
+                        // typed failure that ends the run in place of the
+                        // bare provider error.
+                        let mut retry_refusal: Option<String> = None;
                         let (call, durable_retry_advance, prepared_retry) = if let Some((
                             record_hash,
                             response,
@@ -2462,13 +3263,45 @@ impl Runner {
                                 // A refusal the entry names is final: it is
                                 // never retried, whatever the retry status
                                 // codes say.
-                                if let Some((delay, reason)) =
-                                    retry_classification(error, attempt, &self.execution).filter(
-                                        |_| {
-                                            request_rejection(&self.provider_config, error)
-                                                .is_none()
-                                        },
-                                    )
+                                let classification =
+                                    if request_rejection(&self.provider_config, error).is_some() {
+                                        RetryClassification::Denied(RetryDenial::NotAdmitted)
+                                    } else {
+                                        classify_retry(error, attempt, &self.execution)
+                                    };
+                                let classification = match classification {
+                                    RetryClassification::Admitted { delay, .. } => {
+                                        let outruns_deadline =
+                                            self.harness.run_clock().and_then(|clock| {
+                                                retry_wait_outruns_run_deadline(
+                                                    &clock,
+                                                    lillux::time::timestamp_millis(),
+                                                    delay,
+                                                )
+                                            });
+                                        match outruns_deadline {
+                                            Some(remaining_ms) => {
+                                                retry_refusal = Some(format!(
+                                                    "provider_retry_exceeds_run_deadline: the retry would wait {}ms and the run has {remaining_ms}ms before its hard stop, so the request is not retried",
+                                                    delay.as_millis()
+                                                ));
+                                                RetryClassification::Denied(
+                                                    RetryDenial::NotAdmitted,
+                                                )
+                                            }
+                                            None => classification,
+                                        }
+                                    }
+                                    RetryClassification::Denied(denial) => {
+                                        retry_refusal = denial.typed_failure();
+                                        RetryClassification::Denied(denial)
+                                    }
+                                };
+                                if let RetryClassification::Admitted {
+                                    delay,
+                                    reason,
+                                    retry_after_ms,
+                                } = classification
                                 {
                                     let usage_required = retry_requires_attempt_usage(
                                         &reason,
@@ -2527,6 +3360,7 @@ impl Runner {
                                         attempt_number,
                                         delay,
                                         reason,
+                                        retry_after_ms,
                                         error,
                                         &self.execution,
                                     )?)
@@ -2629,7 +3463,15 @@ impl Runner {
                         };
                         match call {
                             Err(e) => {
+                                if let Some(status) = failed_attempt_usage_status(&e) {
+                                    self.budget.note_usage_status(status);
+                                }
                                 let Some(decision) = prepared_retry else {
+                                    if let Some(refusal) = retry_refusal {
+                                        break Err(anyhow::anyhow!(
+                                            "{refusal}; original error: {e:#}"
+                                        ));
+                                    }
                                     if provider_outcome_is_uncertain(&e) {
                                         break Err(anyhow::anyhow!(
                                             "provider_outcome_uncertain: the provider may have accepted the issued request and this failure was not retried; a retry after an unknown outcome needs the directive to declare `provider_contact: repeatable` on a remote provider route and `execution.unknown_outcome_retry` to name this failure class within its first max_retries attempts (sealed ceiling {}); original error: {e:#}",
@@ -2881,6 +3723,13 @@ impl Runner {
                                 }
                             };
                             let usd = cost.usd;
+                            self.budget.note_usage_status(settled_turn_usage_status(
+                                valid_usage.is_some(),
+                                settled_spend_only,
+                                turn_replayed_from.is_some(),
+                                &cost.source,
+                                input_tok.saturating_add(output_tok),
+                            ));
                             // §2: an operator auditing spend must be able to tell
                             // "free" from "untracked", and know when a model's
                             // cost came from provider-default rates rather than a
@@ -2968,6 +3817,7 @@ impl Runner {
                                 resp.finish_reason.as_deref(),
                             ) == FinishReason::Length;
                             if ended_at_output_limit
+                                && self.summary_job.is_none()
                                 && self.consecutive_length_turns >= self.output_limit_allowance()
                             {
                                 state = State::Errored {
@@ -3015,7 +3865,8 @@ impl Runner {
                             // a `refuse` rule and holds none fails here, after its
                             // usage is settled and before it is recorded or any
                             // tool it proposed is dispatched.
-                            if let Some(missing) = self
+                            if self.summary_job.is_none()
+                                && let Some(missing) = self
                                 .provider_config
                                 .schemas
                                 .as_ref()
@@ -3033,9 +3884,15 @@ impl Runner {
                                 };
                                 continue;
                             }
-                            let finish = finish_label(crate::directive::normalize_finish_reason(
-                                resp.finish_reason.as_deref(),
-                            ));
+                            let summary_finish = self.summary_job.as_ref().map(|job| {
+                                ryeos_runtime::cognition::compaction_summary_finish(&job.trigger)
+                            });
+                            let finish = match summary_finish.as_deref() {
+                                Some(finish) => finish,
+                                None => finish_label(crate::directive::normalize_finish_reason(
+                                    resp.finish_reason.as_deref(),
+                                )),
+                            };
                             let provider_accounting = Some(json!({
                                 "attempt_id": format!("{}:{turn}:{}", self.thread_id, attempt + 1),
                                 "attempt_number": attempt + 1,
@@ -3063,7 +3920,29 @@ impl Runner {
                                 "response_id": &resp.response_id,
                                 "replayed_from": &turn_replayed_from,
                             }));
-                            let malformed_calls =
+                            // A summary call is recorded as its text alone: it
+                            // offered no tools, so a call in its answer is not
+                            // carried and never owed a result.
+                            let recorded_parts: Vec<Part> = if self.summary_job.is_some() {
+                                resp.message
+                                    .parts
+                                    .iter()
+                                    .filter(|part| matches!(part, Part::Text(_)))
+                                    .cloned()
+                                    .collect()
+                            } else {
+                                resp.message.parts.clone()
+                            };
+                            if self.summary_job.is_some() && recorded_parts.is_empty() {
+                                state = State::Errored {
+                                    error: "compaction_summary_failed: the summary call returned no text"
+                                        .to_string(),
+                                };
+                                continue;
+                            }
+                            let malformed_calls = if self.summary_job.is_some() {
+                                Vec::new()
+                            } else {
                                 match malformed_calls_of_turn(&events, &resp.message) {
                                     Ok(calls) => calls,
                                     Err(error) => {
@@ -3072,14 +3951,15 @@ impl Runner {
                                         };
                                         continue;
                                     }
-                                };
+                                }
+                            };
                             if let Err(e) = self
                                 .callback
                                 .emit_turn_complete(
                                     turn,
                                     finish,
                                     token_counts,
-                                    resp.message.parts.clone(),
+                                    recorded_parts.clone(),
                                     provider_accounting,
                                     malformed_calls.clone(),
                                 )
@@ -3090,6 +3970,22 @@ impl Runner {
                                         "resume-critical callback emit_turn_complete failed: {e}"
                                     ),
                                 };
+                                continue;
+                            }
+                            if self.summary_job.is_some() {
+                                block_at_directive_recovery_test_cut(
+                                    &self.callback,
+                                    "compaction_summary_recorded",
+                                )
+                                .await;
+                            }
+                            if let Some(job) = self.summary_job.as_mut() {
+                                // The summary is not a conversation turn: it
+                                // goes into the compaction record, not into the
+                                // conversation.
+                                job.result = Some(recorded_parts);
+                                job.truncated = ended_at_output_limit;
+                                state = State::FinishingCompaction;
                                 continue;
                             }
                             self.turn_malformed_calls = malformed_calls;
@@ -3130,6 +4026,10 @@ impl Runner {
                             State::Streaming { events }
                         }
                         Ok(crate::provider_adapter::StreamOutcome::Cancelled { attempt: cut }) => {
+                            // A cut stream: whatever usage it reported is not
+                            // known to be final.
+                            self.budget
+                                .note_usage_status(ryeos_runtime::envelope::UsageStatus::Partial);
                             if let Err(error) = self
                                 .settle_available_attempt_accounting(
                                     turn,
@@ -3155,6 +4055,31 @@ impl Runner {
                             events,
                             attempt: cut,
                         }) => {
+                            // A cut stream: whatever usage it reported is not
+                            // known to be final.
+                            self.budget
+                                .note_usage_status(ryeos_runtime::envelope::UsageStatus::Partial);
+                            // A live interrupt that cuts a compaction's summary
+                            // call ends the compaction: the partial summary is
+                            // not a conversation turn.
+                            if self.summary_job.is_some() {
+                                let settled = self
+                                    .settle_available_attempt_accounting(
+                                        turn,
+                                        cut.usage.as_ref(),
+                                        turn_start.elapsed().as_millis() as u64,
+                                    )
+                                    .await;
+                                state = State::Errored {
+                                    error: match settled {
+                                        Ok(_) => "interrupted: the compaction summary call was interrupted".to_string(),
+                                        Err(error) => format!(
+                                            "interrupted: the compaction summary call was interrupted; its accounting settlement failed: {error:#}"
+                                        ),
+                                    },
+                                };
+                                continue;
+                            }
                             // Live interrupt (SIGUSR1) cut the in-flight cognition.
                             // Surface any provider warnings from the partial stream
                             // (the diagnostic State::Streaming pass is skipped on the
@@ -3352,6 +4277,9 @@ impl Runner {
                                                          {turn}: model `{}` has no usable price",
                                                         self.model_name
                                                     ));
+                                                    self.budget.note_usage_status(
+                                                        ryeos_runtime::envelope::UsageStatus::Unavailable,
+                                                    );
                                                 }
                                                 self
                                                     .settle_provider_usage(
@@ -3488,32 +4416,79 @@ impl Runner {
                             } else {
                                 format!("{e:#}")
                             };
+                            // The compaction policy may answer a refusal that names
+                            // an overflow code: this thread settles `continued` and
+                            // its successor compacts first, then makes the request
+                            // again. A refusal of a compaction's own summary call is
+                            // never answered this way.
+                            let recovery = match &rejection {
+                                Some(rejection) if self.summary_job.is_none() => {
+                                    self.overflow_recovery(&rejection.code)
+                                }
+                                _ => OverflowRecovery::NotApplicable,
+                            };
                             match rejection {
                                 // A named refusal reaches the directive's
                                 // `provider_error` hooks, with its code, before
                                 // the failure settles. The hooks observe; the
                                 // failure itself is the typed code.
-                                Some(rejection) => State::FiringHooks {
-                                    occurrence:
-                                        ryeos_runtime::callback::HookDispatchOccurrence::new(
-                                            "directive",
-                                            "provider_error",
-                                            self.definition_ref.clone(),
-                                            self.root_raw_content_digest.clone(),
-                                            self.effective_definition_digest.clone(),
-                                        )
-                                        .with_counter_coordinate("turn", turn),
-                                    context: json!({
-                                        "event": {
-                                            "name": "provider_error",
-                                            "code": rejection.code,
-                                            "status": rejection.status,
-                                            "turn": turn,
-                                            "retryable": false,
+                                Some(rejection) => {
+                                    let after = match recovery {
+                                        OverflowRecovery::Allowed => {
+                                            let live_context = self
+                                                .continuation
+                                                .estimate_live_context_tokens(&self.messages);
+                                            let fork = || State::ForkingAfterRefusal {
+                                                code: rejection.code.clone(),
+                                                detail: error.clone(),
+                                            };
+                                            self.pressure_hook = Some(PressureHook {
+                                                compact: fork(),
+                                                skip: State::Errored {
+                                                    error: error.clone(),
+                                                },
+                                            });
+                                            State::FiringHooks {
+                                                occurrence: self.pressure_occurrence(turn),
+                                                context: self.pressure_context(
+                                                    "overflow",
+                                                    turn,
+                                                    live_context,
+                                                    Some(&rejection),
+                                                ),
+                                                resume_to: Box::new(fork()),
+                                            }
                                         }
-                                    }),
-                                    resume_to: Box::new(State::Errored { error }),
-                                },
+                                        OverflowRecovery::Exhausted => State::Errored {
+                                            error: format!(
+                                                "compaction_recovery_exhausted: {} overflow recoveries are spent in this chain; the refusal was: {error}",
+                                                self.compaction.max_overflow_recoveries_per_chain
+                                            ),
+                                        },
+                                        OverflowRecovery::NotApplicable => State::Errored { error },
+                                    };
+                                    State::FiringHooks {
+                                        occurrence:
+                                            ryeos_runtime::callback::HookDispatchOccurrence::new(
+                                                "directive",
+                                                "provider_error",
+                                                self.definition_ref.clone(),
+                                                self.root_raw_content_digest.clone(),
+                                                self.effective_definition_digest.clone(),
+                                            )
+                                            .with_counter_coordinate("turn", turn),
+                                        context: json!({
+                                            "event": {
+                                                "name": "provider_error",
+                                                "code": rejection.code,
+                                                "status": rejection.status,
+                                                "turn": turn,
+                                                "retryable": false,
+                                            }
+                                        }),
+                                        resume_to: Box::new(after),
+                                    }
+                                }
                                 None => State::Errored { error },
                             }
                         }
@@ -3612,6 +4587,7 @@ impl Runner {
                     match last {
                         Some(msg) => {
                             if msg.has_tool_calls() {
+                                self.consecutive_malformed_replies = 0;
                                 let occurrences = msg
                                     .calls()
                                     .iter()
@@ -3652,6 +4628,7 @@ impl Runner {
                                     }
                                 }
                             } else if self.consecutive_length_turns > 0 {
+                                self.consecutive_malformed_replies = 0;
                                 // The turn ended at the output limit and made no
                                 // tool call: its text is incomplete, so it must
                                 // not finalize. Record the policy's message as a
@@ -3685,7 +4662,68 @@ impl Runner {
                                         error: OUTPUT_LIMIT_ERROR.to_string(),
                                     },
                                 }
+                            } else if let Some((marker, policy)) = self
+                                .provider_config
+                                .malformed_replies
+                                .as_ref()
+                                .and_then(|policy| {
+                                    policy
+                                        .first_marker_in(&msg.joined_text())
+                                        .map(|marker| (marker.to_string(), policy.clone()))
+                                })
+                            {
+                                // A reply with no structured tool call whose
+                                // text holds a marker is malformed: the model
+                                // wrote a call as text. Invariant: text that
+                                // looks like a tool call is never parsed or
+                                // executed, so a malformed reply runs no tool.
+                                // The reply is dropped from the conversation,
+                                // the policy's message takes its place, and
+                                // another turn is taken within the policy's
+                                // bound and the turn limit. Otherwise the run
+                                // fails, and the reply is never the result.
+                                let streak = self.consecutive_malformed_replies.saturating_add(1);
+                                tracing::warn!(
+                                    turn,
+                                    streak,
+                                    matched_marker = %marker,
+                                    max_consecutive = policy.max_consecutive,
+                                    "provider reply is malformed"
+                                );
+                                if streak <= policy.max_consecutive && self.can_start_another_turn()
+                                {
+                                    let input = ryeos_runtime::CognitionInput::text(
+                                        "harness",
+                                        &policy.message,
+                                    )
+                                    .with_kind(
+                                        ryeos_runtime::cognition::malformed_reply_kind(
+                                            turn, streak,
+                                        ),
+                                    );
+                                    if let Err(e) = self.callback.emit_cognition_input(&input).await
+                                    {
+                                        State::RecoveryRequired {
+                                            error: format!(
+                                                "resume-critical malformed_reply input append failed: {e}"
+                                            ),
+                                        }
+                                    } else {
+                                        self.messages.pop();
+                                        self.messages.push(ProviderMessage::user(policy.message));
+                                        self.consecutive_malformed_replies = streak;
+                                        State::CheckingLimits
+                                    }
+                                } else {
+                                    State::Errored {
+                                        error: format!(
+                                            "{MALFORMED_REPLY_ERROR_CODE}: the provider's reply held the marker {marker:?} and no correction was left (allowed in a row: {})",
+                                            policy.max_consecutive
+                                        ),
+                                    }
+                                }
                             } else if let Some(content) = msg.content_value() {
+                                self.consecutive_malformed_replies = 0;
                                 // Steer pre-finalize drain (finding C): a no-tool
                                 // content response is about to finalize. If an
                                 // operator input is pending, fold it and take
@@ -4317,6 +5355,12 @@ impl Runner {
                     resume_to,
                 } => {
                     let event = occurrence.event().to_string();
+                    // What a `context_pressure` hook's action chooses between.
+                    let pressure_hook = if event == CONTEXT_PRESSURE_EVENT {
+                        self.pressure_hook.take()
+                    } else {
+                        None
+                    };
                     let callback = self.callback.clone();
                     let thread_id = self.thread_id.clone();
 
@@ -4374,8 +5418,9 @@ impl Runner {
                     {
                         // A `provider_error` hook only observes a failure that
                         // is already typed; its own cost violation must not
-                        // replace that failure's code.
-                        if event == "provider_error" {
+                        // replace that failure's code. A `context_pressure`
+                        // hook's cost violation leaves the policy's default.
+                        if event == "provider_error" || event == CONTEXT_PRESSURE_EVENT {
                             tracing::warn!(%error, "provider_error hook cost violates accounting bounds; the typed failure stands");
                             state = *resume_to;
                             continue;
@@ -4413,6 +5458,29 @@ impl Runner {
 
                             match hook_result.as_ref().map(HookAction::from_value) {
                                 Some(Ok(action)) => match action {
+                                    HookAction::Compact if event == CONTEXT_PRESSURE_EVENT => {
+                                        match pressure_hook {
+                                            Some(hook) => hook.compact,
+                                            None => *resume_to,
+                                        }
+                                    }
+                                    HookAction::SkipCompaction if event == CONTEXT_PRESSURE_EVENT => {
+                                        match pressure_hook {
+                                            Some(hook) => hook.skip,
+                                            None => *resume_to,
+                                        }
+                                    }
+                                    HookAction::Compact | HookAction::SkipCompaction => State::Errored {
+                                        error: format!(
+                                            "hook event `{event}` returned invalid control action: {action:?} is valid only on context_pressure"
+                                        ),
+                                    },
+                                    // Retrying would send the same request: refused here.
+                                    HookAction::Retry if event == CONTEXT_PRESSURE_EVENT => {
+                                        State::Errored {
+                                            error: "hook event `context_pressure` returned invalid control action: retry would send the same request".to_string(),
+                                        }
+                                    }
                                     HookAction::Retry => State::CallingProvider,
                                     HookAction::Abort | HookAction::Fail => State::Errored {
                                         error: format!("hook aborted: {}", event),
@@ -4436,8 +5504,8 @@ impl Runner {
                         // A `provider_error` hook only observes a failure that
                         // is already typed; a hook that itself fails must not
                         // replace that failure's code.
-                        Err(e) if event == "provider_error" => {
-                            tracing::warn!(error = %e, "provider_error hook failed; the typed failure stands");
+                        Err(e) if event == "provider_error" || event == CONTEXT_PRESSURE_EVENT => {
+                            tracing::warn!(error = %e, event = %event, "observing hook failed; the policy default stands");
                             *resume_to
                         }
                         Err(e) => State::Errored {
@@ -4447,6 +5515,116 @@ impl Runner {
                 }
 
                 State::CheckingContinuation => {
+                    let live_context = self
+                        .continuation
+                        .estimate_live_context_tokens(&self.messages);
+                    if self.compaction_due(live_context) {
+                        // The trigger is reached: the directive's hooks may
+                        // choose, and with no choice the policy decides.
+                        let compact = || State::Compacting {
+                            trigger: "pressure".to_string(),
+                        };
+                        let by_policy =
+                            if self.compaction.on_pressure == CompactionOnPressure::Compact {
+                                compact()
+                            } else {
+                                State::ContinuationBoundary
+                            };
+                        self.pressure_hook = Some(PressureHook {
+                            compact: compact(),
+                            skip: State::ContinuationBoundary,
+                        });
+                        State::FiringHooks {
+                            occurrence: self.pressure_occurrence(turn),
+                            context: self.pressure_context("pressure", turn, live_context, None),
+                            resume_to: Box::new(by_policy),
+                        }
+                    } else {
+                        State::ContinuationBoundary
+                    }
+                }
+
+                State::Compacting { trigger } => {
+                    block_at_directive_recovery_test_cut(&self.callback, "compaction_started")
+                        .await;
+                    let outcome = match self.compaction.summary.mode {
+                        SummaryMode::None => self.finish_compaction(&trigger, None).await,
+                        SummaryMode::Model => match self.begin_summary_call(&trigger).await {
+                            Ok(true) => {
+                                state = State::CallingProvider;
+                                continue;
+                            }
+                            Ok(false) => Ok(CompactionOutcome::NothingToReplace),
+                            Err(failure) => Err(failure),
+                        },
+                    };
+                    self.after_compaction(&trigger, outcome)
+                }
+
+                State::ForkingAfterRefusal { code, detail } => {
+                    let finish = ryeos_runtime::cognition::provider_refused_finish(&code);
+                    let parts = vec![Part::text(bound_diagnostic(&detail))];
+                    match self
+                        .callback
+                        .emit_turn_complete(turn, &finish, None, parts, None, Vec::new())
+                        .await
+                    {
+                        Ok(()) => State::Continued,
+                        Err(e) => State::RecoveryRequired {
+                            error: format!(
+                                "resume-critical callback emit_turn_complete (refusal) failed: {e}"
+                            ),
+                        },
+                    }
+                }
+
+                State::FinishingCompaction => {
+                    let Some(job) = self.summary_job.take() else {
+                        state = State::Errored {
+                            error: "compaction_failed: no compaction summary to finish".to_string(),
+                        };
+                        continue;
+                    };
+                    // Only text is a summary: a call the model made although no
+                    // tools were offered is not carried.
+                    if job.truncated {
+                        state = State::Errored {
+                            error: "compaction_summary_failed: the summary was cut off at the output limit and is not carried"
+                                .to_string(),
+                        };
+                        continue;
+                    }
+                    let parts: Vec<Part> = job
+                        .result
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|part| matches!(part, Part::Text(_)))
+                        .collect();
+                    let has_text = parts.iter().any(
+                        |part| matches!(part, Part::Text(text) if !text.text.trim().is_empty()),
+                    );
+                    if !has_text {
+                        state = State::Errored {
+                            error: "compaction_summary_failed: the summary call returned no text"
+                                .to_string(),
+                        };
+                        continue;
+                    }
+                    let outcome = self
+                        .finish_compaction(
+                            &job.trigger,
+                            Some(crate::compaction::Summary {
+                                parts,
+                                model_call: true,
+                                turn,
+                                omitted_from_input: job.omitted_from_input,
+                            }),
+                        )
+                        .await;
+                    self.after_compaction(&job.trigger, outcome)
+                }
+
+                State::ContinuationBoundary => {
                     let threshold = self.continuation.threshold();
                     // Measure the LIVE context window (post-trim messages), NOT
                     // cumulative chain spend — the threshold is a per-call
@@ -4482,12 +5660,15 @@ impl Runner {
                                 resume_to: Box::new(State::Continued),
                             }
                         } else {
-                            let result = self
-                                .messages
-                                .last()
-                                .and_then(|m| m.content_value())
-                                .unwrap_or(Value::Null);
-                            State::Finalizing { result }
+                            // Over the window with no way to continue: the run
+                            // ends with a typed failure, not with its last
+                            // message as if it were an answer. A directive that
+                            // wants the old stop writes it into a hook.
+                            State::Errored {
+                                error: format!(
+                                    "context_window_exhausted: live context of {live_context} estimated tokens reached the {threshold}-token continuation threshold and continuation is not enabled"
+                                ),
+                            }
                         }
                     } else {
                         // Loop back to the limits + provider call.
@@ -4614,6 +5795,15 @@ impl Runner {
                 }
 
                 State::Continued => {
+                    if self.chain_depth >= self.chain_depth_limit {
+                        state = State::Errored {
+                            error: format!(
+                                "continuation_chain_limit: this thread has {} continuation predecessors, the chain's limit of {}; the chain will not continue",
+                                self.chain_depth, self.chain_depth_limit
+                            ),
+                        };
+                        continue;
+                    }
                     // Cut off by a limit mid-task: hand off to a chain-fold
                     // successor. Continuation is autonomous by construction — no
                     // reason/gate/mode, only an optional free-form string for logs.
@@ -4648,6 +5838,16 @@ impl Runner {
                         .request_continuation(Some(CONTINUATION_LOG_REASON), completion)
                         .await
                     {
+                        // The daemon's refusal at the chain's depth limit carries
+                        // its code: the run fails with it, typed.
+                        if format!("{e}").contains("continuation_chain_limit:") {
+                            state = State::Errored {
+                                error: format!(
+                                    "continuation_chain_limit: the chain reached its continuation depth limit and will not continue: {e}"
+                                ),
+                            };
+                            continue;
+                        }
                         let runtime_result = RuntimeResult {
                             success: false,
                             status: RuntimeResultStatus::Failed,
@@ -4666,6 +5866,17 @@ impl Runner {
                 }
 
                 State::Errored { error } => {
+                    // A failed compaction summary call fails the run with its
+                    // own typed code. This is a deliberate choice, not the
+                    // carry-on-uncompacted behaviour a gentler design would
+                    // have: the failed call burned a turn coordinate, and
+                    // carrying on would need a failure-final record that every
+                    // recovery reader skips.
+                    let error = if self.summary_job.take().is_some() {
+                        format!("compaction_summary_failed: {error}")
+                    } else {
+                        error
+                    };
                     record_callback_warning(
                         &mut warnings,
                         "thread_failed(emit_error)",
@@ -5177,6 +6388,7 @@ impl Runner {
             output_tokens,
             total_usd: usd,
             basis: None,
+            usage_status: Default::default(),
         };
         let mut proposed_cost = self.budget.cost();
         proposed_cost
@@ -5259,6 +6471,7 @@ impl Runner {
                 prepared.requested_output_ceiling,
             )?,
             verified_bound: verified,
+            restart_retry: self.restart_retry_offer(turn, attempt_number)?,
         };
         let response = self.prepare_with_recovery(&prepare_params).await?;
         let (attempt_id, request_hash, coordinate, response_authority_digest, execution_budget_id) =
@@ -5390,6 +6603,57 @@ impl Runner {
                 ledger.attempt_id
             ),
         }
+    }
+
+    /// The retry this runtime would authorize for `attempt_number` of `turn`
+    /// if a restart cut the call, offered to the daemon when preparing an
+    /// attempt of a turn the restart interrupted. A restart is a stream cut:
+    /// the request may have reached the provider and the answer was lost, so
+    /// the reason is `mid_stream`. The signed policy gates it
+    /// like any in-process unknown-outcome retry, and the daemon applies the
+    /// sealed ceiling and transport; with no offer a cut attempt stays an
+    /// unknown outcome. The decision is a pure function of the record and the
+    /// policy, so a re-sent prepare carries the identical offer.
+    fn restart_retry_offer(
+        &self,
+        turn: u32,
+        attempt_number: u32,
+    ) -> anyhow::Result<Option<ProviderRetryDecision>> {
+        if self.restart_cut_turn != Some(turn) {
+            return Ok(None);
+        }
+        // Stream fragments are live-only and never reach the durable record,
+        // so a resumed process cannot know how many the dead attempt
+        // published; zero is the most the record can attest. A reader voids
+        // the fragments of a retried turn by position, not by this count.
+        let reason = ProviderRetryReason::MidStream {
+            live_output_events_emitted: 0,
+        };
+        // A restart cut carries no Retry-After: nothing observed a response.
+        let Ok(delay) = retry_delay_for_reason(&reason, attempt_number, None, &self.execution)
+        else {
+            return Ok(None);
+        };
+        let decision = ProviderRetryDecision {
+            turn,
+            failed_attempt_number: attempt_number,
+            next_attempt_number: attempt_number
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("provider retry attempt coordinate overflow"))?,
+            backoff_ms: u64::try_from(delay.as_millis())
+                .map_err(|_| anyhow::anyhow!("provider retry backoff exceeds u64"))?,
+            reason,
+            retry_after_ms: None,
+            failure_digest: HexDigest::new(lillux::sha256_hex(
+                RESTART_CUT_FAILURE_MARKER.as_bytes(),
+            ))
+            .map_err(|error| anyhow::anyhow!("restart retry failure digest: {error}"))?,
+            retry_policy_digest: retry_policy_digest(&self.execution)?,
+        };
+        decision
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(Some(decision))
     }
 
     /// Prepare replay-or-reservation with bounded exact retry. The daemon owns
@@ -5562,18 +6826,19 @@ impl Runner {
                 "provider retry advancement contradicts active turn {turn} attempt {failed_attempt_number}"
             );
         }
-        let policy_digest = retry_policy_digest(&self.execution)?;
-        if advance.decision.retry_policy_digest != policy_digest {
+        check_recorded_retry_policy_digest(&advance.decision.retry_policy_digest, &self.execution)?;
+        if advance.decision.retry_after_ms.is_some() && self.execution.retry_after_max_ms == 0 {
             anyhow::bail!(
-                "provider retry advancement was admitted under a different execution policy"
+                "provider retry advancement records a Retry-After the execution policy ignores"
             );
         }
         let expected_delay = retry_delay_for_reason(
             &advance.decision.reason,
             failed_attempt_number,
+            advance.decision.retry_after_ms,
             &self.execution,
         )
-        .ok_or_else(|| {
+        .map_err(|_| {
             anyhow::anyhow!("provider retry advancement is forbidden by the exact execution policy")
         })?;
         if u64::try_from(expected_delay.as_millis()).ok() != Some(advance.decision.backoff_ms) {
@@ -6094,6 +7359,7 @@ fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) 
         output_tokens: 0,
         total_usd: usd,
         basis: None,
+        usage_status: Default::default(),
     }
 }
 
@@ -6790,6 +8056,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -6872,6 +8139,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -6930,6 +8198,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -6987,6 +8256,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -7059,6 +8329,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(usd("1"));
@@ -7236,6 +8507,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7313,6 +8585,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7387,6 +8660,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7445,6 +8719,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
 
@@ -7509,6 +8784,7 @@ mod tests {
             code,
             detail: format!("provider returned {code}: {body}"),
             body: body.to_string(),
+            retry_after_ms: None,
         })
     }
 
@@ -7577,6 +8853,7 @@ mod tests {
             code,
             detail: format!("provider returned {code}"),
             body: String::new(),
+            retry_after_ms: None,
         })
     }
 
@@ -7762,14 +9039,248 @@ mod tests {
         let reason = ProviderRetryReason::MidStream {
             live_output_events_emitted: 1,
         };
-        assert!(retry_delay_for_reason(&reason, 2, &cfg).is_some());
-        assert!(retry_delay_for_reason(&reason, 3, &cfg).is_none());
+        assert!(retry_delay_for_reason(&reason, 2, None, &cfg).is_ok());
+        assert!(retry_delay_for_reason(&reason, 3, None, &cfg).is_err());
         let narrowed = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::Timeout]);
-        assert!(retry_delay_for_reason(&reason, 1, &narrowed).is_none());
+        assert!(retry_delay_for_reason(&reason, 1, None, &narrowed).is_err());
         assert_ne!(
             retry_policy_digest(&cfg).unwrap(),
             retry_policy_digest(&narrowed).unwrap()
         );
+    }
+
+    fn status_err_with_retry_after(code: u16, retry_after_ms: Option<u64>) -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
+            code,
+            detail: format!("provider returned {code}"),
+            body: String::new(),
+            retry_after_ms,
+        })
+    }
+
+    #[test]
+    fn retry_after_raises_the_delay_never_lowers_it() {
+        use std::time::Duration;
+        let cfg = retry_cfg(); // base 1000, cap 60000
+        let reason = ProviderRetryReason::Status { code: 429 };
+        // Backoff for the first retry is 1000: a smaller ask changes nothing,
+        // a larger one wins, an ask equal to the cap is honoured.
+        for (asked, expected) in [
+            (None, 1_000),
+            (Some(0), 1_000),
+            (Some(400), 1_000),
+            (Some(1_000), 1_000),
+            (Some(4_500), 4_500),
+            (Some(60_000), 60_000),
+        ] {
+            assert_eq!(
+                retry_delay_for_reason(&reason, 1, asked, &cfg),
+                Ok(Duration::from_millis(expected)),
+                "{asked:?}"
+            );
+        }
+        // A later attempt's larger backoff beats a small ask.
+        assert_eq!(
+            retry_delay_for_reason(&reason, 2, Some(1_500), &cfg),
+            Ok(Duration::from_millis(2_000))
+        );
+    }
+
+    #[test]
+    fn retry_after_over_the_cap_is_a_typed_denial() {
+        let cfg = ExecutionConfig {
+            retry_after_max_ms: 5_000,
+            ..retry_cfg()
+        };
+        let reason = ProviderRetryReason::Status { code: 429 };
+        assert_eq!(
+            retry_delay_for_reason(&reason, 1, Some(5_001), &cfg),
+            Err(RetryDenial::RetryAfterExceedsCap {
+                asked_ms: 5_001,
+                cap_ms: 5_000
+            })
+        );
+        let typed = RetryDenial::RetryAfterExceedsCap {
+            asked_ms: 5_001,
+            cap_ms: 5_000,
+        }
+        .typed_failure()
+        .unwrap();
+        assert!(
+            typed.starts_with("provider_retry_after_exceeds_cap:"),
+            "{typed}"
+        );
+        assert!(typed.contains("5001") && typed.contains("5000"), "{typed}");
+        assert_eq!(RetryDenial::NotAdmitted.typed_failure(), None);
+        // The classifier carries the denial for a status that is otherwise
+        // retryable, and records nothing for a status that is not.
+        assert_eq!(
+            classify_retry(&status_err_with_retry_after(429, Some(9_000)), 0, &cfg),
+            RetryClassification::Denied(RetryDenial::RetryAfterExceedsCap {
+                asked_ms: 9_000,
+                cap_ms: 5_000
+            })
+        );
+        assert_eq!(
+            classify_retry(&status_err_with_retry_after(418, Some(9_000)), 0, &cfg),
+            RetryClassification::Denied(RetryDenial::NotAdmitted)
+        );
+    }
+
+    #[test]
+    fn a_zero_cap_ignores_the_header_and_records_none() {
+        use std::time::Duration;
+        let cfg = ExecutionConfig {
+            retry_after_max_ms: 0,
+            ..retry_cfg()
+        };
+        assert_eq!(
+            classify_retry(&status_err_with_retry_after(429, Some(900_000)), 0, &cfg),
+            RetryClassification::Admitted {
+                delay: Duration::from_millis(1_000),
+                reason: ProviderRetryReason::Status { code: 429 },
+                retry_after_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_admitted_classification_carries_the_honoured_header() {
+        use std::time::Duration;
+        assert_eq!(
+            classify_retry(
+                &status_err_with_retry_after(503, Some(7_000)),
+                0,
+                &retry_cfg()
+            ),
+            RetryClassification::Admitted {
+                delay: Duration::from_millis(7_000),
+                reason: ProviderRetryReason::Status { code: 503 },
+                retry_after_ms: Some(7_000),
+            }
+        );
+    }
+
+    #[test]
+    fn a_header_on_a_non_status_reason_is_never_applied() {
+        let cfg = retry_cfg();
+        let reason = ProviderRetryReason::Send {
+            connect_phase: true,
+        };
+        assert_eq!(
+            retry_delay_for_reason(&reason, 1, Some(50_000), &cfg),
+            Ok(std::time::Duration::from_millis(1_000))
+        );
+    }
+
+    #[test]
+    fn the_policy_digest_covers_retry_after_max_ms_and_is_v3() {
+        let a = retry_cfg();
+        let b = ExecutionConfig {
+            retry_after_max_ms: a.retry_after_max_ms + 1,
+            ..retry_cfg()
+        };
+        assert_ne!(
+            retry_policy_digest(&a).unwrap(),
+            retry_policy_digest(&b).unwrap()
+        );
+        assert_eq!(
+            RETRY_POLICY_DIGEST_SCHEMA,
+            "ryeos.directive.provider-retry-policy.v3"
+        );
+        assert_ne!(
+            retry_policy_digest(&a).unwrap(),
+            retry_policy_digest_v2(&a).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_v2_recorded_digest_is_refused_by_name_and_a_stranger_is_a_policy_mismatch() {
+        let cfg = retry_cfg();
+        check_recorded_retry_policy_digest(&retry_policy_digest(&cfg).unwrap(), &cfg).unwrap();
+        let retired =
+            check_recorded_retry_policy_digest(&retry_policy_digest_v2(&cfg).unwrap(), &cfg)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            retired.starts_with("provider_retry_policy_digest_retired:"),
+            "{retired}"
+        );
+        let stranger = HexDigest::new(lillux::sha256_hex(b"something else")).unwrap();
+        let mismatch = check_recorded_retry_policy_digest(&stranger, &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            mismatch.contains("different execution policy"),
+            "{mismatch}"
+        );
+    }
+
+    #[test]
+    fn a_decision_records_the_header_and_its_delay_matches_policy() {
+        let cfg = retry_cfg();
+        let error = status_err_with_retry_after(429, Some(4_000));
+        let RetryClassification::Admitted {
+            delay,
+            reason,
+            retry_after_ms,
+        } = classify_retry(&error, 0, &cfg)
+        else {
+            panic!("admitted");
+        };
+        let decision =
+            provider_retry_decision(1, 1, delay, reason, retry_after_ms, &error, &cfg).unwrap();
+        assert_eq!(decision.backoff_ms, 4_000);
+        assert_eq!(decision.retry_after_ms, Some(4_000));
+        // What recovery recomputes from the recorded header equals the record.
+        assert_eq!(
+            retry_delay_for_reason(&decision.reason, 1, decision.retry_after_ms, &cfg),
+            Ok(std::time::Duration::from_millis(decision.backoff_ms))
+        );
+        // A tampered delay no longer equals the recomputation.
+        assert_ne!(
+            retry_delay_for_reason(&decision.reason, 1, Some(9_000), &cfg),
+            Ok(std::time::Duration::from_millis(decision.backoff_ms))
+        );
+    }
+
+    #[test]
+    fn a_wait_past_the_hard_stop_is_refused_and_one_inside_it_is_not() {
+        use ryeos_runtime::envelope::{DeadlineLimits, HardLimits};
+        let limits = HardLimits {
+            deadline: DeadlineLimits {
+                reserve_seconds: 10,
+                hold_back_ms: 0,
+                at_ms: Some(100_000),
+            },
+            ..HardLimits::default()
+        };
+        let clock = crate::run_clock::RunClock::from_limits(&limits).expect("a run clock");
+        // The hard stop is at 90_000.
+        let now = 50_000;
+        assert_eq!(
+            retry_wait_outruns_run_deadline(&clock, now, std::time::Duration::from_millis(39_999)),
+            None
+        );
+        assert_eq!(
+            retry_wait_outruns_run_deadline(&clock, now, std::time::Duration::from_millis(40_000)),
+            Some(40_000)
+        );
+        assert_eq!(
+            retry_wait_outruns_run_deadline(&clock, now, std::time::Duration::from_secs(600)),
+            Some(40_000)
+        );
+    }
+
+    #[test]
+    fn a_ledgerless_route_with_retries_says_so_at_launch() {
+        let statement = provider_retries_unavailable_statement(2, false).expect("a statement");
+        assert!(
+            statement.starts_with("provider retries unavailable: no ledger authority"),
+            "{statement}"
+        );
+        assert_eq!(provider_retries_unavailable_statement(0, false), None);
+        assert_eq!(provider_retries_unavailable_statement(2, true), None);
     }
 
     #[test]
@@ -8426,7 +9937,10 @@ mod tests {
         ledger_runner_with_policy(mock, make_policy())
     }
 
-    fn ledger_runner_with_policy(mock: Arc<ScriptedLedger>, policy: EnvelopePolicy) -> Runner {
+    fn ledger_runner_with_policy(
+        mock: Arc<dyn RuntimeCallbackAPI>,
+        policy: EnvelopePolicy,
+    ) -> Runner {
         let provider = ProviderConfig {
             category: None,
             family: ProtocolFamily::ChatCompletions,
@@ -8444,6 +9958,7 @@ mod tests {
             image_input: None,
             cache_marks: None,
             request_rejections: None,
+            malformed_replies: None,
             profiles: vec![],
         };
         Runner::new(RunnerConfig {
@@ -8453,12 +9968,7 @@ mod tests {
             harness: Harness::new(&policy, 0, None),
             continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(usd("1")),
-            callback: CallbackClient::from_inner(
-                mock as Arc<dyn RuntimeCallbackAPI>,
-                "T-test",
-                "/project",
-                "tat-test",
-            ),
+            callback: CallbackClient::from_inner(mock, "T-test", "/project", "tat-test"),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
             provider_config: provider,
@@ -8713,6 +10223,336 @@ mod tests {
         assert!(mock.recorded("append_event").is_empty());
     }
 
+    /// One thread's durable record held in memory: appends are stored under
+    /// the next chain sequence and replays filter as the daemon does.
+    #[derive(Default)]
+    struct EventStore {
+        events: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl EventStore {
+        fn push(&self, event_type: &str, payload: Value) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((event_type.to_string(), payload));
+        }
+
+        fn push_input(&self, input: &ryeos_runtime::CognitionInput) {
+            for payload in ryeos_runtime::encode_cognition_in_payloads(input).unwrap() {
+                self.push("cognition_in", payload);
+            }
+        }
+
+        fn inputs_of_kind(&self, kind: &str) -> usize {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(event_type, payload)| {
+                    event_type == "cognition_in"
+                        && payload.get("kind").and_then(Value::as_str) == Some(kind)
+                })
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeCallbackAPI for EventStore {
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({"thread": {}}))
+        }
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            event_type: &str,
+            payload: Value,
+        ) -> Result<Value, CallbackError> {
+            self.push(event_type, payload);
+            Ok(json!({}))
+        }
+        async fn append_events(
+            &self,
+            _: &str,
+            events: Vec<Value>,
+            _: ryeos_runtime::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
+            for event in events {
+                self.push(
+                    event["event_type"].as_str().unwrap(),
+                    event["payload"].clone(),
+                );
+            }
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
+            let types: Option<Vec<String>> = params
+                .get("event_types")
+                .and_then(|types| serde_json::from_value(types.clone()).ok());
+            let after = params
+                .get("after_chain_seq")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let events = self
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(index, (event_type, payload))| (index as i64 + 1, event_type, payload))
+                .filter(|(seq, event_type, _)| {
+                    *seq > after
+                        && types
+                            .as_ref()
+                            .is_none_or(|types| types.iter().any(|t| t == *event_type))
+                })
+                .map(
+                    |(chain_seq, event_type, payload)| ryeos_runtime::ReplayedEventRecord {
+                        chain_seq,
+                        event_type: event_type.clone(),
+                        payload: payload.clone(),
+                    },
+                )
+                .collect();
+            Ok(serde_json::to_value(ryeos_runtime::ReplayResponse {
+                events,
+                next_cursor: None,
+            })
+            .unwrap())
+        }
+        async fn bundle_events_append(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn bundle_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn vault_put(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_get(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: i64,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+    }
+
+    /// A completed text-only turn, in the record and in the live conversation.
+    fn record_same_turn(store: &EventStore, runner: &mut Runner, turn: u32) {
+        store.push("cognition_in", json!({"turn": turn, "purpose": "turn"}));
+        store.push(
+            "cognition_out",
+            json!({
+                "turn": turn,
+                "parts": [{"type": "text", "text": "same"}],
+                "finish": "stop",
+                "provider_accounting": {"replayed_from": "ab".repeat(32)},
+            }),
+        );
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![Part::text("same")],
+        ));
+    }
+
+    fn conversation_turns(runner: &Runner) -> usize {
+        crate::loop_guards::digests_from_messages(&runner.messages).len()
+    }
+
+    #[tokio::test]
+    async fn a_live_compaction_keeps_the_wrap_up_and_the_grace_a_loop_warning_had_used() {
+        use crate::loop_guards::FindingKind;
+        let store = Arc::new(EventStore::default());
+        let mut runner = ledger_runner_with_policy(store.clone(), make_policy());
+        runner.execution.loop_guards = crate::directive::LoopGuardsConfig {
+            no_progress_turns: 1,
+            grace_turns: 5,
+            ..Default::default()
+        };
+        runner.compaction.keep_turns = 3;
+        store.push_input(&ryeos_runtime::CognitionInput::text("launch", "THE TASK").pinned());
+        runner.messages.push(ProviderMessage::user("THE TASK"));
+        record_same_turn(&store, &mut runner, 1);
+        record_same_turn(&store, &mut runner, 2);
+        // Two turns that only repeat what was seen: warned, at turn count 2.
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(runner.loop_warned.get(&FindingKind::NoProgress), Some(&2));
+        // The deadline notice is given too.
+        let notice = ryeos_runtime::CognitionInput::text("harness", "Deadline notice")
+            .with_kind(ryeos_runtime::cognition::KIND_DEADLINE_WRAP_UP);
+        runner.callback.emit_cognition_input(&notice).await.unwrap();
+        runner
+            .messages
+            .push(ProviderMessage::user("Deadline notice"));
+        runner.wrap_up_delivered.deadline = true;
+        for turn in 3..=5 {
+            record_same_turn(&store, &mut runner, turn);
+        }
+        // Grace 5: without a compaction the stop lands at turn count 7.
+        let outcome = runner.finish_compaction("pressure", None).await;
+        assert!(matches!(outcome, Ok(CompactionOutcome::Compacted)));
+        // The kept turns are 3, 4 and 5; the notice and the warning, both
+        // recorded before turn 3, are summarised away.
+        assert_eq!(conversation_turns(&runner), 3);
+        assert!(
+            runner.messages.iter().all(|message| {
+                message
+                    .text()
+                    .is_none_or(|text| !text.starts_with("Deadline notice"))
+            }),
+            "the compaction dropped the notice from the conversation"
+        );
+        // (i) the flag stays set, so the model is not told again.
+        assert!(runner.wrap_up_delivered.deadline);
+        // (ii) the record carries the two replaced turns, so the warning keeps
+        // its place in the history of 2 carried + 3 kept turns.
+        assert_eq!(runner.guard_prefix.len(), 2);
+        assert_eq!(runner.loop_warned.get(&FindingKind::NoProgress), Some(&2));
+        // A fresh process recovering the same record reaches the same state.
+        let recovered = crate::resume::load_resume_state(
+            &runner.callback,
+            "T-test",
+            crate::resume::CarryPolicy {
+                carry_turns: u32::MAX,
+                start_tokens: u64::MAX,
+                ceiling_tokens: u64::MAX,
+            },
+            crate::resume::ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(recovered.wrap_up_delivered.deadline);
+        assert_eq!(recovered.guard_prefix, runner.guard_prefix);
+        assert_eq!(
+            recovered.loop_warned.get(&FindingKind::NoProgress),
+            Some(&2)
+        );
+        // Still found, not warned afresh, and not stopped yet.
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        assert_eq!(store.inputs_of_kind("loop_warning_no_progress"), 1);
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![Part::text("same")],
+        ));
+        assert_eq!(runner.loop_guard_boundary().await.unwrap(), None);
+        // Two turns after the compaction (history of 7 = 2 + grace) the run is
+        // stopped: the same two turns it had left without the compaction.
+        runner.messages.push(ProviderMessage::new(
+            ryeos_provider_contract::Role::Assistant,
+            vec![Part::text("same")],
+        ));
+        let stop = runner
+            .loop_guard_boundary()
+            .await
+            .unwrap()
+            .expect("stopped");
+        assert!(stop.starts_with("loop_detected: "), "{stop}");
+        assert_eq!(store.inputs_of_kind("loop_warning_no_progress"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_compaction_with_the_loop_guards_off_carries_null_and_a_resume_says_so() {
+        let store = Arc::new(EventStore::default());
+        let mut runner = ledger_runner_with_policy(store.clone(), make_policy());
+        runner.execution.loop_guards.enabled = false;
+        runner.compaction.keep_turns = 2;
+        store.push_input(&ryeos_runtime::CognitionInput::text("launch", "THE TASK").pinned());
+        runner.messages.push(ProviderMessage::user("THE TASK"));
+        for turn in 1..=4 {
+            record_same_turn(&store, &mut runner, turn);
+        }
+        let outcome = runner.finish_compaction("pressure", None).await;
+        assert!(matches!(outcome, Ok(CompactionOutcome::Compacted)));
+        let records: Vec<Value> = store
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(event_type, _)| event_type == "cognition_compaction")
+            .map(|(_, payload)| payload.clone())
+            .collect();
+        assert_eq!(records.len(), 1);
+        // Present on the record, and null: the guards were off.
+        assert_eq!(records[0].get("guard_carry"), Some(&Value::Null));
+        // Resumed with the guards on, the history is reported as not measured.
+        let recovered = crate::resume::load_resume_state(
+            &runner.callback,
+            "T-test",
+            crate::resume::CarryPolicy {
+                carry_turns: u32::MAX,
+                start_tokens: u64::MAX,
+                ceiling_tokens: u64::MAX,
+            },
+            crate::resume::ResumeMode::NativeSameThread,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            recovered.guard_history,
+            crate::resume::GuardHistory::NotRecorded
+        );
+        assert_eq!(
+            recovered
+                .guard_history
+                .shortfall(&crate::directive::LoopGuardsConfig::default()),
+            Some(0)
+        );
+    }
+
     fn push_turn(runner: &mut Runner, index: u32, tool: &str, result: &str) {
         let id = format!("c{index}");
         runner.messages.push(ProviderMessage::new(
@@ -8892,6 +10732,111 @@ mod tests {
         assert_eq!(mock.recorded("reserve").len(), 1);
         assert_eq!(mock.recorded("mark_issued").len(), 1);
         assert!(mock.recorded("release_unissued").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_resumed_turn_offers_the_daemon_the_restart_retry_its_policy_admits() {
+        let authority = base_ledger_authority();
+        let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
+        let mut runner = ledger_runner(mock.clone());
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        runner.restart_cut_turn = Some(4);
+        let prepared = test_prepared();
+
+        // Within the policy: a mid-stream decision carrying the true fragment
+        // count, bound to the attempt's coordinate and the exact policy.
+        let offer = runner.restart_retry_offer(4, 2).unwrap().expect("offer");
+        assert_eq!(offer.turn, 4);
+        assert_eq!(offer.failed_attempt_number, 2);
+        assert_eq!(offer.next_attempt_number, 3);
+        assert_eq!(
+            offer.reason,
+            ProviderRetryReason::MidStream {
+                live_output_events_emitted: 0
+            }
+        );
+        assert_eq!(
+            offer.retry_policy_digest,
+            retry_policy_digest(&runner.execution).unwrap()
+        );
+        assert_eq!(
+            retry_supersedes(&offer),
+            json!({"turn": 4, "attempt": 2, "output_events": 0})
+        );
+        // Readers recognise a restart-cut decision by this exact digest.
+        assert_eq!(
+            offer.failure_digest.as_str(),
+            "07922c912825b5b1aac477c84a9b4acbe584f7d5549f6b1ce9ac56226676f384"
+        );
+        // The decision is deterministic, so a re-sent prepare offers the same.
+        assert_eq!(
+            runner.restart_retry_offer(4, 2).unwrap(),
+            Some(offer.clone())
+        );
+        // The runtime would accept the daemon's stored copy of it.
+        let advance = ProviderRetryAdvance::build(
+            "A-1".to_string(),
+            lillux::sha256_hex(b"request"),
+            lillux::sha256_hex(b"coordinate"),
+            offer.clone(),
+            1_000,
+        )
+        .unwrap();
+        runner.validate_retry_advance(&advance, 4, 2).unwrap();
+
+        // Past the policy's attempt bound, in another turn, or with a policy
+        // that does not name the class: no offer, so the cut stays unknown.
+        assert_eq!(runner.restart_retry_offer(4, 3).unwrap(), None);
+        assert_eq!(runner.restart_retry_offer(5, 1).unwrap(), None);
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::Timeout]);
+        assert_eq!(runner.restart_retry_offer(4, 1).unwrap(), None);
+        runner.execution = retry_cfg();
+        assert_eq!(runner.restart_retry_offer(4, 1).unwrap(), None);
+
+        // The offer rides on the prepare the runtime sends.
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        let verified = test_verified(&authority, &prepared);
+        runner
+            .admit_ledger_attempt(
+                4,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        let reserves = mock.recorded("reserve");
+        assert_eq!(reserves.len(), 1);
+        assert_eq!(
+            reserves[0]["restart_retry"]["reason"],
+            json!({"kind": "mid_stream", "live_output_events_emitted": 0})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uninterrupted_turn_offers_no_restart_retry() {
+        let authority = base_ledger_authority();
+        let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
+        let mut runner = ledger_runner(mock.clone());
+        runner.execution = unknown_policy_cfg(3, 2, vec![UnknownOutcomeClass::MidStream]);
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+        runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(mock.recorded("reserve")[0].get("restart_retry").is_none());
     }
 
     #[tokio::test]
@@ -9500,5 +11445,90 @@ mod frame_refusal_tests {
             assert!(recorder.events.lock().unwrap().is_empty());
             assert!(recorder.finalized.lock().unwrap().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_status_producer_tests {
+    use super::*;
+    use ryeos_runtime::envelope::UsageStatus;
+
+    #[test]
+    fn a_turn_with_no_usable_usage_is_unavailable() {
+        let status = settled_turn_usage_status(false, false, false, &PricingSource::PerModel, 0);
+        assert_eq!(status, UsageStatus::Unavailable);
+    }
+
+    #[test]
+    fn a_turn_with_only_a_reported_spend_is_partial() {
+        let status =
+            settled_turn_usage_status(false, true, false, &PricingSource::ProviderReported, 0);
+        assert_eq!(status, UsageStatus::Partial);
+    }
+
+    #[test]
+    fn tokens_without_a_computable_price_are_unavailable_not_zero() {
+        for pricing in [PricingSource::Unpriced, PricingSource::ByokUntracked] {
+            assert_eq!(
+                settled_turn_usage_status(true, false, false, &pricing, 12),
+                UsageStatus::Unavailable
+            );
+        }
+        // No tokens consumed: nothing is missing.
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::Unpriced, 0),
+            UsageStatus::Complete
+        );
+    }
+
+    #[test]
+    fn a_measured_priced_or_replayed_turn_is_complete() {
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::PerModel, 9),
+            UsageStatus::Complete
+        );
+        assert_eq!(
+            settled_turn_usage_status(true, false, false, &PricingSource::ExplicitlyFree, 9),
+            UsageStatus::Complete
+        );
+        assert_eq!(
+            settled_turn_usage_status(false, false, true, &PricingSource::PerModel, 0),
+            UsageStatus::Complete
+        );
+    }
+
+    #[test]
+    fn a_cut_timeout_or_unknown_outcome_leaves_usage_partial() {
+        let timeout = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
+            detail: "read timed out".to_string(),
+        });
+        assert_eq!(
+            failed_attempt_usage_status(&timeout),
+            Some(UsageStatus::Partial)
+        );
+        let cut = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
+            Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
+                live_output_events_emitted: 0,
+                accepted_bytes: 0,
+                accepted_output_events: 0,
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens: None,
+                detail: "reset".to_string(),
+            }),
+        ));
+        assert_eq!(
+            failed_attempt_usage_status(&cut),
+            Some(UsageStatus::Partial)
+        );
+        // A refusal before contact consumed nothing.
+        let status = anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
+            code: 429,
+            detail: "rate limited".to_string(),
+            body: String::new(),
+            retry_after_ms: None,
+        });
+        assert_eq!(failed_attempt_usage_status(&status), None);
     }
 }

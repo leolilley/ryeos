@@ -102,6 +102,16 @@ pub struct ProviderAttemptPrepareParams {
     pub transport: ryeos_provider_contract::PreparedTransportIntent,
     pub request: ryeos_provider_contract::PreparedRequestProjection,
     pub verified_bound: VerifiedPreparedSpendBound,
+    /// Present only when the runtime resumed an unfinished provider turn after
+    /// a restart and its signed policy would admit retrying this attempt had
+    /// the failure been observed in process. It is the runtime's decision for
+    /// this exact attempt, and nothing more than an offer: the daemon stores
+    /// it only when the same coordinate is already closed as cut by the
+    /// restart (fenced while issued, with no recorded answer or advancement)
+    /// and the sealed launch authority admits another contact. In every other
+    /// case it has no effect, so it is not part of the request identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_retry: Option<ProviderRetryDecision>,
 }
 
 impl ProviderAttemptPrepareParams {
@@ -118,6 +128,19 @@ impl ProviderAttemptPrepareParams {
         self.transport
             .validate()
             .map_err(|error| format!("{error:#}"))?;
+        if let Some(retry) = &self.restart_retry {
+            retry.validate()?;
+            if retry.turn != self.turn || retry.failed_attempt_number != self.attempt_number {
+                return Err(
+                    "a restart retry decision must name the prepared turn and attempt".to_string(),
+                );
+            }
+            if !retry.reason.leaves_outcome_unknown() {
+                return Err(
+                    "a restart retry decision must carry an unknown-outcome reason".to_string(),
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -264,6 +287,13 @@ pub struct ProviderRetryDecision {
     pub reason: ProviderRetryReason,
     pub failure_digest: HexDigest,
     pub retry_policy_digest: HexDigest,
+    /// The provider's `Retry-After` the `backoff_ms` honoured, in
+    /// milliseconds. Absent when the response carried none or the policy
+    /// ignores it. Skipped when absent so a decision without one keeps the
+    /// digest it always had and a row written before this field decodes
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 impl ProviderRetryDecision {
@@ -286,6 +316,16 @@ impl ProviderRetryDecision {
             && !(100..=599).contains(&code)
         {
             return Err("retry status code is outside the HTTP status range".to_string());
+        }
+        if let Some(retry_after_ms) = self.retry_after_ms {
+            if !matches!(self.reason, ProviderRetryReason::Status { .. }) {
+                return Err(
+                    "retry decision carries Retry-After for a non-status failure".to_string(),
+                );
+            }
+            if retry_after_ms > self.backoff_ms {
+                return Err("retry decision waits less than the provider asked".to_string());
+            }
         }
         Ok(())
     }
@@ -742,6 +782,7 @@ mod tests {
                 },
                 verifier_contract_digest: digest_of("verifier"),
             },
+            restart_retry: None,
         };
         params.validate().unwrap();
         let mut value = serde_json::to_value(&params).unwrap();
@@ -780,6 +821,7 @@ mod tests {
                 },
                 verifier_contract_digest: digest_of("verifier"),
             },
+            restart_retry: None,
         };
         assert!(params.validate().is_err());
         params.turn = 1;
@@ -799,6 +841,58 @@ mod tests {
         assert!(spend.validate().is_err());
     }
 
+    fn decision_for_retry_after(retry_after_ms: Option<u64>) -> ProviderRetryDecision {
+        ProviderRetryDecision {
+            turn: 1,
+            failed_attempt_number: 1,
+            next_attempt_number: 2,
+            backoff_ms: 4_000,
+            reason: ProviderRetryReason::Status { code: 429 },
+            failure_digest: digest_of("failure"),
+            retry_policy_digest: digest_of("policy"),
+            retry_after_ms,
+        }
+    }
+
+    #[test]
+    fn a_decision_without_retry_after_keeps_its_digest_and_old_rows_decode() {
+        let decision = decision_for_retry_after(None);
+        let encoded = serde_json::to_value(&decision).unwrap();
+        assert!(encoded.get("retry_after_ms").is_none(), "{encoded}");
+        // The pre-field row shape decodes to the same decision, and its
+        // canonical digest is the digest of the old encoding.
+        let old_row: ProviderRetryDecision = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(old_row, decision);
+        let canonical = lillux::canonical_json(&encoded).unwrap();
+        assert_eq!(
+            decision.digest().unwrap().as_str(),
+            lillux::sha256_hex(canonical.as_bytes())
+        );
+    }
+
+    #[test]
+    fn retry_after_round_trips_and_changes_the_digest() {
+        let with = decision_for_retry_after(Some(4_000));
+        let encoded = serde_json::to_value(&with).unwrap();
+        assert_eq!(encoded["retry_after_ms"], 4_000);
+        let back: ProviderRetryDecision = serde_json::from_value(encoded).unwrap();
+        assert_eq!(back, with);
+        assert_ne!(
+            with.digest().unwrap(),
+            decision_for_retry_after(None).digest().unwrap()
+        );
+        with.validate().unwrap();
+    }
+
+    #[test]
+    fn retry_after_must_be_honoured_and_belong_to_a_status() {
+        // A recorded delay shorter than the ask cannot be what policy gave.
+        assert!(decision_for_retry_after(Some(4_001)).validate().is_err());
+        let mut non_status = decision_for_retry_after(Some(1_000));
+        non_status.reason = ProviderRetryReason::Timeout;
+        assert!(non_status.validate().is_err());
+    }
+
     #[test]
     fn retry_decision_is_closed_exactly_one_step_and_digest_bound() {
         let decision = ProviderRetryDecision {
@@ -809,6 +903,7 @@ mod tests {
             reason: ProviderRetryReason::Status { code: 503 },
             failure_digest: digest_of("failure"),
             retry_policy_digest: digest_of("policy"),
+            retry_after_ms: None,
         };
         decision.validate().unwrap();
         assert_eq!(decision.digest().unwrap(), decision.digest().unwrap());
@@ -888,6 +983,7 @@ mod tests {
                 reason: ProviderRetryReason::Timeout,
                 failure_digest: digest_of("failure"),
                 retry_policy_digest: digest_of("policy"),
+                retry_after_ms: None,
             }),
         };
         assert!(params.validate().is_err());

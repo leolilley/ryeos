@@ -356,7 +356,9 @@ async fn wait_for_daemon_ready(
     context: &str,
     deadline: Instant,
 ) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
+    let client = ryeos_http_egress::client_builder()
+        .build()
+        .expect("the HTTP client builds");
     let url = format!("http://{bind}/_ryeos/ready");
 
     loop {
@@ -1001,6 +1003,25 @@ impl DaemonHarness {
         .await
     }
 
+    /// [`start_fast_core_only_prepared`] with the `plant` hook of
+    /// [`start_fast_with`], for a test that adds one signed fixture bundle to
+    /// the core-only node before it starts.
+    pub async fn start_fast_core_only_with<S>(
+        plant: S,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+    {
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::CoreOnly,
+            plant,
+            |_| {},
+        )
+        .await
+    }
+
     /// Like [`start_fast`] but with two hooks:
     ///
     /// * `plant`: runs after `populate_initialized_state` and receives
@@ -1612,7 +1633,9 @@ impl DaemonHarness {
     ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
         let body_bytes = serde_json::to_vec(&body)?;
 
-        let mut req = reqwest::Client::new()
+        let mut req = ryeos_http_egress::client_builder()
+            .build()
+            .expect("the HTTP client builds")
             .post(format!("http://{}{}", self.bind, route_path))
             .header("content-type", "application/json")
             .body(body_bytes.clone());

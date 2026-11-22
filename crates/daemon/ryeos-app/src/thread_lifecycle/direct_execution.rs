@@ -3087,7 +3087,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
         );
         let site = state.threads.site_id().to_owned();
         let context = PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: state.identity.fingerprint().to_owned(),
                 scopes: vec![execute_cap],
@@ -3877,7 +3877,13 @@ pub fn spawn_item(
             ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
             _ => None,
         };
-        let isolation_resolution_roots = engine.resolution_roots(isolation_project_root);
+        let isolation_resolution_roots = engine.resolution_roots(
+            isolation_project_root,
+            ryeos_engine::contracts::LogicalProject::from_optional(
+                None,
+                &resolved.plan_context.subject_resolution_authority,
+            ),
+        );
         let isolation_bundle_roots = isolation_resolution_roots
             .ordered
             .iter()
@@ -4604,7 +4610,12 @@ mod tests {
             &candidate,
             None,
             &[],
-            &engine.resolution_roots(None),
+            &engine.resolution_roots(
+                None,
+                ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                ),
+            ),
             None,
             None,
             None,

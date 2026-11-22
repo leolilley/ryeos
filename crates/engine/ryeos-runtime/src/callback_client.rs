@@ -45,6 +45,24 @@ pub const TOOL_RESULT_INLINE_MAX_BYTES: usize = 256 * 1024;
 /// same wire limit; clients paginate until `next_cursor` is absent.
 pub const MAX_RUNTIME_REPLAY_PAGE_LIMIT: usize = 32;
 
+/// A recovery's replay is larger than the ceiling. The text starts with the
+/// stable failure code, which is how the failure reaches the thread's record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayCeilingExceeded(pub String);
+
+impl ReplayCeilingExceeded {
+    /// The stable failure code of this refusal.
+    pub const CODE: &'static str = "replay_ceiling_exceeded";
+}
+
+impl std::fmt::Display for ReplayCeilingExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", Self::CODE, self.0)
+    }
+}
+
+impl std::error::Error for ReplayCeilingExceeded {}
+
 /// Process-local safety ceilings for one complete native-runtime recovery
 /// fold. Authored graph/directive limits remain the semantic execution
 /// authority; these bounds prevent an unexpectedly long or malformed daemon
@@ -105,7 +123,10 @@ fn append_replay_page(
         .checked_add(page.events.len())
         .ok_or_else(|| anyhow::anyhow!("runtime replay event count overflow"))?;
     if next_event_count > max_events {
-        anyhow::bail!("runtime replay contains {next_event_count} events; maximum is {max_events}");
+        return Err(ReplayCeilingExceeded(format!(
+            "runtime replay contains {next_event_count} events; maximum is {max_events}"
+        ))
+        .into());
     }
 
     let mut next_serialized_bytes = budget.total_serialized_bytes;
@@ -123,9 +144,10 @@ fn append_replay_page(
             .ok_or_else(|| anyhow::anyhow!("runtime replay byte count overflow"))?;
     }
     if next_serialized_bytes > max_serialized_bytes {
-        anyhow::bail!(
+        return Err(ReplayCeilingExceeded(format!(
             "runtime replay serializes to {next_serialized_bytes} bytes; maximum is {max_serialized_bytes}"
-        );
+        ))
+        .into());
     }
 
     let next_cursor = page.next_cursor;
@@ -962,6 +984,7 @@ impl CallbackClient {
             "chain_root_id",
             chain_root_id,
             event_types,
+            None,
             &mut RuntimeReplayBudget::default(),
         )
         .await
@@ -992,8 +1015,29 @@ impl CallbackClient {
         event_types: Option<&[&str]>,
         budget: &mut RuntimeReplayBudget,
     ) -> Result<ReplayResponse> {
-        self.replay_paged("thread_id", thread_id, event_types, budget)
+        self.replay_paged("thread_id", thread_id, event_types, None, budget)
             .await
+    }
+
+    /// [`Self::replay_thread_with_budget`] starting after the given chain
+    /// sequence number: only events with a larger `chain_seq` come back. A
+    /// recovery that found its fold base in an earlier, filtered replay uses it
+    /// to read the thread from there on.
+    pub async fn replay_thread_after(
+        &self,
+        thread_id: &str,
+        event_types: Option<&[&str]>,
+        after_chain_seq: i64,
+        budget: &mut RuntimeReplayBudget,
+    ) -> Result<ReplayResponse> {
+        self.replay_paged(
+            "thread_id",
+            thread_id,
+            event_types,
+            Some(after_chain_seq),
+            budget,
+        )
+        .await
     }
 
     /// Page through `after_chain_seq` cursors for a single replay scope
@@ -1004,6 +1048,7 @@ impl CallbackClient {
         scope_key: &str,
         scope_value: &str,
         event_types: Option<&[&str]>,
+        start_after_chain_seq: Option<i64>,
         budget: &mut RuntimeReplayBudget,
     ) -> Result<ReplayResponse> {
         let client = self.inner.as_ref().ok_or_else(|| {
@@ -1014,7 +1059,7 @@ impl CallbackClient {
         })?;
 
         let mut all_events = Vec::new();
-        let mut after_chain_seq: Option<i64> = None;
+        let mut after_chain_seq: Option<i64> = start_after_chain_seq;
         loop {
             let mut params = serde_json::Map::new();
             params.insert(
@@ -1170,12 +1215,14 @@ impl CallbackClient {
     pub async fn emit_turn_start(
         &self,
         turn: u32,
+        purpose: crate::cognition::TurnPurpose,
         tools_offered: Option<Vec<String>>,
     ) -> Result<()> {
         self.append_runtime_event(
             RuntimeEventType::CognitionIn,
             crate::cognition::to_payload(&crate::cognition::TurnMarker {
                 turn,
+                purpose,
                 tools_offered,
             })?,
         )
@@ -1748,17 +1795,40 @@ mod tests {
 
     #[tokio::test]
     async fn the_turn_marker_names_offered_tools_only_when_given() {
+        use crate::cognition::TurnPurpose;
         let (callback, recorder) = make_recorder_client();
-        callback.emit_turn_start(1, None).await.unwrap();
         callback
-            .emit_turn_start(2, Some(vec!["only_tool".to_string()]))
+            .emit_turn_start(1, TurnPurpose::Turn, None)
+            .await
+            .unwrap();
+        callback
+            .emit_turn_start(
+                2,
+                TurnPurpose::CompactionSummaryOverflow,
+                Some(vec!["only_tool".to_string()]),
+            )
             .await
             .unwrap();
         let events = recorder.events.lock().unwrap();
-        assert_eq!(events[0].1, json!({"turn": 1}));
+        assert_eq!(events[0].1, json!({"turn": 1, "purpose": "turn"}));
         assert_eq!(
             events[1].1,
-            json!({"turn": 2, "tools_offered": ["only_tool"]})
+            json!({
+                "turn": 2,
+                "purpose": "compaction_summary_overflow",
+                "tools_offered": ["only_tool"]
+            })
+        );
+    }
+
+    #[test]
+    fn a_turn_marker_without_a_purpose_is_refused() {
+        let mut assembler = crate::events::CognitionInAssembler::default();
+        assert!(assembler.push(&json!({"turn": 1})).is_err());
+        assert!(
+            assembler
+                .push(&json!({"turn": 1, "purpose": "something_else"}))
+                .is_err()
         );
     }
 
@@ -2457,6 +2527,7 @@ mod tests {
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
             use crate::callback::{ReplayResponse, ReplayedEventRecord};
             let ev = |t: &str| ReplayedEventRecord {
+                chain_seq: 0,
                 event_type: t.to_string(),
                 payload: json!({}),
             };
@@ -2541,6 +2612,7 @@ mod tests {
 
     fn replay_event(event_type: &str, payload: Value) -> ReplayedEventRecord {
         ReplayedEventRecord {
+            chain_seq: 0,
             event_type: event_type.to_string(),
             payload,
         }
@@ -2643,6 +2715,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{count_error:#}").contains("2 events; maximum is 1"));
+        // The ceiling is a typed failure with a stable code.
+        assert!(
+            count_error
+                .downcast_ref::<ReplayCeilingExceeded>()
+                .is_some()
+        );
+        assert!(format!("{count_error}").starts_with("replay_ceiling_exceeded: "));
 
         let exact_bytes = serde_json::to_vec(&two_events).unwrap().len();
         let byte_error = append_replay_page(

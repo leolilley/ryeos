@@ -156,6 +156,7 @@ fn settlement_cost_boundary_rejects_invalid_values() {
         spend: ryeos_engine::launch_envelope_types::UsdNanos::parse_canonical("0.01").unwrap(),
         provider: None,
         basis: None,
+        usage_status: Default::default(),
         metadata: None,
     };
     assert!(validate_final_cost_for_settlement(&valid).is_ok());

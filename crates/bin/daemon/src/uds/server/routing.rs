@@ -318,9 +318,7 @@ mod tests {
         let error = response.error.expect("typed refusal");
         assert_eq!(error.code, "provider_attempt_outcome_unknown");
         assert!(
-            error
-                .message
-                .contains("Resuming after a restart is not supported"),
+            error.message.contains("this turn was not resumed"),
             "{}",
             error.message
         );

@@ -751,7 +751,9 @@ fn resolve_policy_source(
         |generation| -> Result<ProductQualificationPolicySource> {
             let resolution = generation.effective_resolution_output(
                 ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                        ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+                    ),
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(policy_ref)?,
                     expected_kind: Some("config".into()),
                     project_root: None,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-19T05:26:30Z:5cd6e7f04872ddd202c271f5936e33a9ad9b919fc9fbbfc6e783d2debacb69a3:YZC+GzB9KnHPBR6+LJC13dnt47RtvJaAh/todj8iWUCB2TAFVzVL2OoIt1Q7BFd5CgPBNVB+3m006Nak5UuUBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-19T14:28:47Z:1233eedd59a35cfc4e7518a196963d65b73a38bf9916c054a8477d179b689f5f:ks/y7bbmiSksWGydQGADA4CQ6/9pRngGVZ5wF1RzuSIwRX+bTGxlf0Av4wxOQWnoDagFtdRzTTYyhYGOA6UpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 inventory_policy:
   admission:
@@ -70,6 +70,18 @@ execution:
           schema: ryeos.hooks.context.v1
           allowed_roots: [event]
         allowed_results: [discard, observation]
+      # Fired when live context reaches the compaction trigger, and when the
+      # provider refused a request with one of the compaction policy's overflow
+      # codes. The event root carries `trigger` (`pressure` or `overflow`),
+      # `turn`, the token counts, and for an overflow the rejection `code` and
+      # `status`. It carries no conversation text. A control result may name
+      # `compact` or `skip_compaction`; with no action the compaction policy
+      # decides.
+      context_pressure:
+        context_contract:
+          schema: ryeos.hooks.context.v1
+          allowed_roots: [event]
+        allowed_results: [discard, observation, control]
 formats:
   - extensions: [".md"]
     parser: parser:ryeos/core/markdown/directive

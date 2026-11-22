@@ -27,8 +27,9 @@
 //! - `repeat`: how many consecutive requests this step serves.
 //! - `delay_ms`: wait before any response byte (applies to every response
 //!   shape, including `fail`).
-//! - `fail`: `{status, body}`; the response is that HTTP status with that
-//!   body and nothing else in the step is used.
+//! - `fail`: `{status, body, retry_after?}`; the response is that HTTP status
+//!   with that body (and the `Retry-After` header when `retry_after` is set)
+//!   and nothing else in the step is used.
 //! - `text`, `reasoning`: assistant text and reasoning text.
 //! - `reasoning_field`: the delta key carrying `reasoning` (default
 //!   `reasoning_content`; `reasoning` is the other common one).
@@ -142,6 +143,9 @@ pub struct Failure {
     pub status: u16,
     #[serde(default)]
     pub body: String,
+    /// Sent verbatim as the response's `Retry-After` header when set.
+    #[serde(default)]
+    pub retry_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

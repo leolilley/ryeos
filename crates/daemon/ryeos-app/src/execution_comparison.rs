@@ -5,6 +5,7 @@
 //! separately authorized the exact subject.
 
 use anyhow::{Result, bail};
+use ryeos_engine::launch_envelope_types::UsageStatus;
 use serde::Serialize;
 
 use crate::state_store::{AuthoritativeThreadSubject, StateStore};
@@ -40,6 +41,9 @@ pub struct RunCostSample {
     pub spend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basis: Option<CostBasis>,
+    /// Omitted when the figure is complete.
+    #[serde(skip_serializing_if = "UsageStatus::is_complete")]
+    pub usage_status: UsageStatus,
     pub resource_status: CostSampleStatus,
     pub resource_operation_count: u64,
     /// Exact request shares derived from already-rated resource purchases.
@@ -62,6 +66,7 @@ impl RunCostSample {
             output_tokens: None,
             spend: None,
             basis: None,
+            usage_status: UsageStatus::Complete,
             resource_status: CostSampleStatus::Unavailable,
             resource_operation_count: 0,
             resource_attributed_spend: "0".to_string(),
@@ -152,6 +157,7 @@ fn project_cost_sample(
         output_tokens: Some(cost.output_tokens),
         spend: Some(cost.spend.to_canonical_string()),
         basis: Some(basis),
+        usage_status: cost.usage_status,
         resource_status: CostSampleStatus::Unavailable,
         resource_operation_count: 0,
         resource_attributed_spend: "0".to_string(),
@@ -174,6 +180,7 @@ mod tests {
             spend: ryeos_accounting::UsdNanos::parse_canonical("0.125").unwrap(),
             provider: Some("private-provider-label".to_string()),
             basis: None,
+            usage_status: Default::default(),
             metadata: Some(serde_json::json!({"private": "metadata"})),
         }
     }

@@ -194,9 +194,10 @@ fn build_dimension_projection(
     });
 
     // ── Spaces (from resolution roots) ──
-    let roots = state
-        .engine
-        .resolution_roots(project_access.map(|access| access.path().to_path_buf()));
+    let roots = state.engine.resolution_roots(
+        project_access.map(|access| access.path().to_path_buf()),
+        ryeos_engine::contracts::LogicalProject::MaterializedLive,
+    );
     let spaces: Vec<SpaceSummary> = roots
         .ordered
         .iter()

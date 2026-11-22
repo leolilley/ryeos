@@ -167,7 +167,7 @@ fn projectless_admission(
     fixture: &Fixture,
 ) -> Result<crate::thread_lifecycle::RootExecutionAdmission> {
     let plan_context = PlanContext {
-        logical_project_root: None,
+        logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: fixture.context.fingerprint.clone(),
             scopes: fixture.context.scopes.clone(),
@@ -223,7 +223,10 @@ fn finalized_current(
     let candidate = ryeos_engine::effective_program::relock_recovered_effective_program(
         resolution, validation, projection,
     )?;
-    let roots = fixture.state.engine.resolution_roots(None);
+    let roots = fixture.state.engine.resolution_roots(
+        None,
+        LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+    );
     let contract = fixture
         .state
         .engine
@@ -307,7 +310,10 @@ fn seed_auxiliary_qualification_in_context(
         let mut resolution = admission.resolution_output().clone();
         let retained = crate::operator_external_content::product_composition::select_products_with_project_context_resolver(
             &fixture.state, &fixture.context, pinned.request_engine,
-            &pinned.request_engine.resolution_roots(Some(pinned.project_root.to_path_buf())),
+            &pinned.request_engine.resolution_roots(
+                Some(pinned.project_root.to_path_buf()),
+                LogicalProject::Absent(LogicalProjectAbsence::NotStated),
+            ),
             &pinned.plan_context.subject_resolution_authority, &mut resolution, &[selection], None,
         ).context("admit pinned auxiliary unqualified subject")?;
         bind_selected_inputs(
@@ -961,7 +967,7 @@ fn signed_probe_dependency_capture_refuses_changed_tool_envelope() -> Result<()>
     let canonical = CanonicalRef::parse(AUX_VERIFIER)?;
     let site = fixture.state.threads.site_id().to_owned();
     let context = PlanContext {
-        logical_project_root: None,
+        logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: fixture.context.fingerprint.clone(),
             scopes: vec![],
@@ -1399,7 +1405,7 @@ fn pinned_fixture(fixture: &Fixture) -> Result<PinnedFixture> {
         },
     )?;
     let plan = PlanContext {
-        logical_project_root: None,
+        logical_project: LogicalProject::Absent(LogicalProjectAbsence::NotStated),
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: fixture.context.fingerprint.clone(),
             scopes: fixture.context.scopes.clone(),
@@ -1451,6 +1457,7 @@ fn pinned_fixture(fixture: &Fixture) -> Result<PinnedFixture> {
         relationship_name: "subject_to_downstream".into(),
         project_context: Some(launch::ProductQualificationProjectContext {
             snapshot_hash: snapshot.snapshot.clone(),
+            project_path: None,
         }),
         auxiliary_product_selections: vec![ProductSelectionInput {
             target: ProductSelectionTarget::Root {},
@@ -1510,7 +1517,10 @@ fn bind_pinned_inputs(fixture: &Fixture, pinned: &PinnedFixture) -> Result<()> {
         .collect::<Vec<_>>();
     let retained = crate::operator_external_content::product_composition::select_products_with_project_context_resolver(
         &fixture.state, &fixture.context, &pinned.snapshot.engine,
-        &pinned.snapshot.engine.resolution_roots(Some(pinned.snapshot.path.clone())),
+        &pinned.snapshot.engine.resolution_roots(
+            Some(pinned.snapshot.path.clone()),
+            LogicalProject::Absent(LogicalProjectAbsence::NotStated),
+        ),
         &pinned.plan.subject_resolution_authority, &mut resolution, &selectors, Some(&pinned.snapshot),
     )?;
     assert_eq!(retained.len(), 2);
@@ -1613,7 +1623,10 @@ fn seal_complete_launch(
         .collect::<Vec<_>>();
     let retained = crate::operator_external_content::product_composition::select_products_with_project_context_resolver(
         &fixture.state, &fixture.context, &pinned.snapshot.engine,
-        &pinned.snapshot.engine.resolution_roots(Some(pinned.snapshot.path.clone())),
+        &pinned.snapshot.engine.resolution_roots(
+            Some(pinned.snapshot.path.clone()),
+            LogicalProject::Absent(LogicalProjectAbsence::NotStated),
+        ),
         &pinned.plan.subject_resolution_authority, &mut resolution, &selectors, Some(&pinned.snapshot),
     ).context("select complete inputs for sealing")?;
     let authority = fixture.state.state_store.pinned_state_authority()?;

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-22T01:37:20Z:83c2a07b51cb7aa33cdddac58288435324683c654d8bbbadf5d5e99a412266cc:m6jiP0/9+cTHzF/PEFNAF+5t276isIURJayTlUjdGCPjq/aPs7CDc5s+ngueoqwWv5d5O3n6SeSPbFda/ySoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T11:43:18Z:4dca5ee5ae794fe2cb61b430082a6bd1ba62c3276032539065b4eb598959b472:JTSQVO/wY9ul13lPcqkE/0RG4XHtLz/8YdkM40YD/rTb4jpvsJBD4A49vKXAlePtFIQq8VRuL0dOtIdO6+hLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -24,6 +24,7 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `never_retry`        | 401, 403, 404 | HTTP codes that never retry    |
 | `backoff_base_ms`    | 1000     | Exponential backoff base (ms)         |
 | `backoff_max_ms`     | 60000    | Cap on any single backoff delay (ms); must not be below `backoff_base_ms` |
+| `retry_after_max_ms` | 60000   | Longest `Retry-After` wait honoured on a retryable status; `0` ignores the header; otherwise at least `backoff_base_ms` |
 | `on_output_limit` | absent | Recovery when the provider ends a turn at its output limit; absent fails the thread |
 | `unknown_outcome_retry` | absent | Retry policy after a failure that leaves the provider outcome unknown; see below |
 | `timeout_seconds`    | 300      | Overall request timeout               |
@@ -43,6 +44,31 @@ When an API call fails with a retryable status code (429, 500, 502, 503, 504, 52
 1. Wait `min(backoff_base_ms * 2^attempt, backoff_max_ms)` milliseconds
 2. Retry the request
 3. Repeat up to `retries` times (default: 2 → 3 total attempts)
+
+A retryable response may carry a `Retry-After` header, either whole seconds or
+an HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`, measured against the node's wall
+clock). A value that is negative, not a number or date, or a date not in the
+future is ignored, and a longer wait than one day counts as one day. When the
+header is present the delay becomes the larger of the backoff and the header,
+so a retry is never earlier than the provider asked. A header above
+`retry_after_max_ms` is not waited out: the run fails with the original provider
+error and the typed reason `provider_retry_after_exceeds_cap`, naming the asked
+wait and the cap. `retry_after_max_ms: 0` ignores the header entirely (it does
+not mean "no cap"). The retry decision records the header it honoured as
+`retry_after_ms`, and its `backoff_ms` is the delay actually used.
+
+A retry whose wait would not finish before the run's hard stop is not made: the
+run fails with the original error and the typed reason
+`provider_retry_exceeds_run_deadline`.
+
+A retry needs the daemon's attempt ledger to record it. On a route without
+ledger authority `retries` has no effect; when `retries` is above zero such a
+run says "provider retries unavailable: no ledger authority" in its run
+warnings and in a launch observation, instead of looking as if retries were on.
+
+The retry policy digest sealed into every retry decision covers
+`retry_after_max_ms`. A decision recorded under the earlier digest schema is
+refused by recovery with `provider_retry_policy_digest_retired`.
 
 Auth errors (401, 403) and not-found (404) are never retried.
 
@@ -75,10 +101,29 @@ removed `retry_on_timeout` and `retry_mid_stream` keys are refused.
 
 These retries cover a failure the running process observed. If the node stops
 while a model call is in flight (a kill, a crash, a planned rollover that cuts
-the run), the call's outcome is never recorded. The attempt is charged its
-reserved maximum, the turn cannot be resumed, and the thread fails with
-`provider_attempt_outcome_unknown`. Resuming after a restart is not supported
-for any directive yet; no header declaration changes this.
+the run), nothing observed the failure and the call's outcome is never
+recorded. The attempt is charged its reserved maximum. On the next start the
+resumed run treats the cut as a mid-stream failure of that attempt and retries
+it, using one of the `unknown_outcome_retry` slots, when all of these hold:
+
+1. The directive declares `provider_contact: repeatable`.
+2. The provider route is remote, not an admitted local worker, and is on the
+   accounting ledger (priced, or declared explicitly free).
+3. `unknown_outcome_retry.on` names `mid_stream`.
+4. The cut attempt's number is at most `max_retries`, counting every retry of
+   the turn before it, in process or after an earlier restart, and at most
+   `retries`.
+
+The retry resends the same request, so a restart can cost the provider's
+charge for the cut call as well as the reserved maximum node-side; the
+resumed attempt is charged like any other. `max_retries` bounds the total
+number of contacts for a turn across restarts. In every other case (the
+directive is not repeatable, the route is a local worker or has no ledger, the
+policy does not name `mid_stream`, or the ceiling is spent) the turn is not
+resumed and the thread fails with the typed code
+`provider_attempt_outcome_unknown`; no second contact is made.
+
+Resume itself is bounded separately: after a hard crash a turn is resumed at most once; planned restarts re-arm. A turn cut by a second hard crash is therefore failed by the resume budget, not retried, whatever `max_retries` allows.
 
 ### Output limit
 

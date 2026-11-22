@@ -67,6 +67,7 @@ pub(crate) fn validate_checkpoint_snapshots(
         output_tokens: 0,
         total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
         basis: Some(COST_BASIS_ROLLUP.to_string()),
+        usage_status: Default::default(),
     };
     let mut previous_accounting_step = None;
     for (index, record) in accounting.nodes.iter().enumerate() {

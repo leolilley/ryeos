@@ -646,6 +646,58 @@ impl<'de> Deserialize<'de> for RuntimeResult {
 /// double-counts. Absent basis = cost this thread itself incurred.
 pub const COST_BASIS_ROLLUP: &str = "rollup";
 
+/// How much of the real usage a reported cost figure accounts for.
+///
+/// `Complete` is the default and is never serialized, so a complete cost is
+/// byte-identical to one written before this field existed. A figure that is
+/// `Partial` omits usage some member of it could not report; `Unavailable`
+/// carries no real usage at all (its token and spend values are zero
+/// placeholders, not measurements).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageStatus {
+    #[default]
+    Complete,
+    Partial,
+    Unavailable,
+}
+
+impl UsageStatus {
+    /// Serde `skip_serializing_if` predicate: only non-complete figures name
+    /// their status on the wire.
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// Parse the snapshot-facet spelling. Absent means `Complete`.
+    pub fn from_facet(value: Option<&str>) -> Result<Self, RuntimeCostError> {
+        match value {
+            None | Some("complete") => Ok(Self::Complete),
+            Some("partial") => Ok(Self::Partial),
+            Some("unavailable") => Ok(Self::Unavailable),
+            Some(other) => Err(RuntimeCostError::InvalidUsageStatus(other.to_string())),
+        }
+    }
+
+    /// Status of an aggregate of two members: complete only when both are,
+    /// unavailable only when both are, otherwise partial.
+    pub fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Complete, Self::Complete) => Self::Complete,
+            (Self::Unavailable, Self::Unavailable) => Self::Unavailable,
+            _ => Self::Partial,
+        }
+    }
+}
+
 /// A runtime cost failed the shared accounting contract.
 ///
 /// Cost is security- and billing-sensitive data: callers must never wrap token
@@ -665,6 +717,8 @@ pub enum RuntimeCostError {
     OutputTokensOutOfRange,
     #[error("runtime cost basis `{0}` is invalid; expected `rollup` or null")]
     InvalidBasis(String),
+    #[error("cost usage_status `{0}` is invalid; expected `complete`, `partial` or `unavailable`")]
+    InvalidUsageStatus(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -682,9 +736,18 @@ pub struct RuntimeCost {
     /// from children it dispatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basis: Option<String>,
+    /// Whether the figure covers all the usage it claims to. Serialized only
+    /// when not `complete`.
+    #[serde(default, skip_serializing_if = "UsageStatus::is_complete")]
+    pub usage_status: UsageStatus,
 }
 
 impl RuntimeCost {
+    /// Mark this aggregate partial because a member reported no cost at all.
+    pub fn note_missing_member(&mut self) {
+        self.usage_status = UsageStatus::Partial;
+    }
+
     /// Validate one independently reported cost before it can enter accounting
     /// or SQLite-backed settlement. Token counters use `u64` in memory, but the
     /// durable projection is signed-integer SQLite; the accepted wire domain is
@@ -734,6 +797,7 @@ impl RuntimeCost {
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
         self.total_usd = total_usd;
+        self.usage_status = self.usage_status.combine(cost.usage_status);
         Ok(())
     }
 }
@@ -851,6 +915,7 @@ mod tests {
                 output_tokens: 50,
                 total_usd: usd("0.01"),
                 basis: None,
+                usage_status: Default::default(),
             }),
             warnings: Vec::new(),
         };
@@ -999,6 +1064,7 @@ cost:
             output_tokens: 7,
             total_usd: usd("1.5"),
             basis: Some(COST_BASIS_ROLLUP.to_string()),
+            usage_status: Default::default(),
         };
         let error = total
             .checked_accumulate(&RuntimeCost {
@@ -1006,6 +1072,7 @@ cost:
                 output_tokens: 3,
                 total_usd: usd("0.5"),
                 basis: None,
+                usage_status: Default::default(),
             })
             .unwrap_err();
 
@@ -1013,6 +1080,57 @@ cost:
         assert_eq!(total.input_tokens, i64::MAX as u64);
         assert_eq!(total.output_tokens, 7);
         assert_eq!(total.total_usd, usd("1.5"));
+    }
+
+    #[test]
+    fn accumulated_usage_status_is_partial_unless_all_members_agree() {
+        let member = |usage_status| RuntimeCost {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_usd: usd("0.1"),
+            basis: None,
+            usage_status,
+        };
+        let fold = |statuses: &[UsageStatus]| {
+            let mut total = member(statuses[0]);
+            for status in &statuses[1..] {
+                total.checked_accumulate(&member(*status)).unwrap();
+            }
+            total.usage_status
+        };
+        use UsageStatus::{Complete, Partial, Unavailable};
+        assert_eq!(fold(&[Complete, Complete]), Complete);
+        assert_eq!(fold(&[Unavailable, Unavailable, Unavailable]), Unavailable);
+        assert_eq!(fold(&[Complete, Partial]), Partial);
+        assert_eq!(fold(&[Complete, Unavailable]), Partial);
+        assert_eq!(fold(&[Unavailable, Complete, Unavailable]), Partial);
+        assert_eq!(fold(&[Partial, Unavailable]), Partial);
+
+        let mut total = member(Complete);
+        total.note_missing_member();
+        assert_eq!(total.usage_status, Partial);
+    }
+
+    #[test]
+    fn usage_status_is_serialized_only_when_not_complete() {
+        let cost = |usage_status| RuntimeCost {
+            input_tokens: 1,
+            output_tokens: 2,
+            total_usd: usd("0.5"),
+            basis: None,
+            usage_status,
+        };
+        let complete = serde_json::to_string(&cost(UsageStatus::Complete)).unwrap();
+        assert!(!complete.contains("usage_status"));
+        let round: RuntimeCost = serde_json::from_str(&complete).unwrap();
+        assert_eq!(round.usage_status, UsageStatus::Complete);
+        let partial = serde_json::to_value(cost(UsageStatus::Partial)).unwrap();
+        assert_eq!(partial["usage_status"], "partial");
+        assert!(UsageStatus::from_facet(Some("bogus")).is_err());
+        assert_eq!(
+            UsageStatus::from_facet(None).unwrap(),
+            UsageStatus::Complete
+        );
     }
 
     #[test]

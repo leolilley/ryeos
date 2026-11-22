@@ -18,8 +18,8 @@ use serde_json::Value;
 use super::contract::{RequestBody, SignedRequest};
 use super::facts::{
     FACT_AUTHORIZED_KEYS, FACT_BUNDLE_REGISTRATIONS, FACT_CAPACITY_ACCOUNT,
-    FACT_EXTERNAL_EXECUTION, FACT_POLICY_GENERATION, FACT_REMOTES, FACT_RESTART_INHIBITION,
-    FACT_RUNTIME_SNAPSHOTS, FACT_TRUST_REGISTRY,
+    FACT_EXTERNAL_EXECUTION, FACT_POLICY_GENERATION, FACT_PROJECT_REGISTRATIONS, FACT_REMOTES,
+    FACT_RESTART_INHIBITION, FACT_RUNTIME_SNAPSHOTS, FACT_TRUST_REGISTRY,
 };
 use super::handlers;
 use super::host::OfflineHost;
@@ -950,6 +950,48 @@ static OPERATIONS: &[OperationSpec] = &[
             why: "the succession event is recognised by the request digest and the new key is installed last, so a request that stopped earlier finishes and one that stopped after installing it finds the new key in place",
         },
     },
+    OperationSpec {
+        id: "node.project.register",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_PROJECT_REGISTRATIONS, FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::ProjectRegistrationArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::project_register),
+        recovery: Recovery {
+            record: "the owner's registration record under the project name",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "registering a path the record already lists rewrites nothing",
+        },
+    },
+    OperationSpec {
+        id: "node.project.unregister",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_PROJECT_REGISTRATIONS, FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::ProjectRegistrationArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::project_unregister),
+        recovery: Recovery {
+            record: "the owner's registration record under the project name",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "unregistering a path the record no longer lists, or a record already removed, changes nothing",
+        },
+    },
 ];
 
 /// Every operation this binary can apply.
@@ -1053,10 +1095,12 @@ mod tests {
             "node.trust.succeed",
             "node.operator.rotate",
             "node.authoring.rotate",
+            "node.project.register",
+            "node.project.unregister",
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 32);
+        assert_eq!(operations().len(), 34);
     }
 
     #[test]
@@ -1111,6 +1155,8 @@ mod tests {
                 "node.trust.succeed",
                 "node.operator.rotate",
                 "node.authoring.rotate",
+                "node.project.register",
+                "node.project.unregister",
             ]
         );
     }
@@ -1151,7 +1197,7 @@ mod tests {
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 15);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 17);
     }
 
     #[test]
