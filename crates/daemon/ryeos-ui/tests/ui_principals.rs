@@ -171,7 +171,6 @@ async fn a_stored_light_or_dark_theme_reads_as_system_and_can_be_replaced() {
 }
 
 #[tokio::test]
-#[tokio::test]
 async fn a_theme_that_is_not_installed_is_refused_and_a_stored_one_reads_as_system() {
     let (tmp, _state_owner, state) = build_test_state_with_live_bundles();
     let principal = format!("fp:{}", "ee".repeat(32));
@@ -293,6 +292,7 @@ async fn config_get_grants_the_session_the_ground_pictures_of_its_active_themes(
     drop(other_attachment);
 }
 
+#[tokio::test]
 async fn ryeos_dimension_exposes_session_user_principal() {
     let (_tmp, _state_owner, state) = build_test_state();
     let principal = format!("fp:{}", "cc".repeat(32));
