@@ -551,7 +551,15 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     plant_python_tool(
         root,
         "bulk",
-        "print(json.dumps({'ok': True, 'data': 'x' * 600}))",
+        // Each call returns different content of the same length, numbered by
+        // a locked per-run counter in `aux`: a scripted run that calls the tool
+        // every turn then makes progress under the production loop guards, the
+        // sequence is the same on every run and across a restart, and the 600
+        // bytes the tests tune to are unchanged.
+        &format!(
+            "import fcntl\nfd = os.open({:?}, os.O_RDWR | os.O_CREAT)\nfcntl.flock(fd, fcntl.LOCK_EX)\nn = int(os.read(fd, 32).decode() or '0') + 1\nos.lseek(fd, 0, 0)\nos.ftruncate(fd, 0)\nos.write(fd, str(n).encode())\nos.close(fd)\nprint(json.dumps({{'ok': True, 'data': ('%08d' % n + 'x' * 600)[:600]}}))",
+            aux.path().join("bulk.count").to_str().expect("utf-8 path")
+        ),
         &fixture.publisher,
     )?;
     plant_python_tool(
