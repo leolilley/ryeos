@@ -192,7 +192,6 @@ pub fn state_pinned_qualification_logical_project(
 /// principal.
 #[derive(Debug, Clone)]
 pub(crate) struct ReleaseHeadSource {
-    pub project_path: PathBuf,
     pub head_snapshot_hash: String,
 }
 

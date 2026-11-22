@@ -701,7 +701,6 @@ pub(crate) async fn execute_protected_qualification(
         "capture": signed_capture_recipe.as_deref(),
         "recipe_ref": recipe_ref,
     }))?;
-    let release_project_identity = source_generation.project_identity().to_path_buf();
     // The gate checks the SOURCE snapshot (the launcher's own head), while the
     // verifier qualifies the overlay snapshot materialized below: the source
     // plus signed recipe Config. That split is sound because the only files
@@ -720,7 +719,6 @@ pub(crate) async fn execute_protected_qualification(
         )
         .map_err(|error| anyhow::anyhow!("release source identity: {error}"))?;
     let release_head_source = super::product_qualification_launch::ReleaseHeadSource {
-        project_path: release_project_identity.clone(),
         head_snapshot_hash: source_generation.source_snapshot_hash().to_owned(),
     };
     let workspace = tokio::task::spawn_blocking(move || {
