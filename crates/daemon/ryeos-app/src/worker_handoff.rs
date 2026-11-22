@@ -489,6 +489,7 @@ pub mod test_support {
         SourceBeforePreparedEvidenceProjection => "source_before_prepared_evidence_projection",
         SourcePreparedEvidenceProjected => "source_prepared_evidence_projected",
         SourceBeforeWriterCut => "source_before_writer_cut",
+        SourceAllowanceExported => "source_allowance_exported",
         SourceWriterCutPublished => "source_writer_cut_published",
         SourceCommitProjected => "source_commit_projected",
         SourceBeforeAbortPublication => "source_before_abort_publication",
@@ -606,6 +607,7 @@ pub mod test_support {
     pub enum HandoffProtocolMilestone {
         SourceExportPublication,
         SourcePreparedEvidenceProjection,
+        SourceAllowanceExport,
         SourceWriterCutPublication,
         SourceCommitProjection,
         SourceAbortPublication,
@@ -681,6 +683,12 @@ pub mod test_support {
             Source,
             SourceWriterCutPublication,
             Before
+        ),
+        boundary_spec!(
+            SourceAllowanceExported,
+            Source,
+            SourceAllowanceExport,
+            After
         ),
         boundary_spec!(
             SourceWriterCutPublished,
@@ -1608,6 +1616,17 @@ pub mod test_support {
             RECOVERED_ABORTED_WITH_TARGET,
             RejectedByAbortAuthority,
             AbortedSourceContinues
+        ),
+        acceptance_case!(
+            "source_allowance_exported",
+            SourceAllowanceExported,
+            Source,
+            AmbiguousResponse,
+            RestartSource,
+            CUT_SOURCE_PREPARED_IDLE,
+            RECOVERED_COMPLETED,
+            ResumesExactOperation,
+            Completed
         ),
         acceptance_case!(
             "source_writer_cut_published",

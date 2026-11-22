@@ -4080,6 +4080,14 @@ async fn handoff(
         (_, None) => None,
         (None, Some(_)) => return Err(internal("source accounting ledger disappeared")),
     };
+    // A crash here must roll the writer cut forward: the allowance export is irreversible.
+    #[cfg(any(test, feature = "handoff-test-support"))]
+    reach_source_handoff_phase_cut(
+        &state,
+        ryeos_app::worker_handoff::test_support::HandoffCrashBoundary::SourceAllowanceExported,
+        &operation,
+    )
+    .map_err(internal)?;
     let successor = ryeos_app::state_store::NewThreadRecord {
         thread_id: successor_thread_id.clone(),
         chain_root_id: source.chain_root_id.clone(),

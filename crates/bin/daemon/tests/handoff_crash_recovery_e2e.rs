@@ -1273,8 +1273,53 @@ struct HandoffRetryJobsEvidence {
     target_job: Option<HandoffRetryJobEvidence>,
 }
 
+/// The source ledger's durable allowance-export row for one handoff
+/// operation: the request digest and the financial-chain coordinate it
+/// anchored. Identical values before and after recovery prove the export was
+/// not repeated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceAllowanceExportEvidence {
+    request_digest: String,
+    financial_sequence: i64,
+    financial_chain_digest: String,
+}
+
+/// Read the exported-allowance row from the stopped source node's accounting
+/// ledger through the native test gate; `None` when no export was recorded.
+fn read_source_allowance_export(
+    state_path: &Path,
+    operation_id: &str,
+) -> Option<SourceAllowanceExportEvidence> {
+    use rusqlite::OptionalExtension as _;
+
+    let path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join(ryeos_app::accounting_db::ACCOUNTING_DB_FILENAME);
+    if !path.exists() {
+        return None;
+    }
+    ryeos_app::test_support::read_existing_accounting(&path, |connection| {
+        Ok(connection
+            .query_row(
+                "SELECT request_digest, financial_sequence, financial_chain_digest
+                   FROM accounting_handoff_transfer WHERE operation_id=?1",
+                rusqlite::params![operation_id],
+                |row| {
+                    Ok(SourceAllowanceExportEvidence {
+                        request_digest: row.get(0)?,
+                        financial_sequence: row.get(1)?,
+                        financial_chain_digest: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HandoffRetryEvidence {
+    source_allowance_export: Option<SourceAllowanceExportEvidence>,
     source_job: Option<HandoffRetryJobEvidence>,
     target_job: Option<HandoffRetryJobEvidence>,
     writer_grant_hash: Option<String>,
@@ -1816,6 +1861,8 @@ async fn observe_handoff_retry_evidence(
     };
     // A test thread holds one Store at a time: read everything the source
     // node retains and close its Store before the target's opens.
+    let source_allowance_export =
+        read_source_allowance_export(&handoff.source.state_path, operation_id);
     let (source_job, source_chain_head, source_remote_continuation) = {
         let source = open_daemon_state_with_trusted_nodes(&handoff.source.state_path, &trusted)?;
         let source_job = match live_source_job {
@@ -1928,6 +1975,7 @@ async fn observe_handoff_retry_evidence(
     }
     drop(target);
     Ok(HandoffRetryEvidence {
+        source_allowance_export,
         source_job,
         target_job,
         writer_grant_hash,
@@ -2649,6 +2697,18 @@ fn assert_retry_disposition(
                 "resume case `{}` did not start from an incomplete durable operation",
                 case.case_id
             );
+            if case.boundary == HandoffCrashBoundary::SourceAllowanceExported {
+                // The irreversible export precedes the cut, so recovery rolls
+                // the writer cut forward and must reuse that exact export.
+                let exported = at_cut
+                    .source_allowance_export
+                    .as_ref()
+                    .context("crash after the allowance export retained no export row")?;
+                anyhow::ensure!(
+                    after_retry.source_allowance_export.as_ref() == Some(exported),
+                    "recovery repeated or changed the accounting allowance export"
+                );
+            }
             let receipt = after_retry
                 .adoption_receipt
                 .as_ref()
