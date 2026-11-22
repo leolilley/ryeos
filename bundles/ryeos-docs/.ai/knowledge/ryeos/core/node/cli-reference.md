@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-21T16:24:56Z:29359a57a62d1a60352ef5fea6685963cb1d771ff12b2d43eb5cce5abe965820:MVNvq23Ri+gJzMFjANN7xUR9xdtYs1zKtrkY7BN++5velWyMjTmDRmTkqY/G+6gE+gc1RUebzxtYKNqtG6rBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T18:13:08Z:86e664e6ce2708d6b226afa41d40991f4667545e3c47ab48540dc7440528ed92:XEiHoRlXLfj3m0naupCwKTGhHY4kdxBIuZTDECxA6rPW1OqasKm+qpkv5dD6s0fuxkWTm/FZWykpFogE/Th8AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -286,6 +286,15 @@ granted it, or the node operator), or on a remote with `ryeos remote revoke
 [--keep-delegates]` does the same offline and is the only way to revoke the
 configured operator's own grant. See [Identity model](../identity-model.md#revocation).
 
+The `project_registrations` row verifies every node-signed project
+registration under `.ai/node/projects/` and warns when one name lists more
+than one checkout (names are free text, so unrelated checkouts registered
+under one name would share its trust at the cut). It fails, naming the cure,
+for an unsigned, edited or stray entry. The `project_registration_declarations`
+row warns for each registered checkout that is gone or whose `.ai/project.yaml`
+no longer declares the registered name; the fix restores the declaration or
+unregisters the checkout.
+
 The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
 cure, for a record that is unsigned (`remote_pin_unsigned`), signed by a key
@@ -336,6 +345,27 @@ The fix, named exactly in each row and refusal, is
 `ryeos node external-execution retire <section>/<id>` on the stopped node, then
 compose the binding again. Recompose skips and lists each stale id with this
 cure; see [`retire`](#ryeos-node-external-execution-retire).
+
+Operator note for the runtime schema cut to epoch 143: every node must run
+`ryeos node reset execution-history --confirm --schema-cut-from 142 --schema-cut-to 143`
+on its next upgrade; no project heads are involved, so it is the heads-free form.
+The cut carries the stored external terminal observation's required `basis`
+field (how the lifecycle adapter settled a termination: it states the basis it
+relied on), which a store written at epoch 142 lacks. The same epoch also
+carries the turn marker's required `purpose` field (a stored-shape change: a
+marker without it is refused on resume with `resume_marker_without_purpose`) and the
+compaction record's required `guard_carry` field (recent loop-guard digests, wrap-up
+flags and warned ages; null when loop guards are off; a record without the field is
+refused on resume). It also moves the provider retry policy digest to v3
+(`retry_after_max_ms`): the reset clears in-flight threads whose retry decisions
+sealed a v2 digest, and recovery refuses one it still meets. The cut ships together with
+lifecycle adapter protocol v4, so the order on a node is: drain (settle or
+terminate every lease, qualification occurrence and termination in flight),
+stop the daemon gracefully, install the re-signed bundles, run the reset above,
+start, run `ryeos node doctor`, recompose each binding it names as stranded
+(`ryeos node external-execution recompose`, plus `compose` for production and
+qualification bindings, provisioning credentials again where compose names a new
+generation), then run the rig preflight before any live spend.
 
 Operator note for the runtime schema cut to epoch 142: every node must run
 `ryeos node reset execution-history --confirm --schema-cut-from 141 --schema-cut-to 142`
@@ -952,6 +982,26 @@ only). On a running node they refuse with `node_running_trust_change`; cure
 by stopping the node, or by `ryeos node offline-operation submit --stop`.
 Each change appends a node-signed, hash-chained key event under
 `<app_root>/.ai/node/trust/events/`.
+
+### Project registrations
+
+| Verb | Effect |
+|---|---|
+| `ryeos project register <path> [--name <name>] [--owner fp:<hex>]` | Register a live checkout under `fp:<owner>/<name>`. The checkout's `.ai/project.yaml` (`schema: 1`, `name: <name>`) must declare the name, and `--name` defaults to it. The owner defaults to the node's operator and is never the node key or the authoring key |
+| `ryeos project unregister <path> [--name <name>] [--owner fp:<hex>]` | Remove the checkout from the registration; the record is deleted when no checkout remains. A checkout that no longer exists is unregistered by naming `--name` |
+
+Both are signed offline operations (`node.project.register`,
+`node.project.unregister`; local signer only) and refuse on a running node with
+`node_running_trust_change`. A path that is `/`, the node app root, an ancestor
+of it or inside it is refused. Each registration is a node-signed record at
+`<app_root>/.ai/node/projects/<owner-hex>/<name>.yaml` listing the canonical
+checkout paths. Refusal codes: `project_undeclared`, `project_name_mismatch`,
+`project_name_required`, `project_owner_is_node_key`,
+`project_owner_is_authoring_key`.
+
+Registrations are inert for now: only `ryeos node doctor` reads them. At the
+owner+name trust cut they become what lets a live checkout state its project
+identity, so registrations made before the cut become trust at the cut.
 
 ### Key rotation
 

@@ -270,10 +270,13 @@ pub enum ProviderStreamError {
     /// `body` is the start of the response body (at most
     /// [`STATUS_BODY_MAX_BYTES`] bytes), kept for matching the entry's declared
     /// request rejections; `detail` is the formatted diagnostic.
+    /// `retry_after_ms` is the wait the response's `Retry-After` header asked
+    /// for, `None` when the header is absent or not understood.
     Status {
         code: u16,
         detail: String,
         body: String,
+        retry_after_ms: Option<u64>,
     },
     /// The request timed out before a response arrived. The provider may still
     /// have accepted work, so this is not proof of zero usage.
@@ -2126,6 +2129,13 @@ async fn send_prepared_streaming_inner(
             })
             .flatten()
             .unwrap_or_default();
+        let retry_after_ms = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                super::retry_after::parse_retry_after(value, lillux::time::timestamp_millis())
+            });
         let text = resp.text().await.unwrap_or_else(|e| {
             tracing::warn!(
                 "failed to read error response body: {:#}",
@@ -2153,6 +2163,7 @@ async fn send_prepared_streaming_inner(
             code: status,
             detail,
             body: bounded_status_body(&text),
+            retry_after_ms,
         }));
     }
 

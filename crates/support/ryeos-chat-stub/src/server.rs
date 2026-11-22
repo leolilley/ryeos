@@ -216,7 +216,15 @@ async fn handle(
     }
     if let Some(fail) = &step.fail {
         let status = StatusCode::from_u16(fail.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        return (status, fail.body.clone()).into_response();
+        let mut response = (status, fail.body.clone()).into_response();
+        if let Some(retry_after) = &fail.retry_after
+            && let Ok(value) = axum::http::HeaderValue::from_str(retry_after)
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        return response;
     }
     if !streaming {
         return Json(non_stream_body(&step, seq)).into_response();

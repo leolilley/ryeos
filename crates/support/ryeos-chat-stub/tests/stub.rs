@@ -150,6 +150,22 @@ async fn http_failures_carry_status_and_body() {
 }
 
 #[tokio::test]
+async fn a_failure_can_carry_a_retry_after_header() {
+    let stub = serve(
+        "steps:\n  - fail: { status: 429, body: slow, retry_after: \"7\" }\n  - fail: { status: 429, body: slow }\n",
+    )
+    .await;
+    let with = post(&stub, json!({"stream": true}))
+        .await
+        .to_ascii_lowercase();
+    assert!(with.contains("retry-after: 7"), "{with}");
+    let without = post(&stub, json!({"stream": true}))
+        .await
+        .to_ascii_lowercase();
+    assert!(!without.contains("retry-after"), "{without}");
+}
+
+#[tokio::test]
 async fn length_finish_reason_streams_and_non_streams() {
     let stub = serve("steps:\n  - { text: cut, finish_reason: length }\n  - { text: cut, finish_reason: length }\n").await;
     assert_eq!(

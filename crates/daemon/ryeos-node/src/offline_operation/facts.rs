@@ -43,6 +43,9 @@ pub const FACT_BUNDLE_REGISTRATIONS: &str = "bundle_registrations";
 /// Digest of the node's signer registry: records and key events.
 pub const FACT_TRUST_REGISTRY: &str = "trust_registry";
 
+/// Digest of the live project registrations directory.
+pub const FACT_PROJECT_REGISTRATIONS: &str = "project_registrations";
+
 /// Every fact the node can report, in report order.
 pub const ALL_FACTS: &[&str] = &[
     FACT_INIT_COMPLETION,
@@ -56,6 +59,7 @@ pub const ALL_FACTS: &[&str] = &[
     FACT_REMOTES,
     FACT_BUNDLE_REGISTRATIONS,
     FACT_TRUST_REGISTRY,
+    FACT_PROJECT_REGISTRATIONS,
 ];
 
 /// Facts every request pins, whatever its operation.
@@ -127,6 +131,10 @@ pub fn measure(app_root: &Path, ledger_head: &str) -> NodeFacts {
     facts.insert(
         FACT_TRUST_REGISTRY.to_owned(),
         tree_digest(&node.join("trust")),
+    );
+    facts.insert(
+        FACT_PROJECT_REGISTRATIONS.to_owned(),
+        tree_digest(&node.join(crate::project_registry::PROJECTS_DIR)),
     );
     facts
 }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T12:27:40Z:3cd7ec8c999630b17fd5018cc28d0b74807f5d2f0aa5b77c568fc079f7ef22ef:E/nq18rOgh9jDDIGwWi1dS0KXIJ/vEgc1feSlEHqyqXpLNS1haWzuR9BYEXX4A++6bi0e+UJvP4QS3IFMKXFAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-21T16:51:29Z:1b51ed34ecc37e53ba1507d93fd1fc8370172ab0ce6cc7dceda7fe8949cbe16a:TLv4QW6dUPcylViB21Bbl2UuEoRAzUrfPnvilaS3LHIstqzpQKOjWU2xudOomEdHo3jGy4lpNxljhC8lnUncDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: render-sandbox
 version: 0.1.0
 description: Early-access Render Sandbox lifecycle adapter with qualified-guest one-shot startup, retained file relay and a controller-relayed guest channel; reconciliation remains pending
@@ -8,7 +8,7 @@ requires_kinds:
 uses_kinds: []
 external_lifecycle_adapters:
 - id: render-sandbox-early-access
-  protocol: ryeos.external-execution.lifecycle-adapter.v3
+  protocol: ryeos.external-execution.lifecycle-adapter.v4
   targets:
   - x86_64-unknown-linux-gnu
   - aarch64-unknown-linux-gnu

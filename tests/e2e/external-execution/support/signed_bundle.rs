@@ -121,7 +121,7 @@ requires_kinds: []
 uses_kinds: []
 external_lifecycle_adapters:
   - id: synthetic-local
-    protocol: ryeos.external-execution.lifecycle-adapter.v3
+    protocol: ryeos.external-execution.lifecycle-adapter.v4
     targets: [{target}]
     adapter: ryeos-synthetic-external-lifecycle-adapter
     supervisor: ryeos-synthetic-external-candidate-supervisor
