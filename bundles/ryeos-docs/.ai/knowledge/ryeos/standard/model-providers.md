@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-19T10:13:35Z:8bcc39ff59b9f7f7d3da169cee24fcb96b01b8169f18c91c721c506c346713be:AVHunrneQbJVdXTbPOTzYRo4/4sem6X+8c0yLJNz/w4i9jlaMupddsPZPPgh0pNwgTC6o/M+K7OCQ7P8whiXBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-22T10:53:23Z:022383f8ee0703d87618838d99e5b239cbe51255f53e756c0dd7e4bb5b89baf5:XP/bcszHMM3NHN4nYp0WyD1kCAkHCGImBBpzulnX+e7/zZsuU6y77pKWCo27tIDjXDWjeyif1U7MJ+w+bKSMCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -392,6 +392,39 @@ gives no code a meaning. A parent graph that follows the directive reads it as
 
 The runtime reads `request_rejections` with `deny_unknown_fields`, so a runtime
 payload older than a bundle config that declares it refuses the config. Refresh
+the runtime payload and the bundle's provider configs together.
+
+## Malformed replies
+
+Some models sometimes write a tool call as plain text in their own markup instead
+of making a structured call. The reply then has text and no tool calls, and
+without a policy the run would finish with that text as its result.
+`malformed_replies` sits at the top level of the provider entry, and a profile's
+value replaces the entry's whole; an entry without it finishes as before.
+
+```yaml
+malformed_replies:
+  markers: ["<|channel|>", "<|message|>"]
+  message: "Your last reply was not a valid tool call. Make the call again as a structured tool call."
+  max_consecutive: 3
+```
+
+A reply with no structured tool call whose text parts (not its reasoning) contain
+any marker, compared exactly and case-sensitively, is malformed. The runtime
+never parses or runs a call written as text. It drops the reply from the
+conversation sent next, records the entry's `message` as a harness input of kind
+`malformed_reply_turn_<turn>_streak_<n>` (so the record names the turn it
+corrects), and takes another turn. After `max_consecutive` corrections in a row,
+or when no turn is left, the run fails with `malformed_reply_retries_exhausted`
+and the failure names the marker it matched; the reply is never the result. A
+genuine answer that happens to contain a marker is retried the same way, so
+choose markers that only the malformed form contains. Every malformed reply is
+logged with its turn, streak position and marker.
+
+All three fields are required: 1 to 16 markers of 1 to 128 bytes (no control
+characters, none a substring of another), a message of 1 to 4096 bytes, and
+`max_consecutive` from 1 to 8. The runtime reads the strings as opaque data and
+gives none a meaning. It reads the field with `deny_unknown_fields`, so refresh
 the runtime payload and the bundle's provider configs together.
 
 ## Provider cache usage
