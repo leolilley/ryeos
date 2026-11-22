@@ -1992,7 +1992,17 @@ mod linux {
     }
 
     pub(super) fn read_process_stat(pid: u32) -> std::io::Result<ProcessStat> {
-        let raw = std::fs::read(format!("/proc/{pid}/stat"))?;
+        // A task that exits while its stat file is being read fails the read
+        // with ESRCH, which std does not classify as NotFound. Report it as
+        // the same absence an already-gone entry gives, so callers that skip
+        // vanished members handle both.
+        let raw = match std::fs::read(format!("/proc/{pid}/stat")) {
+            Ok(raw) => raw,
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, error));
+            }
+            Err(error) => return Err(error),
+        };
         let fields = crate::process_control::proc_stat_fields_after_comm(&raw)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let state = fields
@@ -2033,7 +2043,12 @@ mod linux {
     pub(super) fn thread_group_of(pid: u32) -> Option<Result<u32, String>> {
         let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
             Ok(status) => status,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                return None;
+            }
             Err(error) => return Some(Err(format!("read /proc/{pid}/status: {error}"))),
         };
         Some(
