@@ -1199,21 +1199,25 @@ mod tests {
         let live_only = ".ai/config/qlr/live-only.yaml";
         let snapshot =
             store_ai_only_snapshot(&fixture.state, &[(in_snapshot, b"snapshot: true\n")]);
+        // A project of its own: the fixture's project already has a head.
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("labelled-project");
+        std::fs::create_dir_all(&project).unwrap();
         write_head(
             &fixture.state,
             &fixture.operator_principal,
-            &fixture.project,
+            &project,
             &snapshot,
         );
         for relative in [in_snapshot, live_only] {
-            let path = fixture.project.join(relative);
+            let path = project.join(relative);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"live: true\n").unwrap();
         }
         let stated = state_pinned_qualification_logical_project(
             &fixture.state,
             &fixture.operator,
-            &fixture.project,
+            &project,
             &snapshot,
         )
         .unwrap();
