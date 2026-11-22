@@ -53,6 +53,9 @@ pub struct ResumeState {
     /// Final turns in a row, ending at the latest recorded turn of this exact
     /// native thread, that ended at the provider's output limit.
     pub trailing_length_turns: u32,
+    /// Malformed replies in a row, ending at the newest recorded one that the
+    /// run has not yet moved past: the position its correction names.
+    pub trailing_malformed_replies: u32,
     /// The latest frame recorded on the path: what the model was given besides
     /// the conversation. `None` when the path recorded none.
     pub frame: Option<CognitionFramePayload>,
@@ -274,6 +277,7 @@ pub async fn load_resume_state(
     // started from, so it is carried the way the successor's start carried it:
     // pinned inputs, then the most recent turns.
     let trailing_length_turns = trailing_length_turns(&events[own_start..])?;
+    let trailing_malformed_replies = trailing_malformed_replies(&events[own_start..])?;
     let frame = latest_frame(&events)?;
     let predecessor = fold_messages(&events[..own_start])?;
     let own = fold_messages(&events[own_start..])?;
@@ -337,6 +341,7 @@ pub async fn load_resume_state(
         result_guard,
         provider_retry_testimony_digests,
         trailing_length_turns,
+        trailing_malformed_replies,
         frame,
         wrap_up_delivered,
         loop_warned,
@@ -412,6 +417,62 @@ fn trailing_length_turns(events: &[ReplayedEventRecord]) -> Result<u32> {
         count = count.saturating_add(1);
     }
     Ok(count)
+}
+
+/// The turn and run position a `cognition_in` event's kind names, when the
+/// event is the correction of a malformed reply.
+fn malformed_reply_input(event: &ReplayedEventRecord) -> Option<(u32, u32)> {
+    if event.event_type != "cognition_in" {
+        return None;
+    }
+    ryeos_runtime::cognition::malformed_reply_of_kind(
+        event.payload.get("kind").and_then(Value::as_str)?,
+    )
+}
+
+/// The run position of the newest malformed-reply correction, while the run
+/// has not moved past it. At most one final turn may follow it, and only one
+/// that proposed no tool call: that turn is the reply the run was about to
+/// judge, so the correction still counts. Any later turn means the run went on
+/// and the run starts over. Derived from the record so resume needs no
+/// separate counter.
+fn trailing_malformed_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
+    let mut finals_after = 0u32;
+    let mut calls_after = false;
+    for event in events.iter().rev() {
+        if let Some((_, position)) = malformed_reply_input(event) {
+            let still_counts = finals_after == 0 || (finals_after == 1 && !calls_after);
+            return Ok(if still_counts { position } else { 0 });
+        }
+        if final_cognition_turn(event)?.is_some() {
+            finals_after = finals_after.saturating_add(1);
+            calls_after |= replayed_cognition_out(event)?
+                .message()
+                .tool_calls()
+                .next()
+                .is_some();
+        }
+    }
+    Ok(0)
+}
+
+/// The positions of the final `cognition_out` events that a later
+/// malformed-reply correction names. The live run removed such a reply from
+/// the conversation, so a fold must not include it.
+fn corrected_replies(events: &[ReplayedEventRecord]) -> Result<std::collections::HashSet<usize>> {
+    let mut corrected = std::collections::HashSet::new();
+    let mut latest_final: Option<(usize, u32)> = None;
+    for (index, event) in events.iter().enumerate() {
+        if let Some(turn) = final_cognition_turn(event)? {
+            latest_final = Some((index, turn));
+        } else if let Some((named, _)) = malformed_reply_input(event)
+            && let Some((final_index, turn)) = latest_final
+            && turn == named
+        {
+            corrected.insert(final_index);
+        }
+    }
+    Ok(corrected)
 }
 
 /// Parse a replayed `tool_call_result` into its typed payload. A payload in
@@ -1420,13 +1481,14 @@ struct FoldedMessage {
 fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
     let mut messages = Vec::new();
     let mut cognition_in = ryeos_runtime::CognitionInAssembler::default();
+    let corrected = corrected_replies(events)?;
     let unpinned = |message: ProviderMessage| FoldedMessage {
         message,
         pinned: false,
         kind: None,
     };
 
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
         validate_replayed_cognition_out(event)?;
         if cognition_in.has_pending() && event.event_type != "cognition_in" {
             anyhow::bail!(
@@ -1459,6 +1521,9 @@ fn fold_messages(events: &[ReplayedEventRecord]) -> Result<Vec<FoldedMessage>> {
             // provider history. The final transcript-bearing cognition_out
             // emitted at turn completion is folded below.
             "cognition_out" if is_stream_fragment(event) => {}
+            // A reply the run corrected as malformed was removed from the
+            // conversation when it was corrected.
+            "cognition_out" if corrected.contains(&index) => {}
             "cognition_out" => {
                 messages.push(unpinned(replayed_cognition_out(event)?.message()));
             }
@@ -3719,6 +3784,89 @@ mod tests {
         // A clean turn after the cuts ends the run of them.
         assert_eq!(
             trailing_length_turns(&[length(1), harness_input, stop(2)]).unwrap(),
+            0
+        );
+    }
+
+    fn malformed_fixture() -> (
+        impl Fn(&str, Value) -> ReplayedEventRecord,
+        impl Fn(u32, u32) -> ReplayedEventRecord,
+    ) {
+        let event = |event_type: &str, payload: Value| ReplayedEventRecord {
+            event_type: event_type.to_string(),
+            payload,
+        };
+        let correction = |turn: u32, position: u32| ReplayedEventRecord {
+            event_type: "cognition_in".to_string(),
+            payload: json!({
+                "origin": "harness",
+                "kind": ryeos_runtime::cognition::malformed_reply_kind(turn, position),
+                "parts": text_parts("fix it"),
+            }),
+        };
+        (event, correction)
+    }
+
+    #[test]
+    fn the_fold_drops_a_reply_a_later_correction_names() {
+        let (event, correction) = malformed_fixture();
+        let events = vec![
+            event("cognition_in", input("Do task")),
+            event("cognition_out", out(1, "<|channel|>leak")),
+            correction(1, 1),
+            event("cognition_out", out(2, "the answer")),
+        ];
+        let folded = reconstruct_messages(&events).unwrap();
+        let texts: Vec<String> = folded.iter().map(|message| message.joined_text()).collect();
+        assert_eq!(texts, vec!["Do task", "fix it", "the answer"]);
+
+        // A correction that names another turn removes nothing.
+        let other = vec![
+            event("cognition_in", input("Do task")),
+            event("cognition_out", out(1, "kept")),
+            correction(5, 1),
+        ];
+        assert_eq!(reconstruct_messages(&other).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_malformed_run_position_is_derived_from_the_record() {
+        let (event, correction) = malformed_fixture();
+        let leak = |turn: u32| event("cognition_out", out(turn, "<|channel|>leak"));
+        let call = |turn: u32| {
+            event(
+                "cognition_out",
+                json!({
+                    "turn": turn,
+                    "parts": [{"type": "tool_call", "call_id": "c1", "name": "t", "arguments": {}}],
+                    "finish": "tool_calls",
+                }),
+            )
+        };
+
+        assert_eq!(trailing_malformed_replies(&[]).unwrap(), 0);
+        assert_eq!(trailing_malformed_replies(&[leak(1)]).unwrap(), 0);
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1)]).unwrap(),
+            1
+        );
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1), leak(2), correction(2, 2)])
+                .unwrap(),
+            2
+        );
+        // The next reply, not yet judged, still counts the correction before it.
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1), leak(2)]).unwrap(),
+            1
+        );
+        // A later turn that made a call, or two later turns, ends the run.
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1), call(2)]).unwrap(),
+            0
+        );
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1), leak(2), leak(3)]).unwrap(),
             0
         );
     }

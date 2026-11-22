@@ -63,6 +63,11 @@ impl ReleaseSourceGeneration {
         &self.project_identity
     }
 
+    /// The RyeOS ProjectSnapshot this source generation materializes.
+    pub(crate) fn source_snapshot_hash(&self) -> &str {
+        self.materialization.snapshot_hash()
+    }
+
     pub(crate) fn project_content(
         &self,
     ) -> &dyn ryeos_engine::project_content::AuthoritativeProjectContent {
@@ -700,6 +705,18 @@ pub(crate) async fn execute_protected_qualification(
         "recipe_ref": recipe_ref,
     }))?;
     let release_project_identity = source_generation.project_identity().to_path_buf();
+    // The gate checks the SOURCE snapshot (the launcher's own head), while the
+    // verifier qualifies the overlay snapshot materialized below: the source
+    // plus signed recipe Config. That split is sound because the only files
+    // the overlay adds or replaces are the signed build recipe and, on a
+    // capture lane, the signed capture recipe, both issued by the publisher
+    // authority for this release; below, before any verifier is launched, the
+    // overlay's resolved recipe must equal the publisher-authorized raw digest
+    // and verify as trusted. Every other byte of the overlay is the gated head.
+    let release_head_source = super::product_qualification_launch::ReleaseHeadSource {
+        project_path: release_project_identity.clone(),
+        head_snapshot_hash: source_generation.source_snapshot_hash().to_owned(),
+    };
     let workspace = tokio::task::spawn_blocking(move || {
         source_generation.materialize_with_recipe_overlay(
             &signed_build_recipe,
@@ -823,13 +840,14 @@ pub(crate) async fn execute_protected_qualification(
             witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
             relationship_name,
             consumer_invocation: None,
-            project_context: Some(ryeos_app::operator_external_content::product_qualification::launch::ProductQualificationProjectContext { snapshot_hash }),
+            project_context: Some(ryeos_app::operator_external_content::product_qualification::launch::ProductQualificationProjectContext { snapshot_hash, project_path: None }),
             auxiliary_product_selections,
         },
         context,
         Arc::clone(&state),
         graph_ref.to_owned(),
         full_product_selections,
+        Some(release_head_source),
         #[cfg(test)]
         None,
     );
@@ -876,6 +894,7 @@ fn spawn_protected_qualification_launch_owner(
     state: Arc<AppState>,
     expected_verifier_ref: String,
     full_product_selections: ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    release_source: Option<super::product_qualification_launch::ReleaseHeadSource>,
     #[cfg(test)] before_handoff: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> tokio::task::JoinHandle<anyhow::Result<Value>> {
     let task_launch_id = request.launch_id.clone();
@@ -891,6 +910,7 @@ fn spawn_protected_qualification_launch_owner(
             Arc::clone(&state),
             Some(&expected_verifier_ref),
             Some(&full_product_selections),
+            release_source,
         )
         .await;
         let accepted = match launch {
@@ -1197,7 +1217,7 @@ mod tests {
             witness_source: ProductWitnessSource::LocalCapture {},
             relationship_name: "missing_qualification_relationship".to_owned(),
             consumer_invocation: None,
-            project_context: Some(ryeos_app::operator_external_content::product_qualification::launch::ProductQualificationProjectContext { snapshot_hash: snapshot_hash.clone() }),
+            project_context: Some(ryeos_app::operator_external_content::product_qualification::launch::ProductQualificationProjectContext { snapshot_hash: snapshot_hash.clone(), project_path: None }),
             auxiliary_product_selections: Vec::new(),
         };
         let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
@@ -1213,6 +1233,7 @@ mod tests {
                 outer_state,
                 "tool:missing/release-verifier".to_owned(),
                 Vec::new(),
+                None,
                 Some(continue_rx),
             );
             owner_started_tx.send(()).unwrap();
@@ -1258,6 +1279,7 @@ mod tests {
             Arc::clone(&state),
             Some("tool:missing/release-verifier"),
             Some(&Vec::new()),
+            None,
         )
         .await;
         assert!(replay.is_err(), "replayed launch coordinate must refuse");

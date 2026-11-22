@@ -242,3 +242,77 @@ async fn project_open_refuses_the_predecessor_request_shape() {
         "{error:#}"
     );
 }
+
+#[tokio::test]
+async fn projects_add_refuses_roots_that_expose_the_node_app_root() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let app_root = state.config.app_root.canonicalize().expect("app root");
+    let parent = app_root.parent().expect("app root has a parent").to_owned();
+    let inside = app_root.join("inside-project");
+    std::fs::create_dir_all(&inside).expect("create directory inside the app root");
+    let operator_ctx = local_operator_context(&state, vec!["*".into()]);
+    let state = Arc::new(state);
+
+    for (root, rule) in [
+        ("/".to_string(), "is the filesystem root"),
+        (app_root.display().to_string(), "contains the node app root"),
+        (parent.display().to_string(), "contains the node app root"),
+        (inside.display().to_string(), "is inside the node app root"),
+    ] {
+        let err = ryeos_ui::handlers::ui_projects::handle_projects_add(
+            json!({ "root": root }),
+            operator_ctx.clone(),
+            state.clone(),
+        )
+        .await
+        .expect_err("a node-internal project root must be refused");
+        assert!(err.to_string().contains(rule), "{root}: {err}");
+    }
+
+    let listed =
+        ryeos_ui::handlers::ui_projects::handle_projects_list(json!(null), operator_ctx, state)
+            .await
+            .expect("list projects");
+    assert!(listed["projects"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn file_handlers_refuse_a_project_root_that_exposes_the_node_app_root() {
+    let (_tmp, _state_owner, state) = build_test_state();
+    let app_root = state.config.app_root.canonicalize().expect("app root");
+    let parent = app_root.parent().expect("app root has a parent").to_owned();
+    let operator_ctx = local_operator_context(&state, vec!["*".into()]);
+    let state = Arc::new(state);
+
+    for root in [app_root, parent, "/".into()] {
+        let project_path = root.display().to_string();
+        let listed = ryeos_ui::handlers::ui_files::handle_files_list(
+            json!({ "root": "project", "project_path": project_path }),
+            operator_ctx.clone(),
+            state.clone(),
+        )
+        .await
+        .expect_err("files/list must refuse");
+        let tree = ryeos_ui::handlers::ui_files::handle_files_tree(
+            json!({ "root": "project", "project_path": project_path }),
+            operator_ctx.clone(),
+            state.clone(),
+        )
+        .await
+        .expect_err("files/tree must refuse");
+        let read = ryeos_ui::handlers::ui_files::handle_files_read(
+            json!({ "root": "project", "path": "any", "project_path": project_path }),
+            operator_ctx.clone(),
+            state.clone(),
+        )
+        .await
+        .expect_err("files/read must refuse");
+        for err in [listed, tree, read] {
+            assert!(
+                err.to_string().contains("node app root")
+                    || err.to_string().contains("filesystem root"),
+                "{project_path}: {err}"
+            );
+        }
+    }
+}

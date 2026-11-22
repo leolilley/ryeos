@@ -1612,7 +1612,21 @@ async fn admit_execution_with_publication(
                     ProjectSource::LiveFs | ProjectSource::CaptureLiveFullProject
                 ) {
                     match std::fs::canonicalize(&path) {
-                        Ok(path) => path,
+                        Ok(path) => {
+                            if let Err(refusal) =
+                                ryeos_app::project_root_guard::refuse_node_internal_project_root_for_app(
+                                    &path,
+                                    &state.config.app_root,
+                                )
+                            {
+                                return Ok((
+                                    StatusCode::FORBIDDEN,
+                                    json!({ "error": refusal.to_string() }),
+                                )
+                                    .into());
+                            }
+                            path
+                        }
                         Err(error) => {
                             return Ok((
                                     StatusCode::BAD_REQUEST,
