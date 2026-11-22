@@ -3966,6 +3966,7 @@ mod tests {
         .map(|payload| ReplayedEventRecord {
             event_type: "cognition_in".to_string(),
             payload,
+            chain_seq: 0,
         })
         .collect()
     }
