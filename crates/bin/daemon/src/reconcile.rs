@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -243,7 +243,9 @@ pub enum ResumeDecision {
     DeadlineReached { end_at_ms: i64 },
 }
 
-use ryeos_app::dedicated_session_service::{SessionRootResume, session_root_resume};
+use ryeos_app::dedicated_session_service::{
+    DEDICATED_SESSION_HOLDS_CANDIDATE, SessionRootResume, session_root_resume,
+};
 
 /// What a restart does with the root of the dedicated session `thread_id`
 /// names, if any, keyed by the session's state through the one policy table.
@@ -346,6 +348,10 @@ pub struct ResumeIntent {
 pub struct ActiveThreadReconcileReport {
     pub active_thread_ids: BTreeSet<String>,
     pub resume_intents: Vec<ResumeIntent>,
+    /// Roots left exactly as they are because their dedicated session holds
+    /// or builds a candidate, keyed by thread id with the stable typed reason
+    /// ([`DEDICATED_SESSION_HOLDS_CANDIDATE`]).
+    pub held_roots: BTreeMap<String, &'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1574,6 +1580,7 @@ async fn reconcile_active_threads_inner(
         return Ok(ActiveThreadReconcileReport {
             active_thread_ids,
             resume_intents: Vec::new(),
+            held_roots: BTreeMap::new(),
         });
     }
 
@@ -1583,6 +1590,7 @@ async fn reconcile_active_threads_inner(
     );
 
     let mut intents: Vec<ResumeIntent> = Vec::new();
+    let mut held_roots: BTreeMap<String, &'static str> = BTreeMap::new();
 
     for thread in &running_threads {
         if let Some((job, operation)) = state
@@ -2231,9 +2239,10 @@ async fn reconcile_active_threads_inner(
                 SessionRootResume::Hold => {
                     tracing::warn!(
                         thread_id = %thread.thread_id,
-                        reason = "dedicated_session_holds_candidate",
+                        reason = DEDICATED_SESSION_HOLDS_CANDIDATE,
                         "dedicated session is not running — holding its unlaunched root on restart"
                     );
+                    held_roots.insert(thread.thread_id.clone(), DEDICATED_SESSION_HOLDS_CANDIDATE);
                     continue;
                 }
                 SessionRootResume::Finalise => {
@@ -2456,9 +2465,10 @@ async fn reconcile_active_threads_inner(
                 // head does not move.
                 tracing::warn!(
                     thread_id = %thread.thread_id,
-                    reason = "dedicated_session_holds_candidate",
+                    reason = DEDICATED_SESSION_HOLDS_CANDIDATE,
                     "dedicated session is not running — holding its root on restart"
                 );
+                held_roots.insert(thread.thread_id.clone(), DEDICATED_SESSION_HOLDS_CANDIDATE);
             }
             ResumeDecision::Resume { .. }
                 if dedicated_session_root_resume(state, &thread.thread_id)?
@@ -2582,6 +2592,7 @@ async fn reconcile_active_threads_inner(
     Ok(ActiveThreadReconcileReport {
         active_thread_ids,
         resume_intents: intents,
+        held_roots,
     })
 }
 

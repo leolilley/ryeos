@@ -6803,6 +6803,10 @@ pub enum SessionRootResume {
     Finalise,
 }
 
+/// Stable typed reason recorded when a restart holds a root because its
+/// dedicated session holds or builds a candidate.
+pub const DEDICATED_SESSION_HOLDS_CANDIDATE: &str = "dedicated_session_holds_candidate";
+
 /// How the session-state-keyed decisions treat one dedicated-session state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionStatePolicy {
