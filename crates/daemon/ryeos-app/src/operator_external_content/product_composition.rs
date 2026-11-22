@@ -1206,7 +1206,8 @@ mod tests {
     fn relationship_lookup_states_the_roots_logical_project_not_the_checkout() {
         use ryeos_engine::item_resolution::ResolutionRoots;
         let checkout = std::path::PathBuf::from("/admitted/exact-source-generation");
-        let logical = std::path::PathBuf::from("/srv/projects/alpha");
+        let logical: ryeos_state::project_identity::ProjectIdentity =
+            format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap();
         let pinned = SubjectResolutionAuthority::PinnedGeneration {
             snapshot_hash: "a".repeat(64),
         };
@@ -1274,7 +1275,9 @@ mod tests {
         let loose = ResolutionRoots::from_flat(
             Some("/loose/project/.ai".into()),
             vec![],
-            ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
         );
         assert!(
             relationship_resolution_request(&loose, &cow, "config:example/relationships").is_err()

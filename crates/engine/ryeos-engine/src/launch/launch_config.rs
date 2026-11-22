@@ -1517,7 +1517,9 @@ mod tests {
 
     fn project_roots(project_root: &Path) -> ResolutionRoots {
         ResolutionRoots {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
@@ -1682,8 +1684,16 @@ composer: handler:ryeos/core/identity
         }
     }
 
-    /// The author is a project signer scoped to exactly one project path.
-    fn scoped_store(config: &ScopedConfig, project: &Path) -> TrustStore {
+    /// The project `name` owned by a fixed test principal.
+    fn identity(name: &str) -> ryeos_state::project_identity::ProjectIdentity {
+        format!("fp:{}/{name}", "a".repeat(64)).parse().unwrap()
+    }
+
+    /// The author is a project signer scoped to exactly one project identity.
+    fn scoped_store(
+        config: &ScopedConfig,
+        project: &ryeos_state::project_identity::ProjectIdentity,
+    ) -> TrustStore {
         use crate::trust::{SignerRecord, SignerRole, SignerScope, SignerSpace, SignerStatus};
         let node_key = lillux::crypto::SigningKey::from_bytes(&[133u8; 32]).verifying_key();
         let mut record = SignerRecord::new(
@@ -1693,7 +1703,7 @@ composer: handler:ryeos/core/identity
             SignerScope {
                 spaces: vec![SignerSpace::Project],
                 kinds: vec!["*".to_string()],
-                projects: vec![project.to_string_lossy().into_owned()],
+                projects: vec![project.to_string().parse().unwrap()],
             },
             SignerStatus::Active,
         );
@@ -1717,12 +1727,12 @@ composer: handler:ryeos/core/identity
     fn pinned_load(
         config: &ScopedConfig,
         store: &TrustStore,
-        logical: Option<&str>,
+        logical: Option<&ryeos_state::project_identity::ProjectIdentity>,
     ) -> Result<LaunchConfigSnapshotSet, EngineError> {
         let checkout = PathBuf::from("/not-opened/generation-7/checkout");
         let mut roots = project_roots(&checkout);
         roots.logical_project = match logical {
-            Some(path) => LogicalProject::Stated(PathBuf::from(path)),
+            Some(identity) => LogicalProject::Stated(identity.clone()),
             None => LogicalProject::Absent(LogicalProjectAbsence::NotStated),
         };
         let content = TestProjectContent::default()
@@ -1747,12 +1757,12 @@ composer: handler:ryeos/core/identity
         engine: &crate::engine::Engine,
         config: &ScopedConfig,
         store: &TrustStore,
-        logical: Option<&str>,
+        logical: Option<&ryeos_state::project_identity::ProjectIdentity>,
     ) -> Result<LaunchConfigSnapshotSet, EngineError> {
         let checkout = PathBuf::from("/not-opened/generation-7/checkout");
         let roots = engine.launch_config_roots(&project_roots(&checkout).with_logical_project(
             match logical {
-                Some(path) => LogicalProject::Stated(PathBuf::from(path)),
+                Some(identity) => LogicalProject::Stated(identity.clone()),
                 None => LogicalProject::Absent(LogicalProjectAbsence::NotStated),
             },
         ));
@@ -1785,17 +1795,21 @@ composer: handler:ryeos/core/identity
     #[test]
     fn a_pinned_config_is_judged_on_its_stated_logical_project_not_its_checkout() {
         let config = scoped_config();
-        let store = scoped_store(&config, Path::new("/work/registered-project"));
+        let store = scoped_store(&config, &identity("registered-project"));
 
-        assert!(pinned_load(&config, &store, Some("/work/registered-project")).is_ok());
+        assert!(pinned_load(&config, &store, Some(&identity("registered-project"))).is_ok());
         assert_untrusted(pinned_load(&config, &store, None));
-        assert_untrusted(pinned_load(&config, &store, Some("/work/other-project")));
+        assert_untrusted(pinned_load(
+            &config,
+            &store,
+            Some(&identity("other-project")),
+        ));
     }
 
     #[test]
     fn launch_config_roots_keep_the_pinned_logical_project() {
         let config = scoped_config();
-        let store = scoped_store(&config, Path::new("/work/registered-project"));
+        let store = scoped_store(&config, &identity("registered-project"));
         let plain = crate::engine::Engine::new(
             crate::kind_registry::KindRegistry::empty(),
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
@@ -1810,7 +1824,7 @@ composer: handler:ryeos/core/identity
                     engine,
                     &config,
                     &store,
-                    Some("/work/registered-project")
+                    Some(&identity("registered-project"))
                 )
                 .is_ok()
             );
@@ -1819,19 +1833,19 @@ composer: handler:ryeos/core/identity
                 engine,
                 &config,
                 &store,
-                Some("/work/other-project"),
+                Some(&identity("other-project")),
             ));
         }
     }
 
     #[test]
-    fn launch_config_roots_leave_a_live_launch_judged_on_its_own_root() {
+    fn launch_config_roots_keep_a_live_launch_s_stated_identity() {
         let config = scoped_config();
         let project = tempfile::tempdir().unwrap();
         let own = project.path().canonicalize().unwrap();
         std::fs::create_dir_all(own.join(".ai/config")).unwrap();
         std::fs::write(own.join(".ai/config/scoped.yaml"), &config.document).unwrap();
-        let store = scoped_store(&config, &own);
+        let store = scoped_store(&config, &identity("live"));
         let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
         let plain = crate::engine::Engine::new(
             crate::kind_registry::KindRegistry::empty(),
@@ -1842,24 +1856,29 @@ composer: handler:ryeos/core/identity
             .clone()
             .with_node_config_root(PathBuf::from("/not-opened/node-config"));
         for engine in [&plain, &with_node_config] {
-            for logical in [
-                LogicalProject::Stated(own.clone()),
-                LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            for (logical, admitted) in [
+                (LogicalProject::Stated(identity("live")), true),
+                (
+                    LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+                    false,
+                ),
             ] {
                 let roots =
                     engine.launch_config_roots(&project_roots(&own).with_logical_project(logical));
-                assert!(
-                    load_launch_config_snapshots_with_proof(
-                        &declarations(),
-                        &roots,
-                        &parsers,
-                        &parsers,
-                        &config.kinds,
-                        &store,
-                        &store,
-                    )
-                    .is_ok()
+                let result = load_launch_config_snapshots_with_proof(
+                    &declarations(),
+                    &roots,
+                    &parsers,
+                    &parsers,
+                    &config.kinds,
+                    &store,
+                    &store,
                 );
+                if admitted {
+                    assert!(result.is_ok());
+                } else {
+                    assert_untrusted(result);
+                }
             }
         }
     }
@@ -1871,7 +1890,8 @@ composer: handler:ryeos/core/identity
         let own = project.path().canonicalize().unwrap();
         std::fs::create_dir_all(own.join(".ai/config")).unwrap();
         std::fs::write(own.join(".ai/config/scoped.yaml"), &config.document).unwrap();
-        let roots = project_roots(&own);
+        let roots =
+            project_roots(&own).with_logical_project(LogicalProject::Stated(identity("live")));
         let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
         let load = |store: &TrustStore| {
             load_launch_config_snapshots_with_proof(
@@ -1885,10 +1905,10 @@ composer: handler:ryeos/core/identity
             )
         };
 
-        assert!(load(&scoped_store(&config, &own)).is_ok());
+        assert!(load(&scoped_store(&config, &identity("live"))).is_ok());
         assert_untrusted(load(&scoped_store(
             &config,
-            Path::new("/work/registered-project"),
+            &identity("registered-project"),
         )));
     }
 }

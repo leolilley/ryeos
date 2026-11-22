@@ -200,7 +200,7 @@ fn references_bfs_does_not_drop_edges_on_long_path_first() {
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+        LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
     );
     let _ = ItemSpace::Project;
 
@@ -255,7 +255,7 @@ fn trusted_fingerprint_with_bogus_signature_is_rejected() {
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+        LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
     );
     let parsers = ParserDispatcher::new(
         ParserRegistry::from_entries(vec![]),
@@ -335,7 +335,7 @@ fn raw_content_uses_envelope_aware_strip_for_markdown() {
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+        LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
     );
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
@@ -412,7 +412,7 @@ fn composition_violation_returns_typed_resolution_error() {
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+        LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
     );
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
@@ -484,7 +484,7 @@ composed_value_contract:
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+        LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
     );
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
@@ -525,7 +525,7 @@ fn valid_composition_passes_through() {
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+        LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
     );
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
@@ -559,7 +559,7 @@ fn effective_item_with_probes_accepts_non_executable_data_kind() {
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+        LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
     );
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
@@ -603,7 +603,7 @@ fn warnings_do_not_block_effective_item() {
     let roots = ResolutionRoots::from_flat(
         Some(project_dir.join(".ai")),
         vec![],
-        LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+        LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered),
     );
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();

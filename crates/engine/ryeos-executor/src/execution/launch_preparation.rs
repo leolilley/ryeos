@@ -454,7 +454,9 @@ impl PreparedExecutionDependency {
         let canonical_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&self.canonical_ref)?;
         Ok(ryeos_engine::contracts::VerifiedItem {
             resolved: ryeos_engine::contracts::ResolvedItem {
-                logical_project: ryeos_engine::contracts::unestablished_project(&self.subject.subject_resolution_authority),
+                logical_project: ryeos_engine::contracts::unestablished_project(
+                    &self.subject.subject_resolution_authority,
+                ),
                 canonical_ref: canonical_ref.clone(),
                 kind: canonical_ref.kind,
                 source_path: self.subject.source_path.clone(),
@@ -3212,7 +3214,12 @@ mod ref_binding_projection_tests {
                 expected_hash: hash.clone(),
             },
             PinnedTerminalPublication::AdvanceHead {
-                head_ref: format!("projects/{}/{}/head", "b".repeat(64), "c".repeat(64)),
+                head_ref: ryeos_state::project_identity::ProjectHeadKey::owned_by(
+                    &format!("fp:{}", "b".repeat(64)),
+                    &ryeos_state::project_identity::ProjectName::new("demo").unwrap(),
+                )
+                .unwrap()
+                .ref_path(),
                 expected_hash: hash.clone(),
             },
             PinnedTerminalPublication::Discard,

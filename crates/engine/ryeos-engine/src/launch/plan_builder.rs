@@ -2009,7 +2009,9 @@ metadata:
         let content_hash = crate::item_resolution::content_hash(&content);
 
         let resolved = ResolvedItem {
-            logical_project: LogicalProject::Absent(crate::contracts::LogicalProjectAbsence::NotRegistered),
+            logical_project: LogicalProject::Absent(
+                crate::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
             canonical_ref: CanonicalRef::parse(canonical_ref).unwrap(),
             kind: kind.to_string(),
             source_path,
@@ -2585,7 +2587,10 @@ config:
 
         // A chain terminal that declares a source scope, signed by a key that
         // is scoped to one registered project that is not the checkout path.
-        let logical = PathBuf::from("/work/registered-project");
+        let logical: ryeos_state::project_identity::ProjectIdentity =
+            format!("fp:{}/registered-project", "a".repeat(64))
+                .parse()
+                .unwrap();
         let author = SigningKey::from_bytes(&[43u8; 32]);
         let node_key = SigningKey::from_bytes(&[44u8; 32]).verifying_key();
         let mut record = SignerRecord::new(
@@ -2595,7 +2600,7 @@ config:
             SignerScope {
                 spaces: vec![SignerSpace::Project],
                 kinds: vec!["*".to_string()],
-                projects: vec![logical.to_string_lossy().into_owned()],
+                projects: vec![logical.to_string().parse().unwrap()],
             },
             SignerStatus::Active,
         );
@@ -2647,7 +2652,11 @@ config:
         // stating some other project is not a way in.
         let by_other = by_checkout
             .clone()
-            .with_logical_project(LogicalProject::Stated(PathBuf::from("/work/other-project")));
+            .with_logical_project(LogicalProject::Stated(
+                format!("fp:{}/other-project", "a".repeat(64))
+                    .parse()
+                    .unwrap(),
+            ));
         let refusal = resolve(&by_other).unwrap_err().to_string();
         assert!(
             refusal.contains("source_scope owner is not signed by an admitted trusted principal"),

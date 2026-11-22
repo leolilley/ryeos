@@ -5158,6 +5158,9 @@ mod tests {
         current: &str,
     ) -> ExecutionProjectAuthority {
         ExecutionProjectAuthority::PinnedGeneration {
+            signer_project: ryeos_state::project_identity::LogicalProject::Absent(
+                ryeos_state::project_identity::LogicalProjectAbsence::NotStated,
+            ),
             stable_project_identity: format!("{site}:{path}"),
             display_path: Some(PathBuf::from(path)),
             base_snapshot_hash: base.to_owned(),
