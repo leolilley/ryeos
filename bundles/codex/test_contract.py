@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-17T03:46:31Z:39cefb4af0f8ac99b2681daf0d75efe4a543440850352810928df17797de4883:gtVvSPeHqpmCAh952qY9nmMQqcp3FWDB8bi/uWTKmPEYYRv1gTao39t50kKeGH2ZQbvrZ74DEjiAZi232MvyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T07:03:43Z:fac296a7dbd82c21cdbeb43b1b62abbc4b6b26a80e348afe045afd277ea8fb50:c3k5sRvSQQwavHV01zykNCIFl8pe0rM8ccoG/tdUohMWxELgGIcytM5C2TExD2nJdhVaELO42xK8WmQiao9NAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
