@@ -6825,9 +6825,10 @@ pub struct SessionStatePolicy {
     pub settles_without_worker: bool,
     /// The abandoned-worker fence moves a session of this state to
     /// `recovering` (or `outcome_unknown`). `false` states are left to their
-    /// own path and the fence refuses them. In practice no candidate state
-    /// can meet a live worker: its worker is already dead and reaped before
-    /// the session leaves `recovering`/`idle` for the candidate path.
+    /// own path and the fence refuses them: the candidate-holding states and
+    /// `terminal`. A candidate state never meets a live worker today (its
+    /// worker is dead and reaped before the session leaves `recovering` for
+    /// the candidate path), so the refusal is a guard, not a behaviour.
     pub worker_fence_moves_session: bool,
 }
 
@@ -6870,10 +6871,10 @@ pub const SESSION_STATE_POLICY: [SessionStatePolicy; 16] = [
         true,
     ),
     session_policy("draining", true, SessionRootResume::Resume, false, true),
-    session_policy("freezing", false, SessionRootResume::Hold, false, true),
+    session_policy("freezing", false, SessionRootResume::Hold, false, false),
     session_policy("frozen", false, SessionRootResume::Hold, false, false),
-    session_policy("verifying", false, SessionRootResume::Hold, false, true),
-    session_policy("qualifying", false, SessionRootResume::Hold, false, true),
+    session_policy("verifying", false, SessionRootResume::Hold, false, false),
+    session_policy("qualifying", false, SessionRootResume::Hold, false, false),
     session_policy(
         "publish_ready",
         false,
@@ -6881,8 +6882,8 @@ pub const SESSION_STATE_POLICY: [SessionStatePolicy; 16] = [
         false,
         false,
     ),
-    session_policy("publishing", false, SessionRootResume::Hold, false, true),
-    session_policy("discarding", false, SessionRootResume::Hold, false, true),
+    session_policy("publishing", false, SessionRootResume::Hold, false, false),
+    session_policy("discarding", false, SessionRootResume::Hold, false, false),
     session_policy("terminal", false, SessionRootResume::Finalise, false, false),
 ];
 
@@ -7148,18 +7149,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_worker_fence_list_is_the_table_and_pins_current_behaviour() {
+    fn the_worker_fence_moves_only_running_or_recoverable_sessions() {
         for policy in SESSION_STATE_POLICY {
             assert_eq!(
                 policy.worker_fence_moves_session,
-                !matches!(policy.state, "terminal" | "frozen" | "publish_ready"),
+                matches!(
+                    policy.state,
+                    "admitted"
+                        | "binding"
+                        | "idle"
+                        | "turn_running"
+                        | "awaiting_approval"
+                        | "recovering"
+                        | "outcome_unknown"
+                        | "draining"
+                ),
                 "{}",
                 policy.state
             );
         }
         let list = worker_fence_moved_states_sql();
-        assert_eq!(list.split(',').count(), 13);
-        for excluded in ["terminal", "frozen", "publish_ready"] {
+        assert_eq!(list.split(',').count(), 8);
+        for excluded in [
+            "terminal",
+            "frozen",
+            "publish_ready",
+            "freezing",
+            "verifying",
+            "qualifying",
+            "publishing",
+            "discarding",
+        ] {
             assert!(!list.contains(excluded), "{excluded}");
         }
     }
