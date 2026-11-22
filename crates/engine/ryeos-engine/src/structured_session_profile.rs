@@ -680,9 +680,23 @@ pub fn compile(
                 "response_schema",
                 "notification",
             ],
-            &[],
+            &["expected_server_version"],
         )?;
         validate_identifier(value_string(step, "method")?)?;
+        if let Some(pin) = step.get("expected_server_version") {
+            let pin = pin.as_str().unwrap_or_default();
+            if pin.is_empty()
+                || pin.len() > 64
+                || pin
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace() || c == '/')
+            {
+                bail!("structured-session initialization server version pin is invalid");
+            }
+            if step.get("response_schema").is_none_or(Value::is_null) {
+                bail!("structured-session initialization version pin needs a response step");
+            }
+        }
         if value_string(step, "effect_class")? != "pure_read" {
             bail!("structured-session initialization exceeds its fixed pure-read budget");
         }
