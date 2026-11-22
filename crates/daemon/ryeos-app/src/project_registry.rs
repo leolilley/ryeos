@@ -268,3 +268,43 @@ pub fn live_signer_project(
         not_registered
     }
 }
+
+/// [`live_signer_project`] for a caller of this node: the caller is the
+/// launcher, and it holds live write only when its scopes authorize
+/// `ryeos.write.project.live`. A registry that cannot be read is logged and
+/// treated as no registration, which admits no scoped signer.
+pub fn live_logical_project(
+    state: &crate::state::AppState,
+    principal: &str,
+    scopes: &[String],
+    checkout: &Path,
+) -> ryeos_state::project_identity::LogicalProject {
+    let holds_live_write = state
+        .authorizer
+        .authorize(
+            scopes,
+            &ryeos_runtime::authorizer::AuthorizationPolicy::require(
+                ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY,
+            ),
+        )
+        .is_ok();
+    match live_signer_project(
+        &state.config.app_root,
+        state.identity.verifying_key(),
+        principal,
+        holds_live_write,
+        checkout,
+    ) {
+        Ok(project) => project,
+        Err(error) => {
+            tracing::warn!(
+                checkout = %checkout.display(),
+                error = %format!("{error:#}"),
+                "live project identity unavailable; no scoped signer is admitted"
+            );
+            ryeos_state::project_identity::LogicalProject::Absent(
+                ryeos_state::project_identity::LogicalProjectAbsence::NotRegistered,
+            )
+        }
+    }
+}
