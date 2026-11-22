@@ -441,6 +441,7 @@ fn candidate_binding(
 mod tests {
     use super::*;
     use crate::contracts::ItemSpace;
+    use crate::contracts::{LogicalProject, LogicalProjectAbsence};
     use crate::resolution::{KindComposedView, ResolutionStepName, ResolvedAncestor, TrustClass};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -572,7 +573,11 @@ mod tests {
             &candidate_a,
             None,
             &[],
-            &ResolutionRoots::from_flat(None, Vec::new()),
+            &ResolutionRoots::from_flat(
+                None,
+                Vec::new(),
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             None,
             None,
             None,
@@ -599,7 +604,11 @@ mod tests {
             &candidate_a,
             None,
             &[],
-            &ResolutionRoots::from_flat(None, Vec::new()),
+            &ResolutionRoots::from_flat(
+                None,
+                Vec::new(),
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             None,
             None,
             None,
@@ -626,7 +635,11 @@ mod tests {
             &candidate,
             None,
             &[],
-            &ResolutionRoots::from_flat(None, Vec::new()),
+            &ResolutionRoots::from_flat(
+                None,
+                Vec::new(),
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             None,
             None,
             None,
@@ -654,7 +667,7 @@ mod tests {
             content_root: Some(temp.path().to_path_buf()),
         };
         let roots = ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
             owned_namespaces: Vec::new(),
             ordered: vec![node_root.clone()],
         };
@@ -705,7 +718,11 @@ mod tests {
                 &candidate,
                 None,
                 &[],
-                &ResolutionRoots::from_flat(None, Vec::new()),
+                &ResolutionRoots::from_flat(
+                    None,
+                    Vec::new(),
+                    LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+                ),
                 None,
                 None,
                 None,
@@ -739,7 +756,11 @@ mod tests {
             &candidate,
             None,
             &[],
-            &ResolutionRoots::from_flat(None, Vec::new()),
+            &ResolutionRoots::from_flat(
+                None,
+                Vec::new(),
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             None,
             None,
             None,
@@ -763,7 +784,11 @@ mod tests {
             &candidate,
             None,
             &[],
-            &ResolutionRoots::from_flat(None, Vec::new()),
+            &ResolutionRoots::from_flat(
+                None,
+                Vec::new(),
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             None,
             None,
             None,
@@ -814,7 +839,11 @@ mod tests {
             &candidate,
             None,
             &[],
-            &ResolutionRoots::from_flat(None, Vec::new()),
+            &ResolutionRoots::from_flat(
+                None,
+                Vec::new(),
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             None,
             None,
             None,
@@ -829,7 +858,11 @@ mod tests {
             &candidate,
             None,
             &[],
-            &ResolutionRoots::from_flat(None, Vec::new()),
+            &ResolutionRoots::from_flat(
+                None,
+                Vec::new(),
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             None,
             None,
             Some((&wrong, &PresentSource)),
@@ -841,7 +874,11 @@ mod tests {
             &candidate,
             None,
             &[],
-            &ResolutionRoots::from_flat(None, Vec::new()),
+            &ResolutionRoots::from_flat(
+                None,
+                Vec::new(),
+                LogicalProject::Absent(LogicalProjectAbsence::Projectless),
+            ),
             None,
             None,
             Some((&source_proof, &PresentSource)),

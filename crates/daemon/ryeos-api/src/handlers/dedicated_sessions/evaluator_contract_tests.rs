@@ -174,7 +174,9 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
     fn capsule(&self, kind: &str) -> Result<(AdmittedLaunchCapsule, ThreadSnapshot)> {
         let engine = &self.state.engine;
         let context = PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: self.state.identity.principal_id(),
                 scopes: vec!["*".into()],
@@ -206,7 +208,12 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
         })?
         .root_admission;
         let mut resolution = admission.resolution_output().clone();
-        let roots = engine.resolution_roots(None);
+        let roots = engine.resolution_roots(
+            None,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+            ),
+        );
         // Capture hooks from the signed kind and actual base/operator/project
         // source discovery, just as production does before final validation.
         // An empty authored list alone is not an effective hook plan.

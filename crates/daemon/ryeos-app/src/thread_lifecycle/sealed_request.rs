@@ -341,7 +341,10 @@ impl SealedResolvedItem {
         pinned_capsule_root.ensure_path_binding()?;
         let materialized_source = capsule_root.join(source_name);
         Ok(ResolvedItem {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                None,
+                &self.subject_resolution_authority,
+            ),
             canonical_ref,
             kind: self.kind.clone(),
             source_path: materialized_source,
@@ -1171,9 +1174,11 @@ impl SealedRootExecutionRequest {
             }
         };
         let plan_context = PlanContext {
-            logical_project_root: self
-                .project_authority
-                .logical_project_root(&self.current_site_id),
+            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                self.project_authority
+                    .logical_project_root(&self.current_site_id),
+                &self.project_binding_subject_authority,
+            ),
             requested_by,
             project_context,
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1797,9 +1802,11 @@ impl SealedRootExecutionRequest {
             anyhow!("invalid sealed runtime ref `{}`: {error}", self.runtime_ref)
         })?;
         let mut resolved_item = self.verified_subject.restore(capsule_root)?;
-        resolved_item.logical_project_root = self
-            .project_authority
-            .logical_project_root(&self.current_site_id);
+        resolved_item.logical_project = ryeos_engine::contracts::LogicalProject::from_optional(
+            self.project_authority
+                .logical_project_root(&self.current_site_id),
+            &resolved_item.subject_resolution_authority,
+        );
         let verified_subject = VerifiedItem {
             resolved: resolved_item.clone(),
             signer: self
@@ -1810,9 +1817,11 @@ impl SealedRootExecutionRequest {
             pinned_version: self.verified_pinned_version.clone(),
         };
         let plan_context = PlanContext {
-            logical_project_root: self
-                .project_authority
-                .logical_project_root(&self.current_site_id),
+            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                self.project_authority
+                    .logical_project_root(&self.current_site_id),
+                &self.project_binding_subject_authority,
+            ),
             requested_by,
             project_context: self.project_context.clone(),
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -2024,7 +2033,11 @@ impl SealedRootExecutionRequest {
         rebound_plan_context.project_context = rebound_project_context;
         rebound_plan_context.subject_resolution_authority =
             provenance.subject_resolution_authority();
-        rebound_plan_context.logical_project_root = provenance.logical_project_root(&site_id);
+        rebound_plan_context.logical_project =
+            ryeos_engine::contracts::LogicalProject::from_optional(
+                provenance.logical_project_root(&site_id),
+                &rebound_plan_context.subject_resolution_authority,
+            );
         let rebound_binding =
             AdmittedProjectBinding::from_provenance(engine, &rebound_plan_context, provenance)?;
         let rebound_materialized_project_root = match provenance {
@@ -2038,7 +2051,11 @@ impl SealedRootExecutionRequest {
             } => Some(provenance.subject_effective_path().to_path_buf()),
         };
         request.resolved_item.materialized_project_root = rebound_materialized_project_root.clone();
-        request.resolved_item.logical_project_root = provenance.logical_project_root(&site_id);
+        request.resolved_item.logical_project =
+            ryeos_engine::contracts::LogicalProject::from_optional(
+                provenance.logical_project_root(&site_id),
+                &request.resolved_item.subject_resolution_authority,
+            );
         {
             let admission = request
                 .root_admission
@@ -2050,8 +2067,14 @@ impl SealedRootExecutionRequest {
                 .verified_subject
                 .resolved
                 .materialized_project_root = rebound_materialized_project_root;
-            admission.verified_subject.resolved.logical_project_root =
-                provenance.logical_project_root(&site_id);
+            admission.verified_subject.resolved.logical_project =
+                ryeos_engine::contracts::LogicalProject::from_optional(
+                    provenance.logical_project_root(&site_id),
+                    &admission
+                        .verified_subject
+                        .resolved
+                        .subject_resolution_authority,
+                );
             // Complete request snapshots include parser/kind registry
             // semantics and belong only to fresh admission. Recovered paths
             // use the sealed execution closure plus a trust-only current

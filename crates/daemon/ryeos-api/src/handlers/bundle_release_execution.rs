@@ -469,7 +469,10 @@ pub(crate) async fn execute_pinned_graph(
     let effective_path = project_ctx.effective_path.clone();
     let site_id = state.threads.site_id().to_owned();
     let plan_ctx = ryeos_engine::contracts::PlanContext {
-        logical_project_root: resolved.provenance.logical_project_root(&site_id),
+        logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+            resolved.provenance.logical_project_root(&site_id),
+            &resolved.provenance.subject_resolution_authority(),
+        ),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),
@@ -500,7 +503,7 @@ pub(crate) async fn execute_pinned_graph(
         let child_consumer_ref = if graph_ref.starts_with("graph:") {
             let graph = project_ctx.request_engine.effective_item(
                 ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: plan_ctx.logical_project_root.clone(),
+                    logical_project: plan_ctx.logical_project.clone(),
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(graph_ref)?,
                     expected_kind: None,
                     project_root: Some(effective_path.clone()),
@@ -731,7 +734,7 @@ pub(crate) async fn execute_protected_qualification(
         // The overlay copies the release source generation into a private
         // workspace; project-scoped signers are matched on the registered
         // project the generation stands for, never on that workspace.
-        logical_project_root: Some(release_project_identity),
+        logical_project: ryeos_engine::contracts::LogicalProject::Stated(release_project_identity),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),

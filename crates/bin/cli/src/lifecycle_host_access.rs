@@ -172,7 +172,10 @@ pub(crate) fn resolve_subject_digests(
     );
     let (effective, output) = engine
         .effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
-            logical_project_root: Some(project.clone()),
+            logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                Some(project.clone()),
+                &authority,
+            ),
             item_ref: canonical,
             expected_kind: None,
             project_root: Some(project.clone()),

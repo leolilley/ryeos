@@ -1030,7 +1030,12 @@ fn compile_workflow(
     if engine.kinds.get(&canonical.kind).is_none() {
         bail!("remote-worker workflow Config kind is not registered");
     }
-    let roots = engine.resolution_roots(Some(context.effective_path.clone()));
+    let roots = engine.resolution_roots(
+        Some(context.effective_path.clone()),
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+        ),
+    );
     let load_context = ConfigLoadContext {
         roots: &roots,
         parsers: &engine.parser_dispatcher,
@@ -1079,7 +1084,9 @@ fn compile_workflow(
         target_product_selections,
     )?;
     let effective = engine.effective_resolution_output(EffectiveItemRequest {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+        ),
         item_ref: driver,
         expected_kind: Some("graph".to_owned()),
         project_root: Some(context.effective_path.clone()),

@@ -3656,7 +3656,12 @@ fn check_service_catalog_entry(
 fn installed_service_refs(
     engine: &ryeos_engine::engine::Engine,
 ) -> Result<Vec<ryeos_engine::canonical_ref::CanonicalRef>> {
-    let roots = engine.resolution_roots(None);
+    let roots = engine.resolution_roots(
+        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
+    );
     ryeos_engine::item_resolution::enumerate_in_process_registry_refs(
         &roots,
         &engine.kinds,
@@ -4580,7 +4585,7 @@ async fn run(
                     let node_principal = identity.principal_id();
 
                     let plan_ctx = ryeos_engine::contracts::PlanContext {
-                        logical_project_root: None,
+                        logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless),
                         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                             ryeos_engine::contracts::Principal {
                                 fingerprint: node_principal,
@@ -4602,7 +4607,7 @@ async fn run(
                     let effective_requests = installed_refs
                         .iter()
                         .map(|canonical| ryeos_engine::engine::EffectiveItemRequest {
-                            logical_project_root: None,
+                            logical_project: ryeos_engine::contracts::LogicalProject::Absent(ryeos_engine::contracts::LogicalProjectAbsence::Projectless),
                             item_ref: canonical.clone(),
                             expected_kind: Some(canonical.kind.clone()),
                             project_root: None,
@@ -8897,7 +8902,9 @@ async fn run_service_standalone(
     let standalone_handler_context =
         standalone_operator_handler_context(standalone_principal.clone());
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: standalone_principal.clone(),

@@ -73,7 +73,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         root_surface,
     );
     let plan_context = PlanContext {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),

@@ -153,7 +153,7 @@ fn build_engine_against_bundle() -> Engine {
 
 fn plan_ctx(project_dir: &Path, scopes: Vec<String>) -> PlanContext {
     PlanContext {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "route-handler:agent-kiwi:agent-kiwi/google-callback".into(),
             scopes,
