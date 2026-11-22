@@ -1,10 +1,15 @@
-use ryeos_runtime::envelope::{RuntimeCost, RuntimeCostError, UsdNanos};
+use ryeos_runtime::envelope::{RuntimeCost, RuntimeCostError, UsageStatus, UsdNanos};
 
 pub struct BudgetTracker {
     total_input: u64,
     total_output: u64,
     total_usd: UsdNanos,
     max_usd: UsdNanos,
+    /// `None` until a member reports a status, so the aggregate is seeded
+    /// from its first member (an all-unavailable run reports unavailable,
+    /// not partial). Tokens and spend settled through `report` are real
+    /// measurements; this records only whether usage was left out.
+    usage_status: Option<UsageStatus>,
 }
 
 impl BudgetTracker {
@@ -14,7 +19,17 @@ impl BudgetTracker {
             total_output: 0,
             total_usd: UsdNanos::ZERO,
             max_usd,
+            usage_status: None,
         }
+    }
+
+    /// Fold one member's usage status into the run's: complete only when every
+    /// member is, unavailable only when every member is, otherwise partial.
+    pub fn note_usage_status(&mut self, status: UsageStatus) {
+        self.usage_status = Some(match self.usage_status {
+            None => status,
+            Some(current) => current.combine(status),
+        });
     }
 
     pub fn report(
@@ -41,6 +56,7 @@ impl BudgetTracker {
         self.total_input = accumulated.input_tokens;
         self.total_output = accumulated.output_tokens;
         self.total_usd = accumulated.total_usd;
+        self.note_usage_status(cost.usage_status);
         Ok(())
     }
 
@@ -61,6 +77,7 @@ impl BudgetTracker {
         self.total_input = input;
         self.total_output = output;
         self.total_usd = usd;
+        self.usage_status = None;
         Ok(())
     }
 
@@ -86,7 +103,7 @@ impl BudgetTracker {
             output_tokens: self.total_output,
             total_usd: self.total_usd,
             basis: None,
-            usage_status: Default::default(),
+            usage_status: self.usage_status.unwrap_or_default(),
         }
     }
 }
@@ -107,6 +124,25 @@ mod tests {
     async fn reserve_and_release() {
         let mut tracker = make_tracker("1");
         tracker.report(0, 0, UsdNanos::ZERO).unwrap();
+    }
+
+    #[test]
+    fn usage_status_is_seeded_from_the_first_member_then_folded() {
+        let mut tracker = make_tracker("10");
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Complete);
+        tracker.note_usage_status(UsageStatus::Unavailable);
+        tracker.note_usage_status(UsageStatus::Unavailable);
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Unavailable);
+        tracker.note_usage_status(UsageStatus::Complete);
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Partial);
+
+        let mut tracker = make_tracker("10");
+        tracker.note_usage_status(UsageStatus::Complete);
+        tracker.note_usage_status(UsageStatus::Partial);
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Partial);
+        // Settled tokens and spend are measurements and do not change it.
+        tracker.report(1, 1, usd("0.01")).unwrap();
+        assert_eq!(tracker.cost().usage_status, UsageStatus::Partial);
     }
 
     #[test]
