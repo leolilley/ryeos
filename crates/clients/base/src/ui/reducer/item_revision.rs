@@ -619,6 +619,151 @@ mod tests {
         );
     }
 
+    /// Put operator state on the focused tile and a draft in its input, then
+    /// run hint -> revise -> rebind. Returns what the operator left behind, the
+    /// keys to find it again, and the effects of the cycle after the swap.
+    fn operator_state_then_rebind(
+        core: &mut RyeOsCore,
+        producer: &crate::ui::binding::UiPresentationProducer,
+        held_effect: &RyeOsEffectKind,
+    ) -> (
+        crate::view_set::ViewLocalState,
+        InputBufferKey,
+        UiBindingAttachmentCoordinate,
+        Vec<RyeOsEffect>,
+    ) {
+        let (tile_id, instance, view_ref) = {
+            let set = core.active_view_set().unwrap();
+            let tile = &set.tiles[&set.focused_tile];
+            (
+                set.focused_tile,
+                tile.instance_key.clone(),
+                tile.view.view_ref.clone(),
+            )
+        };
+        let scrolled = crate::view_set::ViewLocalState::GenericList {
+            cursor: 3,
+            scroll: 7,
+            collapsed: std::collections::BTreeSet::from([1]),
+            timeline_folds: std::collections::BTreeMap::new(),
+            expanded_rows: std::collections::BTreeSet::from(["row-3".to_string()]),
+            collapsed_tree_rows: std::collections::BTreeSet::new(),
+            changed_rows: std::collections::BTreeMap::new(),
+        };
+        core.active_view_set_mut()
+            .unwrap()
+            .tiles
+            .get_mut(&tile_id)
+            .unwrap()
+            .local = scrolled.clone();
+        let held = core.binding_attachments[HELD].descriptor.clone();
+        let key = InputBufferKey {
+            view_instance_key: instance,
+            binding_scope: InputBufferKey::binding_scope(&UiBindingAttachmentCoordinate {
+                binding_attachment_id: HELD.into(),
+                binding_generation: held.binding_generation,
+                binding_digest: held.binding_digest.clone(),
+            }),
+            view_ref,
+            input_id: "line".into(),
+            target_scope: None,
+        };
+        // The caret sits mid-text, not at the end.
+        core.input_buffers.insert(
+            key.storage_key(),
+            crate::ui::model::RyeOsInputState {
+                text: "half-typed draft".into(),
+                cursor: 4,
+                filter_field: 0,
+            },
+        );
+
+        let effects = hint(core, Some("set-1"));
+        assert_eq!(revisions(&effects), vec![HELD.to_string()]);
+        core.note_stale_effect(held_effect);
+        let (answer, to) = revised_answer(core);
+        core.finish_attachment_revision(HELD, Some(answer));
+        core.pump_item_revisions();
+        let mut later = settle_pending_prefix(core, producer);
+        later.extend(core.pump_item_revisions());
+        (scrolled, key, to, later)
+    }
+
+    fn reissued(effects: &[RyeOsEffect]) -> Vec<crate::ui::binding::UiBindingRequest> {
+        effects
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                RyeOsEffectKind::InvokeBinding { request, .. } => Some(request.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_hint_revise_rebind_cycle_keeps_operator_state_and_retries_once() {
+        let mut core = core(writable_session());
+        let producer = claim_fixture_producer(&mut core);
+        settle_pending_prefix(&mut core, &producer);
+        let kind = invocation(&core, crate::ui::binding::UiBindingCoordinate::SurfaceRoute);
+        let (scrolled, key, to, later) = operator_state_then_rebind(&mut core, &producer, &kind);
+
+        assert_eq!(core.active_surface().unwrap().binding(), &to);
+        let set = core.active_view_set().unwrap();
+        // Selection (cursor, folds, expanded rows) and scroll are the same.
+        assert_eq!(set.tiles[&set.focused_tile].local, scrolled);
+        // The draft moved to the successor scope with its text and caret.
+        let to_key = InputBufferKey {
+            binding_scope: InputBufferKey::binding_scope(&to),
+            ..key.clone()
+        };
+        let draft = &core.input_buffers[&to_key.storage_key()];
+        assert_eq!((draft.text.as_str(), draft.cursor), ("half-typed draft", 4));
+        assert!(!core.input_buffers.contains_key(&key.storage_key()));
+        // The refused invocation is re-issued once, against the successor.
+        let requests = reissued(&later);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].binding_attachment_id, to.binding_attachment_id);
+        assert_eq!(requests[0].binding_generation, to.binding_generation);
+        assert_eq!(requests[0].binding_digest, to.binding_digest);
+        // Nothing further is re-issued by later pumps.
+        assert!(reissued(&core.pump_item_revisions()).is_empty());
+    }
+
+    #[test]
+    fn a_rebind_that_removes_the_invoked_view_keeps_state_and_reports_it_removed() {
+        let mut core = core(writable_session());
+        let producer = claim_fixture_producer(&mut core);
+        settle_pending_prefix(&mut core, &producer);
+        let kind = invocation(
+            &core,
+            crate::ui::binding::UiBindingCoordinate::Affordance {
+                view_ref: "view:gone".into(),
+                affordance_id: "x".into(),
+            },
+        );
+        let (scrolled, key, to, later) = operator_state_then_rebind(&mut core, &producer, &kind);
+
+        assert!(reissued(&later).is_empty());
+        let notices = core
+            .ui
+            .notices
+            .iter()
+            .filter(|notice| notice.message.contains("ui_binding_view_removed"))
+            .count();
+        assert_eq!(notices, 1);
+        // The view left, but the surviving tile and its draft are untouched.
+        let set = core.active_view_set().unwrap();
+        assert_eq!(set.tiles[&set.focused_tile].local, scrolled);
+        let to_key = InputBufferKey {
+            binding_scope: InputBufferKey::binding_scope(&to),
+            ..key
+        };
+        assert_eq!(
+            core.input_buffers[&to_key.storage_key()].text,
+            "half-typed draft"
+        );
+    }
+
     #[test]
     fn a_hint_naming_no_held_item_requests_nothing() {
         let mut core = core(writable_session());
