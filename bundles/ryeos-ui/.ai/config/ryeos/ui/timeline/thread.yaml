@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-21T10:24:10Z:273838e9528ccefc21dea5f401817f79ac7a47e717c8db670339ba0137ccbf53:dbskC0F4boCwZhAneLmFyuljbbPUZyFy81kp6x52+vxPvQNRW7mmbptMxwbfg68AU9iE5NdCtvQvLw/jlDB4Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T02:48:16Z:0b206516cd944a612d66b629ac39d844049ee364b5e9a7c808bfc01633694ea4:yybHMMcbTbCf7qDbgBr+zpcu7H3jV8a7XyRJIAkqzzQbOLvDwnTzlPrYNCWtd2ODGFYm42qaFJsFTs8Zl26YBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -432,7 +432,20 @@ events:
   # Provider and accounting notices.
   # A retry after a mid-stream cut voids the live fragments of that turn
   # published so far; the headline says so when any were emitted.
+  # A retry of an attempt a restart cut carries a fixed failure digest and a
+  # count of 0 that means unknown: no process saw how much output the dead
+  # attempt had published, and stream fragments are live-only.
   provider_retry:
+    - when: {eq: [payload.retry_advance.decision.failure_digest, "07922c912825b5b1aac477c84a9b4acbe584f7d5549f6b1ce9ac56226676f384"]}
+      emit:
+        - type: marker
+          tone: [{default: warn}]
+          project:
+            headline:
+              join:
+                - {path: payload.attempt, prefix: "provider retry, attempt "}
+                - {path: payload.retry_advance.decision.reason.kind, prefix: "output lost at restart: "}
+            reason: payload.retry_advance.decision.reason.kind
     - when: {ne: [payload.supersedes.output_events, 0]}
       emit:
         - type: marker

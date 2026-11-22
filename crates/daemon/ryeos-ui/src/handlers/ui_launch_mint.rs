@@ -286,7 +286,7 @@ pub(crate) fn compile_session_binding(
         .engine
         .with_checked_bundle_generation(|generation| -> Result<_> {
             let request = EffectiveItemRequest {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
                 expected_kind: Some(root_ref.kind.clone()),
                 item_ref: root_ref,
                 project_root: project_authority.map(|_| project_path.clone()),
@@ -546,7 +546,7 @@ pub fn revalidate_binding_authority(
     let project_root = resolution_root;
     let item_ref = CanonicalRef::parse(&compiled.binding.surface.canonical_ref)?;
     let request = EffectiveItemRequest {
-        logical_project_root: None,
+        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
         expected_kind: Some(item_ref.kind.clone()),
         item_ref,
         project_root: project_root.map(std::path::Path::to_path_buf),
@@ -705,7 +705,7 @@ pub(crate) fn compile_target(
         .into());
     }
     let request = EffectiveItemRequest {
-        logical_project_root: prepared.exec_ctx.plan_ctx.logical_project_root.clone(),
+        logical_project: prepared.exec_ctx.plan_ctx.logical_project.clone(),
         item_ref: item_ref.clone(),
         expected_kind: Some(item_ref.kind.clone()),
         project_root: Some(prepared.project.effective_path.clone()),

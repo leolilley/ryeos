@@ -326,10 +326,7 @@ fn config_signer_context<'a>(
         .unwrap_or(crate::contracts::ItemSpace::Node);
     let project_root = ctx
         .roots
-        .logical_project_root
-        .as_deref()
-        .or_else(|| ctx.project_authority.map(|(root, _)| root))
-        .or_else(|| ctx.roots.project_root());
+        .signer_project_root_under(ctx.project_authority.map(|(root, _)| root));
     crate::trust::SignerContext::new(space, "config", project_root)
 }
 

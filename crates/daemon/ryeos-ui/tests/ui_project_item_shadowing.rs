@@ -72,7 +72,11 @@ fn every_shipped_bundle() -> Vec<RegisteredBundleRoot> {
 }
 
 fn roots_with_project(project: Option<&Path>) -> ResolutionRoots {
-    ResolutionRoots::from_registered(project.map(Path::to_path_buf), &every_shipped_bundle())
+    ResolutionRoots::from_registered(
+        project.map(Path::to_path_buf),
+        &every_shipped_bundle(),
+        ryeos_engine::contracts::LogicalProject::MaterializedLive,
+    )
 }
 
 fn write_project_item(project: &Path, relative: &str) {
@@ -342,6 +346,7 @@ fn every_other_kind_still_resolves_project_first() {
                 canonical_root: bundle.path().to_path_buf(),
                 owned_namespaces: Vec::new(),
             }],
+            ryeos_engine::contracts::LogicalProject::MaterializedLive,
         );
         let item = CanonicalRef::parse(&format!("{kind}:shadowcheck/item")).expect("item ref");
         let resolved = resolve_item_full(&roots, schema, &item)

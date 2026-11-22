@@ -9,6 +9,7 @@ use ryeos_client_base::ui::view_model::build_view_model;
 use ryeos_client_base::ui::{UiBindingAttachment, UiBindingRequestBounds};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
+use ryeos_engine::contracts::{LogicalProject, LogicalProjectAbsence};
 use ryeos_engine::item_resolution::{RegisteredBundleRoot, ResolutionRoots};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::resolution::run_effective_item_pipeline;
@@ -753,6 +754,7 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
                 canonical_root: ui_bundle,
             },
         ],
+        LogicalProject::Absent(LogicalProjectAbsence::Projectless),
     );
 
     let mut embedded = Map::new();

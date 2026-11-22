@@ -49,7 +49,7 @@ struct LayerLoadPolicy<'a> {
     trust_store: &'a TrustStore,
     node_trust_store: &'a TrustStore,
     /// The project a pinned consumer stands for; its checkout is temporary.
-    logical_project_root: Option<&'a Path>,
+    logical_project: &'a crate::contracts::LogicalProject,
 }
 
 /// The project a config layer's signer scope is matched against. A live
@@ -57,14 +57,19 @@ struct LayerLoadPolicy<'a> {
 /// project it stands for, never on its temporary checkout.
 fn layer_signer_project_root<'a>(
     space: ItemSpace,
-    logical_project_root: Option<&'a Path>,
+    logical_project: &'a crate::contracts::LogicalProject,
     pinned: bool,
     ai_root: &'a Path,
 ) -> Option<&'a Path> {
+    use crate::contracts::LogicalProject;
     if space != ItemSpace::Project {
         return None;
     }
-    logical_project_root.or_else(|| if pinned { None } else { ai_root.parent() })
+    match logical_project {
+        LogicalProject::Stated(path) => Some(path),
+        LogicalProject::MaterializedLive if !pinned => ai_root.parent(),
+        LogicalProject::MaterializedLive | LogicalProject::Absent(_) => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,7 +484,7 @@ fn load_launch_config_snapshots_with_proof_from_authority(
                     node_parsers,
                     trust_store,
                     node_trust_store,
-                    logical_project_root: roots.logical_project_root.as_deref(),
+                    logical_project: &roots.logical_project,
                 };
                 for (root_index, root) in roots.ordered.iter().enumerate() {
                     observe_item_dependencies(
@@ -549,7 +554,7 @@ fn load_launch_config_snapshots_with_proof_from_authority(
                     node_parsers,
                     trust_store,
                     node_trust_store,
-                    logical_project_root: roots.logical_project_root.as_deref(),
+                    logical_project: &roots.logical_project,
                 };
                 for (root_index, root) in roots.ordered.iter().enumerate() {
                     let catalog_root = root.ai_root.join("config").join(prefix);
@@ -1164,7 +1169,7 @@ fn load_layer(
                 .unwrap_or("config"),
             layer_signer_project_root(
                 root.space,
-                policy.logical_project_root,
+                policy.logical_project,
                 project_content.is_some(),
                 &root.ai_root,
             ),
@@ -1452,6 +1457,7 @@ fn invalid(context: impl Into<String>, reason: impl Into<String>) -> EngineError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::{LogicalProject, LogicalProjectAbsence};
     use crate::project_content::{AuthoritativeProjectContent, ProjectContentEntry};
     use std::collections::BTreeMap;
 
@@ -1530,7 +1536,7 @@ mod tests {
 
     fn project_roots(project_root: &Path) -> ResolutionRoots {
         ResolutionRoots {
-            logical_project_root: None,
+            logical_project: LogicalProject::MaterializedLive,
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
@@ -1734,7 +1740,10 @@ composer: handler:ryeos/core/identity
     ) -> Result<LaunchConfigSnapshotSet, EngineError> {
         let checkout = PathBuf::from("/not-opened/generation-7/checkout");
         let mut roots = project_roots(&checkout);
-        roots.logical_project_root = logical.map(PathBuf::from);
+        roots.logical_project = match logical {
+            Some(path) => LogicalProject::Stated(PathBuf::from(path)),
+            None => LogicalProject::Absent(LogicalProjectAbsence::NotStated),
+        };
         let content = TestProjectContent::default()
             .with_file(".ai/config/scoped.yaml", config.document.as_bytes());
         let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
@@ -1760,9 +1769,12 @@ composer: handler:ryeos/core/identity
         logical: Option<&str>,
     ) -> Result<LaunchConfigSnapshotSet, EngineError> {
         let checkout = PathBuf::from("/not-opened/generation-7/checkout");
-        let roots = engine.launch_config_roots(
-            &project_roots(&checkout).with_logical_project_root(logical.map(PathBuf::from)),
-        );
+        let roots = engine.launch_config_roots(&project_roots(&checkout).with_logical_project(
+            match logical {
+                Some(path) => LogicalProject::Stated(PathBuf::from(path)),
+                None => LogicalProject::Absent(LogicalProjectAbsence::NotStated),
+            },
+        ));
         let content = TestProjectContent::default()
             .with_file(".ai/config/scoped.yaml", config.document.as_bytes());
         let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
@@ -1849,9 +1861,12 @@ composer: handler:ryeos/core/identity
             .clone()
             .with_node_config_root(PathBuf::from("/not-opened/node-config"));
         for engine in [&plain, &with_node_config] {
-            for logical in [Some(own.clone()), None] {
-                let roots = engine
-                    .launch_config_roots(&project_roots(&own).with_logical_project_root(logical));
+            for logical in [
+                LogicalProject::Stated(own.clone()),
+                LogicalProject::MaterializedLive,
+            ] {
+                let roots =
+                    engine.launch_config_roots(&project_roots(&own).with_logical_project(logical));
                 assert!(
                     load_launch_config_snapshots_with_proof(
                         &declarations(),

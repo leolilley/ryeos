@@ -341,7 +341,7 @@ impl CompiledDispatchInvoker {
         })?;
 
         let plan_ctx = PlanContext {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: principal_id.clone(),
                 scopes: principal_scopes.clone(),
