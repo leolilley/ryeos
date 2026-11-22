@@ -1,10 +1,11 @@
-# ryeos:signed:2026-11-22T01:37:20Z:505c6cba7c22c9d749d33f275895be915a524b74d06c0f0c3e1f6baf02ddef4e:PFVwPr+CL0n61ABA6QBFVOu9rRDqGyFWL9BSD4vFDdAgbGIG3v/c4Qvun6HDxDLYjMlULc4mFi96o32PYzdfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-22T09:46:53Z:325db80a4d08f87fc905392714200c6dec6f552ebbff383118e2faeb4e9e34e6:J9HyqlnRRPcRHaX3JSXjB6Do3UeFzhF/fnj4E6ikEEflEPBs7Hfi/eFJfiGeQCZK7R15Kbp89laDCuvLmePgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 retries: 2
 retry_status_codes: [429, 500, 502, 503, 504, 529]
 never_retry: ["401", "403", "404"]
 backoff_base_ms: 1000
 backoff_max_ms: 60000
+retry_after_max_ms: 60000
 timeout_seconds: 300
 max_provider_output_tokens_per_turn: 32768
 max_stream_output_bytes_per_turn: 131072

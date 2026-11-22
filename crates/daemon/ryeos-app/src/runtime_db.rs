@@ -2748,7 +2748,23 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // thread launch metadata in this database; that row is compared with the live
 // admission class, so pre-cut rows would stop matching and the reset clears them.
 // Nothing outside this database stores it; scoped-child grants only carry it live.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 142;
+// Epoch 143 (one cut, several stored-shape changes; each appends its own
+// sentence here): the stored external terminal observation
+// (`ExternalTerminalObservation`) carries a required `basis` naming how the
+// adapter settled the termination, and its canonical form is checked with
+// `deny_unknown_fields`, so an epoch-142 store holding observations without it
+// no longer decodes. An epoch-142 store is a predecessor and is reset without
+// decoding; every node needs `ryeos node reset execution-history`
+// (`--schema-cut-from 142 --schema-cut-to 143`) on its next upgrade, heads-free.
+// The turn marker's required `purpose` field also moves in this epoch: a
+// marker without it is refused on resume (`resume_marker_without_purpose`), so
+// an epoch-142 chain holding such markers is reset, never read.
+// The compaction record's required `guard_carry` field (recent loop-guard digests, wrap-up flags and warned ages; null when loop guards are off); a record without the field is refused on resume.
+// The provider retry policy digest (`ryeos.directive.provider-retry-policy`) moved
+// from v2 to v3 inside the cut, adding `retry_after_max_ms`; the reset clears
+// every in-flight thread whose retry decisions sealed a v2 digest, and recovery
+// refuses one it still meets rather than re-deriving it.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 143;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -10100,6 +10116,23 @@ impl RuntimeDb {
               WHERE placement_thread_id=?1 AND state IN ('pending', 'decision_reserved')",
                 params![placement_thread_id, now],
             )?;
+            // The session named no worker, so the profile's lock can only be
+            // released by what no worker, session or reservation still claims:
+            // the same orphan test the boot reconcile applies, in this
+            // transition's transaction.
+            tx.execute(
+                "UPDATE credential_profile SET lock_owner=NULL, updated_at_ms=?2
+              WHERE profile_id=(SELECT credential_profile_id FROM dedicated_session
+                                  WHERE placement_thread_id=?1)
+                AND lock_owner IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_process
+                      WHERE worker_instance_id=credential_profile.lock_owner)
+                AND NOT EXISTS(SELECT 1 FROM dedicated_session
+                      WHERE worker_instance_id=credential_profile.lock_owner)
+                AND NOT EXISTS(SELECT 1 FROM credential_profile_reservation
+                      WHERE reservation_id=credential_profile.lock_owner AND state='reserved')",
+                params![placement_thread_id, now],
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -15421,11 +15454,12 @@ impl RuntimeDb {
             };
             let session_changed = if cleanup_state == "reaped" {
                 tx.execute(
-                    "UPDATE dedicated_session
+                    &format!("UPDATE dedicated_session
                     SET worker_instance_id=NULL, worker_boot_epoch=NULL, worker_scope=NULL, state=?4,
                         send_boundary=?5, current_turn_id=NULL, updated_at_ms=?6
                   WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
-                    AND state NOT IN ('terminal','frozen','publish_ready')",
+                    AND state IN ({})",
+                        crate::dedicated_session_service::worker_fence_moved_states_sql()),
                     params![
                         placement_thread_id,
                         worker_instance_id,
@@ -15440,10 +15474,11 @@ impl RuntimeDb {
                 // the exact worker identity and profile fence so revocation and
                 // recovery can never mistake it for a safely unattached session.
                 tx.execute(
-                    "UPDATE dedicated_session
+                    &format!("UPDATE dedicated_session
                     SET state='outcome_unknown', send_boundary='outcome_unknown', updated_at_ms=?4
                   WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
-                    AND state NOT IN ('terminal','frozen','publish_ready')",
+                    AND state IN ({})",
+                        crate::dedicated_session_service::worker_fence_moved_states_sql()),
                     params![placement_thread_id, worker_instance_id, epoch, now],
                 )?
             };

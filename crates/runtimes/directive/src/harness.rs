@@ -390,6 +390,10 @@ pub enum HookAction {
     Suspend,
     Escalate,
     Continue,
+    /// Compact the conversation now. Valid only on `context_pressure`.
+    Compact,
+    /// Do not compact this time. Valid only on `context_pressure`.
+    SkipCompaction,
 }
 
 impl HookAction {
@@ -407,6 +411,8 @@ impl HookAction {
             "suspend" => Ok(HookAction::Suspend),
             "escalate" => Ok(HookAction::Escalate),
             "continue" => Ok(HookAction::Continue),
+            "compact" => Ok(HookAction::Compact),
+            "skip_compaction" => Ok(HookAction::SkipCompaction),
             other => Err(format!("unknown hook control action `{other}`")),
         }
     }
@@ -469,6 +475,21 @@ pub struct RiskAssessment {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_compaction_actions_parse_and_unknown_actions_do_not() {
+        use super::HookAction;
+        use serde_json::json;
+        assert_eq!(
+            HookAction::from_value(&json!({"action": "compact"})),
+            Ok(HookAction::Compact)
+        );
+        assert_eq!(
+            HookAction::from_value(&json!({"action": "skip_compaction"})),
+            Ok(HookAction::SkipCompaction)
+        );
+        assert!(HookAction::from_value(&json!({"action": "compacting"})).is_err());
+    }
+
     use super::*;
     use std::collections::BTreeMap;
 

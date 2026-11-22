@@ -13542,6 +13542,7 @@ mod tests {
             reason: ryeos_accounting::ProviderRetryReason::Status { code: 503 },
             failure_digest: digest_of("provider-failure"),
             retry_policy_digest: digest_of("retry-policy"),
+            retry_after_ms: None,
         }
     }
 
