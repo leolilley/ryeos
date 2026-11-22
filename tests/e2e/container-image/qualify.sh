@@ -332,7 +332,7 @@ EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$CONTAINER")"
   echo "container exited with status $EXIT_CODE after SIGTERM" >&2
   exit 1
 }
-docker logs "$CONTAINER" 2>&1 | grep -Eq 'daemon exiting.*signal|reason.?=.?signal.*daemon exiting' || {
+docker logs "$CONTAINER" 2>&1 | grep -E 'daemon exiting.*signal|reason.?=.?signal.*daemon exiting' >/dev/null || {
   docker logs "$CONTAINER" >&2
   echo "RyeOS did not record a signal-driven graceful exit" >&2
   exit 1
