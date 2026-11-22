@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -243,11 +243,20 @@ pub enum ResumeDecision {
     DeadlineReached { end_at_ms: i64 },
 }
 
-/// A dedicated session that already settled terminal has nothing left to
-/// resume: its worker lease is gone and its root can only fail in launch
-/// preparation, spending the one-shot resume budget on the way.
-fn dedicated_session_forbids_resume(session_state: Option<&str>) -> bool {
-    session_state == Some("terminal")
+use ryeos_app::dedicated_session_service::{
+    DEDICATED_SESSION_HOLDS_CANDIDATE, SessionRootResume, session_root_resume,
+};
+
+/// What a restart does with the root of the dedicated session `thread_id`
+/// names, if any, keyed by the session's state through the one policy table.
+fn dedicated_session_root_resume(state: &AppState, thread_id: &str) -> Result<SessionRootResume> {
+    Ok(session_root_resume(
+        state
+            .state_store
+            .dedicated_session(thread_id)?
+            .as_ref()
+            .map(|session| session.state.as_str()),
+    ))
 }
 
 /// Pure mapping from `(launch_metadata, current_attempts)` to a
@@ -339,6 +348,10 @@ pub struct ResumeIntent {
 pub struct ActiveThreadReconcileReport {
     pub active_thread_ids: BTreeSet<String>,
     pub resume_intents: Vec<ResumeIntent>,
+    /// Roots left exactly as they are because their dedicated session holds
+    /// or builds a candidate, keyed by thread id with the stable typed reason
+    /// ([`DEDICATED_SESSION_HOLDS_CANDIDATE`]).
+    pub held_roots: BTreeMap<String, &'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1567,6 +1580,7 @@ async fn reconcile_active_threads_inner(
         return Ok(ActiveThreadReconcileReport {
             active_thread_ids,
             resume_intents: Vec::new(),
+            held_roots: BTreeMap::new(),
         });
     }
 
@@ -1576,6 +1590,7 @@ async fn reconcile_active_threads_inner(
     );
 
     let mut intents: Vec<ResumeIntent> = Vec::new();
+    let mut held_roots: BTreeMap<String, &'static str> = BTreeMap::new();
 
     for thread in &running_threads {
         if let Some((job, operation)) = state
@@ -2217,6 +2232,39 @@ async fn reconcile_active_threads_inner(
                         && metadata.launch_driver.is_some()
                 })
         {
+            // The same predicate as the native-resume path: a root whose
+            // dedicated session is not running is never relaunched.
+            match dedicated_session_root_resume(state, &thread.thread_id)? {
+                SessionRootResume::Resume => {}
+                SessionRootResume::Hold => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        reason = DEDICATED_SESSION_HOLDS_CANDIDATE,
+                        "dedicated session is not running — holding its unlaunched root on restart"
+                    );
+                    held_roots.insert(thread.thread_id.clone(), DEDICATED_SESSION_HOLDS_CANDIDATE);
+                    continue;
+                }
+                SessionRootResume::Finalise => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        "dedicated session already settled terminal — not launching its root; finalizing failed"
+                    );
+                    finalize_dead(
+                        state,
+                        mode,
+                        &thread.thread_id,
+                        thread.runtime.pgid,
+                        &thread.status,
+                        Some((
+                            "dedicated_session_settled",
+                            json!({"reason": "the dedicated session is already terminal"}),
+                        )),
+                        &mut reconciled,
+                    )?;
+                    continue;
+                }
+            }
             let launch_metadata = thread
                 .runtime
                 .launch_metadata
@@ -2406,13 +2454,22 @@ async fn reconcile_active_threads_inner(
                 )?;
             }
             ResumeDecision::Resume { .. }
-                if dedicated_session_forbids_resume(
-                    state
-                        .state_store
-                        .dedicated_session(&thread.thread_id)?
-                        .as_ref()
-                        .map(|session| session.state.as_str()),
-                ) =>
+                if dedicated_session_root_resume(state, &thread.thread_id)?
+                    == SessionRootResume::Hold =>
+            {
+                // The session holds or builds a candidate: its root is left
+                // exactly as it is. No resume budget is spent and the chain
+                // head does not move.
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    reason = DEDICATED_SESSION_HOLDS_CANDIDATE,
+                    "dedicated session is not running — holding its root on restart"
+                );
+                held_roots.insert(thread.thread_id.clone(), DEDICATED_SESSION_HOLDS_CANDIDATE);
+            }
+            ResumeDecision::Resume { .. }
+                if dedicated_session_root_resume(state, &thread.thread_id)?
+                    == SessionRootResume::Finalise =>
             {
                 // The root of a dedicated session whose session already
                 // settled terminal has nothing to resume: the resume would
@@ -2531,6 +2588,7 @@ async fn reconcile_active_threads_inner(
     Ok(ActiveThreadReconcileReport {
         active_thread_ids,
         resume_intents: intents,
+        held_roots,
     })
 }
 
@@ -4636,10 +4694,14 @@ fn converge_reserved_follow(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn only_a_terminal_dedicated_session_forbids_native_resume() {
-        use super::dedicated_session_forbids_resume as forbids;
-        assert!(forbids(Some("terminal")));
-        for live in [
+    fn the_resume_predicate_covers_every_dedicated_session_state() {
+        use ryeos_app::dedicated_session_service::{
+            SESSION_STATE_POLICY,
+            SessionRootResume::{Finalise, Hold, Resume},
+            session_root_resume,
+        };
+        assert_eq!(SESSION_STATE_POLICY.len(), 16);
+        for state in [
             "admitted",
             "binding",
             "idle",
@@ -4649,12 +4711,27 @@ mod tests {
             "outcome_unknown",
             "draining",
         ] {
-            assert!(!forbids(Some(live)), "{live} must stay resumable");
+            assert_eq!(session_root_resume(Some(state)), Resume, "{state}");
         }
-        assert!(
-            !forbids(None),
-            "a thread with no dedicated session resumes as before"
-        );
+        for state in [
+            "freezing",
+            "frozen",
+            "verifying",
+            "qualifying",
+            "publish_ready",
+            "publishing",
+            "discarding",
+        ] {
+            assert_eq!(session_root_resume(Some(state)), Hold, "{state}");
+        }
+        assert_eq!(session_root_resume(Some("terminal")), Finalise);
+        // A thread with no dedicated session resumes as before; a state the
+        // table does not know is held rather than resumed.
+        assert_eq!(session_root_resume(None), Resume);
+        assert_eq!(session_root_resume(Some("novel")), Hold);
+        for policy in SESSION_STATE_POLICY {
+            assert_eq!(session_root_resume(Some(policy.state)), policy.root_resume);
+        }
     }
 
     #[test]

@@ -34,6 +34,11 @@ pub const SPEND_VERIFIER_CONTRACT_V1: &str = "spend-verifier/v1";
 
 /// Upper bound applied to every free-text diagnostic accepted over RPC.
 pub const MAX_DIAGNOSTIC_LEN: usize = 2048;
+
+/// Typed refusal code for a provider attempt whose coordinate was already
+/// issued under a predecessor launch generation and whose answer was never
+/// recorded: its external outcome is unknown, so a second contact is refused.
+pub const PROVIDER_OUTCOME_UNKNOWN_CODE: &str = "provider_attempt_outcome_unknown";
 /// Upper bound applied to retained provider raw decimal audit text.
 pub const MAX_RAW_DECIMAL_LEN: usize = 128;
 pub const MAX_LOCAL_PROVIDER_REQUEST_BYTES: usize = 16 * 1024 * 1024;
