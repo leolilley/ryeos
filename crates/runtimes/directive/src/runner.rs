@@ -8642,7 +8642,7 @@ mod tests {
     async fn the_last_permitted_turn_is_told_to_wrap_up_once() {
         let mock = Arc::new(ScriptedLedger::new("authority"));
         let mut runner = ledger_runner_with_policy(mock.clone(), turn_limit_policy(3, None));
-        // Turns 1 and 2 of 3: nothing is said.
+        // Before turns 1 and 2 of 3: nothing is said.
         for _ in 0..2 {
             assert!(matches!(
                 runner.run_deadline_boundary().await,
@@ -8650,11 +8650,13 @@ mod tests {
             ));
             runner.harness.record_turn();
         }
+        assert!(mock.recorded("append_event").is_empty());
+        // Before turn 3, the last the limit allows, it is told, once.
+        runner.run_deadline_boundary().await.unwrap();
         let appended = mock.recorded("append_event");
-        assert_eq!(appended.len(), 1, "the notice came before turn 3 only");
+        assert_eq!(appended.len(), 1);
         assert_eq!(appended[0]["payload"]["kind"], "limit_wrap_up");
         assert!(appended[0]["payload"].get("pinned").is_none());
-        // It is not repeated.
         runner.run_deadline_boundary().await.unwrap();
         assert_eq!(mock.recorded("append_event").len(), 1);
         assert!(
