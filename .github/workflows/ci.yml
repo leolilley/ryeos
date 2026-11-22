@@ -1639,7 +1639,9 @@ jobs:
     name: Process-scope e2e (real isolation)
     needs: [bundles]
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # The handoff acceptance matrix alone runs 55 to 90 minutes depending on
+    # the runner, and the claude follow suite runs after it.
+    timeout-minutes: 180
     if: ${{ always() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') && (inputs.process_scope_probe || github.event_name != 'workflow_dispatch' || (inputs.run_tests && !inputs.merge_gates)) }}
     env:
       RUST_MIN_STACK: 8388608
