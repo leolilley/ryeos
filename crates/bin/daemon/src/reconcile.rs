@@ -3326,7 +3326,7 @@ fn settle_session_after_allocation(state: &AppState, placement_thread_id: &str) 
         SessionLocalSettle::Skipped("allocation_unsettled") => {
             warn_session_awaits_external_terminal(placement_thread_id)
         }
-        SessionLocalSettle::Skipped(_) => {}
+        SessionLocalSettle::Skipped(_) | SessionLocalSettle::WorkerFenced => {}
     }
     Ok(())
 }
@@ -3343,6 +3343,11 @@ fn settle_session_of_finalized_root(state: &AppState, thread_id: &str) {
         Ok(SessionLocalSettle::Settled) => log_predecessor_session_settled(
             thread_id,
             "dedicated session settled with its finalised root",
+        ),
+        Ok(SessionLocalSettle::WorkerFenced) => tracing::warn!(
+            thread_id,
+            "the worker of a finalised root's dedicated session could not be proved reaped; \
+             it is fenced as unproved and the session keeps its credential lock"
         ),
         Ok(SessionLocalSettle::Skipped(_)) => {}
         Err(error) => tracing::warn!(
