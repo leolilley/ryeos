@@ -2681,6 +2681,7 @@ dependencies = [
  "ryeos-external-execution-contract",
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
+ "ryeos-http-egress",
  "ryeos-node",
  "ryeos-node-runtime",
  "ryeos-project-capture",
@@ -2739,6 +2740,7 @@ dependencies = [
  "ryeos-external-execution-contract",
  "ryeos-gpu-loader-owner-contract",
  "ryeos-handler-protocol",
+ "ryeos-http-egress",
  "ryeos-isolation-protocol",
  "ryeos-node-runtime",
  "ryeos-project-capture",
@@ -2901,6 +2903,7 @@ dependencies = [
  "reqwest",
  "ryeos-client-base",
  "ryeos-client-transport",
+ "ryeos-http-egress",
  "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
@@ -2944,9 +2947,11 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
+ "ryeos-http-egress",
  "ryeos-request-signing",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2963,6 +2968,7 @@ dependencies = [
  "reqwest",
  "ryeos-client-base",
  "ryeos-client-transport",
+ "ryeos-http-egress",
  "ryeos-request-signing",
  "serde",
  "serde_json",
@@ -3077,6 +3083,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-directive-definition",
  "ryeos-engine",
+ "ryeos-http-egress",
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-state",
@@ -3393,6 +3400,14 @@ dependencies = [
  "ryeos-effect-contract",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ryeos-http-egress"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "tokio",
 ]
 
 [[package]]
@@ -3743,6 +3758,7 @@ dependencies = [
  "reqwest",
  "ryeos-engine",
  "ryeos-handler-protocol",
+ "ryeos-http-egress",
  "ryeos-runtime",
  "ryeos-state",
  "serde",
@@ -3937,6 +3953,7 @@ dependencies = [
  "ryeos-executor",
  "ryeos-external-candidate-supervisor",
  "ryeos-external-execution-contract",
+ "ryeos-http-egress",
  "ryeos-isolation-protocol",
  "ryeos-node",
  "ryeos-node-runtime",
