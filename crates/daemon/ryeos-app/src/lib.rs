@@ -65,6 +65,8 @@ pub mod item_revised;
 pub mod kind_profiles;
 pub mod launch_metadata;
 pub mod launch_stage_timings;
+#[cfg(any(test, feature = "test-support"))]
+pub mod leased_session_rig;
 pub mod live_input_queue;
 pub mod managed_external_content;
 pub mod managed_external_content_operation;

@@ -196,6 +196,16 @@ pub fn plant_execution(root: &Path, yaml: &str, signer: &SigningKey) -> anyhow::
     Ok(())
 }
 
+/// Plant the directive runtime's continuation config (the context threshold,
+/// the carry bounds and the compaction policy) in the project.
+pub fn plant_continuation(root: &Path, yaml: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    let dir = root.join(".ai/config/ryeos-runtime");
+    std::fs::create_dir_all(&dir)?;
+    let signed = lillux::signature::sign_content(yaml, signer, "#", None);
+    std::fs::write(dir.join("continuation.yaml"), signed)?;
+    Ok(())
+}
+
 /// The shipped execution defaults with only the request timeout changed.
 pub fn execution_with_timeout(timeout_seconds: u64) -> String {
     format!(
@@ -364,8 +374,72 @@ Call the tools as the model directs, then report completion.
 
 pub const DIRECTIVE_REF: &str = "directive:probe/run";
 
+/// The runtime phase-cut gate, in a daemon built with
+/// `crash-qualification-test-support`. Without the feature a rig has none and
+/// asking for a stage is refused.
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+pub type PhaseGate = common::runtime_phase_cut::RuntimePhaseCutGate;
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+type PhaseChild = common::runtime_phase_cut::RuntimePhaseCutChild;
+#[cfg(not(all(unix, feature = "crash-qualification-test-support")))]
+pub type PhaseGate = ();
+#[cfg(not(all(unix, feature = "crash-qualification-test-support")))]
+type PhaseChild = ();
+
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+fn make_phase_gate(
+    stage: Option<&'static str>,
+) -> anyhow::Result<(Option<PhaseGate>, Option<PhaseChild>)> {
+    Ok(match stage {
+        Some(stage) => {
+            let (gate, child) = common::runtime_phase_cut::RuntimePhaseCutGate::pair(stage)?;
+            (Some(gate), Some(child))
+        }
+        None => (None, None),
+    })
+}
+
+#[cfg(not(all(unix, feature = "crash-qualification-test-support")))]
+fn make_phase_gate(
+    stage: Option<&'static str>,
+) -> anyhow::Result<(Option<PhaseGate>, Option<PhaseChild>)> {
+    anyhow::ensure!(
+        stage.is_none(),
+        "a phase cut needs a daemon built with crash-qualification-test-support"
+    );
+    Ok((None, None))
+}
+
+#[cfg(all(unix, feature = "crash-qualification-test-support"))]
+fn configure_phase_child(
+    child: Option<&mut PhaseChild>,
+    stage: Option<&'static str>,
+    cmd: &mut tokio::process::Command,
+) {
+    if let (Some(child), Some(stage)) = (child, stage) {
+        child
+            .configure_command(cmd, stage)
+            .expect("configure the runtime phase-cut channel");
+        cmd.env("RYEOS_DIRECTIVE_TEST_BLOCK_AT", stage);
+    }
+}
+
+#[cfg(not(all(unix, feature = "crash-qualification-test-support")))]
+fn configure_phase_child(
+    _child: Option<&mut PhaseChild>,
+    _stage: Option<&'static str>,
+    _cmd: &mut tokio::process::Command,
+) {
+}
+
 pub struct RigOptions {
     pub exec_yaml: Option<String>,
+    /// The continuation runtime config, including the compaction policy.
+    pub continuation_yaml: Option<String>,
+    /// A runtime recovery stage the directive runtime reports and then blocks
+    /// at (needs a daemon built with `crash-qualification-test-support`); the
+    /// rig's `phase_gate` observes it.
+    pub phase_cut: Option<&'static str>,
     pub context_window: u64,
     pub header_extra: &'static str,
     pub limits: Option<(u64, u64)>,
@@ -406,6 +480,8 @@ impl Default for RigOptions {
     fn default() -> Self {
         Self {
             exec_yaml: None,
+            continuation_yaml: None,
+            phase_cut: None,
             context_window: 200_000,
             header_extra: "",
             limits: None,
@@ -437,6 +513,8 @@ pub struct Rig {
     /// fixture state was ready (just before the daemon was spawned).
     pub spawn_at: Instant,
     pub started_at: Instant,
+    /// Observes the runtime stage named by `RigOptions::phase_cut`.
+    pub phase_gate: Option<PhaseGate>,
 }
 
 impl Rig {
@@ -495,6 +573,8 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     let top_extra = opts.provider_top_extra.clone();
     let usage_extra = opts.provider_usage_extra.clone();
     let cache_tariff = opts.provider_cache_tariff;
+    let (phase_gate, mut phase_child) = make_phase_gate(opts.phase_cut)?;
+    let phase_stage = opts.phase_cut;
     let long_service_window = opts.long_service_window;
     let spawn_cell: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let spawn_cell_tweak = spawn_cell.clone();
@@ -530,6 +610,7 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         if let Ok(filter) = std::env::var("PROBE_RUST_LOG") {
             cmd.env("RUST_LOG", filter);
         }
+        configure_phase_child(phase_child.as_mut(), phase_stage, cmd);
         *spawn_cell_tweak.lock().expect("spawn cell") = Some(Instant::now());
     })
     .await?;
@@ -542,23 +623,38 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
     if let Some(yaml) = &opts.exec_yaml {
         plant_execution(root, yaml, &fixture.publisher)?;
     }
+    if let Some(yaml) = &opts.continuation_yaml {
+        plant_continuation(root, yaml, &fixture.publisher)?;
+    }
     plant_python_tool(
         root,
         "noop",
-        "print(json.dumps({'ok': True}))",
+        &format!(
+            "{}print(json.dumps({{'ok': True, 'n': n}}))",
+            counter_code(aux.path(), "noop")
+        ),
         &fixture.publisher,
     )?;
     plant_python_tool(
         root,
         "bulk",
-        "print(json.dumps({'ok': True, 'data': 'x' * 600}))",
+        // Each call returns different content of the same length, numbered by
+        // a locked per-run counter in `aux`: a scripted run that calls the tool
+        // every turn then makes progress under the production loop guards, the
+        // sequence is the same on every run and across a restart, and the 600
+        // bytes the tests tune to are unchanged.
+        &format!(
+            "import fcntl\nfd = os.open({:?}, os.O_RDWR | os.O_CREAT)\nfcntl.flock(fd, fcntl.LOCK_EX)\nn = int(os.read(fd, 32).decode() or '0') + 1\nos.lseek(fd, 0, 0)\nos.ftruncate(fd, 0)\nos.write(fd, str(n).encode())\nos.close(fd)\nprint(json.dumps({{'ok': True, 'data': ('%08d' % n + 'x' * 600)[:600]}}))",
+            aux.path().join("bulk.count").to_str().expect("utf-8 path")
+        ),
         &fixture.publisher,
     )?;
     plant_python_tool(
         root,
         "nap",
         &format!(
-            "time.sleep({})\nprint(json.dumps({{'ok': True}}))",
+            "{}time.sleep({})\nprint(json.dumps({{'ok': True, 'n': n}}))",
+            counter_code(aux.path(), "nap"),
             opts.nap_seconds
         ),
         &fixture.publisher,
@@ -568,9 +664,10 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         root,
         "marker",
         &format!(
-            "with open({marker:?}, 'a') as f:\n    f.write('executed\\n')\n    f.flush()\n    os.fsync(f.fileno())\ntime.sleep({})\nprint(json.dumps({{'executed': True}}))",
+            "{counter}with open({marker:?}, 'a') as f:\n    f.write('executed\\n')\n    f.flush()\n    os.fsync(f.fileno())\ntime.sleep({})\nprint(json.dumps({{'executed': True, 'n': n}}))",
             opts.marker_sleep_seconds,
             marker = marker.to_str().expect("utf-8 path"),
+            counter = counter_code(aux.path(), "marker"),
         ),
         &fixture.publisher,
     )?;
@@ -618,7 +715,22 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
         publisher: fixture.publisher.clone(),
         spawn_at,
         started_at,
+        phase_gate,
     })
+}
+
+/// Python that numbers each call of a stub tool from a locked per-run counter
+/// file in `aux` and leaves the number in `n`. A scripted run that repeats the
+/// tool every turn then gets different results, so it makes progress under the
+/// production loop guards; the sequence is the same on every run and across a
+/// restart.
+fn counter_code(aux: &std::path::Path, tool: &str) -> String {
+    format!(
+        "import fcntl\nfd = os.open({:?}, os.O_RDWR | os.O_CREAT)\nfcntl.flock(fd, fcntl.LOCK_EX)\nn = int(os.read(fd, 32).decode() or '0') + 1\nos.lseek(fd, 0, 0)\nos.ftruncate(fd, 0)\nos.write(fd, str(n).encode())\nos.close(fd)\n",
+        aux.join(format!("{tool}.count"))
+            .to_str()
+            .expect("utf-8 path")
+    )
 }
 
 // ── launching and observing ─────────────────────────────────────────────
