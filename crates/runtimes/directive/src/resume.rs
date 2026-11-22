@@ -1051,7 +1051,13 @@ fn trailing_malformed_replies(events: &[ReplayedEventRecord]) -> Result<u32> {
             let still_counts = finals_after == 0 || (finals_after == 1 && !calls_after);
             return Ok(if still_counts { position } else { 0 });
         }
-        if final_cognition_turn(event)?.is_some() {
+        // A compaction's summary call and a recorded refusal are not replies
+        // the run judged: a compaction landing after a correction leaves the
+        // run where it was.
+        if final_cognition_turn(event)?.is_some()
+            && !is_compaction_summary_turn(event)
+            && !is_refusal_final(event)
+        {
             finals_after = finals_after.saturating_add(1);
             calls_after |= replayed_cognition_out(event)?
                 .message()
@@ -4782,6 +4788,38 @@ mod tests {
         assert_eq!(
             trailing_malformed_replies(&[leak(1), correction(1, 1), leak(2), leak(3)]).unwrap(),
             0
+        );
+        // A compaction's summary call, or a recorded refusal, between the
+        // correction and the next reply does not move the run on.
+        let summary_final = |turn: u32| {
+            event(
+                "cognition_out",
+                json!({
+                    "turn": turn,
+                    "parts": [{"type": "text", "text": "SUMMARY"}],
+                    "finish": "compaction_summary_pressure",
+                }),
+            )
+        };
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1), summary_final(2), leak(3)])
+                .unwrap(),
+            1
+        );
+        let refusal_final = |turn: u32| {
+            event(
+                "cognition_out",
+                json!({
+                    "turn": turn,
+                    "parts": [],
+                    "finish": ryeos_runtime::cognition::provider_refused_finish("context_length"),
+                }),
+            )
+        };
+        assert_eq!(
+            trailing_malformed_replies(&[leak(1), correction(1, 1), refusal_final(2), leak(3)])
+                .unwrap(),
+            1
         );
     }
 
