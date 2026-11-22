@@ -390,6 +390,8 @@ pub struct RigOptions {
     pub provider_cache_tariff: bool,
     /// Plant the image-returning tools `shot`, `shot_bad` and `shot_big`.
     pub image_tools: bool,
+    /// Plant the tool `big_text`, which returns 200 KB of text.
+    pub spill_tools: bool,
     /// Lines under the directive's `model.reasoning:`, when it sets a
     /// reasoning policy.
     pub directive_reasoning: Option<String>,
@@ -415,6 +417,7 @@ impl Default for RigOptions {
             provider_usage_extra: String::new(),
             provider_cache_tariff: false,
             image_tools: false,
+            spill_tools: false,
             directive_reasoning: None,
             long_service_window: false,
         }
@@ -584,6 +587,14 @@ pub async fn start_rig(script_yaml: &str, opts: RigOptions) -> anyhow::Result<Ri
                 &fixture.publisher,
             )?;
         }
+    }
+    if opts.spill_tools {
+        plant_python_tool(
+            root,
+            "big_text",
+            "print(json.dumps({'text': 'abcdefghij' * 20000}))",
+            &fixture.publisher,
+        )?;
     }
     plant_directive_with(
         root,
