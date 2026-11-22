@@ -370,7 +370,7 @@ pub async fn load_resume_state(
             // again. A successor's start must still fit the window.
             Some(anchor) => {
                 let folded = fold_messages_anchored(&events, Some(anchor.chain_seq))?;
-                let kept_at_record = turns_before_event(&events, anchor.chain_seq);
+                let kept_at_record = turns_before_event(&events, anchor.chain_seq)?;
                 let signals = anchored_signals(
                     mode,
                     anchor.payload.guard_carry.as_ref(),
@@ -965,8 +965,10 @@ fn anchored_signals(
 
 /// The turns the window holds before the compaction event at `anchor_seq`: the
 /// kept turns the record kept whole. Counts the same finals the fold turns into
-/// assistant messages.
-fn turns_before_event(events: &[ReplayedEventRecord], anchor_seq: i64) -> u32 {
+/// assistant messages, so a reply a correction removed is not a turn: the live
+/// run popped it before it measured how long ago a warning was given.
+fn turns_before_event(events: &[ReplayedEventRecord], anchor_seq: i64) -> Result<u32> {
+    let corrected = corrected_replies(events)?;
     let end = events
         .iter()
         .position(|event| {
@@ -975,14 +977,16 @@ fn turns_before_event(events: &[ReplayedEventRecord], anchor_seq: i64) -> u32 {
         .unwrap_or(events.len());
     let turns = events[..end]
         .iter()
-        .filter(|event| {
+        .enumerate()
+        .filter(|(index, event)| {
             event.event_type == "cognition_out"
                 && !is_stream_fragment(event)
                 && !is_compaction_summary_turn(event)
                 && !is_refusal_final(event)
+                && !corrected.contains(index)
         })
         .count();
-    u32::try_from(turns).unwrap_or(u32::MAX)
+    Ok(u32::try_from(turns).unwrap_or(u32::MAX))
 }
 
 /// The history before a successor's conversation: the predecessors' turns its
@@ -6063,12 +6067,67 @@ mod tests {
     }
 
     #[test]
+    fn corrected_replies_are_not_kept_turns_of_a_compaction_window() {
+        // Turn 3 was a malformed reply and turn 4 an empty one; each was popped
+        // by the live run. Only turn 5 is a kept turn.
+        let mut events = Vec::new();
+        let mut seq = 20;
+        let mut push = |events: &mut Vec<ReplayedEventRecord>, kind: &str, payload: Value| {
+            events.push(event_at(kind, seq, payload));
+            seq += 1;
+        };
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 3, "purpose": "turn"}),
+        );
+        push(
+            &mut events,
+            "cognition_out",
+            out(3, "a call written as text"),
+        );
+        for mut input in kinded_input("malformed_reply_turn_3_streak_1") {
+            input.chain_seq = seq;
+            seq += 1;
+            events.push(input);
+        }
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 4, "purpose": "turn"}),
+        );
+        push(&mut events, "cognition_out", out(4, "  "));
+        for mut input in kinded_input("empty_reply_turn_4_streak_1") {
+            input.chain_seq = seq;
+            seq += 1;
+            events.push(input);
+        }
+        push(
+            &mut events,
+            "cognition_in",
+            json!({"turn": 5, "purpose": "turn"}),
+        );
+        push(&mut events, "cognition_out", out(5, "kept"));
+        let anchor = seq;
+        push(
+            &mut events,
+            "cognition_compaction",
+            serde_json::to_value(compaction_record("pressure")).unwrap(),
+        );
+        assert_eq!(turns_before_event(&events, anchor).unwrap(), 1);
+        // Without the empty reply's correction, that reply is a kept turn again.
+        let mut only_malformed = events.clone();
+        only_malformed.remove(5);
+        assert_eq!(turns_before_event(&only_malformed, anchor).unwrap(), 2);
+    }
+
+    #[test]
     fn the_record_tells_a_same_thread_recovery_what_a_compaction_dropped() {
         // The compacted conversation holds no notice and no warning (both were
         // summarised away), the record carries them.
         let window = windowed_events();
         let folded = fold_messages_anchored(&window, Some(26)).unwrap();
-        assert_eq!(turns_before_event(&window, 26), 2);
+        assert_eq!(turns_before_event(&window, 26).unwrap(), 2);
         let signals = anchored_signals(
             ResumeMode::NativeSameThread,
             Some(&carry_record()),
