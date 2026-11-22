@@ -256,7 +256,7 @@ mod tests {
             &format!("{OWNER}/"),
             &format!("{OWNER}/a/b"),
             &format!("{OWNER}/Bad"),
-            &format!("{OWNER}"),
+            OWNER,
         ] {
             assert!(
                 bad.parse::<ProjectIdentity>().is_err(),
