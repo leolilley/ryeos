@@ -650,7 +650,15 @@ mod tests {
                 .binding_attachment_id,
             "successor"
         );
+        // The repeat only asks the successor, which has nothing newer: no
+        // second swap is journalled.
         let again = hint(&mut core, Some("set-9"));
-        assert!(revisions(&again).is_empty());
+        assert_eq!(revisions(&again), vec!["successor".to_string()]);
+        core.finish_attachment_revision(
+            "successor",
+            Some(serde_json::json!({"revised": false, "attachment": {}})),
+        );
+        assert!(core.pump_item_revisions().is_empty());
+        assert!(pending_prefix(&core).is_empty());
     }
 }
