@@ -810,7 +810,10 @@ mod tests {
                 "environment": {"kind": "none"},
                 "project": {
                     "kind": "pinned",
-                    "source": {"kind": "current_head"},
+                    "source": {
+                        "kind": "current_head",
+                        "project": {"kind": "named", "name": "fixture"}
+                    },
                     "realization": {
                         "kind": "cow",
                         "terminal_publication": {"kind": "retain_current_head"}

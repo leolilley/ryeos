@@ -2857,6 +2857,12 @@ mod tests {
     #[test]
     fn direct_execute_current_head_is_typed_control_not_item_input() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".ai")).unwrap();
+        std::fs::write(
+            tmp.path().join(".ai/project.yaml"),
+            "schema: 1\nname: fixture\n",
+        )
+        .unwrap();
         let commands = vec![direct_execute_command()];
         let resolved = resolve_command_for_daemon_with_commands(
             &s(&[
@@ -2988,6 +2994,12 @@ mod tests {
             serde_yaml::from_str(&body).expect("parse signed validate command");
         command.name = "validate".to_string();
         let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".ai")).unwrap();
+        std::fs::write(
+            project.path().join(".ai/project.yaml"),
+            "schema: 1\nname: fixture\n",
+        )
+        .unwrap();
         let resolved = resolve_command_for_daemon_with_commands(
             &s(&[
                 "validate",
