@@ -55,13 +55,17 @@ fn load_transcript(text: &str) -> Transcript {
     }
 }
 
-fn codex_profile() -> StructuredSessionProfile {
+fn codex_profile_with_child(script: &str) -> StructuredSessionProfile {
     let mut profile: StructuredSessionProfile = serde_json::from_str(include_str!(
         "../../../../bundles/codex/.ai/workers/codex/lib/hosted/structured-session.profile.json"
     ))
     .expect("production Codex profile decodes");
-    profile.workload_args = vec!["-c".to_owned(), "sleep 30".to_owned()];
+    profile.workload_args = vec!["-c".to_owned(), script.to_owned()];
     profile
+}
+
+fn codex_profile() -> StructuredSessionProfile {
+    codex_profile_with_child("sleep 30")
 }
 
 fn codex_schemas() -> HashMap<String, Value> {
@@ -149,11 +153,12 @@ fn recorded_codex_turn_replays_through_the_production_profile() {
     // Today the profile ignores usage frames. When a declared usage
     // observation replaces this, this assertion changes with it.
     assert_eq!(usage[0].1, Outcome::Dropped);
-    // The one frame of the recorded turn the profile does not know. Real Codex
-    // announces its built-in `codex_apps` server (and any configured MCP
-    // server) with this notification; the profile neither maps nor ignores it,
-    // so the bridge refuses it as `unknown_notification`. This pins today's
-    // behaviour: when the profile declares the method, this assertion changes.
+    // The recording was made by Codex 0.156.1 with MCP and apps enabled. The
+    // profile is pinned to 0.147.0 with both disabled, and the contract test
+    // (bundles/codex/test_contract.py) lists `mcpServer/startupStatus/updated`
+    // as a notification the profile's own configuration rules out. The bridge
+    // therefore refuses it, which is the designed fail-closed answer to a
+    // server that should not exist. This pins that answer for the real shape.
     let refused: Vec<&str> = outcomes
         .iter()
         .filter(|(_, outcome)| matches!(outcome, Outcome::Refused(_)))
@@ -179,4 +184,64 @@ fn recorded_codex_turn_replays_through_the_production_profile() {
         "the recorded turn completion is recorded, got {:?}",
         completed[0].1
     );
+}
+
+/// A notification no rule of the profile names reaches the real reader and is
+/// refused with its typed class, the refusal is recorded as a bounded event,
+/// and the command that meets it fails with that class.
+#[test]
+fn an_unknown_notification_fails_the_next_command_with_a_typed_refusal() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let events = Arc::new(Mutex::new(EventQueue::default()));
+    let (_control_sender, controls) = sync_channel(1);
+    let (result_sender, _results) = sync_channel(1);
+    let mut lifecycle = BridgeLifecycle::default();
+    let mut workload = StructuredWorkload::start(
+        &mut lifecycle,
+        "/bin/sh",
+        root.path().to_str().unwrap(),
+        home.to_str().unwrap(),
+        codex_profile_with_child(
+            r#"printf '%s\n' '{"method":"surprise/notification","params":{"secret":"never recorded"}}'; sleep 30"#,
+        ),
+        "session".to_owned(),
+        HashSet::from([RouteEffectClass::SessionMutation]),
+        codex_schemas(),
+        Arc::clone(&events),
+        controls,
+        result_sender,
+        "/bin/sh",
+        None,
+        &BTreeMap::new(),
+        Vec::new(),
+    )
+    .expect("bridge starts against the stand-in child");
+    // The frame travels the real stdout reader, so wait for it to be queued.
+    let deadline = MonotonicDeadline::after(Duration::from_secs(10));
+    let refusal = loop {
+        match workload.drain_incoming() {
+            Err(error) => break error,
+            Ok(()) => {
+                assert!(!deadline.has_elapsed(), "the notification never arrived");
+                lillux::time::sleep(Duration::from_millis(5));
+            }
+        }
+    };
+    assert!(matches!(
+        refusal.downcast_ref::<RefusalClass>(),
+        Some(RefusalClass::UnknownNotification)
+    ));
+    let recorded = events.lock().unwrap().events.clone();
+    let refused = recorded
+        .iter()
+        .find(|event| event["event_type"] == "bridge.refused")
+        .expect("the refusal is recorded");
+    assert_eq!(
+        refused["payload"],
+        json!({"class":"unknown_notification","method":"surprise/notification"})
+    );
+    // The record names the class and the method, never the frame's content.
+    assert!(!refused.to_string().contains("never recorded"));
 }
