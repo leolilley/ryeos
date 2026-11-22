@@ -967,6 +967,7 @@ pub(crate) fn write_verified_project_head_ref_in_directory(
         &expected_ref_path,
         None,
         project_snapshot_hash,
+        None,
         advancer,
         signer,
         trust_store,
@@ -1664,6 +1665,7 @@ pub(crate) fn advance_verified_project_head_ref_in_directory(
         &expected_ref_path,
         Some(expected_current_hash),
         new_snapshot_hash,
+        Some(current.signature.as_str()),
         advancer,
         signer,
         trust_store,
@@ -3132,6 +3134,116 @@ mod tests {
         assert!(
             list_verified_generic_head_refs_in_directory(&pinned, "admissions", &trust).is_err()
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn head_advance_records_are_per_occurrence_and_a_crash_retry_by_another_key_succeeds() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let refs_root = tempdir.path().join("refs");
+        fs::create_dir(&refs_root).unwrap();
+        let refs_directory = lillux::PinnedDirectory::open(&refs_root)
+            .unwrap()
+            .expect("refs root exists");
+        let signer = TestSigner::default();
+        let trust = trust_store(&signer);
+        let (a, b) = ("aa".repeat(32), "bb".repeat(32));
+        let key = |byte: &str| crate::head_advance::HeadAdvancer {
+            key: format!("fp:{}", byte.repeat(32)),
+            via_root: None,
+        };
+        let (one, two) = (key("01"), key("02"));
+        let owner = "pid-v1-".to_owned() + &"cc".repeat(32);
+        let lock = ProjectHeadLock::acquire_in_refs_directory(&refs_directory, &owner, "project-a")
+            .unwrap();
+        write_verified_project_head_ref_in_directory(
+            &refs_directory,
+            &owner,
+            "project-a",
+            &a,
+            &one,
+            &signer,
+            &trust,
+            &lock,
+        )
+        .unwrap();
+        let advance = |from: &str, to: &str, by: &crate::head_advance::HeadAdvancer| {
+            advance_verified_project_head_ref_in_directory(
+                &refs_directory,
+                &owner,
+                "project-a",
+                to,
+                from,
+                by,
+                &signer,
+                &trust,
+                &lock,
+            )
+        };
+        // A -> B by key one, back to A by key two, A -> B again by key two:
+        // both occurrences of (A, B) are recorded, each with its own key.
+        advance(&a, &b, &one).unwrap();
+        advance(&b, &a, &two).unwrap();
+        advance(&a, &b, &two).unwrap();
+        let head_directory = lock
+            .protected_directory_in_refs(&refs_directory, &owner, "project-a")
+            .unwrap();
+        let records =
+            crate::head_advance::read_head_advances(&head_directory, Some(&a), &b, &trust).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].advancer, one);
+        assert_eq!(records[1].advancer, two);
+        assert_eq!(records[1].occurrence, 2);
+
+        // A crashed attempt: a record written, the swap never done. A retry by
+        // the same key reuses it; another key writes the next occurrence.
+        let current = read_verified_project_head_ref_in_directory(
+            &refs_directory,
+            &owner,
+            "project-a",
+            &trust,
+        )
+        .unwrap()
+        .unwrap();
+        let c = "dd".repeat(32);
+        crate::head_advance::record_head_advance(
+            &head_directory,
+            &current.ref_path,
+            Some(&b),
+            &c,
+            Some(current.signature.as_str()),
+            &one,
+            &signer,
+            &trust,
+        )
+        .unwrap();
+        crate::head_advance::record_head_advance(
+            &head_directory,
+            &current.ref_path,
+            Some(&b),
+            &c,
+            Some(current.signature.as_str()),
+            &one,
+            &signer,
+            &trust,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::head_advance::read_head_advances(&head_directory, Some(&b), &c, &trust)
+                .unwrap()
+                .len(),
+            1,
+            "a crash-retry by the same key reuses the record"
+        );
+        advance(&b, &c, &two).unwrap();
+        let records =
+            crate::head_advance::read_head_advances(&head_directory, Some(&b), &c, &trust).unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "another key after a crash writes its own record"
+        );
+        assert_eq!(records[1].advancer, two);
     }
 
     #[cfg(target_os = "linux")]

@@ -4254,7 +4254,7 @@ pub fn build_remote_project_rebind(
         snapshot_hash: source_candidate_snapshot_hash.to_owned(),
         realization: PinnedProjectRealization::Cow {
             terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
-                principal_key: target_head.owner_component(),
+                owner_component: target_head.owner_component(),
                 project_hash: target_head.name_hash().to_owned(),
                 expected_hash: target_expected_head_hash.to_owned(),
             },
@@ -5167,7 +5167,7 @@ mod tests {
             snapshot_hash: current.to_owned(),
             realization: PinnedProjectRealization::Cow {
                 terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key: "a".repeat(64),
+                    owner_component: "a".repeat(64),
                     project_hash: "b".repeat(64),
                     expected_hash: base.to_owned(),
                 },

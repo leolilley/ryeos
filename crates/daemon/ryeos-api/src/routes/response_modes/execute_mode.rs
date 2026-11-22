@@ -516,7 +516,7 @@ pub fn resolve_execution_project_authority(
                                 );
                             }
                             PinnedTerminalPublication::RetainCurrentHead {
-                                principal_key: destination.head.owner_component(),
+                                owner_component: destination.head.owner_component(),
                                 project_hash: destination.head.name_hash().to_owned(),
                                 expected_hash: destination.expected_hash.clone(),
                             }
@@ -3704,7 +3704,7 @@ mod tests {
             authority.terminal_publication(),
             Some(
                 &ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key: destination.head.owner_component(),
+                    owner_component: destination.head.owner_component(),
                     project_hash: destination.head.name_hash().to_owned(),
                     expected_hash: snapshot_hash.clone(),
                 }

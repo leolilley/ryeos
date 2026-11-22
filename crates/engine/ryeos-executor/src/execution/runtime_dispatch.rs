@@ -2785,7 +2785,7 @@ mod tests {
         for terminal_publication in [
             PinnedTerminalPublication::RetainResult,
             PinnedTerminalPublication::RetainCurrentHead {
-                principal_key: "b".repeat(64),
+                owner_component: "b".repeat(64),
                 project_hash: "c".repeat(64),
                 expected_hash: "a".repeat(64),
             },

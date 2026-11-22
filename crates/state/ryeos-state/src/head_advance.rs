@@ -4,14 +4,19 @@
 //! and several keys may speak for one principal. So every write or advance
 //! of a project head records, node-signed, the advancing key and how the
 //! node resolved its owner. The record is written in the head's own
-//! directory under the head lock **before** the ref is swapped, named
-//! `advance-<previous hash | genesis>-<new hash>`:
-//! - a head never moves without its record;
-//! - a record whose new hash never became the head (the swap failed after
-//!   the record was written) is ignored by readers, which only ever look up
-//!   the record for an exact (previous, new) pair;
-//! - a replayed advance finds its record and does not duplicate it; a replay
-//!   that names a different key or resolution is refused.
+//! directory under the head lock **before** the ref is swapped. One
+//! (previous, new) pair can recur over a head's life (A to B, back to A, to
+//! B again), so records are append-only per occurrence:
+//! `advance-<previous hash | genesis>-<new hash>-<occurrence>`.
+//! - A head never moves without its record.
+//! - Each record names the head ref it observed (`observed_head`, the
+//!   signature of the head ref current when it was written, or none for a
+//!   first write). If the head ref is still exactly that one, the swap after
+//!   the record never happened (a crash): the same advancer retrying reuses
+//!   the record; anyone else writes the next occurrence. Otherwise every
+//!   advance writes the next occurrence.
+//! - Readers list every occurrence of a pair; a record whose swap never
+//!   happened is evidence of an attempt only.
 //!
 //! Records live under the head's directory, so the explicit project-head
 //! cutover removes them with the head.
@@ -56,6 +61,11 @@ pub struct HeadAdvanceRecord {
     pub ref_path: String,
     pub previous_hash: Option<String>,
     pub target_hash: String,
+    /// Which occurrence of this (previous, new) pair, from 1.
+    pub occurrence: u64,
+    /// Signature of the head ref current when this record was written;
+    /// `None` when the head did not exist yet.
+    pub observed_head: Option<String>,
     pub advancer: HeadAdvancer,
     pub recorded_at: String,
     pub signer: String,
@@ -86,12 +96,39 @@ impl HeadAdvancer {
     }
 }
 
-/// The record file name for one (previous, new) advance.
-pub fn record_name(previous_hash: Option<&str>, target_hash: &str) -> String {
+fn pair_prefix(previous_hash: Option<&str>, target_hash: &str) -> String {
     format!(
-        "{HEAD_ADVANCE_PREFIX}{}-{target_hash}",
+        "{HEAD_ADVANCE_PREFIX}{}-{target_hash}-",
         previous_hash.unwrap_or(GENESIS)
     )
+}
+
+/// The record file name for one occurrence of a (previous, new) advance.
+pub fn record_name(previous_hash: Option<&str>, target_hash: &str, occurrence: u64) -> String {
+    format!("{}{occurrence}", pair_prefix(previous_hash, target_hash))
+}
+
+/// The occurrences of one pair recorded in `head_directory`, ascending.
+fn occurrences(
+    head_directory: &lillux::PinnedDirectory,
+    previous_hash: Option<&str>,
+    target_hash: &str,
+) -> Result<Vec<u64>> {
+    let prefix = pair_prefix(previous_hash, target_hash);
+    let mut found = Vec::new();
+    for name in head_directory.entry_names()? {
+        let Some(text) = name.to_str() else {
+            continue;
+        };
+        if let Some(occurrence) = text
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.parse::<u64>().ok())
+        {
+            found.push(occurrence);
+        }
+    }
+    found.sort_unstable();
+    Ok(found)
 }
 
 impl HeadAdvanceRecord {
@@ -102,6 +139,8 @@ impl HeadAdvanceRecord {
             "ref_path": self.ref_path,
             "previous_hash": self.previous_hash,
             "target_hash": self.target_hash,
+            "occurrence": self.occurrence,
+            "observed_head": self.observed_head,
             "advancer": self.advancer,
             "recorded_at": self.recorded_at,
             "signer": self.signer,
@@ -119,6 +158,9 @@ impl HeadAdvanceRecord {
                 .is_some_and(|previous| !is_lower_hex_64(previous))
         {
             bail!("head advance record hashes must be 64 lowercase hex");
+        }
+        if self.occurrence == 0 {
+            bail!("head advance record occurrences count from 1");
         }
         self.advancer.validate()?;
         if self.signature.is_empty() {
@@ -145,45 +187,53 @@ impl HeadAdvanceRecord {
     }
 }
 
-/// Write (or, on a replay, find) the record for one advance in the head's
-/// directory. Called by the head writers under the head lock, before the
-/// ref swap.
+/// Write the record for one advance in the head's directory, or reuse the
+/// latest occurrence on a crash-retry by the same advancer. Called by the
+/// head writers under the head lock, after the compare and before the ref
+/// swap. `observed_head` is the signature of the head ref current now
+/// (`None` for a first write).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_head_advance(
     head_directory: &lillux::PinnedDirectory,
     ref_path: &str,
     previous_hash: Option<&str>,
     target_hash: &str,
+    observed_head: Option<&str>,
     advancer: &HeadAdvancer,
     signer: &dyn Signer,
     trust_store: &TrustStore,
 ) -> Result<()> {
     advancer.validate()?;
-    let name = record_name(previous_hash, target_hash);
-    let file_name = std::ffi::OsStr::new(&name);
-    if let Some(existing) = read_record(head_directory, file_name, trust_store)? {
-        if existing.ref_path != ref_path
-            || existing.previous_hash.as_deref() != previous_hash
-            || existing.target_hash != target_hash
+    let existing = occurrences(head_directory, previous_hash, target_hash)?;
+    let next = existing.last().map_or(1, |latest| latest + 1);
+    if let Some(&latest) = existing.last() {
+        let name = record_name(previous_hash, target_hash, latest);
+        let record = read_record(head_directory, std::ffi::OsStr::new(&name), trust_store)?
+            .with_context(|| format!("head advance record {name} vanished"))?;
+        if record.ref_path != ref_path
+            || record.previous_hash.as_deref() != previous_hash
+            || record.target_hash != target_hash
+            || record.occurrence != latest
         {
             bail!("head advance record {name} does not describe this advance");
         }
-        if &existing.advancer != advancer {
-            bail!(
-                "head_advance_key_conflict: the advance {} -> {target_hash} of {ref_path} is \
-                 already recorded for key {}, not {}",
-                previous_hash.unwrap_or(GENESIS),
-                existing.advancer.key,
-                advancer.key
-            );
+        // The head ref is exactly the one this record observed: its swap
+        // never happened. The same advancer retrying reuses it.
+        let unswapped = record.observed_head.as_deref() == observed_head;
+        if unswapped && &record.advancer == advancer {
+            return Ok(());
         }
-        return Ok(());
     }
+    let name = record_name(previous_hash, target_hash, next);
+    let file_name = std::ffi::OsStr::new(&name);
     let mut record = HeadAdvanceRecord {
         schema: HEAD_ADVANCE_SCHEMA,
         kind: HEAD_ADVANCE_KIND.to_owned(),
         ref_path: ref_path.to_owned(),
         previous_hash: previous_hash.map(str::to_owned),
         target_hash: target_hash.to_owned(),
+        occurrence: next,
+        observed_head: observed_head.map(str::to_owned),
         advancer: advancer.clone(),
         recorded_at: lillux::time::iso8601_now(),
         signer: signer.fingerprint().to_owned(),
@@ -224,20 +274,25 @@ fn read_record(
     Ok(Some(record))
 }
 
-/// The verified record for an exact advance of the head in
-/// `head_directory`, if one was recorded. Readers look records up only by
-/// the (previous, new) pair of an advance that actually happened.
-pub fn read_head_advance(
+/// Every verified occurrence of one (previous, new) advance of the head in
+/// `head_directory`, ascending. A record whose advancer is the node key
+/// with no `via_root` and whose key is the node's is a node rewrite
+/// (compaction); readers show it as such.
+pub fn read_head_advances(
     head_directory: &lillux::PinnedDirectory,
     previous_hash: Option<&str>,
     target_hash: &str,
     trust_store: &TrustStore,
-) -> Result<Option<HeadAdvanceRecord>> {
-    read_record(
-        head_directory,
-        std::ffi::OsStr::new(&record_name(previous_hash, target_hash)),
-        trust_store,
-    )
+) -> Result<Vec<HeadAdvanceRecord>> {
+    let mut records = Vec::new();
+    for occurrence in occurrences(head_directory, previous_hash, target_hash)? {
+        let name = record_name(previous_hash, target_hash, occurrence);
+        if let Some(record) = read_record(head_directory, std::ffi::OsStr::new(&name), trust_store)?
+        {
+            records.push(record);
+        }
+    }
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -245,11 +300,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn record_names_key_the_exact_advance() {
+    fn record_names_key_each_occurrence_of_an_advance() {
         let a = "a".repeat(64);
         let b = "b".repeat(64);
-        assert_eq!(record_name(None, &a), format!("advance-genesis-{a}"));
-        assert_eq!(record_name(Some(&a), &b), format!("advance-{a}-{b}"));
+        assert_eq!(record_name(None, &a, 1), format!("advance-genesis-{a}-1"));
+        assert_eq!(record_name(Some(&a), &b, 3), format!("advance-{a}-{b}-3"));
     }
 
     #[test]

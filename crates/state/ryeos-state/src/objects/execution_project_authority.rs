@@ -152,7 +152,7 @@ pub enum PinnedTerminalPublication {
     Discard,
     RetainResult,
     RetainCurrentHead {
-        principal_key: String,
+        owner_component: String,
         project_hash: String,
         expected_hash: String,
     },
@@ -1008,7 +1008,7 @@ impl ExecutionProjectAuthority {
                 if let PinnedProjectRealization::Cow {
                     terminal_publication:
                         PinnedTerminalPublication::RetainCurrentHead {
-                            principal_key,
+                            owner_component: principal_key,
                             project_hash,
                             expected_hash,
                         },
@@ -1882,7 +1882,7 @@ mod tests {
             base.clone(),
             PinnedProjectRealization::Cow {
                 terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key: principal_key.clone(),
+                    owner_component: principal_key.clone(),
                     project_hash: project_hash.clone(),
                     expected_hash: base.clone(),
                 },
@@ -1896,7 +1896,7 @@ mod tests {
         restarted.validate().unwrap();
         let identity = restarted.stable_cache_identity().unwrap();
         assert_eq!(
-            identity["realization"]["terminal_publication"]["principal_key"].as_str(),
+            identity["realization"]["terminal_publication"]["owner_component"].as_str(),
             Some(principal_key.as_str())
         );
         assert_eq!(
@@ -1924,7 +1924,7 @@ mod tests {
             base,
             PinnedProjectRealization::Cow {
                 terminal_publication: PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key,
+                    owner_component: principal_key,
                     project_hash,
                     expected_hash: "e".repeat(64),
                 },

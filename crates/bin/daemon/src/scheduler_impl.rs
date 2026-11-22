@@ -83,7 +83,7 @@ impl AppSchedulerContext {
             PinnedProjectRealization::Cow {
                 terminal_publication:
                     PinnedTerminalPublication::RetainCurrentHead {
-                        principal_key,
+                        owner_component: principal_key,
                         project_hash,
                         expected_hash,
                     },

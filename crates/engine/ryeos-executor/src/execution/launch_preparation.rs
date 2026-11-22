@@ -3209,7 +3209,7 @@ mod ref_binding_projection_tests {
         for publication in [
             PinnedTerminalPublication::RetainResult,
             PinnedTerminalPublication::RetainCurrentHead {
-                principal_key: format!("pid-v1-{}", "b".repeat(64)),
+                owner_component: format!("pid-v1-{}", "b".repeat(64)),
                 project_hash: "c".repeat(64),
                 expected_hash: hash.clone(),
             },

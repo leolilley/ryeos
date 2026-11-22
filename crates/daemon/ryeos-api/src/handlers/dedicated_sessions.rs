@@ -323,7 +323,7 @@ fn candidate_publication_pairing_matches(
         (
             OwnerDecision | RetainedForReview,
             RetainCurrentHead {
-                principal_key,
+                owner_component: principal_key,
                 project_hash,
                 expected_hash,
             },
@@ -7850,7 +7850,7 @@ async fn start_candidate_operation(
             ryeos_state::objects::PinnedProjectRealization::Cow {
                 terminal_publication:
                     ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                        principal_key: principal_key.clone(),
+                        owner_component: principal_key.clone(),
                         project_hash: project_hash.clone(),
                         expected_hash: base_snapshot_hash.clone(),
                     },
@@ -8654,7 +8654,7 @@ fn candidate_publication_authority(
         let ryeos_state::objects::PinnedProjectRealization::Cow {
             terminal_publication:
                 ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key,
+                    owner_component: principal_key,
                     project_hash,
                     expected_hash,
                 },
@@ -8954,7 +8954,7 @@ fn verify_candidate_integration_terminal(
         ryeos_state::objects::PinnedProjectRealization::Cow {
             terminal_publication:
                 ryeos_state::objects::PinnedTerminalPublication::RetainCurrentHead {
-                    principal_key,
+                    owner_component: principal_key,
                     project_hash,
                     expected_hash,
                 },
@@ -11336,7 +11336,7 @@ mod tests {
             ryeos_state::project_identity::ProjectHeadKey::owned_by(&owner, &name("demo"));
         let base = "b".repeat(64);
         let pin = |principal_key: &str, project: &str, expected: &str| RetainCurrentHead {
-            principal_key: principal_key.to_owned(),
+            owner_component: principal_key.to_owned(),
             project_hash: lillux::sha256_hex(project.as_bytes()),
             expected_hash: expected.to_owned(),
         };
