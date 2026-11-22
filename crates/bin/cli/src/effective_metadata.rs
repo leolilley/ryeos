@@ -55,7 +55,11 @@ pub fn resolve_effective_composed_value(
         .with_context(|| format!("parse canonical ref '{execute_ref}'"))?;
     let item = engine
         .effective_item(EffectiveItemRequest {
-            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            // Help metadata has no node registry reader, so a live checkout
+            // states no project identity here.
+            logical_project: ryeos_engine::contracts::unestablished_project(
+                &SubjectResolutionAuthority::for_live_project_root(project_path),
+            ),
             item_ref,
             expected_kind: None,
             project_root: project_path.map(Path::to_path_buf),

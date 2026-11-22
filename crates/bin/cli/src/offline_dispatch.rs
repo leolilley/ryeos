@@ -149,7 +149,7 @@ pub async fn try_offline_dispatch(
     )?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
-    let item = effective_item(&engine, canonical, project_path, execute_ref)?;
+    let item = effective_item(&engine, app_root, canonical, project_path, execute_ref)?;
     // `--live-project` is the same explicit intent the daemon path carries:
     // strip it from the parameter tail, enforce it where the tool runs.
     let live_flags: Vec<_> = matched
@@ -208,6 +208,7 @@ pub async fn try_offline_dispatch(
         )?;
         let execution_item = effective_item(
             &execution_engine,
+            app_root,
             CanonicalRef::parse(execute_ref).map_err(|error| local_err(error.into()))?,
             project_path,
             execute_ref,
@@ -322,21 +323,60 @@ fn boot_engine(
 
 fn effective_item(
     engine: &ryeos_engine::engine::Engine,
+    app_root: &Path,
     canonical: CanonicalRef,
     project_path: &str,
     execute_ref: &str,
 ) -> Result<EffectiveItem, CliError> {
-    effective_item_from_project_root(engine, canonical, project_root(project_path), execute_ref)
+    effective_item_from_project_root(
+        engine,
+        app_root,
+        canonical,
+        project_root(project_path),
+        execute_ref,
+    )
+}
+
+/// The project identity a live checkout states for this node's local
+/// operator: `Stated` only when the operator registered the checkout under its
+/// own owner and the tree declares that name. An unreadable registry or
+/// identity states nothing.
+pub(crate) fn operator_live_project(
+    app_root: &Path,
+    checkout: &Path,
+) -> ryeos_engine::contracts::LogicalProject {
+    let stated = || -> anyhow::Result<ryeos_engine::contracts::LogicalProject> {
+        let operator =
+            ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)?;
+        let node_key = ryeos_engine::trust::load_node_verifying_key(app_root)?;
+        ryeos_app::project_registry::live_signer_project(
+            app_root,
+            &node_key,
+            &operator.principal_id(),
+            true,
+            checkout,
+        )
+    };
+    stated().unwrap_or(ryeos_engine::contracts::LogicalProject::Absent(
+        ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+    ))
 }
 
 fn effective_item_from_project_root(
     engine: &ryeos_engine::engine::Engine,
+    app_root: &Path,
     canonical: CanonicalRef,
     project_root: Option<PathBuf>,
     execute_ref: &str,
 ) -> Result<EffectiveItem, CliError> {
+    let signer_project = match project_root.as_deref() {
+        Some(root) => operator_live_project(app_root, root),
+        None => ryeos_engine::contracts::unestablished_project(
+            &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+        ),
+    };
     let request = ryeos_engine::engine::EffectiveItemRequest {
-        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        logical_project: signer_project,
         item_ref: canonical,
         expected_kind: None,
         subject_resolution_authority:
@@ -1004,7 +1044,7 @@ fn dispatch_service(
     let canonical = CanonicalRef::parse(&tool_ref).map_err(|e| CliError::Local {
         detail: format!("invalid offline tool ref '{tool_ref}': {e}"),
     })?;
-    let tool_item = effective_item(engine, canonical, project_path, &tool_ref)?;
+    let tool_item = effective_item(engine, app_root, canonical, project_path, &tool_ref)?;
     exec_tool(
         engine,
         &tool_item,

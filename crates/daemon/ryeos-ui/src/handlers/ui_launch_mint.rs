@@ -286,7 +286,7 @@ pub(crate) fn compile_session_binding(
         .engine
         .with_checked_bundle_generation(|generation| -> Result<_> {
             let request = EffectiveItemRequest {
-                logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+                logical_project: prepared.exec_ctx.plan_ctx.signer_project().clone(),
                 expected_kind: Some(root_ref.kind.clone()),
                 item_ref: root_ref,
                 project_root: project_authority.map(|_| project_path.clone()),
@@ -546,7 +546,11 @@ pub fn revalidate_binding_authority(
     let project_root = resolution_root;
     let item_ref = CanonicalRef::parse(&compiled.binding.surface.canonical_ref)?;
     let request = EffectiveItemRequest {
-        logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        // Revalidation has no caller, so a live checkout states no identity
+        // here.
+        logical_project: ryeos_engine::contracts::unestablished_project(
+            &SubjectResolutionAuthority::for_live_project_root(project_root),
+        ),
         expected_kind: Some(item_ref.kind.clone()),
         item_ref,
         project_root: project_root.map(std::path::Path::to_path_buf),

@@ -610,7 +610,6 @@ fn capture_source_closure(
             "effective program attempted to pre-populate reserved source closure authority"
         );
     }
-    let pinned = project.is_some();
     let kind_schema = engine
         .kinds
         .get(kind)
@@ -820,12 +819,7 @@ fn capture_source_closure(
                 resolution,
                 &engine.trust_store,
                 kind,
-                owner_signer_project_root(
-                    roots,
-                    resolution.root.source_space,
-                    pinned,
-                    content_root,
-                ),
+                owner_signer_project(roots, resolution.root.source_space),
             )?
         }
         ryeos_engine::kind_registry::SourceClosureTestimonyDecl::OwnerSignedDigest => {
@@ -1131,23 +1125,18 @@ fn require_current_source_policy(
     Ok(())
 }
 
-/// The project a source file's signer scope is matched against. A live
-/// project is its own; a pinned generation's content root is a temporary
-/// checkout, so it is matched only on the logical project the resolution roots
-/// state, and a pinned source with no stated project names none.
-fn owner_signer_project_root<'a>(
+/// The project identity a source file's signer scope is matched against: the
+/// one the resolution roots state, for project-space sources only. A checkout
+/// path, live or pinned, never names a project, so a source whose roots state
+/// no identity is matched against none.
+fn owner_signer_project<'a>(
     roots: &'a ryeos_engine::item_resolution::ResolutionRoots,
     source_space: ItemSpace,
-    pinned: bool,
-    content_root: &'a Path,
-) -> Option<&'a Path> {
+) -> &'a ryeos_engine::contracts::LogicalProject {
     if !matches!(source_space, ItemSpace::Project) {
-        return None;
+        return &ryeos_engine::trust::NO_PROJECT;
     }
-    roots
-        .logical_project
-        .stated()
-        .or_else(|| (!pinned).then_some(content_root))
+    roots.signer_project()
 }
 
 fn verify_owner_signed_files(
@@ -1157,7 +1146,7 @@ fn verify_owner_signed_files(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     trust_store: &ryeos_engine::trust::TrustStore,
     kind: &str,
-    project_root: Option<&Path>,
+    project: &ryeos_engine::contracts::LogicalProject,
 ) -> anyhow::Result<ryeos_state::objects::SourceTestimonyProof> {
     let owner = resolution
         .root
@@ -1207,11 +1196,7 @@ fn verify_owner_signed_files(
             &header,
             &format.signature,
             trust_store,
-            &ryeos_engine::trust::SignerContext::new(
-                resolution.root.source_space,
-                kind,
-                project_root,
-            ),
+            &ryeos_engine::trust::SignerContext::new(resolution.root.source_space, kind, project),
         )?;
         if trust != ryeos_engine::contracts::TrustClass::Trusted
             || signer.as_ref().map(|signer| signer.0.as_str()) != Some(owner)
@@ -1745,78 +1730,57 @@ mod retained_current_worker_source_controls {
 }
 
 #[cfg(test)]
-mod owner_signer_project_root_controls {
-    use std::path::{Path, PathBuf};
-
-    use ryeos_engine::contracts::ItemSpace;
+mod owner_signer_project_controls {
+    use ryeos_engine::contracts::{ItemSpace, LogicalProject, LogicalProjectAbsence};
     use ryeos_engine::item_resolution::ResolutionRoots;
 
-    use super::owner_signer_project_root;
+    use super::owner_signer_project;
+
+    fn stated() -> LogicalProject {
+        LogicalProject::Stated(format!("fp:{}/alpha", "a".repeat(64)).parse().unwrap())
+    }
 
     #[test]
-    fn a_pinned_checkout_is_judged_as_its_logical_project() {
-        let checkout = Path::new("/tmp/generation-7/checkout");
-        let logical = PathBuf::from("/work/registered-project");
-        let pinned = ResolutionRoots::from_flat(
-            None,
-            Vec::new(),
-            ryeos_engine::contracts::LogicalProject::Stated(logical.clone()),
-        );
+    fn a_stated_identity_is_the_signer_project_of_project_space() {
+        let roots = ResolutionRoots::from_flat(None, Vec::new(), stated());
         assert_eq!(
-            owner_signer_project_root(&pinned, ItemSpace::Project, true, checkout),
-            Some(logical.as_path()),
-            "a signer scoped to the logical project must be matched on it, not on the checkout"
-        );
-
-        let live = ResolutionRoots::from_flat(
-            None,
-            Vec::new(),
-            ryeos_engine::contracts::LogicalProject::MaterializedLive,
-        );
-        assert_eq!(
-            owner_signer_project_root(&live, ItemSpace::Project, false, checkout),
-            Some(checkout),
-            "a live project is its own logical project"
+            owner_signer_project(&roots, ItemSpace::Project),
+            &stated(),
+            "a signer scoped to the identity must be matched on it"
         );
     }
 
     #[test]
     fn only_project_space_names_a_signer_project() {
-        let checkout = Path::new("/tmp/generation-7/checkout");
-        let pinned = ResolutionRoots::from_flat(
-            None,
-            Vec::new(),
-            ryeos_engine::contracts::LogicalProject::Stated(PathBuf::from(
-                "/work/registered-project",
-            )),
-        );
+        let roots = ResolutionRoots::from_flat(None, Vec::new(), stated());
         assert_eq!(
-            owner_signer_project_root(&pinned, ItemSpace::Bundle, true, checkout),
-            None
+            owner_signer_project(&roots, ItemSpace::Bundle),
+            &ryeos_engine::trust::NO_PROJECT
         );
     }
 
     #[test]
-    fn a_pinned_source_with_no_stated_project_names_none() {
-        let checkout = Path::new("/tmp/generation-7/checkout");
-        let unstated = ResolutionRoots::from_flat(
-            None,
-            Vec::new(),
-            ryeos_engine::contracts::LogicalProject::Absent(
-                ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
-            ),
-        );
-        assert_eq!(
-            owner_signer_project_root(&unstated, ItemSpace::Project, true, checkout),
-            None,
-            "a temporary checkout path must never reach a signer scope"
-        );
+    fn a_checkout_without_a_stated_identity_names_none() {
+        for absence in [
+            LogicalProjectAbsence::NotRegistered,
+            LogicalProjectAbsence::NotStated,
+        ] {
+            let roots =
+                ResolutionRoots::from_flat(None, Vec::new(), LogicalProject::Absent(absence));
+            assert!(
+                matches!(
+                    owner_signer_project(&roots, ItemSpace::Project),
+                    LogicalProject::Absent(_)
+                ),
+                "a checkout path must never reach a signer scope"
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod owner_signed_files_project_scope_controls {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use lillux::crypto::SigningKey;
     use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
@@ -1831,7 +1795,7 @@ mod owner_signed_files_project_scope_controls {
     };
     use ryeos_state::ignore::{IgnoreConfig, IgnoreMatcher};
 
-    use super::{owner_signer_project_root, verify_owner_signed_files};
+    use super::{owner_signer_project, verify_owner_signed_files};
 
     const SCHEMA: &str = r##"location:
   directory: workers
@@ -1952,8 +1916,8 @@ composer: handler:ryeos/core/identity
         }
     }
 
-    /// The author is a project signer scoped to exactly one project path.
-    fn scoped_store(fixture: &Fixture, project: &Path) -> TrustStore {
+    /// The author is a project signer scoped to exactly one project identity.
+    fn scoped_store(fixture: &Fixture, project: &str) -> TrustStore {
         let node_key = SigningKey::from_bytes(&[123; 32]).verifying_key();
         let mut record = SignerRecord::new(
             &fixture.author.verifying_key(),
@@ -1962,7 +1926,7 @@ composer: handler:ryeos/core/identity
             SignerScope {
                 spaces: vec![SignerSpace::Project],
                 kinds: vec!["*".to_string()],
-                projects: vec![project.to_string_lossy().into_owned()],
+                projects: vec![project.parse().unwrap()],
             },
             SignerStatus::Active,
         );
@@ -1970,13 +1934,16 @@ composer: handler:ryeos/core/identity
         TrustStore::from_registry(node_key, vec![record]).unwrap()
     }
 
-    /// Runs the real owner-testimony verifier on the project root the real
+    fn identity(name: &str) -> String {
+        format!("fp:{}/{name}", "a".repeat(64))
+    }
+
+    /// Runs the real owner-testimony verifier on the project identity the real
     /// scope helper selects for these roots.
     fn judge(
         fixture: &Fixture,
         store: &TrustStore,
         roots: &ResolutionRoots,
-        pinned: bool,
     ) -> anyhow::Result<ryeos_state::objects::SourceTestimonyProof> {
         let kind_schema = fixture.registry.get("worker").unwrap();
         verify_owner_signed_files(
@@ -1986,27 +1953,21 @@ composer: handler:ryeos/core/identity
             &fixture.resolution,
             store,
             "worker",
-            owner_signer_project_root(
-                roots,
-                fixture.resolution.root.source_space,
-                pinned,
-                fixture.checkout.path(),
-            ),
+            owner_signer_project(roots, fixture.resolution.root.source_space),
         )
     }
 
     #[test]
-    fn a_pinned_consumer_is_admitted_only_on_its_stated_logical_project() {
+    fn a_consumer_is_admitted_only_on_its_stated_identity() {
         let fixture = fixture();
-        let logical = PathBuf::from("/work/registered-project");
-        let store = scoped_store(&fixture, &logical);
+        let store = scoped_store(&fixture, &identity("alpha"));
 
         let stated = ResolutionRoots::from_flat(
             None,
             Vec::new(),
-            ryeos_engine::contracts::LogicalProject::Stated(logical),
+            ryeos_engine::contracts::LogicalProject::Stated(identity("alpha").parse().unwrap()),
         );
-        assert!(judge(&fixture, &store, &stated, true).is_ok());
+        assert!(judge(&fixture, &store, &stated).is_ok());
 
         let unstated = ResolutionRoots::from_flat(
             None,
@@ -2015,39 +1976,31 @@ composer: handler:ryeos/core/identity
                 ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
             ),
         );
-        let refusal = judge(&fixture, &store, &unstated, true)
-            .unwrap_err()
-            .to_string();
+        let refusal = judge(&fixture, &store, &unstated).unwrap_err().to_string();
         assert!(refusal.contains("no current owner testimony"), "{refusal}");
 
         let other = ResolutionRoots::from_flat(
             None,
             Vec::new(),
-            ryeos_engine::contracts::LogicalProject::Stated(PathBuf::from("/work/other-project")),
+            ryeos_engine::contracts::LogicalProject::Stated(identity("beta").parse().unwrap()),
         );
-        let refusal = judge(&fixture, &store, &other, true)
-            .unwrap_err()
-            .to_string();
+        let refusal = judge(&fixture, &store, &other).unwrap_err().to_string();
         assert!(refusal.contains("no current owner testimony"), "{refusal}");
     }
 
     #[test]
-    fn a_live_project_is_judged_on_its_own_root() {
+    fn a_live_checkout_is_never_matched_without_a_stated_identity() {
         let fixture = fixture();
-        let own = fixture.checkout.path().canonicalize().unwrap();
         let live = ResolutionRoots::from_flat(
             None,
             Vec::new(),
-            ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            ryeos_engine::contracts::LogicalProject::Absent(
+                ryeos_engine::contracts::LogicalProjectAbsence::NotRegistered,
+            ),
         );
 
-        let store = scoped_store(&fixture, &own);
-        assert!(judge(&fixture, &store, &live, false).is_ok());
-
-        let elsewhere = scoped_store(&fixture, Path::new("/work/registered-project"));
-        let refusal = judge(&fixture, &elsewhere, &live, false)
-            .unwrap_err()
-            .to_string();
+        let store = scoped_store(&fixture, &identity("alpha"));
+        let refusal = judge(&fixture, &store, &live).unwrap_err().to_string();
         assert!(refusal.contains("no current owner testimony"), "{refusal}");
     }
 }

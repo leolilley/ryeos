@@ -289,8 +289,29 @@ impl TopologyBuilder {
     }
 }
 
+/// The project identity a live checkout states for the caller of this node:
+/// `Stated` only when the caller holds live write, registered the checkout
+/// under its own owner, and the tree declares that name. A call with no
+/// checkout is projectless.
+pub(crate) fn seat_live_project(
+    state: &AppState,
+    principal: &str,
+    scopes: &[String],
+    checkout: Option<&std::path::Path>,
+) -> ryeos_engine::contracts::LogicalProject {
+    match checkout {
+        Some(root) => {
+            ryeos_app::project_registry::live_logical_project(state, principal, scopes, root)
+        }
+        None => ryeos_engine::contracts::unestablished_project(
+            &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+        ),
+    }
+}
+
 pub(crate) fn build_topology(
     state: &AppState,
+    signer_project: &ryeos_engine::contracts::LogicalProject,
     project_resolution_root: Option<String>,
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     project_identity: Option<String>,
@@ -300,10 +321,9 @@ pub(crate) fn build_topology(
     let project_path = project_resolution_root
         .as_ref()
         .map(std::path::PathBuf::from);
-    let roots = state.engine.resolution_roots(
-        project_path,
-        ryeos_engine::contracts::LogicalProject::MaterializedLive,
-    );
+    let roots = state
+        .engine
+        .resolution_roots(project_path, signer_project.clone());
 
     for kind in state.engine.kinds.kinds() {
         let Some(schema) = state.engine.kinds.get(kind) else {
@@ -349,7 +369,7 @@ pub(crate) fn build_topology(
                     &state.engine.trust_store,
                     resolution.winner_space,
                     kind,
-                    project_resolution_root.as_deref().map(std::path::Path::new),
+                    signer_project,
                 ),
             });
 
@@ -858,10 +878,10 @@ pub(crate) fn classify_trust(
     trust_store: &ryeos_engine::trust::TrustStore,
     space: ItemSpace,
     kind: &str,
-    project_root: Option<&std::path::Path>,
+    project: &ryeos_engine::contracts::LogicalProject,
 ) -> Option<TrustSummary> {
     let raw = crate::seat_auth::read_whole_item_source(path, access)?;
-    classify_trust_of_source(&raw, envelope, trust_store, space, kind, project_root)
+    classify_trust_of_source(&raw, envelope, trust_store, space, kind, project)
 }
 
 /// Trust class of item source bytes already read, so a caller that shows text
@@ -872,7 +892,7 @@ pub(crate) fn classify_trust_of_source(
     trust_store: &ryeos_engine::trust::TrustStore,
     space: ItemSpace,
     kind: &str,
-    project_root: Option<&std::path::Path>,
+    project: &ryeos_engine::contracts::LogicalProject,
 ) -> Option<TrustSummary> {
     let Some(envelope) = envelope else {
         return Some(TrustSummary {
@@ -889,7 +909,7 @@ pub(crate) fn classify_trust_of_source(
     };
 
     let signer = Some(header.signer_fingerprint.clone());
-    let ctx = ryeos_engine::trust::SignerContext::new(space, kind, project_root);
+    let ctx = ryeos_engine::trust::SignerContext::new(space, kind, project);
     let class = match verify_item_signature(raw, &header, envelope, trust_store, &ctx) {
         Ok((TrustClass::Trusted, _)) => "trusted",
         Ok((TrustClass::Untrusted, _)) => "untrusted",
@@ -1147,7 +1167,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
             &trust_store,
             ItemSpace::Bundle,
             "config",
-            None,
+            &ryeos_engine::trust::NO_PROJECT,
         )
         .expect("signed item should classify");
         assert_eq!(trusted.class, "trusted");
@@ -1164,7 +1184,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
             &trust_store,
             ItemSpace::Bundle,
             "config",
-            None,
+            &ryeos_engine::trust::NO_PROJECT,
         )
         .expect("tampered signed item should classify");
         assert_ne!(tampered.class, "trusted");

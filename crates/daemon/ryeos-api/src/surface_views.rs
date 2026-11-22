@@ -368,7 +368,9 @@ pub fn embed_surface_views(
             CanonicalRef::parse(view_ref).map_err(|e| format!("invalid view ref: {e}"))?;
         engine
             .effective_item(EffectiveItemRequest {
-                logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+                logical_project: ryeos_engine::contracts::unestablished_project(
+                    &SubjectResolutionAuthority::for_live_project_root(project_root),
+                ),
                 item_ref,
                 expected_kind: Some("view".to_string()),
                 project_root: project_root.map(Path::to_path_buf),
@@ -716,7 +718,9 @@ fn resolve_identity_items_in_generation(
             Ok(item_ref) => {
                 valid_refs.push(view_ref);
                 requests.push(EffectiveItemRequest {
-                    logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+                    logical_project: ryeos_engine::contracts::unestablished_project(
+                        &SubjectResolutionAuthority::for_live_project_root(project_root),
+                    ),
                     item_ref,
                     expected_kind: Some(kind.to_string()),
                     project_root: project_root.map(Path::to_path_buf),

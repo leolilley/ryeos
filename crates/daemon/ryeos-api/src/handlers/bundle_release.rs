@@ -2551,7 +2551,12 @@ async fn run_release_graph(
         let site_id = state.threads.site_id().to_owned();
         let origin_site_id = context.execution_origin(&site_id);
         let plan_ctx = ryeos_engine::contracts::PlanContext {
-            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
+            logical_project: ryeos_app::project_registry::live_logical_project(
+                &state,
+                &context.fingerprint,
+                &context.scopes,
+                &project_path,
+            ),
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: context.fingerprint.clone(),
