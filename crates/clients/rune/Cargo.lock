@@ -3431,6 +3431,7 @@ dependencies = [
  "reqwest",
  "ryeos-client-base",
  "ryeos-client-transport",
+ "ryeos-http-egress",
  "ryeos-ui-presentation-contract",
  "serde",
  "serde_json",
@@ -3451,9 +3452,17 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
+ "ryeos-http-egress",
  "ryeos-request-signing",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ryeos-http-egress"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
 ]
 
 [[package]]

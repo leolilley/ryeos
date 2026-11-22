@@ -492,6 +492,19 @@ pub(super) fn handle_provider_attempt_prepare(
         request.attempt_number,
         &coordinate_key,
     );
+    // The resumed runtime's offer to retry a coordinate a restart cut. The
+    // sealed launch authority judges it here, with the same transport and
+    // ceiling rule as an in-process unknown-outcome retry; the reserve applies
+    // the verdict only if the coordinate really was cut by a restart.
+    let restart_retry_refusal = request.restart_retry.as_ref().and_then(|decision| {
+        restart_retry_refusal(
+            decision,
+            &coordinate.transport,
+            sealed
+                .external_effect_authority
+                .unknown_outcome_retry_ceiling,
+        )
+    });
     let outcome = ledger.reserve_provider_attempt(ReserveArgs {
         thread_id: &cap.thread_id,
         launch_generation: launch_owner,
@@ -507,6 +520,12 @@ pub(super) fn handle_provider_attempt_prepare(
         root_chain_id: &cap.chain_root_id,
         audit_chain_root_id: &cap.chain_root_id,
         now_ms: now_ms(),
+        restart_retry: request.restart_retry.as_ref().map(|decision| {
+            ryeos_app::accounting_db::RestartRetryOffer {
+                decision,
+                refusal: restart_retry_refusal.as_deref(),
+            }
+        }),
     })?;
     let response = match outcome {
         ReserveOutcome::Reserved {
@@ -635,6 +654,25 @@ fn check_unknown_outcome_retry(
         );
     }
     Ok(())
+}
+
+/// Why the sealed launch authority refuses the retry a resumed runtime offers
+/// for a coordinate a restart cut, or `None` when it admits another contact.
+/// A cut attempt is an unknown outcome by construction, so the offer must say
+/// so and clears exactly the bar an in-process unknown-outcome retry clears:
+/// a remote transport and a failed attempt number within the sealed ceiling,
+/// which is zero unless the directive declared repeatable contact.
+fn restart_retry_refusal(
+    decision: &ryeos_accounting::ProviderRetryDecision,
+    transport: &TransportCoordinate,
+    sealed_ceiling: u32,
+) -> Option<String> {
+    if !decision.reason.leaves_outcome_unknown() {
+        return Some("the offered retry reason does not leave the outcome unknown".to_owned());
+    }
+    check_unknown_outcome_retry(decision, transport, sealed_ceiling)
+        .err()
+        .map(|error| format!("{error:#}"))
 }
 
 pub(super) fn handle_provider_attempt_settle(
@@ -1706,6 +1744,45 @@ mod tests {
             check_unknown_outcome_retry(&retry_decision(9, reason), &local_worker(), 0).unwrap();
         }
     }
+
+    #[test]
+    fn a_restart_retry_offer_clears_the_same_bar_as_an_in_process_unknown_outcome_retry() {
+        use ryeos_accounting::ProviderRetryReason as Reason;
+        let mid_stream = |attempt| {
+            retry_decision(
+                attempt,
+                Reason::MidStream {
+                    live_output_events_emitted: 2,
+                },
+            )
+        };
+        // Repeatable directive (ceiling 2) on a remote route: attempts 1 and 2
+        // are admitted, the third is past the ceiling.
+        assert_eq!(restart_retry_refusal(&mid_stream(1), &remote(), 2), None);
+        assert_eq!(restart_retry_refusal(&mid_stream(2), &remote(), 2), None);
+        assert!(
+            restart_retry_refusal(&mid_stream(3), &remote(), 2)
+                .expect("ceiling spent")
+                .contains("exceeds the sealed ceiling 2")
+        );
+        // A directive that is not repeatable seals ceiling 0.
+        assert!(restart_retry_refusal(&mid_stream(1), &remote(), 0).is_some());
+        // A local worker never gains repeated contact.
+        assert!(
+            restart_retry_refusal(&mid_stream(1), &local_worker(), 5)
+                .expect("local worker")
+                .contains("transport does not admit repeated contact")
+        );
+        // A known-outcome reason is not a restart cut.
+        assert!(
+            restart_retry_refusal(
+                &retry_decision(1, Reason::Status { code: 503 }),
+                &remote(),
+                5
+            )
+            .is_some()
+        );
+    }
     use ryeos_accounting::{
         ChargeReconciliationAuthority, HexDigest, SpendAccounting, SpendBoundAuthority,
         SpendBoundCommitments, UsdNanos, VerifiedPreparedSpendBound,
@@ -1848,6 +1925,7 @@ mod tests {
                 root_chain_id: thread_id,
                 audit_chain_root_id: thread_id,
                 now_ms: 1,
+                restart_retry: None,
             })
             .unwrap()
         {
@@ -2258,6 +2336,7 @@ mod tests {
                 root_chain_id: thread_id,
                 audit_chain_root_id: thread_id,
                 now_ms: 1,
+                restart_retry: None,
             })
             .unwrap()
         else {

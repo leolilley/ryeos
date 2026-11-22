@@ -606,8 +606,8 @@ mod tests {
     use super::*;
     use crate::canonical_ref::CanonicalRef;
     use crate::contracts::{
-        ItemMetadata, ResolvedItem, ResolvedSourceFormat, SignatureEnvelope, SignatureHeader,
-        SignerFingerprint,
+        ItemMetadata, LogicalProject, LogicalProjectAbsence, ResolvedItem, ResolvedSourceFormat,
+        SignatureEnvelope, SignatureHeader, SignerFingerprint,
     };
     use crate::kind_registry::{ExecutionSchema, ThreadHistoryPolicyDecl, ThreadResultPolicyDecl};
 
@@ -627,7 +627,7 @@ mod tests {
     fn verified_item(trust_class: TrustClass) -> VerifiedItem {
         VerifiedItem {
             resolved: ResolvedItem {
-                logical_project_root: None,
+                logical_project: LogicalProject::Absent(LogicalProjectAbsence::Projectless),
                 canonical_ref: CanonicalRef::parse("service:test/example").unwrap(),
                 kind: "service".to_string(),
                 source_path: PathBuf::from("/bundle/.ai/services/test/example.yaml"),

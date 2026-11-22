@@ -207,7 +207,12 @@ fn load_definition(state: &AppState, definition_ref: &str) -> Result<(Definition
         .into());
     }
     let engine = &state.engine;
-    let roots = engine.resolution_roots(None);
+    let roots = engine.resolution_roots(
+        None,
+        ryeos_engine::contracts::LogicalProject::Absent(
+            ryeos_engine::contracts::LogicalProjectAbsence::Projectless,
+        ),
+    );
     let load_context = ConfigLoadContext {
         roots: &roots,
         parsers: &engine.parser_dispatcher,

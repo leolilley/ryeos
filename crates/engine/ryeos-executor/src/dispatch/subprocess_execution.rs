@@ -275,7 +275,7 @@ pub(crate) async fn dispatch_subprocess(
             let effective = ctx
                 .engine
                 .effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: verified.resolved.logical_project_root.clone(),
+                    logical_project: verified.resolved.logical_project.clone(),
                     item_ref: verified.resolved.canonical_ref.clone(),
                     expected_kind: Some(current_ref.kind.clone()),
                     project_root: verified.resolved.materialized_project_root.clone(),
@@ -525,19 +525,16 @@ async fn dispatch_managed_subprocess(
             &launch_contract,
             root_admission.resolution_subject_authority(),
             handler_context.as_ref(),
-            &ctx.engine
-                .resolution_roots(
-                    root_admission
-                        .resolution_workspace()
-                        .map(std::path::Path::to_path_buf),
-                )
-                .with_logical_project_root(
-                    root_admission
-                        .verified_subject()
-                        .resolved
-                        .logical_project_root
-                        .clone(),
-                ),
+            &ctx.engine.resolution_roots(
+                root_admission
+                    .resolution_workspace()
+                    .map(std::path::Path::to_path_buf),
+                root_admission
+                    .verified_subject()
+                    .resolved
+                    .logical_project
+                    .clone(),
+            ),
         )
         .map_err(DispatchError::Internal)?;
         let dependencies_ready = dependencies.admission_ready;
@@ -798,15 +795,14 @@ fn validate_managed_effective_program(
         })
     })
     .transpose()?;
-    let roots = engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
-        .with_logical_project_root(
-            admission
-                .verified_subject()
-                .resolved
-                .logical_project_root
-                .clone(),
-        );
+    let roots = engine.resolution_roots(
+        resolution_project_root.map(Path::to_path_buf),
+        admission
+            .verified_subject()
+            .resolved
+            .logical_project
+            .clone(),
+    );
     let request_snapshot = match admission.admitted_request_snapshot() {
         Some(admitted) => engine.effective_request_snapshot_under_admitted_authority(
             resolution_project_root.ok_or_else(|| {
@@ -1351,15 +1347,14 @@ fn validate_direct_source_closure(
         ))
     })?;
     let resolution = admission.resolution_output();
-    let roots = engine
-        .resolution_roots(project_root.map(Path::to_path_buf))
-        .with_logical_project_root(
-            admission
-                .verified_subject()
-                .resolved
-                .logical_project_root
-                .clone(),
-        );
+    let roots = engine.resolution_roots(
+        project_root.map(Path::to_path_buf),
+        admission
+            .verified_subject()
+            .resolved
+            .logical_project
+            .clone(),
+    );
     let materialization = admission
         .resolution_materialization_binding()
         .map_err(DispatchError::Internal)?;

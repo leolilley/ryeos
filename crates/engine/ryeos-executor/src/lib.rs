@@ -260,7 +260,9 @@ pub mod test_support {
             caller_scopes: scopes.clone(),
             engine: state.engine.clone(),
             plan_ctx: PlanContext {
-                logical_project_root: None,
+                logical_project: ryeos_engine::contracts::LogicalProject::Absent(
+                    ryeos_engine::contracts::LogicalProjectAbsence::NotStated,
+                ),
                 requested_by: EffectivePrincipal::Local(Principal {
                     fingerprint: operator.principal_id(),
                     scopes,
@@ -348,9 +350,10 @@ pub mod test_support {
                 .cloned()
                 .context("fixture worker has no signed external product slots")?,
         )?;
-        let roots = state
-            .engine
-            .resolution_roots(Some(project_root.to_path_buf()));
+        let roots = state.engine.resolution_roots(
+            Some(project_root.to_path_buf()),
+            ryeos_engine::contracts::LogicalProject::MaterializedLive,
+        );
         // Product selection is over the exact pre-selection consumer D0,
         // including its admitted source closure. Derive that projection on a
         // copy: the ordinary admission owner must still be the component that
@@ -410,7 +413,10 @@ pub mod test_support {
                 .with_context(|| format!("fixture selection omits signed slot `{}`", slot.id))?;
             let relationship_resolution = state.engine.effective_resolution_output(
                 ryeos_engine::engine::EffectiveItemRequest {
-                    logical_project_root: None,
+                    logical_project: ryeos_engine::contracts::LogicalProject::from_optional(
+                        None,
+                        &context.plan_ctx.subject_resolution_authority,
+                    ),
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                         &slot.relationship_ref,
                     )?,

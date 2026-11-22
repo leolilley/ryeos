@@ -1116,11 +1116,8 @@ pub(crate) fn verify_resolved_item_content_with_hash(
 
     match &item.signature_header {
         Some(header) => {
-            let context = SignerContext::new(
-                item.source_space,
-                &item.kind,
-                item.logical_project_root.as_deref(),
-            );
+            let context =
+                SignerContext::new(item.source_space, &item.kind, item.logical_project.stated());
             let (trust_class, signer) = verify_item_signature(
                 content,
                 header,

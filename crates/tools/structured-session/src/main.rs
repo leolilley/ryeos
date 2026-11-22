@@ -2772,12 +2772,12 @@ impl StructuredWorkload {
                     &http_contract.listener_stdout_prefix,
                     MonotonicDeadline::after(Duration::from_secs(30)),
                 )?;
-                let client = reqwest::blocking::Client::builder()
+                let client = ryeos_http_egress::loopback_blocking_client_builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(ROUTE_CALL_TIMEOUT)
                     .build()
                     .context("build structured workload HTTP client")?;
-                let server_request_client = reqwest::blocking::Client::builder()
+                let server_request_client = ryeos_http_egress::loopback_blocking_client_builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(SERVER_REQUEST_REPLY_TIMEOUT)
                     .build()
@@ -2793,7 +2793,7 @@ impl StructuredWorkload {
                 validate_schema_from_map(&schemas, &http_contract.readiness_schema, &readiness)?;
                 // The event stream is a long-lived read; it must never inherit
                 // the request client's call deadline.
-                let sse_client = reqwest::blocking::Client::builder()
+                let sse_client = ryeos_http_egress::loopback_blocking_client_builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .context("build structured workload event client")?;

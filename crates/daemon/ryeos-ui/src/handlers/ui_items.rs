@@ -222,7 +222,10 @@ fn build_items_list(
     project_access: Option<&crate::seat_auth::RetainedProjectAccess>,
     req: &ItemsListRequest,
 ) -> ItemsListResponse {
-    let roots = state.engine.resolution_roots(project_path.cloned());
+    let roots = state.engine.resolution_roots(
+        project_path.cloned(),
+        ryeos_engine::contracts::LogicalProject::MaterializedLive,
+    );
 
     let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_space: BTreeMap<String, usize> = BTreeMap::new();
@@ -457,7 +460,10 @@ fn build_item_inspect(
         ))
     })?;
 
-    let roots = state.engine.resolution_roots(project_path.cloned());
+    let roots = state.engine.resolution_roots(
+        project_path.cloned(),
+        ryeos_engine::contracts::LogicalProject::MaterializedLive,
+    );
 
     let Some(schema) = state.engine.kinds.get(&item_ref.kind) else {
         return Err(HandlerError::NotFound.into());
@@ -502,7 +508,7 @@ fn build_item_inspect(
     // Effective content
     let effective = if req.include_effective {
         let effective_req = ryeos_engine::engine::EffectiveItemRequest {
-            logical_project_root: None,
+            logical_project: ryeos_engine::contracts::LogicalProject::MaterializedLive,
             item_ref: item_ref.clone(),
             expected_kind: None,
             project_root: project_path.cloned(),
